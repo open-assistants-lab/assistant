@@ -167,22 +167,23 @@ async def _run_agent_stream(
 
                 for tm in tool_metadata_list:
                     conversation.add_message(
-                        "tool", "", metadata={**tm, "workspace_id": workspace_id}
+                        "tool", "", session_id=session_id, metadata={**tm, "workspace_id": workspace_id}
                     )
 
                 if reasoning_content:
                     conversation.add_message(
                         "reasoning",
                         reasoning_content,
-                        metadata={"session_id": session_id, "workspace_id": workspace_id},
+                        session_id=session_id,
+                        metadata={"workspace_id": workspace_id},
                     )
 
                 msg_id = conversation.add_message(
                     "assistant",
                     response,
+                    session_id=session_id,
                     metadata={
                         "stream": True,
-                        "session_id": session_id,
                         "workspace_id": workspace_id,
                     },
                 )
@@ -316,7 +317,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
         await websocket.send_json(AuthOkMessage().model_dump())
     # ── End auth ──────────────────────────────────────────────────────────
 
-    session_id = str(uuid.uuid4())[:8]
+    session_id = websocket.query_params.get("session_id") or str(uuid.uuid4())[:8]
     user_id = "default_user"
     workspace_id = "personal"
     verbose = False
@@ -455,7 +456,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
 
             t1 = time.monotonic()
 
-            conversation.add_message("user", content, metadata={"workspace_id": workspace_id})
+            conversation.add_message("user", content, session_id=session_id, metadata={"workspace_id": workspace_id})
             t2 = time.monotonic()
 
             recent_messages = conversation.get_messages_with_summary(50, workspace_id=workspace_id)
