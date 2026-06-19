@@ -102,13 +102,17 @@ app.add_middleware(
 )
 
 
-_PUBLIC_PATHS = {"/health", "/health/ready", "/docs", "/redoc", "/openapi.json", "/poc", "/widget"}
+_PUBLIC_PATHS = {"/health", "/health/ready", "/docs", "/redoc", "/openapi.json", "/poc"}
+_PUBLIC_PREFIXES = {"/widget"}
 
 
 @app.middleware("http")
 async def api_key_auth_middleware(request: Request, call_next: Any) -> Any:
     """Apply API-key auth consistently across HTTP routes."""
-    if request.url.path in _PUBLIC_PATHS:
+    path = request.url.path
+    if path in _PUBLIC_PATHS:
+        return await call_next(request)
+    if any(path.startswith(prefix) for prefix in _PUBLIC_PREFIXES):
         return await call_next(request)
 
     from src.config.settings import get_settings
