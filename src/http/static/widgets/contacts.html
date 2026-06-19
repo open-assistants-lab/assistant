@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="/static/ea-tokens.css">
+  <style>
+    .contacts { padding: 8px; }
+    .contact-item { padding: 10px 8px; border-bottom: 1px solid var(--border-subtle); cursor: pointer; display: flex; align-items: center; gap: 10px; }
+    .contact-item:hover { background: var(--bg-elevated); }
+    .contact-avatar { width: 36px; height: 36px; border-radius: 50%; background: var(--accent-muted); display: flex; align-items: center; justify-content: center; color: var(--accent); font-weight: 600; font-size: 14px; flex-shrink: 0; }
+    .contact-name { color: var(--text-primary); font-weight: 500; }
+    .contact-email { color: var(--text-secondary); font-size: 12px; }
+    .detail { padding: 12px; }
+    .detail .field { margin-bottom: 12px; }
+    .detail .field-label { color: var(--text-tertiary); font-size: 12px; margin-bottom: 2px; }
+    .detail .field-value { color: var(--text-primary); }
+    .back-btn { color: var(--accent); cursor: pointer; margin-bottom: 8px; display: inline-block; }
+    .header { padding:12px 8px; font-weight:600; color:var(--text-primary); border-bottom:1px solid var(--border-default); }
+  </style>
+</head>
+<body>
+  <div id="list-view">
+    <div class="header">Contacts</div>
+    <div class="contacts" id="contact-list"></div>
+  </div>
+  <div id="detail-view" class="detail" style="display:none;"></div>
+  <script>
+    let contacts = [];
+    async function fetchContacts() {
+      try {
+        const res = await fetch('/contacts/list');
+        const data = await res.json();
+        contacts = data.contacts || data || [];
+      } catch { contacts = []; }
+      renderList();
+    }
+    function renderList() {
+      const list = document.getElementById('contact-list');
+      if (contacts.length === 0) {
+        list.innerHTML = '<div style="padding:16px;text-align:center;color:var(--text-tertiary);">No contacts</div>';
+        return;
+      }
+      list.innerHTML = contacts.map(c => `
+        <div class="contact-item" onclick="showDetail('${esc(c.id || c.email)}')">
+          <div class="contact-avatar">${(c.name || c.email || '?')[0].toUpperCase()}</div>
+          <div>
+            <div class="contact-name">${esc(c.name || '(no name)')}</div>
+            <div class="contact-email">${esc(c.email || '')}</div>
+          </div>
+        </div>
+      `).join('');
+    }
+    async function showDetail(id) {
+      try {
+        const res = await fetch('/contacts/get/' + id);
+        const c = await res.json();
+        document.getElementById('list-view').style.display = 'none';
+        document.getElementById('detail-view').style.display = 'block';
+        document.getElementById('detail-view').innerHTML = `
+          <span class="back-btn" onclick="showList()">← Back to contacts</span>
+          <div class="field"><div class="field-label">Name</div><div class="field-value">${esc(c.name || '-')}</div></div>
+          <div class="field"><div class="field-label">Email</div><div class="field-value">${esc(c.email || '-')}</div></div>
+          <div class="field"><div class="field-label">Phone</div><div class="field-value">${esc(c.phone || '-')}</div></div>
+        `;
+      } catch {}
+    }
+    function showList() {
+      document.getElementById('list-view').style.display = 'block';
+      document.getElementById('detail-view').style.display = 'none';
+    }
+    function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+    fetchContacts();
+  </script>
+</body>
+</html>

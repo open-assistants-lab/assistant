@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="/static/ea-tokens.css">
+  <style>
+    .todos { padding: 8px; }
+    .todo-item { padding: 10px 8px; border-bottom: 1px solid var(--border-subtle); display: flex; align-items: center; gap: 10px; }
+    .todo-item:hover { background: var(--bg-elevated); }
+    .todo-checkbox { width: 18px; height: 18px; cursor: pointer; accent-color: var(--accent); }
+    .todo-text { flex: 1; color: var(--text-primary); }
+    .todo-text.done { text-decoration: line-through; color: var(--text-tertiary); }
+    .add-bar { display: flex; gap: 8px; padding: 8px; }
+    .add-bar input { flex: 1; background: var(--bg-field); border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: 8px; color: var(--text-primary); outline: none; }
+    .add-bar input:focus { border-color: var(--accent); }
+    .add-bar button { background: var(--accent); color: #fff; border: none; border-radius: var(--radius-sm); padding: 8px 16px; cursor: pointer; }
+    .add-bar button:hover { background: var(--accent-hover); }
+    .header { padding:12px 8px; font-weight:600; color:var(--text-primary); border-bottom:1px solid var(--border-default); }
+  </style>
+</head>
+<body>
+  <div class="header">To-Do</div>
+  <div class="todos" id="todo-list"></div>
+  <div class="add-bar">
+    <input type="text" id="new-todo" placeholder="Add a task..." onkeydown="if(event.key==='Enter') addTodo()">
+    <button onclick="addTodo()">Add</button>
+  </div>
+  <script>
+    let todos = [];
+    async function fetchTodos() {
+      try {
+        const res = await fetch('/todos/list');
+        const data = await res.json();
+        todos = data.todos || data || [];
+      } catch { todos = []; }
+      renderTodos();
+    }
+    async function toggleTodo(id, done) {
+      try { await fetch('/todos/update', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id, done}) }); } catch {}
+      await fetchTodos();
+    }
+    async function addTodo() {
+      const inp = document.getElementById('new-todo');
+      const text = inp.value.trim();
+      if (!text) return;
+      try { await fetch('/todos/add', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text}) }); } catch {}
+      inp.value = '';
+      await fetchTodos();
+    }
+    function renderTodos() {
+      const list = document.getElementById('todo-list');
+      if (todos.length === 0) {
+        list.innerHTML = '<div style="padding:16px;text-align:center;color:var(--text-tertiary);">No tasks</div>';
+        return;
+      }
+      list.innerHTML = todos.map(t => `
+        <div class="todo-item">
+          <input type="checkbox" class="todo-checkbox" ${t.done ? 'checked' : ''} onchange="toggleTodo('${t.id}', this.checked)">
+          <span class="todo-text ${t.done ? 'done' : ''}">${esc(t.title || t.text || '')}</span>
+        </div>
+      `).join('');
+    }
+    function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+    fetchTodos();
+  </script>
+</body>
+</html>

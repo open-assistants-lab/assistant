@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="/static/ea-tokens.css">
+  <style>
+    .inbox { padding: 8px; }
+    .thread { padding: 10px; border-bottom: 1px solid var(--border-subtle); cursor: pointer; }
+    .thread:hover { background: var(--bg-elevated); }
+    .thread .from { color: var(--text-primary); font-weight: 500; }
+    .thread .subject { color: var(--text-secondary); font-size: 13px; }
+    .thread .date { color: var(--text-tertiary); font-size: 12px; float: right; }
+    .thread .snippet { color: var(--text-tertiary); font-size: 12px; margin-top: 2px; }
+    .detail { padding: 12px; }
+    .detail h3 { margin: 0 0 8px; color: var(--text-primary); }
+    .detail .meta { color: var(--text-secondary); font-size: 13px; margin-bottom: 12px; }
+    .detail .body { color: var(--text-primary); line-height: 1.6; white-space: pre-wrap; }
+    .back-btn { color: var(--accent); cursor: pointer; margin-bottom: 8px; display: inline-block; }
+    .back-btn:hover { color: var(--accent-hover); }
+  </style>
+</head>
+<body>
+  <div id="email-app">
+    <div id="inbox-view" class="inbox">
+      <div style="padding:12px 8px; font-weight:600; color:var(--text-primary); border-bottom:1px solid var(--border-default);">Inbox</div>
+      <div id="email-list"></div>
+    </div>
+    <div id="detail-view" class="detail" style="display:none;"></div>
+  </div>
+  <script>
+    let emails = [];
+    async function fetchInbox() {
+      try {
+        const res = await fetch('/email/list');
+        const data = await res.json();
+        emails = data.emails || [];
+      } catch { emails = []; }
+      renderInbox();
+    }
+    function renderInbox() {
+      const list = document.getElementById('email-list');
+      if (emails.length === 0) {
+        list.innerHTML = '<div style="padding:16px;text-align:center;color:var(--text-tertiary);">No emails</div>';
+        return;
+      }
+      list.innerHTML = emails.map(e => `
+        <div class="thread" onclick="showDetail('${e.id}')">
+          <span class="date">${esc(e.date || '')}</span>
+          <div class="from">${esc(e.from || '')}</div>
+          <div class="subject">${esc(e.subject || '(no subject)')}</div>
+          <div class="snippet">${esc((e.snippet || '').slice(0, 80))}</div>
+        </div>
+      `).join('');
+    }
+    async function showDetail(id) {
+      try {
+        const res = await fetch('/email/get/' + id);
+        const e = await res.json();
+        document.getElementById('inbox-view').style.display = 'none';
+        document.getElementById('detail-view').style.display = 'block';
+        document.getElementById('detail-view').innerHTML = `
+          <span class="back-btn" onclick="showInbox()">← Back to inbox</span>
+          <h3>${esc(e.subject || '(no subject)')}</h3>
+          <div class="meta">
+            <div>From: ${esc(e.from || '')}</div>
+            <div>Date: ${e.date || ''}</div>
+          </div>
+          <div class="body">${esc(e.body || e.snippet || '')}</div>
+        `;
+      } catch {}
+    }
+    function showInbox() {
+      document.getElementById('inbox-view').style.display = 'block';
+      document.getElementById('detail-view').style.display = 'none';
+    }
+    function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+    fetchInbox();
+  </script>
+</body>
+</html>
