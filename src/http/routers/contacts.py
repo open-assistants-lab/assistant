@@ -65,6 +65,15 @@ async def update_contact(
     return {"result": str(result)}
 
 
+@router.get("/{contact_id}")
+async def get_contact(contact_id: str, user_id: str = "default_user") -> dict[str, Any]:
+    """Get a contact by ID."""
+    from src.sdk.tools_core.contacts import contacts_get
+
+    result = contacts_get.invoke({"user_id": user_id, "contact_id": contact_id})
+    return {"contact": result}
+
+
 @router.delete("/{contact_id}")
 async def delete_contact(contact_id: str, user_id: str = "default_user") -> dict[str, Any]:
     """Delete a contact."""
