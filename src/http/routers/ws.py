@@ -55,31 +55,35 @@ def parse_directives(text: str) -> tuple[str, list[dict[str, Any]]]:
 
     Returns (cleaned_text, events) where events are dicts with type and payload
     to send to the Flutter client as separate WS events.
+    Handles multiple occurrences of each directive type.
     """
     events: list[dict[str, Any]] = []
 
-    switch_match = re.search(r'\[SWITCH_TAB:(\w+)\]', text)
-    if switch_match:
-        tab = switch_match.group(1).lower()
-        events.append({"type": "switch_tab", "tab": tab})
-        text = text.replace(switch_match.group(0), "").strip()
+    # [SWITCH_TAB:tab] — collect all, strip all
+    switch_pat = re.compile(r'\[SWITCH_TAB:(\w+)\]', re.IGNORECASE)
+    for match in switch_pat.finditer(text):
+        events.append({"type": "switch_tab", "tab": match.group(1).lower()})
+    text = switch_pat.sub("", text)
 
-    refresh_match = re.search(r'\[WIDGET_REFRESH:(\w+)\]', text)
-    if refresh_match:
-        tab = refresh_match.group(1).lower()
-        events.append({"type": "widget_refresh", "tab": tab})
-        text = text.replace(refresh_match.group(0), "").strip()
+    # [WIDGET_REFRESH:tab] — must be handled before bare [WIDGET_REFRESH]
+    ref_param_pat = re.compile(r'\[WIDGET_REFRESH:(\w+)\]', re.IGNORECASE)
+    for match in ref_param_pat.finditer(text):
+        events.append({"type": "widget_refresh", "tab": match.group(1).lower()})
+    text = ref_param_pat.sub("", text)
 
-    all_refresh = re.search(r'\[WIDGET_REFRESH\]', text)
-    if all_refresh:
+    # [WIDGET_REFRESH] (bare — refresh all)
+    ref_pat = re.compile(r'\[WIDGET_REFRESH\]', re.IGNORECASE)
+    if ref_pat.search(text):
         events.append({"type": "widget_refresh", "tab": "all"})
-        text = text.replace(all_refresh.group(0), "").strip()
+    text = ref_pat.sub("", text)
 
-    new_session = re.search(r'\[NEW_SESSION\]', text)
-    if new_session:
+    # [NEW_SESSION]
+    session_pat = re.compile(r'\[NEW_SESSION\]', re.IGNORECASE)
+    if session_pat.search(text):
         events.append({"type": "new_session"})
-        text = text.replace(new_session.group(0), "").strip()
+    text = session_pat.sub("", text)
 
+    text = text.strip()
     return text, events
 
 

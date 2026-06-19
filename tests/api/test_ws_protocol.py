@@ -221,3 +221,78 @@ class TestMessageSerialization:
         restored = DoneMessage(**json_data)
         assert restored.response == "Complete"
         assert len(restored.tool_calls) == 1
+
+
+from src.http.routers.ws import parse_directives
+
+
+class TestParseDirectives:
+    """Tests for directive parsing from agent response text."""
+
+    def test_no_directives(self):
+        text, events = parse_directives("Hello, how can I help?")
+        assert text == "Hello, how can I help?"
+        assert events == []
+
+    def test_switch_tab(self):
+        text, events = parse_directives("Here are your emails. [SWITCH_TAB:email]")
+        assert "[SWITCH_TAB:email]" not in text
+        assert events == [{"type": "switch_tab", "tab": "email"}]
+
+    def test_switch_tab_lowercased(self):
+        text, events = parse_directives("[SWITCH_TAB:Canvas]")
+        assert events[0]["tab"] == "canvas"
+
+    def test_switch_tab_mid_prose(self):
+        text, events = parse_directives("Let me show you [SWITCH_TAB:email] your inbox.")
+        assert "your inbox" in text
+        assert "[SWITCH_TAB:email]" not in text
+        assert len(events) == 1
+
+    def test_multiple_switch_tab(self):
+        text, events = parse_directives("[SWITCH_TAB:email][SWITCH_TAB:contacts]")
+        assert len(events) == 2
+        assert events[0] == {"type": "switch_tab", "tab": "email"}
+        assert events[1] == {"type": "switch_tab", "tab": "contacts"}
+
+    def test_widget_refresh_param(self):
+        text, events = parse_directives("Done. [WIDGET_REFRESH:email]")
+        assert "[WIDGET_REFRESH:email]" not in text
+        assert events == [{"type": "widget_refresh", "tab": "email"}]
+
+    def test_widget_refresh_all(self):
+        text, events = parse_directives("Done. [WIDGET_REFRESH]")
+        assert events == [{"type": "widget_refresh", "tab": "all"}]
+
+    def test_param_refresh_before_bare(self):
+        # [WIDGET_REFRESH:email] should be consumed by parameterized pattern
+        # not by the bare [WIDGET_REFRESH] pattern
+        text, events = parse_directives("[WIDGET_REFRESH:email][WIDGET_REFRESH]")
+        assert len(events) == 2
+        assert events[0] == {"type": "widget_refresh", "tab": "email"}
+        assert events[1] == {"type": "widget_refresh", "tab": "all"}
+
+    def test_new_session(self):
+        text, events = parse_directives("[NEW_SESSION]")
+        assert events == [{"type": "new_session"}]
+
+    def test_all_directives_together(self):
+        text, events = parse_directives(
+            "[SWITCH_TAB:email][WIDGET_REFRESH:email]Check your mail[NEW_SESSION]"
+        )
+        assert len(events) == 3
+        assert events[0] == {"type": "switch_tab", "tab": "email"}
+        assert events[1] == {"type": "widget_refresh", "tab": "email"}
+        assert events[2] == {"type": "new_session"}
+        assert "Check your mail" in text
+        assert "[" not in text
+
+    def test_empty_string(self):
+        text, events = parse_directives("")
+        assert text == ""
+        assert events == []
+
+    def test_brackets_not_directives(self):
+        text, events = parse_directives("Look at [this] link")
+        assert text == "Look at [this] link"
+        assert events == []
