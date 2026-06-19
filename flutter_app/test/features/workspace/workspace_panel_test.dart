@@ -58,141 +58,60 @@ List<Override> apiClientOverrides(ApiClient api) => [
 ];
 
 void main() {
-  testWidgets('refreshes file list without switching workspace', (
-    tester,
-  ) async {
-    var calls = 0;
-    Future<List<Map<String, dynamic>>> loadFiles(WidgetRef ref) async {
-      calls++;
-      if (calls == 1) {
-        return [
-          {'name': 'old.pdf', 'is_dir': false, 'size': 10},
-        ];
-      }
-      return [
-        {'name': 'new.pdf', 'is_dir': false, 'size': 20},
-      ];
-    }
-
+  testWidgets('renders 5 bottom tabs', (tester) async {
     await tester.pumpWidget(
       ProviderScope(
         child: MaterialApp(
           theme: AppTheme.dark,
-          home: Scaffold(
-            body: WorkspacePanel(
-              refreshInterval: const Duration(seconds: 1),
-              fileLoader: loadFiles,
-            ),
-          ),
+          home: const Scaffold(body: WorkspacePanel()),
         ),
       ),
     );
     await tester.pump();
 
-    expect(find.text('old.pdf'), findsOneWidget);
-
-    await tester.pump(const Duration(seconds: 1));
-    await tester.pump();
-
-    expect(find.text('new.pdf'), findsOneWidget);
+    expect(find.byIcon(Symbols.dashboard_customize), findsOneWidget);
+    expect(find.byIcon(Symbols.mail), findsOneWidget);
+    expect(find.byIcon(Symbols.checklist), findsOneWidget);
+    expect(find.byIcon(Symbols.contacts), findsOneWidget);
+    expect(find.byIcon(Symbols.folder), findsOneWidget);
   });
 
-  testWidgets(
-    'defaults to files and switches to capabilities from bottom icon tab',
-    (tester) async {
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            currentWorkspaceIdProvider.overrideWith((ref) => 'sales'),
-          ],
-          child: MaterialApp(
-            theme: AppTheme.dark,
-            home: Scaffold(
-              body: WorkspacePanel(
-                refreshInterval: const Duration(days: 1),
-                fileLoader: (_) async => [
-                  {'name': 'brief.md', 'is_dir': false, 'size': 20},
-                ],
-              ),
-            ),
-          ),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.text('Files'), findsOneWidget);
-      expect(find.text('brief.md'), findsOneWidget);
-
-      // Tap the Capabilities tab (Symbols.tune)
-      await tester.tap(find.byIcon(Symbols.tune));
-      await tester.pump();
-      await tester.pump();
-
-      // Capabilities tab has a search bar
-      expect(find.text('Search capabilities...'), findsOneWidget);
-      // Sections are present
-      expect(find.text('Tools'), findsOneWidget);
-      expect(find.text('Skills'), findsOneWidget);
-      expect(find.text('Subagents'), findsOneWidget);
-    },
-  );
-
-  testWidgets('switches to capabilities tab and shows sections', (
-    tester,
-  ) async {
-    final container = ProviderContainer(overrides: [_noopBackendOverride()]);
-    addTearDown(container.dispose);
-    container.read(currentWorkspaceIdProvider.notifier).state = 'test12345';
-
-    await tester.pumpWidget(
-      UncontrolledProviderScope(
-        container: container,
-        child: MaterialApp(
-          theme: AppTheme.dark,
-          home: Scaffold(
-            body: WorkspacePanel(
-              refreshInterval: const Duration(days: 1),
-              fileLoader: (_) async => [],
-            ),
-          ),
-        ),
-      ),
-    );
-    await tester.pump();
-    await tester.tap(find.byIcon(Symbols.tune));
-    await tester.pump();
-    await tester.pump();
-
-    expect(find.text('Search capabilities...'), findsOneWidget);
-    expect(find.text('Tools'), findsOneWidget);
-    expect(find.text('Skills'), findsOneWidget);
-    expect(find.text('Subagents'), findsOneWidget);
-  });
-
-  testWidgets('capabilities tab shows section headers', (tester) async {
+  testWidgets('defaults to canvas tab', (tester) async {
     await tester.pumpWidget(
       ProviderScope(
         child: MaterialApp(
           theme: AppTheme.dark,
-          home: Scaffold(
-            body: WorkspacePanel(
-              refreshInterval: const Duration(days: 1),
-              fileLoader: (_) async => [],
-            ),
-          ),
+          home: const Scaffold(body: WorkspacePanel()),
         ),
       ),
     );
     await tester.pump();
 
-    // Switch to Capabilities tab
-    await tester.tap(find.byIcon(Symbols.tune));
+    expect(
+      find.text('Agent-generated content appears here'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('switches to email tab', (tester) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          theme: AppTheme.dark,
+          home: const Scaffold(body: WorkspacePanel()),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byIcon(Symbols.mail));
     await tester.pump();
     await tester.pump();
 
-    expect(find.text('Tools'), findsOneWidget);
-    expect(find.text('Skills'), findsOneWidget);
-    expect(find.text('Subagents'), findsOneWidget);
+    expect(
+      find.text('Agent-generated content appears here'),
+      findsNothing,
+    );
   });
 
   testWidgets('discards stale skills response after workspace changes', (

@@ -10,7 +10,7 @@ resolution-markers = [
 [[package]]
 name = "agentprofile"
 version = "0.1.0"
-source = { editable = "../AgentProfile" }
+source = { editable = "../../../AgentProfile" }
 dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },
@@ -751,7 +751,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agentprofile", editable = "../AgentProfile" },
+    { name = "agentprofile", editable = "../../../AgentProfile" },
     { name = "aiohttp", specifier = ">=3.9.0" },
     { name = "aiosqlite", specifier = ">=0.20.0" },
     { name = "apscheduler", specifier = ">=3.11.2" },

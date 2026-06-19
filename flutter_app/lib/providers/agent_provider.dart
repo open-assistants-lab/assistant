@@ -2,12 +2,16 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:uuid/uuid.dart';
 import '../models/message.dart';
 import '../services/backend_service.dart';
 import '../services/ws_client.dart';
 import '../services/api_client.dart';
 
 String resolvedUserId = 'default_user';
+
+const _sessionIdPrefsKey = 'workspace_session_ids';
 
 enum ChatStatus { idle, streaming, error, awaitingApproval, disconnected }
 
@@ -103,6 +107,8 @@ class AgentNotifier extends StateNotifier<ChatState> {
   bool _backendReady = false;
   bool _welcomeSent = false;
   void Function(Map<String, dynamic>)? onCanvasUpdate;
+  void Function(String tab)? onTabUpdate;
+  void Function(String widget)? onWidgetRefresh;
 
   AgentNotifier(this._wsClient, this._apiClient, this._backendService)
       : super(const ChatState()) {
@@ -120,6 +126,36 @@ class AgentNotifier extends StateNotifier<ChatState> {
       state = _withCurrentTransport(saved);
       _workspaceStates[id] = state;
     }
+  }
+
+  void setSessionId(String sessionId) {
+    if (state.sessionId == sessionId) return;
+    _setState(state.copyWith(sessionId: sessionId));
+    _wsClient.updateSessionId(sessionId);
+    if (_transportConnected) {
+      _wsClient.disconnect();
+      _wsClient.connect();
+    }
+  }
+
+  Future<String> createSession(String workspaceId, String name) async {
+    final sessionId = const Uuid().v4().substring(0, 8);
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString(_sessionIdPrefsKey);
+    final sessions = saved != null
+        ? Map<String, String>.from(jsonDecode(saved))
+        : <String, String>{};
+    sessions[workspaceId] = sessionId;
+    await prefs.setString(_sessionIdPrefsKey, jsonEncode(sessions));
+    return sessionId;
+  }
+
+  Future<String?> getSessionId(String workspaceId) async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString(_sessionIdPrefsKey);
+    if (saved == null) return null;
+    final sessions = Map<String, String>.from(jsonDecode(saved));
+    return sessions[workspaceId];
   }
 
   bool hasWorkspaceState(String id) => _workspaceStates.containsKey(id);
@@ -231,9 +267,11 @@ class AgentNotifier extends StateNotifier<ChatState> {
   Future<void> loadHistory({int limit = 100}) async {
     try {
       final targetWorkspaceId = _workspaceId;
+      final targetSessionId = state.sessionId;
       final apiMessages = await _apiClient.getConversation(
         limit: limit,
         workspaceId: targetWorkspaceId,
+        sessionId: targetSessionId.isNotEmpty ? targetSessionId : null,
       );
       if (_disposed || targetWorkspaceId != _workspaceId) return;
       _historyLoadedWorkspaces.add(targetWorkspaceId);
@@ -636,6 +674,20 @@ class AgentNotifier extends StateNotifier<ChatState> {
       return;
     }
 
+    // --- Tab Update event (agent directive) ---
+    if (type == 'tab_update') {
+      final tab = msg['tab']?.toString() ?? '';
+      onTabUpdate?.call(tab);
+      return;
+    }
+
+    // --- Widget Refresh event (agent directive) ---
+    if (type == 'widget_refresh') {
+      final widget = msg['widget']?.toString() ?? '';
+      onWidgetRefresh?.call(widget);
+      return;
+    }
+
     // --- Completion ---
     if (type == 'done') {
       final messageId = msg['message_id']?.toString() ?? '';
@@ -839,6 +891,10 @@ class AgentNotifier extends StateNotifier<ChatState> {
 
 final hostProvider = StateProvider<String>((ref) => '127.0.0.1:8080');
 final userIdProvider = StateProvider<String>((ref) => resolvedUserId);
+
+final currentSessionIdProvider = StateProvider<String>((ref) {
+  return const Uuid().v4().substring(0, 8);
+});
 
 final backendServiceProvider = Provider<BackendService>((ref) {
   final host = ref.watch(hostProvider);

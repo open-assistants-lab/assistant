@@ -1,118 +1,88 @@
-import 'dart:convert';
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:http/http.dart' as http;
+import 'package:webview_flutter/webview_flutter.dart';
 import '../../theme/app_theme.dart';
 import '../../providers/agent_provider.dart';
 import '../../providers/workspace_provider.dart';
 import 'canvas_tab.dart';
-import 'capabilities_tab.dart';
 import 'learn_checklist_provider.dart';
 import 'learn_checklist_widget.dart' show htmlForChecklistItem;
 
-typedef WorkspaceFileLoader =
-    Future<List<Map<String, dynamic>>> Function(WidgetRef ref);
-
 class WorkspacePanel extends ConsumerStatefulWidget {
-  final Duration refreshInterval;
-  final WorkspaceFileLoader? fileLoader;
-
-  const WorkspacePanel({
-    super.key,
-    this.refreshInterval = const Duration(seconds: 3),
-    this.fileLoader,
-  });
+  const WorkspacePanel({super.key});
 
   @override
   ConsumerState<WorkspacePanel> createState() => _WorkspacePanelState();
 }
 
 class _WorkspacePanelState extends ConsumerState<WorkspacePanel> {
-  List<Map<String, dynamic>> _files = [];
-  bool _loading = true;
-  String? _error;
-  Timer? _refreshTimer;
-  _WorkspacePanelTab _tab = _WorkspacePanelTab.files;
+  _WorkspacePanelTab _tab = _WorkspacePanelTab.canvas;
+  final Map<String, WebViewController> _widgetControllers = {};
 
   @override
   void initState() {
     super.initState();
-    _loadFiles();
-    _refreshTimer = Timer.periodic(widget.refreshInterval, (_) => _loadFiles());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      ref.read(agentProvider.notifier).onCanvasUpdate = (event) {
+      final agent = ref.read(agentProvider.notifier);
+      agent.onCanvasUpdate = (event) {
         ref.read(canvasProvider.notifier).onCanvasUpdate(event);
+      };
+      agent.onTabUpdate = (tab) {
+        final mapped = _tabFromString(tab);
+        if (mapped != null && mounted) {
+          setState(() => _tab = mapped);
+        }
+      };
+      agent.onWidgetRefresh = (widget) {
+        _widgetControllers[widget]?.reload();
       };
     });
   }
 
   @override
   void dispose() {
-    _refreshTimer?.cancel();
+    _widgetControllers.clear();
     super.dispose();
   }
 
-  Future<List<Map<String, dynamic>>> _fetchFiles() async {
+  _WorkspacePanelTab? _tabFromString(String tab) {
+    return switch (tab.toLowerCase()) {
+      'canvas' => _WorkspacePanelTab.canvas,
+      'email' => _WorkspacePanelTab.email,
+      'todos' => _WorkspacePanelTab.todos,
+      'contacts' => _WorkspacePanelTab.contacts,
+      'files' => _WorkspacePanelTab.files,
+      _ => null,
+    };
+  }
+
+  String _widgetUrl(String type) {
     final host = ref.read(hostProvider);
-    final userId = ref.read(userIdProvider);
-    final wsId = ref.read(currentWorkspaceIdProvider);
-    final url = Uri.parse(
-      'http://$host/workspace/json?user_id=$userId&workspace_id=$wsId',
-    );
-    final response = await http.get(url);
-    if (response.statusCode != 200) {
-      throw Exception('Failed to load (${response.statusCode})');
-    }
-    final data = jsonDecode(response.body) as Map<String, dynamic>;
-    return List<Map<String, dynamic>>.from(data['files'] ?? []);
+    return 'http://$host/widget/$type';
   }
 
-  Future<void> _loadFiles() async {
-    if (!mounted) return;
-    setState(() {
-      _loading = _files.isEmpty;
-      _error = null;
-    });
-    try {
-      final files = await (widget.fileLoader?.call(ref) ?? _fetchFiles());
-      if (!mounted) return;
-      setState(() {
-        _files = files;
-        _loading = false;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _error = 'Cannot connect: $e';
-        _loading = false;
-      });
+  WebViewController _ensureWidgetController(String type) {
+    if (_widgetControllers.containsKey(type)) {
+      return _widgetControllers[type]!;
     }
-  }
-
-  String _formatSize(int bytes) {
-    if (bytes < 1024) return '$bytes B';
-    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    if (bytes < 1024 * 1024 * 1024) {
-      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
-    }
-    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+    final controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onPageFinished: (_) {},
+        ),
+      )
+      ..loadRequest(Uri.parse(_widgetUrl(type)));
+    _widgetControllers[type] = controller;
+    return controller;
   }
 
   @override
   Widget build(BuildContext context) {
     ref.listen(currentWorkspaceIdProvider, (prev, next) {
       if (prev != next) {
-        _loadFiles();
         ref.read(canvasProvider.notifier).setActiveWorkspace(next);
-      }
-    });
-
-    ref.listen<ChatState>(agentProvider, (prev, next) {
-      if (prev?.status == ChatStatus.streaming &&
-          next.status == ChatStatus.idle) {
-        _loadFiles();
       }
     });
 
@@ -142,8 +112,10 @@ class _WorkspacePanelState extends ConsumerState<WorkspacePanel> {
               index: _tab.index,
               children: [
                 const CanvasTab(),
-                _buildFilesPanel(),
-                const CapabilitiesTab(),
+                _buildWidgetWebView('email'),
+                _buildWidgetWebView('todos'),
+                _buildWidgetWebView('contacts'),
+                _buildWidgetWebView('files'),
               ],
             ),
           ),
@@ -153,6 +125,13 @@ class _WorkspacePanelState extends ConsumerState<WorkspacePanel> {
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildWidgetWebView(String type) {
+    final controller = _ensureWidgetController(type);
+    return SizedBox.expand(
+      child: WebViewWidget(controller: controller),
     );
   }
 
@@ -234,146 +213,6 @@ class _WorkspacePanelState extends ConsumerState<WorkspacePanel> {
       ),
     );
   }
-
-  Widget _buildFilesPanel() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Container(
-          height: 52,
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          decoration: BoxDecoration(
-            border: Border(
-              bottom: BorderSide(color: context.tokens.colors.borderSubtle),
-            ),
-          ),
-          child: Row(
-            children: [
-              Icon(
-                Symbols.folder,
-                size: 18,
-                color: context.tokens.colors.accent,
-              ),
-              const SizedBox(width: 8),
-              Text(
-                'Files',
-                style: context.tokens.typography.textTheme.headlineMedium!
-                    .copyWith(
-                      fontSize: 15,
-                      color: context.tokens.colors.textPrimary,
-                    ),
-              ),
-              const Spacer(),
-              if (_loading && _files.isNotEmpty)
-                const SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-              const SizedBox(width: 4),
-              Text(
-                '${_files.length}',
-                style: context.tokens.typography.textTheme.bodySmall!.copyWith(
-                  color: context.tokens.colors.textTertiary,
-                ),
-              ),
-              const SizedBox(width: 4),
-              InkWell(
-                onTap: _loadFiles,
-                child: Icon(
-                  Symbols.refresh,
-                  size: 16,
-                  color: context.tokens.colors.textTertiary,
-                ),
-              ),
-            ],
-          ),
-        ),
-        Expanded(child: _buildFilesBody()),
-      ],
-    );
-  }
-
-  Widget _buildFilesBody() {
-    if (_loading && _files.isEmpty) {
-      return const Center(child: CircularProgressIndicator(strokeWidth: 2));
-    }
-    if (_error != null && _files.isEmpty) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                _error!,
-                style: context.tokens.typography.textTheme.bodySmall!.copyWith(
-                  color: context.tokens.colors.error,
-                ),
-              ),
-              const SizedBox(height: 8),
-              OutlinedButton(onPressed: _loadFiles, child: const Text('Retry')),
-            ],
-          ),
-        ),
-      );
-    }
-    if (_files.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Symbols.folder_open,
-              size: 40,
-              color: context.tokens.colors.textTertiary,
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'No files',
-              style: context.tokens.typography.textTheme.bodySmall!.copyWith(
-                color: context.tokens.colors.textTertiary,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-    return ListView.builder(
-      padding: EdgeInsets.zero,
-      itemCount: _files.length,
-      itemBuilder: (_, i) {
-        final f = _files[i];
-        final name = f['name']?.toString() ?? '';
-        final isDir = f['is_dir'] == true;
-        final size = f['size'] as int? ?? 0;
-        return ListTile(
-          dense: true,
-          leading: Icon(
-            isDir ? Symbols.folder : Symbols.description,
-            size: 18,
-            color: isDir
-                ? context.tokens.colors.warning
-                : context.tokens.colors.textSecondary,
-          ),
-          title: Text(
-            name,
-            style: context.tokens.typography.textTheme.bodyLarge!.copyWith(
-              fontSize: 13,
-              color: context.tokens.colors.textPrimary,
-            ),
-          ),
-          subtitle: Text(
-            isDir ? 'Folder' : _formatSize(size),
-            style: context.tokens.typography.textTheme.bodySmall!.copyWith(
-              fontSize: 11,
-              color: context.tokens.colors.textSecondary,
-            ),
-          ),
-        );
-      },
-    );
-  }
 }
 
 class _ChecklistChip extends StatelessWidget {
@@ -422,13 +261,21 @@ class _ChecklistChip extends StatelessWidget {
   }
 }
 
-enum _WorkspacePanelTab { canvas, files, capabilities }
+enum _WorkspacePanelTab { canvas, email, todos, contacts, files }
 
 class _BottomTabs extends StatelessWidget {
   final _WorkspacePanelTab selected;
   final ValueChanged<_WorkspacePanelTab> onSelected;
 
   const _BottomTabs({required this.selected, required this.onSelected});
+
+  static const _tabs = <({IconData icon, IconData activeIcon, String tooltip, _WorkspacePanelTab tab})>[
+    (icon: Symbols.dashboard_customize, activeIcon: Symbols.dashboard_customize, tooltip: 'Canvas', tab: _WorkspacePanelTab.canvas),
+    (icon: Symbols.mail, activeIcon: Symbols.mail, tooltip: 'Email', tab: _WorkspacePanelTab.email),
+    (icon: Symbols.checklist, activeIcon: Symbols.checklist, tooltip: 'Todos', tab: _WorkspacePanelTab.todos),
+    (icon: Symbols.contacts, activeIcon: Symbols.contacts, tooltip: 'Contacts', tab: _WorkspacePanelTab.contacts),
+    (icon: Symbols.folder, activeIcon: Symbols.folder, tooltip: 'Files', tab: _WorkspacePanelTab.files),
+  ];
 
   @override
   Widget build(BuildContext context) {
@@ -439,31 +286,18 @@ class _BottomTabs extends StatelessWidget {
           top: BorderSide(color: context.tokens.colors.borderSubtle),
         ),
       ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          _BottomTabButton(
-            icon: Symbols.dashboard_customize,
-            activeIcon: Symbols.dashboard_customize,
-            selected: selected == _WorkspacePanelTab.canvas,
-            tooltip: 'Canvas',
-            onTap: () => onSelected(_WorkspacePanelTab.canvas),
-          ),
-          _BottomTabButton(
-            icon: Symbols.folder,
-            activeIcon: Symbols.folder,
-            selected: selected == _WorkspacePanelTab.files,
-            tooltip: 'Files',
-            onTap: () => onSelected(_WorkspacePanelTab.files),
-          ),
-          _BottomTabButton(
-            icon: Symbols.tune,
-            activeIcon: Symbols.tune,
-            selected: selected == _WorkspacePanelTab.capabilities,
-            tooltip: 'Capabilities',
-            onTap: () => onSelected(_WorkspacePanelTab.capabilities),
-          ),
-        ],
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: EdgeInsets.zero,
+        children: _tabs.map((t) {
+          return _BottomTabButton(
+            icon: t.icon,
+            activeIcon: t.activeIcon,
+            selected: selected == t.tab,
+            tooltip: t.tooltip,
+            onTap: () => onSelected(t.tab),
+          );
+        }).toList(),
       ),
     );
   }

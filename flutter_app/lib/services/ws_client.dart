@@ -9,6 +9,7 @@ enum ConnectionStatus { disconnected, connecting, connected }
 class WsClient {
   String _host;
   String _userId;
+  String? _sessionId;
   String? _model;
   Map<String, String>? _providerKeys;
   WebSocketChannel? _channel;
@@ -18,9 +19,13 @@ class WsClient {
   final _pendingApprovals = <String, ToolCallDisplay>{};
   bool _disposed = false;
 
-  WsClient({String host = '127.0.0.1:8080', String userId = 'default'})
-    : _host = host,
-      _userId = userId;
+  WsClient({
+    String host = '127.0.0.1:8080',
+    String userId = 'default',
+    String? sessionId,
+  }) : _host = host,
+       _userId = userId,
+       _sessionId = sessionId;
 
   Stream<WsMessage> get messages => _messageController.stream;
   Stream<ConnectionStatus> get status => _statusController.stream;
@@ -107,7 +112,16 @@ class WsClient {
     final scheme = wsScheme;
     final host = cleanHost;
     try {
-      final uri = Uri.parse('$scheme://$host/ws/conversation');
+      final queryParams = <String, String>{};
+      if (_sessionId != null && _sessionId!.isNotEmpty) {
+        queryParams['session_id'] = _sessionId!;
+      }
+      final uri = Uri(
+        scheme: scheme,
+        host: host,
+        path: '/ws/conversation',
+        queryParameters: queryParams.isNotEmpty ? queryParams : null,
+      );
       debugPrint('[WsClient] Connecting to $uri');
       _channel = WebSocketChannel.connect(uri);
       _channel!.ready.then((_) {
@@ -162,6 +176,7 @@ class WsClient {
       'user_id': _userId,
       'workspace_id': workspaceId,
       'verbose': verbose,
+      if (_sessionId != null && _sessionId!.isNotEmpty) 'session_id': _sessionId,
       if (_model != null) 'model': _model,
       if (_providerKeys != null && _providerKeys!.isNotEmpty) 'provider_keys': _providerKeys,
     };
@@ -205,6 +220,10 @@ class WsClient {
 
   void updateUserId(String userId) {
     _userId = userId;
+  }
+
+  void updateSessionId(String? sessionId) {
+    _sessionId = sessionId;
   }
 
   void disconnect() {

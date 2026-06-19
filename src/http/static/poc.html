@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Executive Assistant · POC</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg-canvas: #08090A;
+    --bg-surface: #0E0F11;
+    --bg-elevated: #131416;
+    --bg-field: #1A1B1E;
+    --text-primary: #E6E6E6;
+    --text-secondary: #9B9B9B;
+    --text-tertiary: #6B6B6B;
+    --accent: #239766;
+    --accent-hover: #2EAD78;
+    --accent-muted: #0D2B22;
+    --success: #3DBC83;
+    --warning: #E0A04B;
+    --error: #E55B5B;
+    --border-subtle: #1F1F22;
+    --border-default: #2A2B2E;
+    --border-accent: #66239766;
+    --radius-sm: 6px;
+    --radius-md: 8px;
+    --radius-lg: 10px;
+    --radius-xl: 12px;
+    --font: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-mono: 'Fira Code', 'SF Mono', Monaco, 'Cascadia Code', monospace;
+  }
+  html, body { height: 100%; font-family: var(--font); background: var(--bg-canvas); color: var(--text-primary); }
+  body { display: flex; overflow: hidden; }
+
+  /* Chat panel */
+  #chat-panel {
+    width: 320px;
+    min-width: 280px;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--border-default);
+    background: var(--bg-surface);
+  }
+  #chat-header {
+    padding: 16px;
+    font-size: 14px;
+    font-weight: 600;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  #chat-header .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+  }
+  .dot.connected { background: var(--success); }
+  .dot.disconnected { background: var(--error); }
+  #chat-header .status-label {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text-tertiary);
+    margin-left: auto;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .msg {
+    max-width: 92%;
+    padding: 10px 14px;
+    border-radius: var(--radius-lg);
+    font-size: 13px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+  .msg.user {
+    align-self: flex-end;
+    background: var(--accent);
+    color: #fff;
+    border-bottom-right-radius: 4px;
+  }
+  .msg.assistant {
+    align-self: flex-start;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-default);
+    border-bottom-left-radius: 4px;
+    color: var(--text-primary);
+  }
+  .msg.system {
+    align-self: center;
+    background: transparent;
+    color: var(--text-tertiary);
+    font-size: 11px;
+    padding: 4px 8px;
+  }
+  .msg.tool-call {
+    align-self: flex-start;
+    background: var(--accent-muted);
+    border: 1px solid var(--border-accent);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+  }
+  #input-area {
+    padding: 12px 16px;
+    border-top: 1px solid var(--border-default);
+    display: flex;
+    gap: 8px;
+    background: var(--bg-surface);
+  }
+  #input-area input {
+    flex: 1;
+    padding: 10px 14px;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-xl);
+    background: var(--bg-field);
+    color: var(--text-primary);
+    font-size: 13px;
+    font-family: var(--font);
+    outline: none;
+  }
+  #input-area input:focus { border-color: var(--accent); }
+  #input-area input::placeholder { color: var(--text-tertiary); }
+  #input-area button {
+    padding: 10px 18px;
+    border: none;
+    border-radius: var(--radius-xl);
+    background: var(--accent);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: var(--font);
+  }
+  #input-area button:hover { background: var(--accent-hover); }
+  #input-area button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* Workspace panel */
+  #workspace-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-canvas);
+    min-width: 0;
+  }
+  #workspace-content {
+    flex: 1;
+    overflow-y: auto;
+    position: relative;
+  }
+  .tab-content {
+    display: none;
+    height: 100%;
+    overflow-y: auto;
+  }
+  .tab-content.active { display: flex; flex-direction: column; }
+
+  /* Tab bar (bottom) */
+  #tab-bar {
+    display: flex;
+    gap: 0;
+    border-top: 1px solid var(--border-default);
+    background: var(--bg-surface);
+    padding: 0;
+    flex-shrink: 0;
+  }
+  #tab-bar button {
+    flex: 1;
+    padding: 10px 16px;
+    border: none;
+    background: transparent;
+    color: var(--text-tertiary);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    border-top: 2px solid transparent;
+    transition: all 0.15s;
+    text-align: center;
+    font-family: var(--font);
+    letter-spacing: 0.01em;
+  }
+  #tab-bar button:hover { color: var(--text-primary); background: rgba(35,151,102,0.06); }
+  #tab-bar button.active {
+    color: var(--accent);
+    border-top-color: var(--accent);
+    background: rgba(35,151,102,0.1);
+  }
+
+  /* Canvas tab */
+  #canvas-content {
+    padding: 0;
+  }
+  #canvas-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-tertiary);
+    font-size: 13px;
+    text-align: center;
+    padding: 40px;
+    line-height: 1.6;
+  }
+  #canvas-surfaces {
+    padding: 12px;
+  }
+  #canvas-surfaces iframe {
+    width: 100%;
+    border: none;
+    border-radius: var(--radius-md);
+    background: #fff;
+  }
+
+  /* Email tab */
+  #email-content { gap: 0; }
+  #email-list {
+    flex: 1;
+    overflow-y: auto;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .email-item {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-subtle);
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  .email-item:hover { background: var(--bg-elevated); }
+  .email-item.selected { background: rgba(35,151,102,0.08); border-left: 3px solid var(--accent); }
+  .email-item .from { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+  .email-item .subject { font-size: 13px; color: var(--text-primary); margin-top: 2px; }
+  .email-item .snippet { font-size: 12px; color: var(--text-secondary); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .email-item .date { font-size: 11px; color: var(--text-tertiary); float: right; margin-left: 12px; }
+  #email-detail {
+    padding: 16px;
+    flex-shrink: 0;
+    max-height: 240px;
+    overflow-y: auto;
+    background: var(--bg-surface);
+    border-top: 1px solid var(--border-default);
+  }
+  #email-detail .detail-label { font-size: 11px; color: var(--text-tertiary); font-weight: 500; text-transform: uppercase; letter-spacing: 0.04em; }
+  #email-detail .detail-body { font-size: 13px; margin-top: 8px; line-height: 1.6; color: var(--text-primary); white-space: pre-wrap; }
+  #email-detail .focal-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    background: var(--accent-muted);
+    color: var(--accent);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-accent);
+  }
+
+  /* Todos tab */
+  #todos-content { padding: 8px; gap: 0; }
+  #todos-list { }
+  .todo-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border-subtle);
+    font-size: 13px;
+    color: var(--text-primary);
+  }
+  .todo-item.done { text-decoration: line-through; color: var(--text-tertiary); }
+  .todo-item input[type="checkbox"] {
+    accent-color: var(--accent);
+    width: 14px; height: 14px;
+  }
+
+  /* Contacts tab */
+  #contacts-content { padding: 8px; }
+  #contacts-list { }
+  .contact-item {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border-subtle);
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  .contact-item:hover { background: var(--bg-elevated); }
+  .contact-item .name { font-weight: 600; font-size: 13px; color: var(--text-primary); }
+  .contact-item .meta { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--text-tertiary); }
+</style>
+</head>
+<body>
+
+<!-- Chat panel -->
+<div id="chat-panel">
+  <div id="chat-header">
+    <span class="dot disconnected" id="status-dot"></span>
+    Executive Assistant
+    <span class="status-label" id="status-text">disconnected</span>
+  </div>
+  <div id="messages"></div>
+  <div id="input-area">
+    <input type="text" id="msg-input" placeholder="Message..." disabled>
+    <button id="send-btn" disabled>Send</button>
+  </div>
+</div>
+
+<!-- Workspace panel -->
+<div id="workspace-panel">
+  <div id="workspace-content">
+    <div class="tab-content active" id="canvas-content" data-tab="canvas">
+      <div id="canvas-empty">Agent's canvas will appear here.<br>The agent can draw, plan, and visualize.</div>
+      <div id="canvas-surfaces"></div>
+    </div>
+    <div class="tab-content" id="email-content" data-tab="email">
+      <div id="email-list"></div>
+      <div id="email-detail">
+        <div class="detail-label">Select an email</div>
+      </div>
+    </div>
+    <div class="tab-content" id="todos-content" data-tab="todos">
+      <div id="todos-list"></div>
+    </div>
+    <div class="tab-content" id="contacts-content" data-tab="contacts">
+      <div id="contacts-list"></div>
+    </div>
+  </div>
+  <div id="tab-bar">
+    <button class="active" data-tab="canvas">Canvas</button>
+    <button data-tab="email">Email</button>
+    <button data-tab="todos">Todos</button>
+    <button data-tab="contacts">Contacts</button>
+  </div>
+</div>
+
+<script>
+// ── Mock data ──────────────────────────────────────────────────────────
+const MOCK_EMAILS = [
+  { id: "e1", from: "Bob Chen", email: "bob@company.com", subject: "Q3 Planning — Budget Review", snippet: "Hey, can you take a look at the Q3 budget draft I sent? We need to finalize before the board meeting...", date: "Jun 18", body: "Hey,\n\nCan you take a look at the Q3 budget draft I sent? We need to finalize before the board meeting next Thursday. The engineering department is projecting a 15% overrun on infrastructure costs.\n\nAlso — should we push back on the marketing expansion request? I think they're being optimistic about the ROI timeline.\n\n— Bob" },
+  { id: "e2", from: "Alice Wang", email: "alice@company.com", subject: "Sprint Review — Demo Ready", snippet: "The sprint review demo is ready. Here's the recording and the key metrics we hit this sprint...", date: "Jun 18", body: "Hey team,\n\nThe sprint review demo is ready. We hit:\n- 12 story points completed (92% of target)\n- 3 bugs fixed, 0 regressions\n- API latency improved by 40%\n\nRecording at https://drive.company.com/sprint-42\n\n— Alice" },
+  { id: "e3", from: "Dave Park", email: "dave@company.com", subject: "Budget Q3 — Infrastructure Costs", snippet: "Attached is the updated infrastructure cost projection. We're seeing higher than expected GPU utilization...", date: "Jun 17", body: "Attached is the updated infrastructure cost projection.\n\nKey changes:\n- GPU utilization at 92% (forecast was 75%)\n- Need to order 20 more A100s by end of Q3\n- Total infra cost: $240k (was $180k)\n\nLet me know if you want to discuss.\n\n— Dave" },
+  { id: "e4", from: "Sarah Lee", email: "sarah@company.com", subject: "Customer Feedback — Q2 Summary", snippet: "Here's the Q2 customer feedback summary. NPS is up 8 points, but there are recurring complaints about...", date: "Jun 17", body: "Q2 Customer Feedback Summary:\n\n- NPS: 42 (up from 34 in Q1)\n- Top praise: mobile app performance, onboarding flow\n- Top complaints: search functionality, email notification delays\n- CSAT: 4.2/5.0\n\nFull breakdown attached.\n\n— Sarah" },
+  { id: "e5", from: "James Okafor", email: "james@company.com", subject: "Re: New Hire Onboarding", snippet: "Thanks for putting this together. A couple of comments on the onboarding checklist...", date: "Jun 16", body: "Thanks for putting this together!\n\nA couple of comments:\n1. Day 1 checklist looks good — maybe add the security briefing earlier\n2. The mentoring program assignment should happen by week 2, not week 4\n3. We should include a feedback survey at 30/60/90 day marks\n\nLet me know if you want to iterate on this.\n\n— James" },
+];
+
+const MOCK_TODOS = [
+  { id: "t1", text: "Review Q3 budget proposal", done: false },
+  { id: "t2", text: "Prepare board meeting slides", done: false },
+  { id: "t3", text: "Approve infrastructure purchase order", done: false },
+  { id: "t4", text: "Follow up with Alice on sprint metrics", done: true },
+  { id: "t5", text: "Schedule 1:1 with direct reports", done: true },
+];
+
+const MOCK_CONTACTS = [
+  { id: "c1", name: "Bob Chen", email: "bob@company.com", role: "Engineering Director" },
+  { id: "c2", name: "Alice Wang", email: "alice@company.com", role: "Engineering Manager" },
+  { id: "c3", name: "Dave Park", email: "dave@company.com", role: "Infrastructure Lead" },
+  { id: "c4", name: "Sarah Lee", email: "sarah@company.com", role: "Customer Success" },
+  { id: "c5", name: "James Okafor", email: "james@company.com", role: "VP of Product" },
+];
+
+// ── State ──────────────────────────────────────────────────────────────
+let ws = null;
+let currentTab = "canvas";
+let selectedEmailId = null;
+let assistantMsgBuffer = "";
+let canvasSurfaces = {};
+
+// ── DOM refs ───────────────────────────────────────────────────────────
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => document.querySelectorAll(s);
+const messages = $("#messages");
+const msgInput = $("#msg-input");
+const sendBtn = $("#send-btn");
+const statusDot = $("#status-dot");
+const statusText = $("#status-text");
+
+// ── WebSocket ──────────────────────────────────────────────────────────
+function connect() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const host = location.host;
+  ws = new WebSocket(`${proto}//${host}/ws/conversation`);
+
+  ws.onopen = () => {
+    statusDot.className = "dot connected";
+    statusText.textContent = "connected";
+    msgInput.disabled = false;
+    sendBtn.disabled = false;
+    msgInput.focus();
+    addSystemMsg("Connected");
+  };
+
+  ws.onclose = () => {
+    statusDot.className = "dot disconnected";
+    statusText.textContent = "disconnected";
+    msgInput.disabled = true;
+    sendBtn.disabled = true;
+    addSystemMsg("Disconnected — retrying...");
+    setTimeout(connect, 3000);
+  };
+
+  ws.onerror = () => {};
+
+  ws.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      handleWsMessage(data);
+    } catch (e) {
+      console.error("WS parse error:", e);
+    }
+  };
+}
+
+// ── WS message handler ─────────────────────────────────────────────────
+function handleWsMessage(data) {
+  const type = data.type || data.canonical_type;
+
+  switch (type) {
+    case "text_start":
+      assistantMsgBuffer = data.content || data.text || "";
+      showAssistantMessage();
+      break;
+
+    case "text_delta":
+    case "ai_token":
+      assistantMsgBuffer += data.content || data.text || "";
+      updateAssistantMessage();
+      break;
+
+    case "text_end":
+      if (data.content) assistantMsgBuffer += data.content;
+      updateAssistantMessage();
+      break;
+
+    case "tool_input_start":
+    case "tool_start":
+      showToolCall(data.tool || data.name || "tool", data.args || {});
+      break;
+
+    case "tool_result":
+      showToolResult(data.content || "");
+      break;
+
+    case "canvas_update":
+      handleCanvasUpdate(data);
+      break;
+
+    case "done":
+      finalizeAssistantMessage(data.response || assistantMsgBuffer);
+      parseDirectives(data.response || assistantMsgBuffer);
+      break;
+
+    case "error":
+      addSystemMsg("Error: " + (data.message || "unknown"));
+      break;
+
+    case "interrupt":
+      addSystemMsg("⏸ Agent needs approval");
+      break;
+
+    case "pong":
+      break;
+  }
+}
+
+// ── Canvas surface handling ────────────────────────────────────────────
+function handleCanvasUpdate(data) {
+  const sid = data.surface_id || "default";
+  const action = data.action || "create";
+  const html = data.html || "";
+
+  if (action === "destroy") {
+    delete canvasSurfaces[sid];
+  } else {
+    canvasSurfaces[sid] = html;
+  }
+  renderCanvas();
+}
+
+function renderCanvas() {
+  const container = document.getElementById("canvas-surfaces");
+  const empty = document.getElementById("canvas-empty");
+  const keys = Object.keys(canvasSurfaces);
+
+  if (keys.length === 0) {
+    empty.style.display = "flex";
+    container.innerHTML = "";
+    return;
+  }
+
+  empty.style.display = "none";
+  container.innerHTML = keys.map((id) => {
+    const html = canvasSurfaces[id];
+    const height = Math.min(Math.max(html.split('\n').length * 20, 200), 600);
+    return `<div style="margin-bottom:12px;border-radius:var(--radius-md);overflow:hidden;border:1px solid var(--border-default)">
+      <iframe srcdoc="${escapeHtml(html)}" style="width:100%;height:${height}px;border:none;background:#fff"></iframe>
+    </div>`;
+  }).join("");
+}
+
+// ── Message rendering ──────────────────────────────────────────────────
+function addUserMsg(text) {
+  const div = document.createElement("div");
+  div.className = "msg user";
+  div.textContent = text;
+  messages.appendChild(div);
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function addSystemMsg(text) {
+  const div = document.createElement("div");
+  div.className = "msg system";
+  div.textContent = text;
+  messages.appendChild(div);
+  messages.scrollTop = messages.scrollHeight;
+}
+
+let assistantMsgEl = null;
+
+function showAssistantMessage() {
+  assistantMsgEl = document.createElement("div");
+  assistantMsgEl.className = "msg assistant";
+  messages.appendChild(assistantMsgEl);
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function updateAssistantMessage() {
+  if (!assistantMsgEl) return;
+  assistantMsgEl.textContent = assistantMsgBuffer;
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function finalizeAssistantMessage(text) {
+  if (assistantMsgEl) {
+    assistantMsgEl.textContent = text;
+    assistantMsgEl = null;
+  }
+  assistantMsgBuffer = "";
+}
+
+function showToolCall(name, args) {
+  const div = document.createElement("div");
+  div.className = "msg tool-call";
+  const argsPreview = JSON.stringify(args).slice(0, 200);
+  div.textContent = `🔧 ${name}(${argsPreview})`;
+  messages.appendChild(div);
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function showToolResult(content) {
+  const div = document.createElement("div");
+  div.className = "msg tool-call";
+  const preview = (content || "").slice(0, 200);
+  div.textContent = `📋 ${preview}`;
+  messages.appendChild(div);
+  messages.scrollTop = messages.scrollHeight;
+}
+
+// ── Directives ─────────────────────────────────────────────────────────
+function parseDirectives(text) {
+  if (!text) return;
+  const tabMatch = text.match(/\[SWITCH_TAB:(\w+)\]/i);
+  if (tabMatch) switchTab(tabMatch[1].toLowerCase());
+
+  const refreshMatch = text.match(/\[WIDGET_REFRESH:(\w+)\]/i);
+  if (refreshMatch) refreshWidget(refreshMatch[1].toLowerCase());
+}
+
+// ── Tab switching ──────────────────────────────────────────────────────
+function switchTab(tab) {
+  if (!["canvas", "email", "todos", "contacts"].includes(tab)) return;
+  currentTab = tab;
+
+  $$(".tab-content").forEach((el) => el.classList.remove("active"));
+  const content = document.querySelector(`[data-tab="${tab}"]`);
+  if (content) content.classList.add("active");
+
+  $$("#tab-bar button").forEach((btn) => btn.classList.remove("active"));
+  const tabBtn = document.querySelector(`#tab-bar button[data-tab="${tab}"]`);
+  if (tabBtn) tabBtn.classList.add("active");
+}
+
+// ── Widget refresh ─────────────────────────────────────────────────────
+function refreshWidget(widget) {
+  if (widget === "email") renderEmails();
+  if (widget === "todos") renderTodos();
+  if (widget === "contacts") renderContacts();
+}
+
+// ── Email tab ──────────────────────────────────────────────────────────
+function renderEmails() {
+  const list = document.getElementById("email-list");
+  list.innerHTML = MOCK_EMAILS.map((e) => `
+    <div class="email-item ${selectedEmailId === e.id ? 'selected' : ''}" data-id="${e.id}">
+      <span class="date">${escapeHtml(e.date)}</span>
+      <div class="from">${escapeHtml(e.from)}</div>
+      <div class="subject">${escapeHtml(e.subject)}</div>
+      <div class="snippet">${escapeHtml(e.snippet)}</div>
+    </div>
+  `).join("");
+
+  list.querySelectorAll(".email-item").forEach((el) => {
+    el.addEventListener("click", () => selectEmail(el.dataset.id));
+  });
+
+  if (selectedEmailId) showEmailDetail(selectedEmailId);
+}
+
+function selectEmail(id) {
+  selectedEmailId = id;
+  showEmailDetail(id);
+  renderEmails();
+
+  const email = MOCK_EMAILS.find((e) => e.id === id);
+  if (email && ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: "user_message",
+      content: `[FOCAL:email:${id}] ${email.subject}`,
+    }));
+    addSystemMsg(`📌 Focus: ${email.subject}`);
+  }
+}
+
+function showEmailDetail(id) {
+  const detail = document.getElementById("email-detail");
+  const email = MOCK_EMAILS.find((e) => e.id === id);
+  if (!email) {
+    detail.innerHTML = `<div class="detail-label">Select an email</div>`;
+    return;
+  }
+  detail.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px">
+      <div>
+        <div style="font-weight:600;font-size:14px;color:var(--text-primary)">${escapeHtml(email.subject)}</div>
+        <div class="detail-label" style="margin-top:4px">From: ${escapeHtml(email.from)} &lt;${escapeHtml(email.email)}&gt; · ${email.date}</div>
+      </div>
+      <span class="focal-badge">focal</span>
+    </div>
+    <div class="detail-body">${escapeHtml(email.body)}</div>
+  `;
+}
+
+// ── Todos tab ──────────────────────────────────────────────────────────
+function renderTodos() {
+  const list = document.getElementById("todos-list");
+  list.innerHTML = MOCK_TODOS.map((t) => `
+    <div class="todo-item ${t.done ? 'done' : ''}">
+      <input type="checkbox" ${t.done ? 'checked' : ''} disabled>
+      ${escapeHtml(t.text)}
+    </div>
+  `).join("");
+}
+
+// ── Contacts tab ───────────────────────────────────────────────────────
+function renderContacts() {
+  const list = document.getElementById("contacts-list");
+  list.innerHTML = MOCK_CONTACTS.map((c) => `
+    <div class="contact-item" data-id="${c.id}">
+      <div class="name">${escapeHtml(c.name)}</div>
+      <div class="meta">${escapeHtml(c.email)} · ${escapeHtml(c.role)}</div>
+    </div>
+  `).join("");
+
+  list.querySelectorAll(".contact-item").forEach((el) => {
+    el.addEventListener("click", () => {
+      const contact = MOCK_CONTACTS.find((c) => c.id === el.dataset.id);
+      if (contact && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: "user_message",
+          content: `[FOCAL:contact:${contact.id}] ${contact.name} — ${contact.role}`,
+        }));
+        addSystemMsg(`📌 Focus: ${contact.name}`);
+      }
+    });
+  });
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────
+function escapeHtml(str) {
+  if (!str) return "";
+  const d = document.createElement("div");
+  d.textContent = str;
+  return d.innerHTML;
+}
+
+// ── Send message ───────────────────────────────────────────────────────
+function sendMessage() {
+  const text = msgInput.value.trim();
+  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+  ws.send(JSON.stringify({ type: "user_message", content: text }));
+  addUserMsg(text);
+  msgInput.value = "";
+}
+
+// ── Tab bar click ──────────────────────────────────────────────────────
+document.querySelector("#tab-bar").addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  switchTab(btn.dataset.tab);
+});
+
+// ── Events ─────────────────────────────────────────────────────────────
+sendBtn.addEventListener("click", sendMessage);
+msgInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+
+// ── Wire up the POC router ────────────────────────────────────────────
+renderEmails();
+renderTodos();
+renderContacts();
+connect();
+</script>
+</body>
+</html>

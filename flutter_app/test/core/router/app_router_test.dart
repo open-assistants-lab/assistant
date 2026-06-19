@@ -5,7 +5,7 @@ void main() {
   group('isUtilityRoute', () {
     test('returns true for utility routes', () {
       for (final path in const [
-        '/tools', '/skills', '/subagents', '/connectors', '/settings',
+        '/tools', '/skills', '/subagents', '/settings',
       ]) {
         expect(isUtilityRoute(path), isTrue, reason: '$path should be utility');
       }
@@ -13,7 +13,7 @@ void main() {
 
     test('returns false for non-utility routes', () {
       for (final path in const [
-        '/workspace', '/email', '/chat', '/tasks', '/contacts', '/more',
+        '/workspace', '/chat',
       ]) {
         expect(isUtilityRoute(path), isFalse, reason: '$path should NOT be utility');
       }

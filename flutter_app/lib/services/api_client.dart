@@ -471,11 +471,13 @@ class ApiClient {
   Future<List<dynamic>> getConversation({
     int limit = 20,
     String workspaceId = 'personal',
+    String? sessionId,
   }) async {
     final extra = <String, String>{
       'limit': limit.toString(),
       'user_id': _userId,
       'workspace_id': workspaceId,
+      if (sessionId != null && sessionId.isNotEmpty) 'session_id': sessionId,
     };
     final response = await _get(Uri.parse(_buildUrl('/conversation', extra)));
     return _handleListResponse(response, 'messages');

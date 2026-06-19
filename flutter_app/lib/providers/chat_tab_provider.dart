@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
 import 'workspace_provider.dart';
+import 'agent_provider.dart';
 
 /// Tracks which workspace tabs are open in the chat panel.
 /// Key: workspace_id, Value: workspace_name
@@ -36,6 +37,7 @@ class ChatTabNotifier extends StateNotifier<Map<String, String>> {
           final activeName = tabs[activeId] ?? 'Personal';
           ref.read(activeChatTabProvider.notifier).state = activeId;
           ref.read(workspaceNotifierProvider.notifier).switchWorkspace(activeId, activeName);
+          _ensureSessionId(activeId);
         }
       } catch (_) {}
     }
@@ -46,16 +48,28 @@ class ChatTabNotifier extends StateNotifier<Map<String, String>> {
     await prefs.setString('open_tabs', jsonEncode(state));
   }
 
+  Future<void> _ensureSessionId(String workspaceId) async {
+    final agent = ref.read(agentProvider.notifier);
+    var sessionId = await agent.getSessionId(workspaceId);
+    if (sessionId == null || sessionId.isEmpty) {
+      sessionId = await agent.createSession(workspaceId, workspaceId);
+    }
+    agent.setSessionId(sessionId);
+    ref.read(currentSessionIdProvider.notifier).state = sessionId;
+  }
+
   void openWorkspace(String id, String name) {
     if (state.containsKey(id)) {
       ref.read(activeChatTabProvider.notifier).state = id;
       ref.read(workspaceNotifierProvider.notifier).switchWorkspace(id, name);
+      _ensureSessionId(id);
       ref.read(workspaceSwitchSignalProvider.notifier).state++;
       return;
     }
     state = {...state, id: name};
     ref.read(activeChatTabProvider.notifier).state = id;
     ref.read(workspaceNotifierProvider.notifier).switchWorkspace(id, name);
+    _ensureSessionId(id);
     _persistTabs();
     ref.read(workspaceSwitchSignalProvider.notifier).state++;
   }
@@ -70,6 +84,7 @@ class ChatTabNotifier extends StateNotifier<Map<String, String>> {
       ref.read(activeChatTabProvider.notifier).state = nextId;
       final nextName = updated[nextId]!;
       ref.read(workspaceNotifierProvider.notifier).switchWorkspace(nextId, nextName);
+      _ensureSessionId(nextId);
     }
     _persistTabs();
   }

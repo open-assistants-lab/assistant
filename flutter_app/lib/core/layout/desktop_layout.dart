@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../theme/app_theme.dart';
 import '../../providers/agent_provider.dart';
-import '../../providers/workspace_provider.dart';
 import '../../providers/chat_tab_provider.dart';
 import '../../widgets/app_input.dart';
 import '../../features/chat/widgets/chat_message_list.dart';
@@ -16,29 +15,11 @@ import '../../features/companion/companion_context_pill.dart';
 import '../../features/companion/companion_toast.dart';
 
 enum DesktopSidebarItem {
-  email(
-    icon: Symbols.mail,
-    activeIcon: Symbols.mail,
-    label: 'Email',
-    path: '/email',
-  ),
-  workspace(
-    icon: Symbols.folder,
-    activeIcon: Symbols.folder,
-    label: 'Workspace',
+  chat(
+    icon: Symbols.chat,
+    activeIcon: Symbols.chat,
+    label: 'Chat',
     path: '/workspace',
-  ),
-  connectors(
-    icon: Symbols.cable,
-    activeIcon: Symbols.cable,
-    label: 'Connection',
-    path: '/connectors',
-  ),
-  settings(
-    icon: Symbols.settings,
-    activeIcon: Symbols.settings,
-    label: 'Settings',
-    path: '/settings',
   ),
   tools(
     icon: Symbols.handyman,
@@ -57,6 +38,12 @@ enum DesktopSidebarItem {
     activeIcon: Symbols.robot_2,
     label: 'Subagents',
     path: '/subagents',
+  ),
+  settings(
+    icon: Symbols.settings,
+    activeIcon: Symbols.settings,
+    label: 'Settings',
+    path: '/settings',
   );
 
   final IconData icon;
@@ -73,7 +60,7 @@ enum DesktopSidebarItem {
 }
 
 final desktopSidebarProvider = StateProvider<DesktopSidebarItem>(
-  (ref) => DesktopSidebarItem.workspace,
+  (ref) => DesktopSidebarItem.chat,
 );
 
 class DesktopLayout extends ConsumerWidget {
@@ -92,8 +79,8 @@ class DesktopLayout extends ConsumerWidget {
             builder: (context, constraints) {
               final totalWidth = constraints.maxWidth;
               final remainingWidth = totalWidth - sidebarWidth - dividerCount;
-              final chatPanelWidth = remainingWidth * 0.6;
-              final contentWidth = remainingWidth * 0.4;
+              final chatPanelWidth = remainingWidth * 0.28;
+              final contentWidth = remainingWidth * 0.72;
               return Row(
                 children: [
                   const Sidebar(width: sidebarWidth),
@@ -125,8 +112,6 @@ class Sidebar extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final tokens = context.tokens;
-    final currentId = ref.watch(currentWorkspaceIdProvider);
-    final workspaces = ref.watch(workspaceListProvider);
 
     return Container(
       width: width,
@@ -142,135 +127,16 @@ class Sidebar extends ConsumerWidget {
           const SizedBox(height: 10),
           const Divider(height: 1),
           Expanded(
-            child: workspaces.when(
-              data: (list) => list.isEmpty
-                  ? Center(
-                      child: Padding(
-                        padding: const EdgeInsets.all(24),
-                        child: InkWell(
-                          onTap: () => _showCreateDialog(context, ref),
-                          borderRadius: BorderRadius.circular(8),
-                          child: Padding(
-                            padding: const EdgeInsets.all(12),
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(
-                                  Symbols.add,
-                                  size: 24,
-                                  color: tokens.colors.textTertiary,
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  'New workspace',
-                                  style: tokens.typography.textTheme.labelSmall
-                                      ?.copyWith(
-                                        color: tokens.colors.textTertiary,
-                                      ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    )
-                  : Material(
-                      color: Colors.transparent,
-                      child: ListView(
-                        padding: const EdgeInsets.only(top: 4),
-                        children: [
-                          ListTile(
-                            dense: true,
-                            leading: Icon(
-                              Symbols.add,
-                              size: 16,
-                              color: tokens.colors.textTertiary,
-                            ),
-                            title: Text(
-                              'New workspace',
-                              style: tokens.typography.textTheme.labelSmall
-                                  ?.copyWith(color: tokens.colors.textTertiary),
-                            ),
-                            onTap: () => _showCreateDialog(context, ref),
-                          ),
-                          const Divider(height: 1),
-                        ...list.map((ws) {
-                          final id = ws['id']?.toString() ?? '';
-                          final name = ws['name']?.toString() ?? '';
-                          final isActive = currentId == id;
-                          return Stack(
-                            children: [
-                              if (isActive)
-                                Positioned(
-                                  left: 0,
-                                  top: 0,
-                                  bottom: 0,
-                                  child: Container(
-                                    width: 2,
-                                    color: tokens.colors.accent,
-                                  ),
-                                ),
-                              ListTile(
-                              dense: true,
-                              contentPadding: const EdgeInsets.only(
-                                left: 16,
-                                right: 8,
-                              ),
-                              visualDensity: VisualDensity.compact,
-                              title: Text(
-                                name,
-                                style: tokens.typography.textTheme.bodyMedium
-                                    ?.copyWith(
-                                      fontSize: 13,
-                                      fontWeight: isActive
-                                          ? FontWeight.w600
-                                          : FontWeight.w400,
-                                      color: isActive
-                                          ? tokens.colors.textPrimary
-                                          : tokens.colors.textSecondary,
-                                    ),
-                              ),
-                              trailing: PopupMenuButton<String>(
-                                icon: Icon(
-                                  Symbols.more_horiz,
-                                  size: 16,
-                                  color: tokens.colors.textTertiary,
-                                ),
-                                onSelected: (value) {
-                                  if (value == 'delete') {
-                                    _confirmDeleteWorkspace(
-                                      context,
-                                      ref,
-                                      id,
-                                      name,
-                                    );
-                                  }
-                                },
-                                itemBuilder: (_) => [
-                                  const PopupMenuItem(
-                                    value: 'delete',
-                                    child: Text('Delete'),
-                                  ),
-                                ],
-                              ),
-                              selected: isActive,
-                              selectedTileColor: tokens.colors.bgElevated,
-                              hoverColor: tokens.colors.bgElevated,
-                              onTap: () {
-                                ref
-                                    .read(chatTabNotifierProvider.notifier)
-                                    .openWorkspace(id, name);
-                                GoRouter.maybeOf(context)?.go('/workspace');
-                              },
-                              ),
-                            ],
-                          );
-                        }),
-                        ],
-                      ),
-                    ),
-              loading: () => const SizedBox.shrink(),
-              error: (error, stackTrace) => const SizedBox.shrink(),
+            child: Padding(
+              padding: EdgeInsets.symmetric(
+                horizontal: tokens.spacing.md,
+                vertical: tokens.spacing.xs,
+              ),
+              child: SidebarItem(
+                item: DesktopSidebarItem.chat,
+                selected: true,
+                onTap: () => context.go('/workspace'),
+              ),
             ),
           ),
           const Divider(height: 1),
@@ -311,17 +177,6 @@ class Sidebar extends ConsumerWidget {
                 ),
               ),
               Padding(
-                padding: EdgeInsets.symmetric(
-                  horizontal: tokens.spacing.md,
-                  vertical: tokens.spacing.xs,
-                ),
-                child: SidebarItem(
-                  item: DesktopSidebarItem.connectors,
-                  selected: false,
-                  onTap: () => context.go('/connectors'),
-                ),
-              ),
-              Padding(
                 padding: EdgeInsets.only(
                   left: tokens.spacing.md,
                   right: tokens.spacing.sm,
@@ -355,90 +210,6 @@ class Sidebar extends ConsumerWidget {
           ),
         ],
       ),
-    );
-  }
-
-  void _showCreateDialog(BuildContext context, WidgetRef ref) {
-    final nameCtrl = TextEditingController();
-    final t = context.tokens;
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(
-          'New Workspace',
-          style: t.typography.textTheme.titleLarge?.copyWith(
-            color: t.colors.textPrimary,
-          ),
-        ),
-        content: TextField(
-          controller: nameCtrl,
-          style: t.typography.textTheme.bodyLarge?.copyWith(
-            color: t.colors.textPrimary,
-          ),
-          decoration: const InputDecoration(hintText: 'Workspace name'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () {
-              final name = nameCtrl.text.trim();
-              if (name.isNotEmpty) {
-                ref
-                    .read(workspaceNotifierProvider.notifier)
-                    .createWorkspace(name, '', '');
-                Navigator.pop(ctx);
-              }
-            },
-            child: const Text('Create'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _confirmDeleteWorkspace(
-    BuildContext context,
-    WidgetRef ref,
-    String id,
-    String name,
-  ) {
-    showDialog(
-      context: context,
-      builder: (ctx) {
-        final t = ctx.tokens;
-        return AlertDialog(
-          title: Text(
-            'Delete workspace?',
-            style: t.typography.textTheme.titleLarge?.copyWith(
-              color: t.colors.textPrimary,
-            ),
-          ),
-          content: Text(
-            'Delete "$name"? This will also delete all associated conversation messages.',
-            style: t.typography.textTheme.bodyMedium?.copyWith(
-              color: t.colors.textPrimary,
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () {
-                Navigator.pop(ctx);
-                ref
-                    .read(workspaceNotifierProvider.notifier)
-                    .deleteWorkspace(id);
-              },
-              child: const Text('Delete'),
-            ),
-          ],
-        );
-      },
     );
   }
 }
