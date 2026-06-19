@@ -317,7 +317,8 @@ async def ws_conversation(websocket: WebSocket) -> None:
         await websocket.send_json(AuthOkMessage().model_dump())
     # ── End auth ──────────────────────────────────────────────────────────
 
-    session_id = websocket.query_params.get("session_id") or str(uuid.uuid4())[:8]
+    raw_sid = websocket.query_params.get("session_id", "").strip()
+    session_id = raw_sid or str(uuid.uuid4())[:8]
     user_id = "default_user"
     workspace_id = "personal"
     verbose = False
