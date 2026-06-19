@@ -29,9 +29,9 @@
     let contacts = [];
     async function fetchContacts() {
       try {
-        const res = await fetch('/contacts/list');
+        const res = await fetch('/contacts');
         const data = await res.json();
-        contacts = data.contacts || data || [];
+        contacts = data.contacts || [];
       } catch { contacts = []; }
       renderList();
     }
@@ -42,7 +42,7 @@
         return;
       }
       list.innerHTML = contacts.map(c => `
-        <div class="contact-item" onclick="showDetail('${esc(c.id || c.email)}')">
+        <div class="contact-item" data-id="${esc(c.id || c.email)}" onclick="showDetail(this.dataset.id)">
           <div class="contact-avatar">${(c.name || c.email || '?')[0].toUpperCase()}</div>
           <div>
             <div class="contact-name">${esc(c.name || '(no name)')}</div>
@@ -53,8 +53,10 @@
     }
     async function showDetail(id) {
       try {
-        const res = await fetch('/contacts/get/' + id);
-        const c = await res.json();
+        const res = await fetch('/contacts/' + encodeURIComponent(id));
+        const data = await res.json();
+        const c = data.contact || data;
+        if (c.error) { showList(); return; }
         document.getElementById('list-view').style.display = 'none';
         document.getElementById('detail-view').style.display = 'block';
         document.getElementById('detail-view').innerHTML = `
@@ -63,7 +65,7 @@
           <div class="field"><div class="field-label">Email</div><div class="field-value">${esc(c.email || '-')}</div></div>
           <div class="field"><div class="field-label">Phone</div><div class="field-value">${esc(c.phone || '-')}</div></div>
         `;
-      } catch {}
+      } catch { showList(); }
     }
     function showList() {
       document.getElementById('list-view').style.display = 'block';

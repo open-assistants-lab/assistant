@@ -32,7 +32,7 @@
     let emails = [];
     async function fetchInbox() {
       try {
-        const res = await fetch('/email/list');
+        const res = await fetch('/emails?limit=50');
         const data = await res.json();
         emails = data.emails || [];
       } catch { emails = []; }
@@ -45,7 +45,7 @@
         return;
       }
       list.innerHTML = emails.map(e => `
-        <div class="thread" onclick="showDetail('${e.id}')">
+        <div class="thread" data-id="${esc(e.id)}" onclick="showDetail(this.dataset.id)">
           <span class="date">${esc(e.date || '')}</span>
           <div class="from">${esc(e.from || '')}</div>
           <div class="subject">${esc(e.subject || '(no subject)')}</div>
@@ -55,8 +55,9 @@
     }
     async function showDetail(id) {
       try {
-        const res = await fetch('/email/get/' + id);
+        const res = await fetch('/emails/' + encodeURIComponent(id));
         const e = await res.json();
+        if (e.error) { showInbox(); return; }
         document.getElementById('inbox-view').style.display = 'none';
         document.getElementById('detail-view').style.display = 'block';
         document.getElementById('detail-view').innerHTML = `
@@ -68,7 +69,7 @@
           </div>
           <div class="body">${esc(e.body || e.snippet || '')}</div>
         `;
-      } catch {}
+      } catch { showInbox(); }
     }
     function showInbox() {
       document.getElementById('inbox-view').style.display = 'block';

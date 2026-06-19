@@ -26,13 +26,12 @@
   </div>
   <div id="content-view" class="file-content" style="display:none;"></div>
   <script>
-    async function fetchFiles(path) {
-      const url = path ? '/files/list?path=' + encodeURIComponent(path) : '/files/list';
+    async function fetchFiles() {
       try {
-        const res = await fetch(url);
+        const res = await fetch('/workspace/json');
         const data = await res.json();
-        const files = data.files || data || [];
-        document.getElementById('current-path').textContent = path || '/';
+        const files = data.files || [];
+        document.getElementById('current-path').textContent = data.path || '/';
         renderFiles(files);
       } catch {}
     }
@@ -43,23 +42,24 @@
         return;
       }
       list.innerHTML = files.map(f => `
-        <div class="file-item" onclick="${f.is_dir ? 'fetchFiles(\'' + escPath(f.path) + '\')' : 'showFile(\'' + escPath(f.path) + '\')'}">
+        <div class="file-item" data-name="${esc(f.name)}" onclick="${f.is_dir ? 'alert(\'Directory navigation coming soon\')' : 'showFile(this.dataset.name)'}">
           <span class="file-icon">${f.is_dir ? '📁' : '📄'}</span>
           <span class="file-name">${esc(f.name)}</span>
           <span class="file-size">${f.size || ''}</span>
         </div>
       `).join('');
     }
-    async function showFile(path) {
+    async function showFile(name) {
       try {
-        const res = await fetch('/files/read?path=' + encodeURIComponent(path));
-        const data = await res.text();
+        const res = await fetch('/workspace/read/' + encodeURIComponent(name));
+        const data = await res.json();
+        const content = data.response || '';
         document.getElementById('list-view').style.display = 'none';
         document.getElementById('content-view').style.display = 'block';
         document.getElementById('content-view').innerHTML = `
           <span class="back-btn" onclick="showList()">← Back to files</span>
-          <div style="margin-bottom:8px; font-weight:500;">${esc(path)}</div>
-          <pre>${esc(data)}</pre>
+          <div style="margin-bottom:8px; font-weight:500;">${esc(name)}</div>
+          <pre>${esc(content)}</pre>
         `;
       } catch {}
     }
@@ -68,8 +68,7 @@
       document.getElementById('content-view').style.display = 'none';
     }
     function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
-    function escPath(s) { return (s || '').replace(/'/g, "\\'"); }
-    fetchFiles('');
+    fetchFiles();
   </script>
 </body>
 </html>

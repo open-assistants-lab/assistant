@@ -30,21 +30,23 @@
     let todos = [];
     async function fetchTodos() {
       try {
-        const res = await fetch('/todos/list');
+        const res = await fetch('/todos');
         const data = await res.json();
-        todos = data.todos || data || [];
+        todos = data.todos || [];
       } catch { todos = []; }
       renderTodos();
     }
-    async function toggleTodo(id, done) {
-      try { await fetch('/todos/update', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id, done}) }); } catch {}
+    async function toggleTodo(td) {
+      const done = td.checked;
+      const status = done ? 'done' : 'active';
+      try { await fetch('/todos/' + encodeURIComponent(td.dataset.id) + '?status=' + status, { method: 'PUT' }); } catch {}
       await fetchTodos();
     }
     async function addTodo() {
       const inp = document.getElementById('new-todo');
       const text = inp.value.trim();
       if (!text) return;
-      try { await fetch('/todos/add', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text}) }); } catch {}
+      try { await fetch('/todos?content=' + encodeURIComponent(text), { method: 'POST' }); } catch {}
       inp.value = '';
       await fetchTodos();
     }
@@ -56,7 +58,7 @@
       }
       list.innerHTML = todos.map(t => `
         <div class="todo-item">
-          <input type="checkbox" class="todo-checkbox" ${t.done ? 'checked' : ''} onchange="toggleTodo('${t.id}', this.checked)">
+          <input type="checkbox" class="todo-checkbox" data-id="${esc(t.id)}" ${t.done ? 'checked' : ''} onchange="toggleTodo(this)">
           <span class="todo-text ${t.done ? 'done' : ''}">${esc(t.title || t.text || '')}</span>
         </div>
       `).join('');
