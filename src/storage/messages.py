@@ -236,14 +236,14 @@ class MessageStore:
 
         sentinel.touch()
 
-    def add_message(self, role: str, content: str, metadata: dict[str, Any] | None = None) -> str:
-        result = self._core.ingest(role, content or "(empty)", metadata=metadata)
+    def add_message(self, role: str, content: str, metadata: dict[str, Any] | None = None, session_id: str | None = None) -> str:
+        result = self._core.ingest(role, content or "(empty)", metadata=metadata, session_id=session_id)
         return result or ""
 
     def add_message_with_embedding(
-        self, role: str, content: str, embedding: list[float], metadata: dict[str, Any] | None = None
+        self, role: str, content: str, embedding: list[float], metadata: dict[str, Any] | None = None, session_id: str | None = None
     ) -> str:
-        result = self._core.ingest(role, content or "(empty)", metadata=metadata, embedding=embedding)
+        result = self._core.ingest(role, content or "(empty)", metadata=metadata, embedding=embedding, session_id=session_id)
         return result or ""
 
     @staticmethod
@@ -288,14 +288,18 @@ class MessageStore:
 
     def get_messages(
         self, start_date: date | None = None, end_date: date | None = None,
-        limit: int | None = None,
+        limit: int | None = None, session_id: str | None = None,
     ) -> list[Message]:
         ts_after = f"{start_date.isoformat()}T00:00:00" if start_date else None
         ts_before = f"{end_date.isoformat()}T23:59:59" if end_date else None
+        kwargs: dict[str, Any] = {}
+        if session_id is not None:
+            kwargs["session_id"] = session_id
         memories = self._core.fetch(
             limit=limit or 10000,
             ts_after=ts_after,
             ts_before=ts_before,
+            **kwargs,
         )
         return [self._to_msg(m) for m in reversed(memories)]
 
