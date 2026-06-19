@@ -102,7 +102,7 @@ app.add_middleware(
 )
 
 
-_PUBLIC_PATHS = {"/health", "/health/ready", "/docs", "/redoc", "/openapi.json"}
+_PUBLIC_PATHS = {"/health", "/health/ready", "/docs", "/redoc", "/openapi.json", "/poc", "/widget"}
 
 
 @app.middleware("http")
@@ -142,6 +142,14 @@ app.include_router(tools_router)
 app.include_router(capabilities_router)
 app.include_router(ws_router)
 app.include_router(settings_router)
+
+# POC route for canvas 2.0 workspace concept
+from src.http.routers.poc import router as poc_router
+app.include_router(poc_router)
+
+# Widget router for Canvas 2.0
+from src.http.routers.widgets import router as widgets_router
+app.include_router(widgets_router)
 
 # ConnectKit OAuth + catalog routers (safe if connectkit not installed)
 try:
