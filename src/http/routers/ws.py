@@ -13,6 +13,7 @@ Uses the SDK AgentLoop for all agent execution.
 
 import asyncio
 import json
+import re
 import uuid
 from typing import Any, Literal
 
@@ -49,6 +50,39 @@ logger = get_logger()
 router = APIRouter(tags=["websocket"])
 
 
+def parse_directives(text: str) -> tuple[str, list[dict[str, Any]]]:
+    """Parse agent directives from response text.
+
+    Returns (cleaned_text, events) where events are dicts with type and payload
+    to send to the Flutter client as separate WS events.
+    """
+    events: list[dict[str, Any]] = []
+
+    switch_match = re.search(r'\[SWITCH_TAB:(\w+)\]', text)
+    if switch_match:
+        tab = switch_match.group(1).lower()
+        events.append({"type": "switch_tab", "tab": tab})
+        text = text.replace(switch_match.group(0), "").strip()
+
+    refresh_match = re.search(r'\[WIDGET_REFRESH:(\w+)\]', text)
+    if refresh_match:
+        tab = refresh_match.group(1).lower()
+        events.append({"type": "widget_refresh", "tab": tab})
+        text = text.replace(refresh_match.group(0), "").strip()
+
+    all_refresh = re.search(r'\[WIDGET_REFRESH\]', text)
+    if all_refresh:
+        events.append({"type": "widget_refresh", "tab": "all"})
+        text = text.replace(all_refresh.group(0), "").strip()
+
+    new_session = re.search(r'\[NEW_SESSION\]', text)
+    if new_session:
+        events.append({"type": "new_session"})
+        text = text.replace(new_session.group(0), "").strip()
+
+    return text, events
+
+
 async def _run_agent_stream(
     websocket: WebSocket,
     user_id: str,
@@ -60,6 +94,7 @@ async def _run_agent_stream(
     model: str | None = None,
     provider_keys: dict[str, str] | None = None,
     current_tab: str = "canvas",
+    connection_state: dict[str, Any] | None = None,
 ) -> None:
     """Run the agent streaming loop and handle all chunk types."""
     import uuid as _uuid
@@ -153,6 +188,15 @@ async def _run_agent_stream(
 
             elif chunk.type == "done":
                 response = "".join(ai_content_parts)
+
+                # Parse and apply directives BEFORE canvas extraction
+                cleaned_response, directive_events = parse_directives(response)
+                if directive_events:
+                    response = cleaned_response
+                    for event in directive_events:
+                        if event["type"] == "switch_tab" and connection_state is not None:
+                            connection_state["current_tab"] = event["tab"]
+                        await websocket.send_json({**event, "workspace_id": workspace_id})
 
                 canvas_blocks = _extract_surfaces(response)
                 for surface in canvas_blocks:
@@ -328,6 +372,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
     current_model: str | None = None
     current_provider_keys: dict[str, str] | None = None
     current_tab: str = "canvas"
+    connection_state: dict[str, Any] = {"current_tab": "canvas"}
     pending_container: list[Any] = [None]
 
     try:
@@ -381,6 +426,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                         pending_ref=pending_container, workspace_id=workspace_id,
                         model=current_model, provider_keys=current_provider_keys,
                         current_tab=current_tab,
+                        connection_state=connection_state,
                     )
                 continue
 
@@ -422,6 +468,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                         pending_ref=pending_container, workspace_id=workspace_id,
                         model=current_model, provider_keys=current_provider_keys,
                         current_tab=current_tab,
+                        connection_state=connection_state,
                     )
                 else:
                     await websocket.send_json(
@@ -491,7 +538,9 @@ async def ws_conversation(websocket: WebSocket) -> None:
                 pending_ref=pending_container, workspace_id=workspace_id,
                 model=msg_model, provider_keys=msg_provider_keys,
                 current_tab=current_tab,
+                connection_state=connection_state,
             )
+            current_tab = connection_state["current_tab"]
             # After stream finishes: if a tool was interrupted, wait for approval
             while pending_container[0] is not None:
                 tool_name = pending_container[0].get("tool", "unknown")
@@ -528,6 +577,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                         pending_ref=pending_container, workspace_id=workspace_id,
                         model=msg_model, provider_keys=msg_provider_keys,
                         current_tab=current_tab,
+                        connection_state=connection_state,
                     )
                 elif is_reject:
                     pending_container[0] = None
