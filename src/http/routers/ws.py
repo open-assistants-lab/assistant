@@ -59,6 +59,7 @@ async def _run_agent_stream(
     workspace_id: str = "personal",
     model: str | None = None,
     provider_keys: dict[str, str] | None = None,
+    current_tab: str = "canvas",
 ) -> None:
     """Run the agent streaming loop and handle all chunk types."""
     import uuid as _uuid
@@ -72,6 +73,8 @@ async def _run_agent_stream(
     skill_load_names: dict[str, str] = {}
 
     try:
+        context_msg = Message.system(f"[Chat: {current_tab} tab]")
+        sdk_messages = [*sdk_messages, context_msg]
         async for chunk in run_sdk_agent_stream(
             user_id=user_id,
             messages=sdk_messages,
@@ -324,6 +327,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
     verbose = False
     current_model: str | None = None
     current_provider_keys: dict[str, str] | None = None
+    current_tab: str = "canvas"
     pending_container: list[Any] = [None]
 
     try:
@@ -376,6 +380,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                         websocket, user_id, retry_msgs, conversation, session_id,
                         pending_ref=pending_container, workspace_id=workspace_id,
                         model=current_model, provider_keys=current_provider_keys,
+                        current_tab=current_tab,
                     )
                 continue
 
@@ -416,6 +421,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                         websocket, user_id, retry_msgs, conversation, session_id,
                         pending_ref=pending_container, workspace_id=workspace_id,
                         model=current_model, provider_keys=current_provider_keys,
+                        current_tab=current_tab,
                     )
                 else:
                     await websocket.send_json(
@@ -484,6 +490,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                 websocket, user_id, sdk_messages, conversation, session_id,
                 pending_ref=pending_container, workspace_id=workspace_id,
                 model=msg_model, provider_keys=msg_provider_keys,
+                current_tab=current_tab,
             )
             # After stream finishes: if a tool was interrupted, wait for approval
             while pending_container[0] is not None:
@@ -520,6 +527,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                         websocket, user_id, retry_msgs, conversation, session_id,
                         pending_ref=pending_container, workspace_id=workspace_id,
                         model=msg_model, provider_keys=msg_provider_keys,
+                        current_tab=current_tab,
                     )
                 elif is_reject:
                     pending_container[0] = None
