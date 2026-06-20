@@ -199,6 +199,7 @@ class DiffCardRejectMessage(BaseModel):
     """Client rejects a diff card proposal."""
     type: str = "diff_card_reject"
     suggestion_id: str
+    file_path: str = ""
 
 class DiffCardErrorMessage(BaseModel):
     """Server reports an error applying a diff or suggestion."""
@@ -308,11 +309,12 @@ Backend applies the diff to the file (reads current content, applies unified dif
 ```json
 {
   "type": "diff_card_reject",
-  "suggestion_id": "diff_0"
+  "suggestion_id": "diff_0",
+  "file_path": "path/to/file.md"
 }
 ```
 
-Backend does nothing. The diff card is dismissed in the UI.
+Backend does nothing. The diff card is dismissed in the UI. The `file_path` field is included for routing/disambiguation (multiple diff cards may target different files).
 
 ---
 
