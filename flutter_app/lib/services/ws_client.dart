@@ -226,6 +226,22 @@ class WsClient {
     });
   }
 
+  void acceptSuggestion(String suggestionId, String filePath) {
+    _send({
+      'type': 'suggestion_accept',
+      'suggestion_id': suggestionId,
+      'file_path': filePath,
+    });
+  }
+
+  void rejectSuggestion(String suggestionId, String filePath) {
+    _send({
+      'type': 'suggestion_reject',
+      'suggestion_id': suggestionId,
+      'file_path': filePath,
+    });
+  }
+
   void ping() {
     _send({'type': 'ping'});
   }

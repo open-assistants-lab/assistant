@@ -115,6 +115,7 @@ class AgentNotifier extends StateNotifier<ChatState> {
   void Function(String tab)? onTabUpdate;
   void Function(String widget)? onWidgetRefresh;
   void Function(Map<String, dynamic>)? onSuggestionPush;
+  void Function(Map<String, dynamic>)? onEditorOpen;
 
   AgentNotifier(this._wsClient, this._apiClient, this._backendService)
       : super(const ChatState()) {
@@ -445,6 +446,14 @@ class AgentNotifier extends StateNotifier<ChatState> {
     _setState(state.copyWith(diffCards: updated));
   }
 
+  void acceptSuggestion(String suggestionId, String filePath) {
+    _wsClient.acceptSuggestion(suggestionId, filePath);
+  }
+
+  void rejectSuggestion(String suggestionId, String filePath) {
+    _wsClient.rejectSuggestion(suggestionId, filePath);
+  }
+
   void approveToolCall(String callId) {
     _wsClient.approveToolCall(callId);
     final updated = Map<String, ToolCallDisplay>.from(state.pendingApprovals);
@@ -758,6 +767,12 @@ class AgentNotifier extends StateNotifier<ChatState> {
     // --- Suggestion Push event (agent directive) ---
     if (type == 'suggestion_push') {
       onSuggestionPush?.call(msg.data);
+      return;
+    }
+
+    // --- Open Editor event (agent directive) ---
+    if (type == 'open_editor') {
+      onEditorOpen?.call(msg.data);
       return;
     }
 

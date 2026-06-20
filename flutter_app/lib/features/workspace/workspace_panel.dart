@@ -1,5 +1,7 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:http/http.dart' as http;
 import 'package:webview_flutter/webview_flutter.dart';
 import '../../theme/app_theme.dart';
 import '../../providers/agent_provider.dart';
@@ -18,6 +20,10 @@ class WorkspacePanel extends ConsumerStatefulWidget {
 class _WorkspacePanelState extends ConsumerState<WorkspacePanel> {
   _WorkspacePanelTab _tab = _WorkspacePanelTab.canvas;
   final Map<String, WebViewController> _widgetControllers = {};
+  WebViewController? _editorController;
+  String? _activeEditorFilePath;
+  final Map<String, List<Map<String, dynamic>>> _suggestionQueue = {};
+  static const int _maxSuggestionsPerFile = 100;
 
   @override
   void initState() {
@@ -38,7 +44,27 @@ class _WorkspacePanelState extends ConsumerState<WorkspacePanel> {
         _widgetControllers[widget]?.reload();
       };
       agent.onSuggestionPush = (event) {
-        // TODO(4.5): Route suggestion to editor
+        final filePath = event['file_path']?.toString() ?? '';
+        if (filePath.isEmpty) return;
+        if (_activeEditorFilePath == filePath && _editorController != null) {
+          _editorController!.runJavaScript(
+            'window.__addSuggestion(${jsonEncode(event)})',
+          );
+        } else {
+          _enqueueSuggestion(filePath, event);
+        }
+      };
+      agent.onEditorOpen = (event) {
+        final filePath = event['file_path']?.toString() ?? '';
+        if (filePath.isEmpty) return;
+        if (mounted) {
+          setState(() {
+            _activeEditorFilePath = filePath;
+            _tab = _WorkspacePanelTab.notes;
+          });
+          _loadEditorForFile(filePath);
+          _drainSuggestionQueue(filePath);
+        }
       };
     });
   }
@@ -46,6 +72,8 @@ class _WorkspacePanelState extends ConsumerState<WorkspacePanel> {
   @override
   void dispose() {
     _widgetControllers.clear();
+    _editorController = null;
+    _suggestionQueue.clear();
     super.dispose();
   }
 
@@ -56,8 +84,124 @@ class _WorkspacePanelState extends ConsumerState<WorkspacePanel> {
       'todos' => _WorkspacePanelTab.todos,
       'contacts' => _WorkspacePanelTab.contacts,
       'files' => _WorkspacePanelTab.files,
+      'notes' => _WorkspacePanelTab.notes,
       _ => null,
     };
+  }
+
+  void _enqueueSuggestion(String filePath, Map<String, dynamic> suggestion) {
+    _suggestionQueue.putIfAbsent(filePath, () => []);
+    if (_suggestionQueue[filePath]!.length >= _maxSuggestionsPerFile) return;
+    _suggestionQueue[filePath]!.add(suggestion);
+  }
+
+  void _drainSuggestionQueue(String filePath) {
+    final queue = _suggestionQueue.remove(filePath);
+    if (queue == null || _editorController == null) return;
+    for (final sug in queue) {
+      _editorController!.runJavaScript(
+        'window.__addSuggestion(${jsonEncode(sug)})',
+      );
+    }
+  }
+
+  Future<void> _loadEditorForFile(String filePath) async {
+    try {
+      final host = ref.read(hostProvider);
+      final response = await http.get(
+        Uri.parse('http://$host/workspace/read/$filePath?user_id=default_user'),
+      );
+      String content = '';
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        content = data['response']?.toString() ?? '';
+      }
+      final encodedPath = Uri.encodeComponent(filePath);
+      final encodedContent = Uri.encodeComponent(content);
+      final editorUrl = 'http://$host/editor?file_path=$encodedPath&content=$encodedContent';
+      _ensureEditorController().loadRequest(Uri.parse(editorUrl));
+    } catch (e) {
+      debugPrint('[WorkspacePanel] Failed to load editor for $filePath: $e');
+    }
+  }
+
+  void _closeEditor() {
+    setState(() {
+      _activeEditorFilePath = null;
+      _editorController = null;
+      _tab = _WorkspacePanelTab.files;
+    });
+  }
+
+  WebViewController _ensureEditorController() {
+    if (_editorController != null) return _editorController!;
+    _editorController = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..addJavaScriptChannel(
+        'flutterChannel',
+        onMessageReceived: _onEditorMessage,
+      )
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onPageFinished: (_) {
+            _editorController!.runJavaScript('''
+window.parent.postMessage = function(msg) {
+  window.flutterChannel.postMessage(JSON.stringify(msg));
+};
+''');
+          },
+        ),
+      );
+    return _editorController!;
+  }
+
+  void _onEditorMessage(JavaScriptMessage message) {
+    try {
+      final data = jsonDecode(message.message) as Map<String, dynamic>;
+      if (data['type'] == 'editor_action') {
+        _handleEditorAction(data);
+      }
+    } catch (e) {
+      debugPrint('[WorkspacePanel] Failed to parse editor message: $e');
+    }
+  }
+
+  void _handleEditorAction(Map<String, dynamic> data) {
+    final action = data['action']?.toString() ?? '';
+    switch (action) {
+      case 'suggestion_accept':
+        final suggestionId = data['suggestion_id']?.toString() ?? '';
+        final filePath = data['file_path']?.toString() ?? _activeEditorFilePath ?? '';
+        if (suggestionId.isNotEmpty) {
+          ref.read(agentProvider.notifier).acceptSuggestion(suggestionId, filePath);
+        }
+      case 'suggestion_reject':
+        final suggestionId = data['suggestion_id']?.toString() ?? '';
+        final filePath = data['file_path']?.toString() ?? _activeEditorFilePath ?? '';
+        if (suggestionId.isNotEmpty) {
+          ref.read(agentProvider.notifier).rejectSuggestion(suggestionId, filePath);
+        }
+      case 'save':
+        final content = data['content']?.toString() ?? '';
+        if (_activeEditorFilePath != null && content.isNotEmpty) {
+          _saveFile(_activeEditorFilePath!, content);
+        }
+      case 'cancel':
+        _closeEditor();
+    }
+  }
+
+  Future<void> _saveFile(String filePath, String content) async {
+    try {
+      final host = ref.read(hostProvider);
+      await http.post(
+        Uri.parse('http://$host/workspace/$filePath?user_id=default_user'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'content': content}),
+      );
+    } catch (e) {
+      debugPrint('[WorkspacePanel] Failed to save file: $e');
+    }
   }
 
   String _widgetUrl(String type) {
@@ -119,12 +263,18 @@ class _WorkspacePanelState extends ConsumerState<WorkspacePanel> {
                 _buildWidgetWebView('todos'),
                 _buildWidgetWebView('contacts'),
                 _buildWidgetWebView('files'),
+                _buildEditorWebView(),
               ],
             ),
           ),
           _BottomTabs(
             selected: _tab,
-            onSelected: (tab) => setState(() => _tab = tab),
+            onSelected: (tab) => setState(() {
+              _tab = tab;
+              if (tab == _WorkspacePanelTab.notes && _activeEditorFilePath != null) {
+                _drainSuggestionQueue(_activeEditorFilePath!);
+              }
+            }),
           ),
         ],
       ),
@@ -135,6 +285,15 @@ class _WorkspacePanelState extends ConsumerState<WorkspacePanel> {
     final controller = _ensureWidgetController(type);
     return SizedBox.expand(
       child: WebViewWidget(controller: controller),
+    );
+  }
+
+  Widget _buildEditorWebView() {
+    if (_editorController == null) {
+      return const SizedBox.shrink();
+    }
+    return SizedBox.expand(
+      child: WebViewWidget(controller: _editorController!),
     );
   }
 
@@ -264,7 +423,7 @@ class _ChecklistChip extends StatelessWidget {
   }
 }
 
-enum _WorkspacePanelTab { canvas, email, todos, contacts, files }
+enum _WorkspacePanelTab { canvas, email, todos, contacts, files, notes }
 
 class _BottomTabs extends StatelessWidget {
   final _WorkspacePanelTab selected;
@@ -278,6 +437,7 @@ class _BottomTabs extends StatelessWidget {
     (icon: Symbols.checklist, activeIcon: Symbols.checklist, tooltip: 'Todos', tab: _WorkspacePanelTab.todos),
     (icon: Symbols.contacts, activeIcon: Symbols.contacts, tooltip: 'Contacts', tab: _WorkspacePanelTab.contacts),
     (icon: Symbols.folder, activeIcon: Symbols.folder, tooltip: 'Files', tab: _WorkspacePanelTab.files),
+    (icon: Symbols.edit_note, activeIcon: Symbols.edit_note, tooltip: 'Notes', tab: _WorkspacePanelTab.notes),
   ];
 
   @override

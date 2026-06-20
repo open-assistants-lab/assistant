@@ -6,7 +6,7 @@ from typing import Any
 
 import mistune
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from src.app_logging import get_logger, timer
@@ -212,6 +212,13 @@ async def clear_conversation(user_id: str = "default_user", workspace_id: str = 
     conversation = get_message_store(user_id, workspace_id)
     conversation.delete_messages_for_workspace(workspace_id)
     return {"status": "cleared", "user_id": user_id, "workspace_id": workspace_id}
+
+
+@router.get("/editor", response_class=HTMLResponse)
+async def get_editor(file_path: str = "", content: str = ""):
+    """Render the ProseMirror editor with the given file path and content."""
+    html = _render_editor_surface(file_path, content)
+    return HTMLResponse(content=html)
 
 
 @router.post("/message", response_model=MessageResponse)
