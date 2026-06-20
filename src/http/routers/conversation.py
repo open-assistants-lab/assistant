@@ -54,8 +54,8 @@ def _render_editor_surface(file_path: str, content: str) -> str:
     template = _load_editor_template()
     escaped_path = json.dumps(file_path)
     escaped_content = json.dumps(mistune.html(content))
-    html = template.replace("__FILE_PATH__", escaped_path)
-    html = html.replace("__INITIAL_HTML__", escaped_content)
+    html = template.replace("%%FILE_PATH%%", escaped_path)
+    html = html.replace("%%INITIAL_HTML%%", escaped_content)
     return html
 
 
