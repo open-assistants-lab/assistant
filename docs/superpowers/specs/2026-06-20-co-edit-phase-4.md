@@ -132,7 +132,7 @@ Sent alongside `done` (and existing `switch_tab`/`widget_refresh` directives). T
 
 - `from`/`to` are optional ProseMirror document positions (not character offsets — PM uses a node-counting `doc.resolve()` coordinate system). Default (or `-1`) = entire document.
 - Coordinates are computed by the backend when extracting the fence: for full-file suggestions, `from=0, to=-1`. For precise ranges, the agent specifies positions in the ```` ```suggestion at:42-56 ```` syntax, and the backend proxies them through. The JS bridge in the editor converts these to PM `doc.resolve()` positions.
-- Sent alongside `done`, extracted in the same handler as existing directives and canvas surfaces (see Section 2 event timing clarification).
+- Sent alongside `done`, extracted in the same handler as existing directives and canvas surfaces (see Event timing below).
 
 ### Event timing
 
@@ -140,12 +140,16 @@ All diff/suggestion events are extracted and sent inside the `done` chunk handle
 
 1. Agent text streams → WS `text_delta` events
 2. Agent finishes → WS `done` event handler fires
-3. Handler extracts: directives → `SWITCH_TAB`/`WIDGET_REFRESH` events, diffs → `diff_card` events, suggestions → `suggestion_push` events, canvases → `canvas_update` events
+3. Handler extracts all block types from the response text:
+   - Directives (`[SWITCH_TAB]`, `[WIDGET_REFRESH]`, `[NEW_SESSION]`, `[OPEN_EDITOR]`) — sent as bare dict events (no Pydantic wrapper)
+   - Canvas fences (` ```html:canvas ``, `` ```html:editor ``) — sent as `canvas_update` events
+   - Diff fences (` ```diff:path ``) — sent as `diff_card` events (via `DiffCardMessage`)
+   - Suggestion fences (` ```suggestion ``) — sent as `suggestion_push` events (via `SuggestionPushMessage`), content stored in `_suggestion_store`
 4. Handler strips all fence blocks from display text
 5. Handler stores the cleaned response in conversation history
 6. WS `done` event sent with final response text
 
-This matches the existing pattern in `ws.py:_run_agent_stream()`.
+Extraction and emission order within the handler: directives first (tab switching before other events), then suggestion/diff/canvas events. This matches the existing pattern in `ws.py:_run_agent_stream()` where directives and `canvas_update` events are sent before `done`.
 
 ### Pydantic models
 
@@ -238,6 +242,31 @@ SERVER_MESSAGE_TYPES = {
 ```
 
 Backend writes the suggestion content to the file via `files_write` tool (or appropriate storage API), then broadcasts `widget_refresh` so the widget re-fetches.
+
+**Content persistence:** The `suggestion_accept` event carries only the `suggestion_id`, not the content. The content was already sent in the `suggestion_push` event. The backend stores suggestion content per `suggestion_id` when it sends `suggestion_push`. Storage options:
+- **Primary:** In-memory `dict[str, SuggestionStore]` — keyed by `suggestion_id`, value is `{"content": str, "file_path": str, "created_at": float, "from": int, "to": int}`. This is simple and sufficient since suggestions are ephemeral (survive only for the session).
+- **Fallback:** If the backend process restarts mid-session, pending suggestions are lost — the Flutter side shows "Session expired" on the suggestion decoration and prompts the user to re-ask.
+
+```python
+# In ws.py or a new suggestions.py module:
+
+_suggestion_store: dict[str, dict[str, Any]] = {}
+
+def _store_suggestion(suggestion_id: str, content: str, file_path: str, from_: int = -1, to: int = -1) -> None:
+    _suggestion_store[suggestion_id] = {
+        "content": content,
+        "file_path": file_path,
+        "from": from_,
+        "to": to,
+        "created_at": time.time(),
+    }
+
+def _get_suggestion(suggestion_id: str) -> dict[str, Any] | None:
+    return _suggestion_store.get(suggestion_id)
+
+def _remove_suggestion(suggestion_id: str) -> None:
+    _suggestion_store.pop(suggestion_id, None)
+```
 
 #### `suggestion_reject` event
 
@@ -389,6 +418,37 @@ The widget renders a small pill: `[Accept] [Reject]` using green accent / muted 
 Clicking Accept fires `ws.send({type: "suggestion_accept", suggestion_id, file_path})`.
 Clicking Reject fires `ws.send({type: "suggestion_reject", suggestion_id, file_path})`.
 
+### JS → Flutter bridge
+
+The editor WebView uses `postMessage` to send suggestion accept/reject events back to Flutter:
+```javascript
+// Inside SuggestionControlWidget.onAccept:
+window.parent.postMessage({
+  type: 'editor_action',
+  action: 'suggestion_accept',
+  suggestion_id: 'sug_0',
+  file_path: '/path/to/file.md'
+}, '*');
+```
+
+On the Flutter side, the `WebViewWidget` catches these via `onJavaScriptChannel` or `NavigationDelegate` URL interception:
+```dart
+// Inside the editor WebView builder:
+WebViewWidget(
+  controller: _controller,
+  javascriptMode: JavascriptMode.unrestricted,
+  onJavaScriptMessage: (message) {
+    final data = jsonDecode(message.message);
+    if (data['type'] == 'editor_action') {
+      // Route to agent_provider.dart WS send
+      _onSuggestionEvent(data['action'], data);
+    }
+  },
+);
+```
+
+Note: `postMessage` via `window.parent` works because the editor HTML is loaded as inline content (not an iframe). Alternative: use a custom URL scheme like `app://suggestion_accept?id=sug_0` intercepted by `NavigationDelegate`. The `postMessage` approach is preferred.
+
 ---
 
 ## 5. Diff Card Widget (Flutter)
@@ -433,7 +493,20 @@ The diff card is a Flutter widget rendered inline in the chat message list (not 
 
 ## 6. Inline Suggestion Widget (Flutter)
 
-The editor is a ProseMirror-powered WebView (reusing the `WidgetWebView` pattern from Phase 3). The `suggestion_push` event is forwarded to the editor via JavaScript evaluation:
+The editor is a ProseMirror-powered WebView (reusing the `WidgetWebView` pattern from Phase 3). 
+
+### Editor URL routing
+
+The editor is served via `_render_editor_surface()` which takes `file_path` and `content` and fills the `editor.html` template with `__FILE_PATH__` and `__INITIAL_HTML__` placeholders. The editor WebView URL is not a REST endpoint — it's rendered inline in the Notes tab. When the `open_editor` directive fires:
+
+1. Flutter receives `{"type": "open_editor", "file_path": "path/to/file.md", "tab": "notes"}`
+2. Flutter switches to Notes tab (or opens it)
+3. Flutter calls `GET /workspace/read/path/to/file.md` to get current file content
+4. Flutter loads the editor WebView with the file content via `_render_editor_surface()` (server-side) or directly injects content into the ProseMirror template
+5. The editor's `_activeEditorFilePath` is set to the file path
+6. `_drainSuggestionQueue()` is called to apply any queued suggestions
+
+The `suggestion_push` event is forwarded to the editor via JavaScript evaluation:
 
 ```dart
 // Queue management in agent_provider.dart:
@@ -489,8 +562,18 @@ void _routeSuggestionToEditor(Map<String, dynamic> data) {
       plugins: [
         exampleSetup({ schema: mySchema }),
         suggestionPlugin({
-          onAccept: (id) => postMessage({ type: 'suggestion_accept', id }),
-          onReject: (id) => postMessage({ type: 'suggestion_reject', id }),
+          onAccept: (id) => window.parent.postMessage({
+            type: 'editor_action',
+            action: 'suggestion_accept',
+            suggestion_id: id,
+            file_path: currentFilePath,
+          }, '*'),
+          onReject: (id) => window.parent.postMessage({
+            type: 'editor_action',
+            action: 'suggestion_reject',
+            suggestion_id: id,
+            file_path: currentFilePath,
+          }, '*'),
         }),
       ],
     }),
@@ -608,7 +691,11 @@ This directive is parsed by `parse_directives()` (same as `SWITCH_TAB`/`WIDGET_R
 {"type": "open_editor", "file_path": "path/to/file.md", "tab": "notes"}
 ```
 
-The Flutter workspace panel opens the Notes tab, which loads the editor WebView with the specified file path. The `parse_directives()` function gains a new regex pattern `r'\[OPEN_EDITOR:([^\]]+)\]'` and emits the above event dict.
+The `tab` field is inferred from the file extension:
+- `.md`, `.txt`, `.json`, `.yaml`, `.py`, `.js`, `.ts`, `.css`, `.html` → `notes`
+- Email-related (no extension or `.eml`) → `email` (future)
+
+The Flutter workspace panel opens the specified tab, which loads the editor WebView with the file path. The `parse_directives()` function gains a new regex pattern `r'\[OPEN_EDITOR:([^\]]+)\]'` and emits the above event dict with `file_path` and inferred `tab`.
 
 ### Agent workflow for diff card
 
@@ -647,10 +734,11 @@ The Flutter workspace panel opens the Notes tab, which loads the editor WebView 
 - Wire diff/suggestion extraction into `ws.py` alongside existing directive/canvas extraction in the `done` chunk handler
 - Add `[OPEN_EDITOR]` directive to `parse_directives()` in `ws.py`: regex `r'\[OPEN_EDITOR:([^\]]+)\]'` emits `{"type": "open_editor", "file_path": "...", "tab": "notes"}`
 
-### Task 4.3: WS protocol types
-- Add `DiffCardMessage`, `SuggestionPushMessage`, `SuggestionAcceptMessage`, `SuggestionRejectMessage`, `SuggestionAcceptAllMessage`, `DiffCardAcceptMessage`, `DiffCardRejectMessage` to `ws_protocol.py`
-- Register in `CLIENT_MESSAGE_TYPES` and `SERVER_MESSAGE_TYPES`
+### Task 4.3: WS protocol types + diff utility
+- Add all 8 Pydantic models to `ws_protocol.py`: `DiffCardMessage`, `SuggestionPushMessage`, `SuggestionAcceptMessage`, `SuggestionRejectMessage`, `SuggestionAcceptAllMessage`, `DiffCardAcceptMessage`, `DiffCardRejectMessage`, `DiffCardErrorMessage`
+- Register client types in `CLIENT_MESSAGE_TYPES` and server types in `SERVER_MESSAGE_TYPES`
 - Add `apply_unified_diff()` utility in a new `src/http/diff_utils.py`
+- Add `_suggestion_store` (in-memory dict) with `_store_suggestion()` / `_get_suggestion()` / `_remove_suggestion()` in a new `src/http/suggestion_store.py`
 
 ### Task 4.4: Flutter diff card widget
 - Create `flutter_app/lib/widgets/diff_card.dart` — a Flutter widget for inline diff rendering
