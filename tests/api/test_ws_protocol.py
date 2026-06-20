@@ -5,6 +5,10 @@ from src.http.ws_protocol import (
     AiTokenMessage,
     ApproveMessage,
     CancelMessage,
+    DiffCardAcceptMessage,
+    DiffCardErrorMessage,
+    DiffCardMessage,
+    DiffCardRejectMessage,
     DoneMessage,
     EditAndApproveMessage,
     ErrorMessage,
@@ -14,6 +18,10 @@ from src.http.ws_protocol import (
     PongMessage,
     ReasoningMessage,
     RejectMessage,
+    SuggestionAcceptAllMessage,
+    SuggestionAcceptMessage,
+    SuggestionPushMessage,
+    SuggestionRejectMessage,
     ToolEndMessage,
     ToolStartMessage,
     UserMessage,
@@ -62,6 +70,32 @@ class TestClientMessages:
     def test_ping_message(self):
         msg = PingMessage()
         assert msg.type == "ping"
+
+    def test_suggestion_accept_message(self):
+        msg = SuggestionAcceptMessage(suggestion_id="sug_1", file_path="/test.py")
+        assert msg.type == "suggestion_accept"
+        assert msg.suggestion_id == "sug_1"
+        assert msg.file_path == "/test.py"
+
+    def test_suggestion_reject_message(self):
+        msg = SuggestionRejectMessage(suggestion_id="sug_1", file_path="/test.py")
+        assert msg.type == "suggestion_reject"
+        assert msg.suggestion_id == "sug_1"
+
+    def test_suggestion_accept_all_message(self):
+        msg = SuggestionAcceptAllMessage(file_path="/test.py")
+        assert msg.type == "suggestion_accept_all"
+        assert msg.file_path == "/test.py"
+
+    def test_diff_card_accept_message(self):
+        msg = DiffCardAcceptMessage(suggestion_id="sug_1", file_path="/test.py")
+        assert msg.type == "diff_card_accept"
+        assert msg.suggestion_id == "sug_1"
+
+    def test_diff_card_reject_message(self):
+        msg = DiffCardRejectMessage(suggestion_id="sug_1", file_path="/test.py")
+        assert msg.type == "diff_card_reject"
+        assert msg.suggestion_id == "sug_1"
 
 
 class TestServerMessages:
@@ -122,6 +156,38 @@ class TestServerMessages:
         msg = PongMessage()
         assert msg.type == "pong"
 
+    def test_diff_card_message(self):
+        msg = DiffCardMessage(file_path="/test.py", diff="-old\\n+new", suggestion_id="sug_1")
+        assert msg.type == "diff_card"
+        assert msg.file_path == "/test.py"
+        assert msg.diff == "-old\\n+new"
+        assert msg.suggestion_id == "sug_1"
+
+    def test_suggestion_push_message(self):
+        msg = SuggestionPushMessage(file_path="/test.py", content="new content", suggestion_id="sug_1")
+        assert msg.type == "suggestion_push"
+        assert msg.content == "new content"
+        assert msg.from_ == -1
+        assert msg.to == -1
+
+    def test_suggestion_push_message_with_range(self):
+        msg = SuggestionPushMessage(
+            file_path="/test.py", content="new content", suggestion_id="sug_1", from_=10, to=20
+        )
+        assert msg.from_ == 10
+        assert msg.to == 20
+
+    def test_diff_card_error_message(self):
+        msg = DiffCardErrorMessage(
+            code="DIFF_CONFLICT",
+            message="Context lines don't match",
+            suggestion_id="sug_1",
+            file_path="/test.py",
+        )
+        assert msg.type == "diff_card_error"
+        assert msg.code == "DIFF_CONFLICT"
+        assert msg.message == "Context lines don't match"
+
 
 class TestParseClientMessage:
     """Tests for parsing client messages from raw dicts."""
@@ -158,6 +224,32 @@ class TestParseClientMessage:
         msg = parse_client_message(data)
         assert isinstance(msg, PingMessage)
 
+    def test_parse_suggestion_accept(self):
+        data = {"type": "suggestion_accept", "suggestion_id": "sug_1", "file_path": "/test.py"}
+        msg = parse_client_message(data)
+        assert isinstance(msg, SuggestionAcceptMessage)
+        assert msg.suggestion_id == "sug_1"
+
+    def test_parse_suggestion_reject(self):
+        data = {"type": "suggestion_reject", "suggestion_id": "sug_1", "file_path": "/test.py"}
+        msg = parse_client_message(data)
+        assert isinstance(msg, SuggestionRejectMessage)
+
+    def test_parse_suggestion_accept_all(self):
+        data = {"type": "suggestion_accept_all", "file_path": "/test.py"}
+        msg = parse_client_message(data)
+        assert isinstance(msg, SuggestionAcceptAllMessage)
+
+    def test_parse_diff_card_accept(self):
+        data = {"type": "diff_card_accept", "suggestion_id": "sug_1", "file_path": "/test.py"}
+        msg = parse_client_message(data)
+        assert isinstance(msg, DiffCardAcceptMessage)
+
+    def test_parse_diff_card_reject(self):
+        data = {"type": "diff_card_reject", "suggestion_id": "sug_1", "file_path": "/test.py"}
+        msg = parse_client_message(data)
+        assert isinstance(msg, DiffCardRejectMessage)
+
 
 class TestParseServerMessage:
     """Tests for parsing server messages from raw dicts."""
@@ -188,6 +280,25 @@ class TestParseServerMessage:
         data = {"type": "future_event", "data": "something"}
         msg = parse_server_message(data)
         assert msg is None
+
+    def test_parse_diff_card(self):
+        data = {"type": "diff_card", "file_path": "/test.py", "diff": "-old\\n+new", "suggestion_id": "s_1"}
+        msg = parse_server_message(data)
+        assert isinstance(msg, DiffCardMessage)
+        assert msg.file_path == "/test.py"
+
+    def test_parse_suggestion_push(self):
+        data = {"type": "suggestion_push", "file_path": "/test.py", "content": "hi", "suggestion_id": "s_1", "from": 5, "to": 10}
+        msg = parse_server_message(data)
+        assert isinstance(msg, SuggestionPushMessage)
+        assert msg.from_ == 5
+        assert msg.to == 10
+
+    def test_parse_diff_card_error(self):
+        data = {"type": "diff_card_error", "code": "FILE_NOT_FOUND", "message": "not found", "suggestion_id": "s_1", "file_path": "/test.py"}
+        msg = parse_server_message(data)
+        assert isinstance(msg, DiffCardErrorMessage)
+        assert msg.code == "FILE_NOT_FOUND"
 
 
 class TestMessageSerialization:
@@ -221,6 +332,38 @@ class TestMessageSerialization:
         restored = DoneMessage(**json_data)
         assert restored.response == "Complete"
         assert len(restored.tool_calls) == 1
+
+    def test_suggestion_push_roundtrip(self):
+        msg = SuggestionPushMessage(
+            file_path="/test.py", content="new content", suggestion_id="s_1", from_=5, to=10
+        )
+        json_data = msg.model_dump(by_alias=True)
+        restored = SuggestionPushMessage(**json_data)
+        assert restored.file_path == "/test.py"
+        assert restored.content == "new content"
+        assert restored.from_ == 5
+        assert restored.to == 10
+
+    def test_diff_card_roundtrip(self):
+        msg = DiffCardMessage(file_path="/test.py", diff="-old\\n+new", suggestion_id="s_1")
+        json_data = msg.model_dump()
+        restored = DiffCardMessage(**json_data)
+        assert restored.file_path == "/test.py"
+        assert restored.diff == "-old\\n+new"
+
+    def test_diff_card_error_roundtrip(self):
+        msg = DiffCardErrorMessage(
+            code="WRITE_FAILED", message="permission denied", suggestion_id="s_1", file_path="/test.py"
+        )
+        json_data = msg.model_dump()
+        restored = DiffCardErrorMessage(**json_data)
+        assert restored.code == "WRITE_FAILED"
+
+    def test_suggestion_accept_roundtrip(self):
+        msg = SuggestionAcceptMessage(suggestion_id="s_1", file_path="/test.py")
+        json_data = msg.model_dump()
+        restored = SuggestionAcceptMessage(**json_data)
+        assert restored.suggestion_id == "s_1"
 
 
 from src.http.routers.ws import parse_directives

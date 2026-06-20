@@ -81,6 +81,45 @@ class PingMessage(BaseModel):
     type: str = "ping"
 
 
+class SuggestionAcceptMessage(BaseModel):
+    """Client accepts a suggestion for a file edit."""
+
+    type: str = "suggestion_accept"
+    suggestion_id: str
+    file_path: str
+
+
+class SuggestionRejectMessage(BaseModel):
+    """Client rejects a suggestion for a file edit."""
+
+    type: str = "suggestion_reject"
+    suggestion_id: str
+    file_path: str
+
+
+class SuggestionAcceptAllMessage(BaseModel):
+    """Client accepts all suggestions for a file."""
+
+    type: str = "suggestion_accept_all"
+    file_path: str
+
+
+class DiffCardAcceptMessage(BaseModel):
+    """Client accepts a diff card application."""
+
+    type: str = "diff_card_accept"
+    suggestion_id: str
+    file_path: str
+
+
+class DiffCardRejectMessage(BaseModel):
+    """Client rejects a diff card application."""
+
+    type: str = "diff_card_reject"
+    suggestion_id: str
+    file_path: str
+
+
 # ─── Server → Client Messages (Block-Structured Streaming) ───
 
 
@@ -275,6 +314,38 @@ class CanvasUpdateMessage(BaseModel):
     html: str = ""
 
 
+class DiffCardMessage(BaseModel):
+    """Server pushes a diff card for file editing."""
+
+    type: str = "diff_card"
+    file_path: str
+    diff: str
+    suggestion_id: str
+
+
+class SuggestionPushMessage(BaseModel):
+    """Server pushes a full-file suggestion to the client."""
+
+    type: str = "suggestion_push"
+    file_path: str
+    content: str
+    suggestion_id: str
+    from_: int = Field(default=-1, alias="from")
+    to: int = Field(default=-1)
+
+    model_config = {"populate_by_name": True}
+
+
+class DiffCardErrorMessage(BaseModel):
+    """Server reports an error applying a diff card."""
+
+    type: str = "diff_card_error"
+    code: str
+    message: str
+    suggestion_id: str
+    file_path: str
+
+
 # ─── Message Parsing ───
 
 CLIENT_MESSAGE_TYPES = {
@@ -284,6 +355,11 @@ CLIENT_MESSAGE_TYPES = {
     "edit_and_approve": EditAndApproveMessage,
     "cancel": CancelMessage,
     "ping": PingMessage,
+    "suggestion_accept": SuggestionAcceptMessage,
+    "suggestion_reject": SuggestionRejectMessage,
+    "suggestion_accept_all": SuggestionAcceptAllMessage,
+    "diff_card_accept": DiffCardAcceptMessage,
+    "diff_card_reject": DiffCardRejectMessage,
 }
 
 SERVER_MESSAGE_TYPES = {
@@ -313,6 +389,10 @@ SERVER_MESSAGE_TYPES = {
     # Canvas
     "canvas_update": CanvasUpdateMessage,
     "skills_load": SkillsLoadMessage,
+    # Diff/Suggestions
+    "diff_card": DiffCardMessage,
+    "suggestion_push": SuggestionPushMessage,
+    "diff_card_error": DiffCardErrorMessage,
 }
 
 
@@ -325,6 +405,11 @@ def parse_client_message(
     | EditAndApproveMessage
     | CancelMessage
     | PingMessage
+    | SuggestionAcceptMessage
+    | SuggestionRejectMessage
+    | SuggestionAcceptAllMessage
+    | DiffCardAcceptMessage
+    | DiffCardRejectMessage
     | None
 ):
     """Parse a client message from raw dict. Returns None for unknown types."""
@@ -340,6 +425,11 @@ def parse_client_message(
             | EditAndApproveMessage
             | CancelMessage
             | PingMessage
+            | SuggestionAcceptMessage
+            | SuggestionRejectMessage
+            | SuggestionAcceptAllMessage
+            | DiffCardAcceptMessage
+            | DiffCardRejectMessage
             | None,
             msg_cls(**data),
         )
@@ -370,6 +460,9 @@ _ServerMessage = (
     | ErrorMessage
     | PongMessage
     | CanvasUpdateMessage
+    | DiffCardMessage
+    | SuggestionPushMessage
+    | DiffCardErrorMessage
 )
 
 
