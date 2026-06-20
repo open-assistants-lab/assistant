@@ -438,15 +438,24 @@ The editor is a ProseMirror-powered WebView (reusing the `WidgetWebView` pattern
 ```dart
 // Queue management in agent_provider.dart:
 Map<String, List<Map<String, dynamic>>> _suggestionQueue = {};
+const int _maxQueuedPerFile = 100;
+
+bool _isEditorOpenFor(String filePath) {
+  // Returns true if the active editor WebView is showing this file path.
+  // Set when open_editor event fires or user opens the editor tab.
+  return _activeEditorFilePath == filePath;
+}
 
 void _onSuggestionPush(Map<String, dynamic> data) {
   final filePath = data['file_path'] as String;
-  // Only forward if this editor is showing the same file
   if (_isEditorOpenFor(filePath)) {
     _routeSuggestionToEditor(data);
   } else {
-    // Queue suggestion by file path
-    _suggestionQueue.putIfAbsent(filePath, () => []).add(data);
+    // Queue suggestion by file path (cap to prevent memory leak)
+    _suggestionQueue.putIfAbsent(filePath, () => []);
+    if (_suggestionQueue[filePath]!.length < _maxQueuedPerFile) {
+      _suggestionQueue[filePath]!.add(data);
+    }
   }
 }
 
@@ -571,7 +580,7 @@ If `apply_unified_diff` returns `None` (context mismatch) or the file no longer 
 
 ```json
 {
-  "type": "error",
+  "type": "diff_card_error",
   "code": "DIFF_CONFLICT",
   "message": "File was edited since the suggestion was made. The diff could not be applied.",
   "suggestion_id": "diff_0",
@@ -631,11 +640,12 @@ The Flutter workspace panel opens the Notes tab, which loads the editor WebView 
 - Update `_render_editor_surface()` to use new ProseMirror template
 - Bundle: ~200KB (ProseMirror + suggestion plugin + minimal CSS)
 
-### Task 4.2: Backend block extraction
+### Task 4.2: Backend block extraction + directive parsing
 - Add `_DIFF_FENCE` and `_SUGGESTION_FENCE` regex patterns to `conversation.py`
 - Add `_extract_diff()`, `_extract_suggestions()` functions
 - Update `_extract_surfaces()` and `_strip_canvas_fences()` to include new fence types
 - Wire diff/suggestion extraction into `ws.py` alongside existing directive/canvas extraction in the `done` chunk handler
+- Add `[OPEN_EDITOR]` directive to `parse_directives()` in `ws.py`: regex `r'\[OPEN_EDITOR:([^\]]+)\]'` emits `{"type": "open_editor", "file_path": "...", "tab": "notes"}`
 
 ### Task 4.3: WS protocol types
 - Add `DiffCardMessage`, `SuggestionPushMessage`, `SuggestionAcceptMessage`, `SuggestionRejectMessage`, `SuggestionAcceptAllMessage`, `DiffCardAcceptMessage`, `DiffCardRejectMessage` to `ws_protocol.py`
@@ -644,15 +654,16 @@ The Flutter workspace panel opens the Notes tab, which loads the editor WebView 
 
 ### Task 4.4: Flutter diff card widget
 - Create `flutter_app/lib/widgets/diff_card.dart` — a Flutter widget for inline diff rendering
-- States: `pending`, `accepted`, `rejected`
-- WS event handling in `agent_provider.dart`: `diff_card`, `suggestion_push`
+- States: `pending`, `accepted`, `rejected`, `failed` (with error message from `diff_card_error` + "Re-request" button)
+- WS event handling in `agent_provider.dart`: `diff_card`, `diff_card_error`, `suggestion_push`
 - Render diff cards in chat message list
 
 ### Task 4.5: Flutter inline suggestion integration
 - Wire `suggestion_push` events from `agent_provider.dart` to the active editor `WebViewWidget`
 - Add JavaScript bridge in the editor WebView to call `window.__addSuggestion()`
-- Handle suggestion queues (suggestions for files not currently open)
+- Handle suggestion queues (suggestions for files not currently open, capped at 100 per file)
 - Handle `suggestion_accept` and `suggestion_reject` from editor JS to WS
+- Handle `open_editor` directive event: switch to Notes tab, load editor WebView with specified file path, drain suggestion queue for that file
 
 ### Task 4.6: Backend suggestion/diff apply handlers
 - In `ws.py`, handle `suggestion_accept`, `suggestion_accept_all`, `diff_card_accept` client messages
