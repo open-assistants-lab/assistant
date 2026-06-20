@@ -8,6 +8,7 @@ import 'reasoning_bubble.dart';
 import 'tool_call_card.dart';
 import 'empty_state.dart';
 import 'skill_load_banner.dart';
+import '../../../widgets/diff_card.dart';
 
 const _kScrollBottom = '__bottom__';
 
@@ -18,6 +19,10 @@ class ChatMessageList extends StatefulWidget {
   final String reasoningText;
   final List<ToolCallDisplay> activeToolCalls;
   final List<String> skillsLoaded;
+  final List<DiffCardData> diffCards;
+  final void Function(DiffCardData data)? onDiffCardAccept;
+  final void Function(DiffCardData data)? onDiffCardReject;
+  final VoidCallback? onDiffCardRerequest;
   final ScrollController scrollController;
   final Widget? header;
   final bool isLoading;
@@ -33,6 +38,10 @@ class ChatMessageList extends StatefulWidget {
     this.reasoningText = '',
     this.activeToolCalls = const [],
     this.skillsLoaded = const [],
+    this.diffCards = const [],
+    this.onDiffCardAccept,
+    this.onDiffCardReject,
+    this.onDiffCardRerequest,
     required this.scrollController,
     this.header,
     this.isLoading = false,
@@ -149,7 +158,8 @@ class ChatMessageListState extends State<ChatMessageList> {
         (widget.reasoningText.isNotEmpty ? 1 : 0) +
         (widget.isStreaming && widget.streamingText.isNotEmpty ? 1 : 0) +
         widget.activeToolCalls.length +
-        widget.skillsLoaded.length;
+        widget.skillsLoaded.length +
+        widget.diffCards.length;
     return widget.messages.length + (widget.header != null ? 1 : 0) + extras;
   }
 
@@ -162,6 +172,14 @@ class ChatMessageListState extends State<ChatMessageList> {
     }
     if (widget.reasoningText.isNotEmpty) {
       extras.add(ReasoningBubble(content: widget.reasoningText));
+    }
+    for (final dc in widget.diffCards) {
+      extras.add(DiffCard(
+        data: dc,
+        onAccept: widget.onDiffCardAccept,
+        onReject: widget.onDiffCardReject,
+        onRerequest: widget.onDiffCardRerequest,
+      ));
     }
     for (final tc in widget.activeToolCalls) {
       extras.add(ToolCallCard(toolCall: tc));

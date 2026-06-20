@@ -5,6 +5,7 @@ import '../../providers/agent_provider.dart';
 import '../../providers/workspace_provider.dart';
 import 'widgets/chat_message_list.dart';
 import 'widgets/chat_input.dart';
+import '../../widgets/diff_card.dart';
 import 'widgets/error_bar.dart';
 import 'widgets/connection_banner.dart';
 
@@ -116,6 +117,21 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               state: state,
               scrollController: _scrollController,
               workspaceId: wsId,
+              onDiffCardAccept: (data) {
+                ref.read(agentProvider.notifier).acceptDiffCard(
+                      data.suggestionId,
+                      data.filePath,
+                    );
+              },
+              onDiffCardReject: (data) {
+                ref.read(agentProvider.notifier).rejectDiffCard(
+                      data.suggestionId,
+                      data.filePath,
+                    );
+              },
+              onDiffCardRerequest: () {
+                // TODO(4.5): Wire re-request
+              },
             ),
           ),
           if (state.status == ChatStatus.error && state.error != null)
@@ -184,11 +200,17 @@ class _MessageList extends StatelessWidget {
   final ChatState state;
   final ScrollController scrollController;
   final String workspaceId;
+  final void Function(DiffCardData data)? onDiffCardAccept;
+  final void Function(DiffCardData data)? onDiffCardReject;
+  final VoidCallback? onDiffCardRerequest;
 
   const _MessageList({
     required this.state,
     required this.scrollController,
     required this.workspaceId,
+    this.onDiffCardAccept,
+    this.onDiffCardReject,
+    this.onDiffCardRerequest,
   });
 
   @override
@@ -201,6 +223,10 @@ class _MessageList extends StatelessWidget {
       reasoningText: state.reasoningText,
       activeToolCalls: state.activeToolCalls,
       skillsLoaded: state.skillsLoaded,
+      diffCards: state.diffCards,
+      onDiffCardAccept: onDiffCardAccept,
+      onDiffCardReject: onDiffCardReject,
+      onDiffCardRerequest: onDiffCardRerequest,
       scrollController: scrollController,
       isLoading: state.loadingHistory,
       emptyBuilder: (context) => Center(

@@ -37,6 +37,9 @@ class _WorkspacePanelState extends ConsumerState<WorkspacePanel> {
       agent.onWidgetRefresh = (widget) {
         _widgetControllers[widget]?.reload();
       };
+      agent.onSuggestionPush = (event) {
+        // TODO(4.5): Route suggestion to editor
+      };
     });
   }
 

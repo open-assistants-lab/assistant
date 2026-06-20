@@ -210,6 +210,22 @@ class WsClient {
     _send({'type': 'cancel'});
   }
 
+  void acceptDiffCard(String suggestionId, String filePath) {
+    _send({
+      'type': 'diff_card_accept',
+      'suggestion_id': suggestionId,
+      'file_path': filePath,
+    });
+  }
+
+  void rejectDiffCard(String suggestionId, String filePath) {
+    _send({
+      'type': 'diff_card_reject',
+      'suggestion_id': suggestionId,
+      'file_path': filePath,
+    });
+  }
+
   void ping() {
     _send({'type': 'ping'});
   }

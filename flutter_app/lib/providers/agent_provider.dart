@@ -8,6 +8,7 @@ import '../models/message.dart';
 import '../services/backend_service.dart';
 import '../services/ws_client.dart';
 import '../services/api_client.dart';
+import '../widgets/diff_card.dart';
 
 String resolvedUserId = 'default_user';
 
@@ -34,6 +35,7 @@ class ChatState {
   final bool loadingHistory;
   final List<String> skillsLoaded;
   final BackendStatus backendStatus;
+  final List<DiffCardData> diffCards;
 
   static const _errorSentinel = Object();
 
@@ -51,6 +53,7 @@ class ChatState {
     this.loadingHistory = false,
     this.skillsLoaded = const [],
     this.backendStatus = BackendStatus.stopped,
+    this.diffCards = const [],
   });
 
   ChatState copyWith({
@@ -67,6 +70,7 @@ class ChatState {
     bool? loadingHistory,
     List<String>? skillsLoaded,
     BackendStatus? backendStatus,
+    List<DiffCardData>? diffCards,
   }) {
     return ChatState(
       messages: messages ?? this.messages,
@@ -82,6 +86,7 @@ class ChatState {
       loadingHistory: loadingHistory ?? this.loadingHistory,
       skillsLoaded: skillsLoaded ?? this.skillsLoaded,
       backendStatus: backendStatus ?? this.backendStatus,
+      diffCards: diffCards ?? this.diffCards,
     );
   }
 }
@@ -109,6 +114,7 @@ class AgentNotifier extends StateNotifier<ChatState> {
   void Function(Map<String, dynamic>)? onCanvasUpdate;
   void Function(String tab)? onTabUpdate;
   void Function(String widget)? onWidgetRefresh;
+  void Function(Map<String, dynamic>)? onSuggestionPush;
 
   AgentNotifier(this._wsClient, this._apiClient, this._backendService)
       : super(const ChatState()) {
@@ -417,6 +423,28 @@ class AgentNotifier extends StateNotifier<ChatState> {
     _apiClient.providerKeys = keys;
   }
 
+  void acceptDiffCard(String suggestionId, String filePath) {
+    _wsClient.acceptDiffCard(suggestionId, filePath);
+    final updated = state.diffCards.map((c) {
+      if (c.suggestionId == suggestionId) {
+        return c.copyWith(status: DiffCardStatus.accepted);
+      }
+      return c;
+    }).toList();
+    _setState(state.copyWith(diffCards: updated));
+  }
+
+  void rejectDiffCard(String suggestionId, String filePath) {
+    _wsClient.rejectDiffCard(suggestionId, filePath);
+    final updated = state.diffCards.map((c) {
+      if (c.suggestionId == suggestionId) {
+        return c.copyWith(status: DiffCardStatus.rejected);
+      }
+      return c;
+    }).toList();
+    _setState(state.copyWith(diffCards: updated));
+  }
+
   void approveToolCall(String callId) {
     _wsClient.approveToolCall(callId);
     final updated = Map<String, ToolCallDisplay>.from(state.pendingApprovals);
@@ -448,6 +476,7 @@ class AgentNotifier extends StateNotifier<ChatState> {
         streamingText: '',
         reasoningText: '',
         skillsLoaded: [],
+        diffCards: [],
       ),
     );
   }
@@ -470,6 +499,7 @@ class AgentNotifier extends StateNotifier<ChatState> {
         activeToolCalls: [],
         status: state.connected ? ChatStatus.idle : ChatStatus.disconnected,
         loadingHistory: loading,
+        diffCards: [],
       ),
     );
   }
@@ -685,6 +715,49 @@ class AgentNotifier extends StateNotifier<ChatState> {
     if (type == 'widget_refresh') {
       final widget = msg['widget']?.toString() ?? '';
       onWidgetRefresh?.call(widget);
+      return;
+    }
+
+    // --- Diff Card event ---
+    if (type == 'diff_card') {
+      final suggestionId = msg['suggestion_id']?.toString() ?? '';
+      final filePath = msg['file_path']?.toString() ?? '';
+      final diff = msg['diff']?.toString() ?? '';
+      if (suggestionId.isNotEmpty) {
+        final card = DiffCardData(
+          suggestionId: suggestionId,
+          filePath: filePath,
+          diff: diff,
+        );
+        _setState(
+          state.copyWith(diffCards: [...state.diffCards, card]),
+        );
+      }
+      return;
+    }
+
+    // --- Diff Card Error event ---
+    if (type == 'diff_card_error') {
+      final suggestionId = msg['suggestion_id']?.toString() ?? '';
+      final errorMessage = msg['message']?.toString() ?? 'Edit failed';
+      if (suggestionId.isNotEmpty) {
+        final updated = state.diffCards.map((c) {
+          if (c.suggestionId == suggestionId) {
+            return c.copyWith(
+              status: DiffCardStatus.failed,
+              errorMessage: errorMessage,
+            );
+          }
+          return c;
+        }).toList();
+        _setState(state.copyWith(diffCards: updated));
+      }
+      return;
+    }
+
+    // --- Suggestion Push event (agent directive) ---
+    if (type == 'suggestion_push') {
+      onSuggestionPush?.call(msg.data);
       return;
     }
 
