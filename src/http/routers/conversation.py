@@ -100,15 +100,66 @@ def _extract_canvas(text: str, surface_id_prefix: str = "canvas") -> list[dict[s
     return surfaces
 
 
+_DIFF_FENCE = re.compile(
+    r"```diff:(.+?)\s*\n(.*?)```",
+    re.DOTALL,
+)
+
+_SUGGESTION_FENCE = re.compile(
+    r"```suggestion\s*\nfilePath:\s*(.+?)\n---\n(.*?)```",
+    re.DOTALL,
+)
+
+
+def _extract_diff(text: str) -> list[dict[str, Any]]:
+    diffs: list[dict[str, Any]] = []
+    for match in _DIFF_FENCE.finditer(text):
+        file_path = match.group(1).strip()
+        diff_content = match.group(2).strip()
+        if not diff_content:
+            continue
+        diffs.append({
+            "surface_type": "diff_card",
+            "file_path": file_path,
+            "diff": diff_content,
+        })
+    return diffs
+
+
+def _extract_suggestions(text: str) -> list[dict[str, Any]]:
+    suggestions: list[dict[str, Any]] = []
+    for match in _SUGGESTION_FENCE.finditer(text):
+        file_path = match.group(1).strip()
+        content = match.group(2).strip()
+        if not content:
+            continue
+        suggestions.append({
+            "surface_type": "suggestion",
+            "file_path": file_path,
+            "content": content,
+        })
+    return suggestions
+
+
 def _extract_surfaces(text: str) -> list[dict[str, Any]]:
-    """Extract all surface blocks (canvas, skill-form, subagent-form, editor)."""
+    """Extract all surface blocks (canvas, editor, diff, suggestion)."""
     return _extract_canvas(text) + _extract_editor(text)
 
 
+def _extract_coedit_surfaces(text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Extract co-edit surfaces from text.
+
+    Returns (diffs, suggestions) lists.
+    """
+    return _extract_diff(text), _extract_suggestions(text)
+
+
 def _strip_canvas_fences(text: str) -> str:
-    """Remove ```html:canvas/skill-form/subagent-form/editor ... ``` fence blocks from text."""
+    """Remove all ``` fence blocks from text."""
     text = _CANVAS_FENCE.sub("", text)
     text = _EDITOR_FENCE.sub("", text)
+    text = _DIFF_FENCE.sub("", text)
+    text = _SUGGESTION_FENCE.sub("", text)
     return text.strip()
 
 

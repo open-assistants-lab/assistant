@@ -22,7 +22,11 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from src.app_logging import get_logger
 from src.config.settings import get_settings
 from src.http.auth import verify_key
-from src.http.routers.conversation import _extract_surfaces, _strip_canvas_fences
+from src.http.routers.conversation import (
+    _extract_coedit_surfaces,
+    _extract_surfaces,
+    _strip_canvas_fences,
+)
 from src.http.ws_protocol import (
     ApproveMessage,
     AuthMessage,
@@ -82,6 +86,14 @@ def parse_directives(text: str) -> tuple[str, list[dict[str, Any]]]:
     if session_pat.search(text):
         events.append({"type": "new_session"})
     text = session_pat.sub("", text)
+
+    # [OPEN_EDITOR:path/to/file]
+    open_editor_pat = re.compile(r'\[OPEN_EDITOR:([^\]]+)\]', re.IGNORECASE)
+    for match in open_editor_pat.finditer(text):
+        file_path = match.group(1).strip()
+        tab = "notes"
+        events.append({"type": "open_editor", "file_path": file_path, "tab": tab})
+    text = open_editor_pat.sub("", text)
 
     text = text.strip()
     return text, events
@@ -211,6 +223,30 @@ async def _run_agent_stream(
                         html=surface["html"],
                         workspace_id=workspace_id,
                     )
+
+                diffs, suggestions = _extract_coedit_surfaces(response)
+
+                for i, diff in enumerate(diffs):
+                    suggestion_id = f"diff_{i}"
+                    await websocket.send_json(_with_workspace({
+                        "type": "diff_card",
+                        "file_path": diff["file_path"],
+                        "diff": diff["diff"],
+                        "suggestion_id": suggestion_id,
+                    }))
+
+                for i, sug in enumerate(suggestions):
+                    suggestion_id = f"sug_{i}"
+                    from src.http.suggestion_store import store_suggestion
+                    store_suggestion(suggestion_id, sug["content"], sug["file_path"])
+                    await websocket.send_json(_with_workspace({
+                        "type": "suggestion_push",
+                        "file_path": sug["file_path"],
+                        "content": sug["content"],
+                        "suggestion_id": suggestion_id,
+                        "from": -1,
+                        "to": -1,
+                    }))
 
                 response = _strip_canvas_fences(response)
 
