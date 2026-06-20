@@ -75,7 +75,7 @@ def _extract_diff(text: str) -> list[dict[str, Any]]:
         if not diff_content:
             continue
         diffs.append({
-            "type": "diff_card",
+            "surface_type": "diff_card",
             "file_path": file_path,
             "diff": diff_content,
         })
@@ -89,7 +89,7 @@ def _extract_suggestions(text: str) -> list[dict[str, Any]]:
         if not content:
             continue
         suggestions.append({
-            "type": "suggestion",
+            "surface_type": "suggestion",
             "file_path": file_path,
             "content": content,
         })
@@ -130,8 +130,100 @@ Sent alongside `done` (and existing `switch_tab`/`widget_refresh` directives). T
 }
 ```
 
-- `from`/`to` are optional document positions (character offsets). Default (or `-1`) = entire document.
-- Sent alongside `done`. Flutter routes to the ProseMirror editor showing the file. If no editor is open for that file, the suggestion is queued — the Flutter agent provider maintains `_suggestionQueue: Map<String, List<Map>>` keyed by file path. When the editor opens a file, it drains the queue and applies all queued suggestions via `window.__addSuggestion()`.
+- `from`/`to` are optional ProseMirror document positions (not character offsets — PM uses a node-counting `doc.resolve()` coordinate system). Default (or `-1`) = entire document.
+- Coordinates are computed by the backend when extracting the fence: for full-file suggestions, `from=0, to=-1`. For precise ranges, the agent specifies positions in the ```` ```suggestion at:42-56 ```` syntax, and the backend proxies them through. The JS bridge in the editor converts these to PM `doc.resolve()` positions.
+- Sent alongside `done`, extracted in the same handler as existing directives and canvas surfaces (see Section 2 event timing clarification).
+
+### Event timing
+
+All diff/suggestion events are extracted and sent inside the `done` chunk handler, after streaming completes. The flow is:
+
+1. Agent text streams → WS `text_delta` events
+2. Agent finishes → WS `done` event handler fires
+3. Handler extracts: directives → `SWITCH_TAB`/`WIDGET_REFRESH` events, diffs → `diff_card` events, suggestions → `suggestion_push` events, canvases → `canvas_update` events
+4. Handler strips all fence blocks from display text
+5. Handler stores the cleaned response in conversation history
+6. WS `done` event sent with final response text
+
+This matches the existing pattern in `ws.py:_run_agent_stream()`.
+
+### Pydantic models
+
+Following the existing `CanvasUpdateMessage` pattern in `ws_protocol.py`:
+
+```python
+class DiffCardMessage(BaseModel):
+    """Server sends a diff card to display inline in chat."""
+    type: str = "diff_card"
+    file_path: str
+    diff: str
+    suggestion_id: str
+
+class SuggestionPushMessage(BaseModel):
+    """Server pushes an inline suggestion to the ProseMirror editor."""
+    type: str = "suggestion_push"
+    file_path: str
+    content: str
+    suggestion_id: str
+    from_: int = Field(-1, alias="from")
+    to: int = -1
+
+class SuggestionAcceptMessage(BaseModel):
+    """Client accepts an inline suggestion."""
+    type: str = "suggestion_accept"
+    suggestion_id: str
+    file_path: str
+
+class SuggestionRejectMessage(BaseModel):
+    """Client rejects an inline suggestion."""
+    type: str = "suggestion_reject"
+    suggestion_id: str
+    file_path: str
+
+class SuggestionAcceptAllMessage(BaseModel):
+    """Client accepts all pending suggestions for a file."""
+    type: str = "suggestion_accept_all"
+    file_path: str
+
+class DiffCardAcceptMessage(BaseModel):
+    """Client accepts a diff card proposal."""
+    type: str = "diff_card_accept"
+    suggestion_id: str
+    file_path: str
+
+class DiffCardRejectMessage(BaseModel):
+    """Client rejects a diff card proposal."""
+    type: str = "diff_card_reject"
+    suggestion_id: str
+
+class DiffCardErrorMessage(BaseModel):
+    """Server reports an error applying a diff or suggestion."""
+    type: str = "diff_card_error"
+    code: str  # DIFF_CONFLICT, FILE_NOT_FOUND, WRITE_FAILED
+    message: str
+    suggestion_id: str
+    file_path: str
+```
+
+Register in the message type maps:
+
+```python
+CLIENT_MESSAGE_TYPES = {
+    ...
+    "suggestion_accept": SuggestionAcceptMessage,
+    "suggestion_reject": SuggestionRejectMessage,
+    "suggestion_accept_all": SuggestionAcceptAllMessage,
+    "diff_card_accept": DiffCardAcceptMessage,
+    "diff_card_reject": DiffCardRejectMessage,
+}
+
+SERVER_MESSAGE_TYPES = {
+    ...
+    "diff_card": DiffCardMessage,
+    "suggestion_push": SuggestionPushMessage,
+    "diff_card_error": DiffCardErrorMessage,
+}
+```
 
 ### Client → Server
 
@@ -335,6 +427,7 @@ The diff card is a Flutter widget rendered inline in the chat message list (not 
 - `pending` — awaiting user decision
 - `accepted` — user clicked accept, animation (checkmark, fade out after 2s)
 - `rejected` — user clicked reject, animation (fade out immediately)
+- `failed` — backend returned `diff_card_error` when applying the change. Shows error message from the server + "Re-request" button (re-prompts agent to re-read the file and generate a fresh suggestion).
 
 ---
 
@@ -412,49 +505,81 @@ void _routeSuggestionToEditor(Map<String, dynamic> data) {
 
 ## 7. Backend: Apply Diff Logic
 
-For diff card acceptance, the backend parses the unified diff format and applies it:
+For diff card acceptance, the backend applies the diff to the file. This must be safe against concurrent edits — if the original file changed since the agent generated the diff, the backend must detect the mismatch and fail cleanly.
+
+### Algorithm
+
+A simple line-by-line context-validating diff apply that does NOT rely on hunk headers (`@@ ... @@`):
 
 ```python
-def apply_unified_diff(original: str, diff_text: str) -> str:
-    """Apply a unified diff to original content.
+def apply_unified_diff(original: str, diff_lines: list[str]) -> str | None:
+    """Apply a unified diff with context validation.
     
-    Supports standard +/- unified diff format:
-      - line to remove
-      + line to add
+    Returns the new content on success, or None if context lines don't match
+    (meaning the file was edited since the diff was generated).
+    
+    Expected format (agent-generated, no hunk headers needed):
+      - old line
+      + new line  
        unchanged context line
     """
-    lines = original.split("\n")
+    orig = original.split("\n")
     result: list[str] = []
-    diff_lines = diff_text.split("\n")
-    i = 0  # index into original lines
-    in_hunk = False
+    i = 0
     
     for dline in diff_lines:
+        stripped = dline.strip()
+        
+        # Skip blank lines between hunks
+        if not stripped:
+            continue
+            
         if dline.startswith("+"):
-            result.append(dline[1:])  # add new line
-            in_hunk = True
+            result.append(dline[1:])
         elif dline.startswith("-"):
-            i += 1  # skip original line
-            in_hunk = True
-        elif dline.startswith(" "):
-            result.append(lines[i]) if i < len(lines) else None
+            # Verify context: the removed line must match
+            if i < len(orig) and dline[1:] != orig[i]:
+                return None  # context mismatch — file was edited
             i += 1
-            in_hunk = True
-        # blank lines or context separators: copy through
-        elif not dline.strip() and not in_hunk:
-            result.append("")
-        elif not dline.strip():
-            result.append("")
+        elif dline.startswith(" "):
+            # Verify context: unchanged line must match
+            if i >= len(orig) or dline[1:] != orig[i]:
+                return None  # context mismatch
+            result.append(orig[i])
+            i += 1
+        else:
+            return None  # malformed diff line
     
     # Append remaining original lines
-    while i < len(lines):
-        result.append(lines[i])
+    while i < len(orig):
+        result.append(orig[i])
         i += 1
     
     return "\n".join(result)
 ```
 
-This is applied when the user accepts a `diff_card`. The backend tool call carries the file path and the diff-text.
+**Key constraints:**
+- Returns `None` (not silently corrupts) if context lines don't match the original
+- Agent-generated diffs are simple consecutive ± lines (no hunk headers needed)
+- For complex diffs (multiple hunks, renames): use the `diff-match-patch` library (already available in Python ecosystem) via `diff_match_patch.patch_apply()`
+
+The agent workflow should prefer full-file replacement over patch diffs when feasible (```` ```suggestion ```` with full content), reserving `diff:path` for small targeted changes.
+
+### Error handling
+
+If `apply_unified_diff` returns `None` (context mismatch) or the file no longer exists, the backend sends an error response:
+
+```json
+{
+  "type": "error",
+  "code": "DIFF_CONFLICT",
+  "message": "File was edited since the suggestion was made. The diff could not be applied.",
+  "suggestion_id": "diff_0",
+  "file_path": "path/to/file.md"
+}
+```
+
+The Flutter diff card transitions to the `failed` state, showing the error message and offering a "Re-request" button that prompts the agent to re-read and re-suggest.
 
 ---
 
@@ -468,7 +593,13 @@ This is applied when the user accepts a `diff_card`. The backend tool call carri
 
 The agent can open the editor on any text file accessible via `files_read`. The editor loads the file content and displays it for co-edit.
 
-This directive is parsed by `parse_directives()` (same as `SWITCH_TAB`/`WIDGET_REFRESH`) and sent as a `switch_tab:notes` WS event plus a payload carrying the file path. The Flutter workspace panel opens the Notes tab, which loads the editor WebView with the specified file.
+This directive is parsed by `parse_directives()` (same as `SWITCH_TAB`/`WIDGET_REFRESH`) and sends:
+
+```python
+{"type": "open_editor", "file_path": "path/to/file.md", "tab": "notes"}
+```
+
+The Flutter workspace panel opens the Notes tab, which loads the editor WebView with the specified file path. The `parse_directives()` function gains a new regex pattern `r'\[OPEN_EDITOR:([^\]]+)\]'` and emits the above event dict.
 
 ### Agent workflow for diff card
 
@@ -528,6 +659,20 @@ This directive is parsed by `parse_directives()` (same as `SWITCH_TAB`/`WIDGET_R
 - Apply diff/suggestion to file content and call `files_write` (or appropriate storage API)
 - `files_write` already handles writing to any path under ea_root
 - On success: send `widget_refresh` + confirmation in `done` event
+- On failure: send `diff_card_error` event with appropriate code (`DIFF_CONFLICT`, `FILE_NOT_FOUND`, `WRITE_FAILED`)
+
+### Test strategy
+
+Each task includes verification:
+
+| Task | Tests |
+|------|-------|
+| 4.1 ProseMirror | Manual: editor loads, renders content, saves. JS unit: suggestion plugin add/accept/reject. |
+| 4.2 Block extraction | Unit: `test_block_extraction.py` — verify `_extract_diff`, `_extract_suggestions` parse correct fences, ignore malformed ones, strip from text. Follow existing pattern in `tests/api/test_ws_protocol.py:12 parse_directives unit tests`. |
+| 4.3 WS protocol | Unit: `test_ws_protocol.py` — verify new message types serialize/deserialize, register in type maps. |
+| 4.4 Diff card widget | Flutter widget test: render diff card, test all 4 states (`pending`→`accepted`/`rejected`/`failed`), WS event firing on accept/reject. |
+| 4.5 Suggestion integration | Integration: send `suggestion_push` from server, verify JS bridge called in WebView. Unit: queue management (queue + drain). |
+| 4.6 Backend handlers | Unit: `test_diff_utils.py` — `apply_unified_diff` with matching context, mismatched context (±), malformed input, empty diff, \ No newline at end of file. Integration: `diff_card_accept` → file written, `DIFF_CONFLICT` error sent on mismatch. |
 
 ---
 
