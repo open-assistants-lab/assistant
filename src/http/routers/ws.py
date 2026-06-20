@@ -15,6 +15,7 @@ import asyncio
 import json
 import re
 import uuid
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -33,12 +34,17 @@ from src.http.ws_protocol import (
     AuthOkMessage,
     CancelMessage,
     CanvasUpdateMessage,
+    DiffCardAcceptMessage,
+    DiffCardRejectMessage,
     DoneMessage,
     EditAndApproveMessage,
     ErrorMessage,
     PingMessage,
     PongMessage,
     RejectMessage,
+    SuggestionAcceptAllMessage,
+    SuggestionAcceptMessage,
+    SuggestionRejectMessage,
     parse_client_message,
 )
 from src.sdk.messages import Message
@@ -97,6 +103,27 @@ def parse_directives(text: str) -> tuple[str, list[dict[str, Any]]]:
 
     text = text.strip()
     return text, events
+
+
+def resolve_ea_path(file_path: str, user_id: str, workspace_id: str) -> Path | None:
+    """Resolve a file path within the EA user directory.
+
+    Returns None if the path is outside the ea_root (security guard).
+    """
+    from src.storage.paths import get_paths
+
+    paths = get_paths(user_id, workspace_id=workspace_id)
+    full_path = Path(file_path)
+    if not full_path.is_absolute():
+        full_path = paths.workspace_files_dir() / file_path
+    try:
+        full_path = full_path.resolve()
+        ea_root = paths.root.resolve()
+        if not str(full_path).startswith(str(ea_root)):
+            return None
+    except (ValueError, OSError):
+        return None
+    return full_path
 
 
 async def _run_agent_stream(
@@ -530,6 +557,180 @@ async def ws_conversation(websocket: WebSocket) -> None:
             msg_provider_keys: dict[str, str] | None = getattr(msg, "provider_keys", None)
             current_model = msg_model
             current_provider_keys = msg_provider_keys
+
+            # ── Suggestion/Diff Card handlers ──────────────────────────────
+            if isinstance(msg, SuggestionAcceptMessage):
+                from src.http.suggestion_store import get_suggestion
+                from src.http.suggestion_store import remove_suggestion as _rm_sug
+
+                sug = get_suggestion(msg.suggestion_id)
+                if sug is None:
+                    await websocket.send_text(json.dumps({
+                        "type": "diff_card_error",
+                        "code": "FILE_NOT_FOUND",
+                        "message": "Suggestion not found (may have expired).",
+                        "suggestion_id": msg.suggestion_id,
+                        "file_path": msg.file_path,
+                    }))
+                    continue
+
+                file_path = resolve_ea_path(msg.file_path, user_id, workspace_id)
+                if file_path is None:
+                    await websocket.send_text(json.dumps({
+                        "type": "diff_card_error",
+                        "code": "FILE_NOT_FOUND",
+                        "message": f"File not found: {msg.file_path}",
+                        "suggestion_id": msg.suggestion_id,
+                        "file_path": msg.file_path,
+                    }))
+                    _rm_sug(msg.suggestion_id)
+                    continue
+
+                try:
+                    file_path.write_text(sug["content"])
+                except Exception as e:
+                    await websocket.send_text(json.dumps({
+                        "type": "diff_card_error",
+                        "code": "WRITE_FAILED",
+                        "message": str(e),
+                        "suggestion_id": msg.suggestion_id,
+                        "file_path": msg.file_path,
+                    }))
+                    continue
+
+                _rm_sug(msg.suggestion_id)
+                await websocket.send_text(json.dumps({"type": "widget_refresh", "tab": "files"}))
+                continue
+
+            if isinstance(msg, SuggestionRejectMessage):
+                from src.http.suggestion_store import remove_suggestion as _rm_sug
+
+                _rm_sug(msg.suggestion_id)
+                continue
+
+            if isinstance(msg, SuggestionAcceptAllMessage):
+                from src.http.suggestion_store import get_all_suggestions_for_file
+                from src.http.suggestion_store import remove_suggestion as _rm_sug
+
+                pending = get_all_suggestions_for_file(msg.file_path)
+                file_path = resolve_ea_path(msg.file_path, user_id, workspace_id)
+                if file_path is None:
+                    await websocket.send_text(json.dumps({
+                        "type": "diff_card_error",
+                        "code": "FILE_NOT_FOUND",
+                        "message": f"File not found: {msg.file_path}",
+                        "suggestion_id": "all",
+                        "file_path": msg.file_path,
+                    }))
+                    for sug_id in [s["suggestion_id"] for s in pending]:
+                        _rm_sug(sug_id)
+                    continue
+
+                try:
+                    content = file_path.read_text() if file_path.exists() else ""
+                    for sug in pending:
+                        content = sug["content"]
+                    file_path.write_text(content)
+                except Exception as e:
+                    await websocket.send_text(json.dumps({
+                        "type": "diff_card_error",
+                        "code": "WRITE_FAILED",
+                        "message": str(e),
+                        "suggestion_id": "all",
+                        "file_path": msg.file_path,
+                    }))
+                    continue
+
+                for sug_id in [s["suggestion_id"] for s in pending]:
+                    _rm_sug(sug_id)
+                await websocket.send_text(json.dumps({"type": "widget_refresh", "tab": "files"}))
+                continue
+
+            if isinstance(msg, DiffCardAcceptMessage):
+                from src.http.diff_utils import apply_unified_diff
+                from src.http.suggestion_store import get_suggestion
+                from src.http.suggestion_store import remove_suggestion as _rm_sug
+
+                sug = get_suggestion(msg.suggestion_id)
+                if sug is None:
+                    await websocket.send_text(json.dumps({
+                        "type": "diff_card_error",
+                        "code": "FILE_NOT_FOUND",
+                        "message": "Suggestion not found (may have expired).",
+                        "suggestion_id": msg.suggestion_id,
+                        "file_path": msg.file_path,
+                    }))
+                    continue
+
+                file_path = resolve_ea_path(msg.file_path, user_id, workspace_id)
+                if file_path is None:
+                    await websocket.send_text(json.dumps({
+                        "type": "diff_card_error",
+                        "code": "FILE_NOT_FOUND",
+                        "message": f"File not found: {msg.file_path}",
+                        "suggestion_id": msg.suggestion_id,
+                        "file_path": msg.file_path,
+                    }))
+                    _rm_sug(msg.suggestion_id)
+                    continue
+
+                if not file_path.exists():
+                    await websocket.send_text(json.dumps({
+                        "type": "diff_card_error",
+                        "code": "FILE_NOT_FOUND",
+                        "message": f"File does not exist: {msg.file_path}",
+                        "suggestion_id": msg.suggestion_id,
+                        "file_path": msg.file_path,
+                    }))
+                    _rm_sug(msg.suggestion_id)
+                    continue
+
+                try:
+                    original = file_path.read_text()
+                    diff_lines = sug["content"].split("\n")
+                    result = apply_unified_diff(original, diff_lines)
+                except Exception as e:
+                    await websocket.send_text(json.dumps({
+                        "type": "diff_card_error",
+                        "code": "WRITE_FAILED",
+                        "message": str(e),
+                        "suggestion_id": msg.suggestion_id,
+                        "file_path": msg.file_path,
+                    }))
+                    continue
+
+                if result is None:
+                    await websocket.send_text(json.dumps({
+                        "type": "diff_card_error",
+                        "code": "DIFF_CONFLICT",
+                        "message": "File was edited since the suggestion was made. The diff could not be applied.",
+                        "suggestion_id": msg.suggestion_id,
+                        "file_path": msg.file_path,
+                    }))
+                    _rm_sug(msg.suggestion_id)
+                    continue
+
+                try:
+                    file_path.write_text(result)
+                except Exception as e:
+                    await websocket.send_text(json.dumps({
+                        "type": "diff_card_error",
+                        "code": "WRITE_FAILED",
+                        "message": str(e),
+                        "suggestion_id": msg.suggestion_id,
+                        "file_path": msg.file_path,
+                    }))
+                    continue
+
+                _rm_sug(msg.suggestion_id)
+                await websocket.send_text(json.dumps({"type": "widget_refresh", "tab": "files"}))
+                continue
+
+            if isinstance(msg, DiffCardRejectMessage):
+                from src.http.suggestion_store import remove_suggestion as _rm_sug
+
+                _rm_sug(msg.suggestion_id)
+                continue
 
             if not hasattr(msg, "content"):
                 continue

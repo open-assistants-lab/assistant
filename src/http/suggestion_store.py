@@ -26,6 +26,15 @@ def get_suggestion(suggestion_id: str) -> dict[str, Any] | None:
     return _suggestion_store.get(suggestion_id)
 
 
+def get_all_suggestions_for_file(file_path: str) -> list[dict[str, Any]]:
+    """Get all pending suggestions for a given file path."""
+    result: list[dict[str, Any]] = []
+    for sug_id, sug in _suggestion_store.items():
+        if sug["file_path"] == file_path:
+            result.append({"suggestion_id": sug_id, **sug})
+    return result
+
+
 def remove_suggestion(suggestion_id: str) -> None:
     """Remove a suggestion from the store."""
     _suggestion_store.pop(suggestion_id, None)
