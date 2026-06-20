@@ -17,10 +17,7 @@ def apply_unified_diff(original: str, diff_lines: list[str]) -> str | None:
     i = 0
 
     for dline in diff_lines:
-        stripped = dline.strip()
-
-        # Skip blank lines between hunks
-        if not stripped:
+        if not dline:  # truly empty separator line between hunks, skip
             continue
 
         if dline.startswith("+"):

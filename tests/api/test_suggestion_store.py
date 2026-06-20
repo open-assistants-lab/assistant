@@ -61,3 +61,12 @@ class TestSuggestionStore:
         sug = get_suggestion("sug_1")
         assert sug["content"] == "new content"
         assert sug["file_path"] == "/new.py"
+
+    def test_eviction_when_full(self, monkeypatch):
+        monkeypatch.setattr("src.http.suggestion_store._MAX_SUGGESTIONS", 5)
+        for i in range(5):
+            store_suggestion(f"sug_{i}", f"content_{i}", "/test.py")
+        store_suggestion("new_sug", "new content", "/new.py")
+        assert get_suggestion("sug_0") is None
+        assert get_suggestion("sug_1") is not None
+        assert get_suggestion("new_sug") is not None

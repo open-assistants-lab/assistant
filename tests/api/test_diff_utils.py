@@ -82,13 +82,23 @@ class TestApplyUnifiedDiff:
         original = "a\nb"
         diff = [
             "",
-            " ",
+            "",
             " a",
-            " ",
+            "",
             " b",
         ]
         result = apply_unified_diff(original, diff)
         assert result == "a\nb"
+
+    def test_empty_context_line(self):
+        original = "line1\n\nline3"
+        diff = [
+            " line1",
+            " ",
+            " line3",
+        ]
+        result = apply_unified_diff(original, diff)
+        assert result == "line1\n\nline3"
 
     def test_malformed_diff_line(self):
         original = "hello"
