@@ -54,6 +54,15 @@ class TestExtractDiff:
         assert len(result) == 1
         assert result[0]["file_path"] == "src/main.py"
 
+    def test_diff_empty_path_skipped(self):
+        text = '```diff:  \n-old\n+new\n```'
+        result = _extract_diff(text)
+        assert result == []
+
+    def test_diff_none_input(self):
+        result = _extract_diff("")
+        assert result == []
+
 
 class TestExtractSuggestions:
     """Tests for _extract_suggestions suggestion fence extraction."""
@@ -91,6 +100,15 @@ class TestExtractSuggestions:
         result = _extract_suggestions(text)
         assert len(result) == 1
         assert result[0]["file_path"] == "src/main.py"
+
+    def test_suggestion_empty_path_skipped(self):
+        text = '```suggestion\nfilePath:  \n---\ncontent\n```'
+        result = _extract_suggestions(text)
+        assert result == []
+
+    def test_suggestion_none_input(self):
+        result = _extract_suggestions("")
+        assert result == []
 
 
 class TestExtractCoeditSurfaces:
@@ -173,6 +191,12 @@ class TestStripCanvasFences:
         result = _strip_canvas_fences(text)
         assert result == text
 
+    def test_strips_uppercase_fence(self):
+        text = 'Before ```DIFF:src/main.py\n-old\n+new\n``` After'
+        result = _strip_canvas_fences(text)
+        assert "```" not in result
+        assert result == "Before  After"
+
 
 class TestExtractSurfaces:
     """Tests for _extract_surfaces combining canvas, editor, etc."""
@@ -227,3 +251,17 @@ class TestParseDirectivesOpenEditor:
         types = [e["type"] for e in events]
         assert "open_editor" in types
         assert "switch_tab" in types
+
+    def test_open_editor_empty_path_no_match(self):
+        text, events = parse_directives("[OPEN_EDITOR:]")
+        assert events == []  # regex requires non-empty path
+
+    def test_no_directives(self):
+        text, events = parse_directives("Just a regular response.")
+        assert events == []
+        assert text == "Just a regular response."
+
+    def test_empty_text_no_directives(self):
+        text, events = parse_directives("")
+        assert events == []
+        assert text == ""

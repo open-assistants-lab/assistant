@@ -28,21 +28,14 @@ logger = get_logger()
 
 _CANVAS_FENCE = re.compile(
     r"```html:(canvas|skill-form|subagent-form)\s*\n(.*?)```",
-    re.DOTALL,
+    re.DOTALL | re.IGNORECASE,
 )
-
-_CANVAS_SCHEMAS: dict[str, list[str]] = {
-    "skill-form": ["name", "description", "content"],
-    "subagent-form": ["name", "description", "model", "system_prompt"],
-    "canvas": [],
-    "editor": ["filePath", "content"],
-}
 
 # ── Editor fence block parser ──────────────────────────────────────────────
 
 _EDITOR_FENCE = re.compile(
     r"```html:editor\s*\nfilePath:\s*(.+?)\n---\n(.*?)```",
-    re.DOTALL,
+    re.DOTALL | re.IGNORECASE,
 )
 
 _EDITOR_TEMPLATE_PATH = Path(__file__).parent.parent / "static" / "editor.html"
@@ -102,12 +95,12 @@ def _extract_canvas(text: str, surface_id_prefix: str = "canvas") -> list[dict[s
 
 _DIFF_FENCE = re.compile(
     r"```diff:(.+?)\s*\n(.*?)```",
-    re.DOTALL,
+    re.DOTALL | re.IGNORECASE,
 )
 
 _SUGGESTION_FENCE = re.compile(
     r"```suggestion\s*\nfilePath:\s*(.+?)\n---\n(.*?)```",
-    re.DOTALL,
+    re.DOTALL | re.IGNORECASE,
 )
 
 
@@ -116,7 +109,7 @@ def _extract_diff(text: str) -> list[dict[str, Any]]:
     for match in _DIFF_FENCE.finditer(text):
         file_path = match.group(1).strip()
         diff_content = match.group(2).strip()
-        if not diff_content:
+        if not diff_content or not file_path:
             continue
         diffs.append({
             "surface_type": "diff_card",
@@ -131,7 +124,7 @@ def _extract_suggestions(text: str) -> list[dict[str, Any]]:
     for match in _SUGGESTION_FENCE.finditer(text):
         file_path = match.group(1).strip()
         content = match.group(2).strip()
-        if not content:
+        if not content or not file_path:
             continue
         suggestions.append({
             "surface_type": "suggestion",
@@ -142,7 +135,7 @@ def _extract_suggestions(text: str) -> list[dict[str, Any]]:
 
 
 def _extract_surfaces(text: str) -> list[dict[str, Any]]:
-    """Extract all surface blocks (canvas, editor, diff, suggestion)."""
+    """Extract display surfaces (canvas, skill-form, subagent-form, editor)."""
     return _extract_canvas(text) + _extract_editor(text)
 
 
