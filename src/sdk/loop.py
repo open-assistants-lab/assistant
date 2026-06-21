@@ -164,7 +164,6 @@ class AgentLoop:
         trace_provider: TraceProvider | None = None,
         run_config: RunConfig | None = None,
         user_id: str | None = None,
-        workspace_id: str | None = None,
     ) -> None:
         self.provider = provider
         self.system_prompt = system_prompt
@@ -177,7 +176,6 @@ class AgentLoop:
         self.trace_provider = trace_provider
         self.run_config = run_config or RunConfig(max_iterations=max_iterations)
         self.user_id = user_id
-        self.workspace_id = workspace_id
         self.subagent_ctx: SubagentContext | None = None
 
         self._registry = ToolRegistry()
@@ -348,8 +346,6 @@ class AgentLoop:
         args = dict(tc.arguments)
         if "user_id" in props:
             args["user_id"] = self.user_id
-        if "workspace_id" in props:
-            args["workspace_id"] = getattr(self, "workspace_id", "personal")
         if args == tc.arguments:
             return tc
         return ToolCall(id=tc.id, name=tc.name, arguments=args)
