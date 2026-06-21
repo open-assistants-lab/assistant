@@ -39,7 +39,6 @@ def _research_start(
     target_ref: str,
     change_description: str,
     user_id: str = "default_user",
-    workspace_id: str = "personal",
     budget_seconds: int = 300,
 ) -> str:
     """Start a research experiment on a prompt, skill, or subagent.
@@ -51,7 +50,6 @@ def _research_start(
         target_ref: Path to the target file or skill name
         change_description: The change to apply and evaluate
         user_id: User identifier
-        workspace_id: Workspace identifier
         budget_seconds: Max seconds for the experiment
 
     Returns:
@@ -63,7 +61,7 @@ def _research_start(
     if target_type == "prompt":
         from src.sdk.research import PromptTarget
 
-        target = PromptTarget(target_path, user_id=user_id, workspace_id=workspace_id)
+        target = PromptTarget(target_path, user_id=user_id)
     elif target_type == "skill":
         from src.sdk.research import SkillTarget
 
@@ -71,12 +69,11 @@ def _research_start(
             skill_name=target_path.stem,
             skill_path=target_path,
             user_id=user_id,
-            workspace_id=workspace_id,
         )
     elif target_type == "subagent":
         from src.sdk.research import SubagentTarget
 
-        target = SubagentTarget(target_path, user_id=user_id, workspace_id=workspace_id)
+        target = SubagentTarget(target_path, user_id=user_id)
     else:
         return f"Unknown target_type: {target_type}"
 
@@ -110,7 +107,6 @@ research_start = ToolDefinition(
                 "description": "The change to apply and evaluate",
             },
             "user_id": {"type": "string", "default": "default_user"},
-            "workspace_id": {"type": "string", "default": "personal"},
             "budget_seconds": {"type": "integer", "default": 300},
         },
         "required": ["target_type", "target_ref", "change_description"],
@@ -125,7 +121,6 @@ research_start = ToolDefinition(
 
 def _research_list(
     user_id: str = "default_user",
-    workspace_id: str = "personal",
 ) -> str:
     """List past research experiments from the results TSV.
 
@@ -133,14 +128,13 @@ def _research_list(
 
     Args:
         user_id: User identifier
-        workspace_id: Workspace identifier
 
     Returns:
         A formatted list of past experiments.
     """
     from src.storage.paths import DataPaths
 
-    base = DataPaths(user_id=user_id, workspace_id=workspace_id).research_dir()
+    base = DataPaths().research_dir()
     if not base.exists():
         return "No research experiments found."
 
@@ -168,7 +162,6 @@ research_list = ToolDefinition(
         "type": "object",
         "properties": {
             "user_id": {"type": "string", "default": "default_user"},
-            "workspace_id": {"type": "string", "default": "personal"},
         },
     },
     annotations=ToolAnnotations(

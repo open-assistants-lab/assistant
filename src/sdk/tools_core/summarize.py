@@ -7,7 +7,6 @@ from src.sdk.tools import ToolAnnotations, tool
 @tool
 async def summarize_session(
     user_id: str,
-    workspace_id: str = "personal",
     instructions: str | None = None,
 ) -> str:
     """Manually compact the conversation by summarizing old messages.
@@ -18,7 +17,6 @@ async def summarize_session(
 
     Args:
         user_id: The user ID (required)
-        workspace_id: Workspace ID (defaults to current workspace)
         instructions: Optional focus instructions for the summary
             (e.g. "preserve all file paths and error messages")
 

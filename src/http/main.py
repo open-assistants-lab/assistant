@@ -24,7 +24,6 @@ from src.http.routers import (
     tools_router,
     user_prompt_router,
     workspace_router,
-    workspaces_router,
 )
 from src.http.routers.connectors import router as connectors_router
 from src.http.routers.settings import router as settings_router
@@ -139,7 +138,6 @@ app.include_router(contacts_router)
 app.include_router(todos_router)
 # email_router already included above
 app.include_router(workspace_router)
-app.include_router(workspaces_router)
 app.include_router(skills_router)
 app.include_router(subagents_router)
 app.include_router(tools_router)

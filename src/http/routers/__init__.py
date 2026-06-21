@@ -12,7 +12,6 @@ from src.http.routers.todos import router as todos_router
 from src.http.routers.tools import router as tools_router
 from src.http.routers.user_prompt import router as user_prompt_router
 from src.http.routers.workspace import router as workspace_router
-from src.http.routers.workspaces import router as workspaces_router
 
 __all__ = [
     "health_router",
@@ -23,7 +22,6 @@ __all__ = [
     "memories_router",
     "todos_router",
     "workspace_router",
-    "workspaces_router",
     "user_prompt_router",
     "skills_router",
     "settings_router",

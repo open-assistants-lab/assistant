@@ -270,4 +270,4 @@ async def set_subagent_scope(
     body: dict[str, Any],
     user_id: str = Query("default_user"),
 ) -> dict[str, Any]:
-    return {"name": name, "scope": "all", "workspace_ids": []}
+    return {"name": name, "scope": "all"}

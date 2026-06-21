@@ -251,4 +251,4 @@ async def set_skill_scope(
 ) -> dict[str, Any]:
     _validate_user_id(user_id)
     _validate_skill_name(skill_name)
-    return {"name": skill_name, "scope": "all", "workspace_ids": []}
+    return {"name": skill_name, "scope": "all"}

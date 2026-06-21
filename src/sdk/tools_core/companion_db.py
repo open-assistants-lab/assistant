@@ -22,15 +22,12 @@ CREATE TABLE IF NOT EXISTS companion_notifications (
     user_id TEXT NOT NULL,
     message TEXT NOT NULL,
     category TEXT DEFAULT 'general',
-    workspace_id TEXT,
     dismissed INTEGER DEFAULT 0,
     created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_comp_notif_user
     ON companion_notifications(user_id, dismissed, created_at);
-CREATE INDEX IF NOT EXISTS idx_comp_notif_ws
-    ON companion_notifications(workspace_id, dismissed);
 """
 
 _MEMORY_SCHEMA = """
@@ -83,19 +80,18 @@ class CompanionNotificationDB:
         self,
         message: str,
         category: str = "general",
-        workspace_id: str | None = None,
     ) -> str:
         notif_id = _notif_id()
         db = await self._get_db()
         await db.execute(
-            "INSERT INTO companion_notifications (id, user_id, message, category, workspace_id, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (notif_id, self.user_id, message, category, workspace_id, _now()),
+            "INSERT INTO companion_notifications (id, user_id, message, category, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (notif_id, self.user_id, message, category, _now()),
         )
         await db.commit()
         logger.info(
             "companion.notification_inserted",
-            {"id": notif_id, "category": category, "workspace_id": workspace_id or "none"},
+            {"id": notif_id, "category": category},
             user_id=self.user_id,
         )
         return notif_id

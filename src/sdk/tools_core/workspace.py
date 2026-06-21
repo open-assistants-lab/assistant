@@ -46,7 +46,7 @@ def workspace_create(
 
     # Create workspace directory structure
     from src.storage.paths import DataPaths
-    dp = DataPaths(workspace_id=ws.id)
+    dp = DataPaths()
     dp.workspace_files_dir()
     dp.workspace_memory_dir()
     dp.workspace_subagents_dir()

@@ -143,7 +143,7 @@ class CompanionScheduler:
         text = self._extract_response(result)
         if text and text.strip().upper() != "[SKIP]" and len(text.strip()) > 3:
             category, ws_id = self._categorize(text)
-            await self._db.insert(text, category, ws_id)
+            await self._db.insert(text, category)
 
     async def _build_context(self) -> str:
         now = datetime.now()

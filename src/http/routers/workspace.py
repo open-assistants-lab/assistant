@@ -34,18 +34,9 @@ async def list_workspace_json(user_id: str = "default_user") -> dict[str, Any]:
 
 @router.get("/workspace/read/{path:path}")
 async def read_workspace_file(path: str, user_id: str = "default_user") -> dict[str, Any]:
-    from src.http.workspace_cache import get_file_cache
     from src.sdk.tools_core.filesystem import files_read
 
     result = await files_read.ainvoke({"path": path, "user_id": user_id})
-
-    file_cache = get_file_cache(user_id)
-    files_root = get_paths(user_id).user_files_dir()
-    file_path = files_root / path
-    server_modified = str(file_path.stat().st_mtime) if file_path.exists() else ""
-
-    file_cache.update_sync(path, server_modified)
-
     return {"response": str(result), "path": path}
 
 
@@ -87,39 +78,7 @@ async def delete_workspace_file(path: str, user_id: str = "default_user") -> dic
     return {"response": str(result)}
 
 
-@router.get("/sync/status")
-async def get_sync_status(user_id: str = "default_user") -> dict[str, Any]:
-    from src.http.workspace_cache import get_file_cache
 
-    cache = get_file_cache(user_id)
-    return {"status": cache.get_all()}
-
-
-@router.post("/sync/pin/{path:path}")
-async def pin_file(path: str, user_id: str = "default_user") -> dict[str, Any]:
-    from src.http.workspace_cache import get_file_cache
-
-    cache = get_file_cache(user_id)
-    cache.mark_pinned(path)
-    return {"status": "pinned", "path": path}
-
-
-@router.delete("/sync/pin/{path:path}")
-async def unpin_file(path: str, user_id: str = "default_user") -> dict[str, Any]:
-    from src.http.workspace_cache import get_file_cache
-
-    cache = get_file_cache(user_id)
-    cache.mark_cloud_only(path)
-    return {"status": "cloud_only", "path": path}
-
-
-@router.post("/sync/download/{path:path}")
-async def mark_downloaded(path: str, user_id: str = "default_user") -> dict[str, Any]:
-    from src.http.workspace_cache import get_file_cache
-
-    cache = get_file_cache(user_id)
-    cache.mark_downloaded(path)
-    return {"status": "downloaded", "path": path}
 
 
 @router.get("/sync/stream")

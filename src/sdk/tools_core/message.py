@@ -161,10 +161,10 @@ def message_history(
             )
             if not messages:
                 if conversation.count_messages() == 0:
-            return (
-                "No persisted messages found. Conversation history has not been persisted."
-            )
-        return f"No messages found for {date_str}"
+                    return (
+                        "No persisted messages found. Conversation history has not been persisted."
+                    )
+                return f"No messages found for {date_str}"
 
             result = f"Conversation on {date_str}:\n"
             for msg in messages:
@@ -179,9 +179,9 @@ def message_history(
 
     if not messages:
         if conversation.count_messages() == 0:
-        return (
-            "No persisted messages found. Conversation history has not been persisted."
-        )
+            return (
+                "No persisted messages found. Conversation history has not been persisted."
+            )
         return f"No messages in the last {days} days."
 
     result = f"Recent conversation (last {days} days):\n\n"
@@ -204,7 +204,6 @@ message_history.annotations = ToolAnnotations(
 def message_search(
     query: str,
     user_id: str = "default_user",
-    workspace_id: str = "personal",
     limit: int = 5,
 ) -> str:
     """Search conversation history — semantic + keyword, full session context.
@@ -223,7 +222,6 @@ def message_search(
     Args:
         query: What to search for
         user_id: User identifier
-        workspace_id: Workspace ID (defaults to current workspace)
         limit: Max results (default 5)
 
     Returns:
@@ -231,13 +229,13 @@ def message_search(
     """
     from src.storage.messages import get_message_store
 
-    core = _get_message_core(user_id, workspace_id)
-    store = get_message_store(user_id, workspace_id)
+    core = _get_message_core(user_id)
+    store = get_message_store(user_id)
 
     is_counting = query.lower().startswith("how many") or "total" in query.lower()
     effective_limit = max(limit, 30 if is_counting else 10)
 
-    all_results = core.search_enhanced(query, limit=effective_limit, metadata={"workspace_id": workspace_id})
+    all_results = core.search_enhanced(query, limit=effective_limit, metadata={})
 
     # Deduplicate by session
     query_words = set(query.lower().split())
@@ -319,7 +317,6 @@ message_search.annotations = ToolAnnotations(
 def message_count(
     query: str,
     user_id: str = "default_user",
-    workspace_id: str = "personal",
 ) -> str:
     """Count distinct items — call this for "how many" questions.
 
@@ -334,12 +331,11 @@ def message_count(
     Args:
         query: What to count (e.g., "model kits", "doctors", "projects")
         user_id: User identifier
-        workspace_id: Current workspace ID
     """
     import re as _re
     from collections import defaultdict as _defaultdict
 
-    conversation = get_message_store(user_id, workspace_id)
+    conversation = get_message_store(user_id)
     search_limit = 100
 
     queries = expand_queries(query, llm_provider=_try_create_llm_provider())
@@ -347,7 +343,7 @@ def message_count(
     all_results: list[SearchResult] = []
 
     for q in queries:
-        results = conversation.search_hybrid(q, limit=search_limit, metadata={"workspace_id": workspace_id})
+        results = conversation.search_hybrid(q, limit=search_limit, metadata={})
         for r in results:
             if r.id not in seen_ids:
                 seen_ids.add(r.id)
@@ -412,14 +408,7 @@ def message_count(
             final[key] = display
 
     # Build output
-    searched = [workspace_id]
-    ws_list = _list_workspace_ids(user_id)
-    for ws in ws_list:
-        if ws != workspace_id and ws not in searched:
-            searched.append(ws)
-
-    output = f"Searched {len(searched)} workspace(s): {', '.join(searched)}\n"
-    output += f"Analyzed {len(session_groups)} sessions ({len(all_results)} raw matches)\n\n"
+    output = f"Analyzed {len(session_groups)} sessions ({len(all_results)} raw matches)\n\n"
 
     if final:
         output += f"**Distinct items: {len(final)}**\n\n"
@@ -441,7 +430,6 @@ message_count.annotations = ToolAnnotations(
 def message_timeline(
     query: str,
     user_id: str = "default_user",
-    workspace_id: str = "personal",
     limit: int = 20,
 ) -> str:
     """Find events in conversation history with their dates — for temporal reasoning.
@@ -458,15 +446,14 @@ def message_timeline(
     Args:
         query: What events to find (e.g., "visit to MoMA", "yoga class")
         user_id: User identifier
-        workspace_id: Workspace ID (defaults to current workspace)
         limit: Max events to return (default 20)
 
     Returns:
         Chronological timeline of matching events with dates
     """
-    core = _get_message_core(user_id, workspace_id)
+    core = _get_message_core(user_id)
 
-    results = core.search_enhanced(query, limit=limit, metadata={"workspace_id": workspace_id})
+    results = core.search_enhanced(query, limit=limit, metadata={})
 
     seen_sessions: set[str] = set()
     timeline: list[tuple[str, str, str]] = []  # (date, session_id, snippet)
