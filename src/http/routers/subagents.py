@@ -1,4 +1,4 @@
-"""Subagent management API for Flutter client - workspace-scoped."""
+"""Subagent management API — globally available subagents."""
 
 from __future__ import annotations
 
