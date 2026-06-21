@@ -115,7 +115,7 @@ def resolve_ea_path(file_path: str, user_id: str) -> Path | None:
     paths = get_paths(user_id)
     full_path = Path(file_path)
     if not full_path.is_absolute():
-        full_path = paths.workspace_files_dir() / file_path
+        full_path = paths.user_files_dir() / file_path
     try:
         full_path = full_path.resolve()
         ea_root = paths.root.resolve()

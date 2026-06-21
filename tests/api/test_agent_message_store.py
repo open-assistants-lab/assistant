@@ -25,7 +25,7 @@ class FakeConversation:
     def add_message(self, role: str, content: str, metadata: dict | None = None) -> None:
         self.messages.append(StoredMessage(role, content, metadata))
 
-    def get_messages_with_summary(self, limit: int = 50, workspace_id: str | None = None) -> list[StoredMessage]:
+    def get_messages_with_summary(self, limit: int = 50) -> list[StoredMessage]:
         return self.messages[-limit:]
 
 
@@ -63,7 +63,7 @@ async def test_verbose_message_persists_tool_results(monkeypatch) -> None:
 
     tool_messages = [m for m in store.messages if m.role == "tool"]
     assert [(m.content, m.metadata) for m in tool_messages] == [
-        ("5 unread emails", {"tool_name": "email_list", "tool_call_id": "call_1", "workspace_id": "personal"})
+        ("5 unread emails", {"tool_name": "email_list", "tool_call_id": "call_1"})
     ]
 
 
@@ -108,7 +108,7 @@ async def test_stream_message_persists_tool_result_content(monkeypatch) -> None:
 
     tool_messages = [m for m in store.messages if m.role == "tool"]
     assert [(m.content, m.metadata) for m in tool_messages] == [
-        ("5 unread emails", {"tool_name": "email_list", "tool_call_id": "call_1", "workspace_id": "personal"})
+        ("5 unread emails", {"tool_name": "email_list", "tool_call_id": "call_1"})
     ]
 
 

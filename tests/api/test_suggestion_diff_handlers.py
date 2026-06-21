@@ -8,8 +8,8 @@ class TestSuggestionAccept:
     def test_suggestion_accept_writes_file(self, client, test_user_id):
         clear()
         store_suggestion("sug_1", "hello world", "/test_sug.txt")
-        paths = get_paths(test_user_id, workspace_id="personal")
-        target_file = paths.workspace_files_dir() / "test_sug.txt"
+        paths = get_paths(test_user_id)
+        target_file = paths.user_files_dir() / "test_sug.txt"
         target_file.parent.mkdir(parents=True, exist_ok=True)
         target_file.write_text("old content")
 
@@ -85,8 +85,8 @@ class TestSuggestionAcceptAll:
         clear()
         store_suggestion("sug_a", "version_a", "test_multi.txt")
         store_suggestion("sug_b", "version_b", "test_multi.txt")
-        paths = get_paths(test_user_id, workspace_id="personal")
-        target_file = paths.workspace_files_dir() / "test_multi.txt"
+        paths = get_paths(test_user_id)
+        target_file = paths.user_files_dir() / "test_multi.txt"
         target_file.parent.mkdir(parents=True, exist_ok=True)
         target_file.write_text("original")
 
@@ -124,8 +124,8 @@ class TestDiffCardAccept:
         clear()
         diff_content = " line1\n-old_line\n+new_line\n line3"
         store_suggestion("diff_1", diff_content, "/test_diff.txt")
-        paths = get_paths(test_user_id, workspace_id="personal")
-        target_file = paths.workspace_files_dir() / "test_diff.txt"
+        paths = get_paths(test_user_id)
+        target_file = paths.user_files_dir() / "test_diff.txt"
         target_file.parent.mkdir(parents=True, exist_ok=True)
         target_file.write_text("line1\nold_line\nline3")
 
@@ -146,8 +146,8 @@ class TestDiffCardAccept:
         clear()
         diff_content = " line1\n-old_line\n+new_line\n line3"
         store_suggestion("diff_2", diff_content, "/test_mismatch.txt")
-        paths = get_paths(test_user_id, workspace_id="personal")
-        target_file = paths.workspace_files_dir() / "test_mismatch.txt"
+        paths = get_paths(test_user_id)
+        target_file = paths.user_files_dir() / "test_mismatch.txt"
         target_file.parent.mkdir(parents=True, exist_ok=True)
         target_file.write_text("line1\nEDITED_line\nline3")
 

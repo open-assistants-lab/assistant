@@ -11,7 +11,7 @@ class TestSubagentsEndpoints:
     def test_list_subagents(self, client, test_user_id):
         r = client.get(
             "/subagents",
-            params={"user_id": test_user_id, "workspace_id": "personal"},
+            params={"user_id": test_user_id},
         )
         assert r.status_code == 200
         data = r.json()
@@ -20,7 +20,7 @@ class TestSubagentsEndpoints:
     def test_list_subagent_jobs(self, client, test_user_id):
         r = client.get(
             "/subagents/jobs",
-            params={"user_id": test_user_id, "workspace_id": "personal"},
+            params={"user_id": test_user_id},
         )
         assert r.status_code == 200
         data = r.json()
@@ -29,22 +29,14 @@ class TestSubagentsEndpoints:
     def test_get_subagent_job_not_found(self, client):
         r = client.get(
             "/subagents/jobs/nonexistent_job_id",
-            params={"user_id": "test_user", "workspace_id": "personal"},
+            params={"user_id": "test_user"},
         )
         assert r.status_code == 404
 
     def test_invalid_user_id_returns_client_error(self, client):
         response = client.get(
             "/subagents",
-            params={"user_id": "bad/user", "workspace_id": "personal"},
-        )
-        assert 400 <= response.status_code < 500
-        assert response.json()["detail"]
-
-    def test_invalid_workspace_id_returns_client_error(self, client):
-        response = client.get(
-            "/subagents/jobs",
-            params={"user_id": "test_user", "workspace_id": "bad/workspace"},
+            params={"user_id": "bad/user"},
         )
         assert 400 <= response.status_code < 500
         assert response.json()["detail"]
@@ -53,7 +45,7 @@ class TestSubagentsEndpoints:
 class TestSubagentV1Invocations:
     def test_create_start_list_detail_and_instruct_subagent_job(self, client, test_user_id):
         name = _agent_name()
-        params = {"user_id": test_user_id, "workspace_id": "personal"}
+        params = {"user_id": test_user_id}
 
         create_response = client.post(
             "/subagents",
@@ -64,7 +56,6 @@ class TestSubagentV1Invocations:
         assert create_response.json() == {
             "status": "created",
             "name": name,
-            "workspace_id": "personal",
         }
 
         start_response = client.post(
@@ -105,7 +96,7 @@ class TestSubagentV1Invocations:
     def test_create_subagent_invalid_name_returns_client_error(self, client, test_user_id):
         response = client.post(
             "/subagents",
-            params={"user_id": test_user_id, "workspace_id": "personal"},
+            params={"user_id": test_user_id},
             json={"name": "bad/name", "description": "invalid"},
         )
         assert 400 <= response.status_code < 500
@@ -124,14 +115,14 @@ class TestSubagentV1Invocations:
     def test_cancel_subagent_job(self, client):
         r = client.post(
             "/subagents/jobs/nonexistent_job/cancel",
-            params={"user_id": "test_user", "workspace_id": "personal"},
+            params={"user_id": "test_user"},
         )
         assert r.status_code == 404
 
     def test_old_path_cancel_route_removed(self, client):
         response = client.post(
             "/subagents/nonexistent_job/cancel",
-            params={"user_id": "test_user", "workspace_id": "personal"},
+            params={"user_id": "test_user"},
         )
         assert response.status_code == 404
 
@@ -146,13 +137,13 @@ class TestSubagentV1Invocations:
         r = client.patch(
             "/subagents/nonexistent_agent",
             json={"tools": ["web_search"]},
-            params={"user_id": test_user_id, "workspace_id": "personal"},
+            params={"user_id": test_user_id},
         )
         assert r.status_code in (200, 404)
 
     def test_delete_subagent(self, client, test_user_id):
         r = client.delete(
             "/subagents/nonexistent_agent",
-            params={"user_id": test_user_id, "workspace_id": "personal"},
+            params={"user_id": test_user_id},
         )
         assert r.status_code in (200, 404)

@@ -11,7 +11,6 @@ from src.http.suggestion_store import clear as clear_suggestions
 from src.sdk.loop import AgentLoop, RunConfig
 from src.sdk.messages import Message, StreamChunk
 from src.sdk.providers.base import LLMProvider, ModelCost, ModelInfo
-from src.sdk.tools import ToolDefinition
 
 
 class MockProvider(LLMProvider):
@@ -75,7 +74,7 @@ def _make_mock_run_stream(response: str):
     MockProvider and runs loop.run_stream(messages).
     """
 
-    async def _run(user_id, messages, workspace_id="personal", **kwargs):
+    async def _run(user_id, messages, **kwargs):
         provider = MockProvider(responses=[Message.assistant(content=response)])
         loop = AgentLoop(
             provider=provider,
@@ -551,10 +550,10 @@ class TestCoEditFlow:
         assert get_suggestion(sug_id) is None
 
     def _workspace_file(self, test_user_id, filename):
-        """Get path within workspace files dir."""
+        """Get path within user files dir."""
         from src.storage.paths import get_paths
-        paths = get_paths(test_user_id, workspace_id="personal")
-        wf_dir = paths.workspace_files_dir()
+        paths = get_paths(test_user_id)
+        wf_dir = paths.user_files_dir()
         wf_dir.mkdir(parents=True, exist_ok=True)
         return wf_dir / filename
 

@@ -7,7 +7,7 @@ import time
 
 import websockets
 
-URI = "ws://localhost:8080/ws/conversation?user_id=default_user&workspace_id=personal"
+URI = "ws://localhost:8080/ws/conversation?user_id=default_user"
 
 MESSAGES = [
     "What is 2+2?",

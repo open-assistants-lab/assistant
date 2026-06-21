@@ -1,4 +1,4 @@
-"""Workspace-aware skills API tests."""
+"""Skills API tests."""
 
 import warnings
 from pathlib import Path
@@ -52,20 +52,15 @@ def skill_api_tmp(tmp_path, monkeypatch):
     workspace_root = tmp_path / "workspace-skills"
     registries = {}
 
-    def fake_get_paths(user_id=None, workspace_id=None, **kwargs):
-        if workspace_id == "../bad":
-            raise ValueError("invalid workspace")
+    def fake_get_paths(user_id=None, **kwargs):
         return TempPaths(user_root, workspace_root, tmp_path / "item-scopes")
 
-    def fake_get_skill_registry(user_id="default_user", workspace_id="personal"):
-        if workspace_id == "../bad":
-            raise ValueError("invalid workspace")
-        key = (user_id, workspace_id)
+    def fake_get_skill_registry(user_id="default_user"):
+        key = (user_id,)
         if key not in registries:
             registries[key] = SkillRegistry(
                 skills_dir=user_root,
-                workspace_skills_dir=workspace_root,
-                workspace_id=workspace_id,
+                user_id=user_id,
             )
         return registries[key]
 
@@ -79,45 +74,39 @@ def test_list_returns_user_and_workspace_skills_with_scope_fields(client, skill_
     write_skill(user_root, "user-skill", "User skill")
     write_skill(workspace_root, "workspace-skill", "Workspace skill")
 
-    r = client.get("/skills", params={"user_id": "u1", "workspace_id": "ws1"})
+    r = client.get("/skills", params={"user_id": "u1"})
 
     assert r.status_code == 200
     skills = {skill["name"]: skill for skill in r.json()["skills"]}
     assert skills["user-skill"] == {
         "name": "user-skill",
         "description": "User skill",
-        "scope": "all",
-        "workspace_id": None,
-        "workspace_ids": [],
         "is_loaded": False,
         "disable_model_invocation": True,
     }
-    assert skills["workspace-skill"]["scope"] == "all"
-    assert skills["workspace-skill"]["workspace_id"] is None
     assert "is_system" not in skills["user-skill"]
 
 
 def test_detail_returns_full_content_and_metadata(client, skill_api_tmp):
-    _, workspace_root = skill_api_tmp
-    write_skill(workspace_root, "detail-skill", "Detail skill", "Detailed instructions")
+    user_root, _ = skill_api_tmp
+    write_skill(user_root, "detail-skill", "Detail skill", "Detailed instructions")
 
     r = client.get(
         "/skills/detail-skill",
-        params={"user_id": "u1", "workspace_id": "ws1"},
+        params={"user_id": "u1"},
     )
 
     data = r.json()
     assert r.status_code == 200
     assert data["name"] == "detail-skill"
     assert "Detailed instructions" in data["content"]
-    assert data["metadata"]["scope"] == "workspace"
     assert data["disable_model_invocation"] is True
 
 
 def test_detail_includes_supported_frontmatter_fields(client, skill_api_tmp):
-    _, workspace_root = skill_api_tmp
+    user_root, _ = skill_api_tmp
     write_skill(
-        workspace_root,
+        user_root,
         "detail-frontmatter",
         "Detail frontmatter",
         "Detailed instructions",
@@ -126,7 +115,7 @@ def test_detail_includes_supported_frontmatter_fields(client, skill_api_tmp):
 
     r = client.get(
         "/skills/detail-frontmatter",
-        params={"user_id": "u1", "workspace_id": "ws1"},
+        params={"user_id": "u1"},
     )
 
     assert r.status_code == 200
@@ -138,7 +127,7 @@ def test_detail_includes_supported_frontmatter_fields(client, skill_api_tmp):
 
 
 def test_detail_missing_returns_404(client, skill_api_tmp):
-    r = client.get("/skills/missing", params={"user_id": "u1", "workspace_id": "ws1"})
+    r = client.get("/skills/missing", params={"user_id": "u1"})
 
     assert r.status_code == 404
 
@@ -154,7 +143,7 @@ def test_create_workspace_skill_writes_to_user_scope(client, skill_api_tmp):
             "content": "# Created\n\nInstructions",
             "scope": "workspace",
         },
-        params={"user_id": "u1", "workspace_id": "ws1"},
+        params={"user_id": "u1"},
     )
 
     assert r.status_code == 200
@@ -178,7 +167,7 @@ def test_create_skill_resets_user_loops(client, skill_api_tmp, monkeypatch):
             "content": "# Created\n\nInstructions",
             "scope": "workspace",
         },
-        params={"user_id": "u1", "workspace_id": "ws1"},
+        params={"user_id": "u1"},
     )
 
     assert r.status_code == 200
@@ -192,7 +181,7 @@ def test_update_skill_content_updates_file_and_returns_detail(client, skill_api_
     r = client.put(
         "/skills/update-skill",
         json={"content": "# Updated\n\nNew content", "scope": "workspace"},
-        params={"user_id": "u1", "workspace_id": "ws1"},
+        params={"user_id": "u1"},
     )
 
     assert r.status_code == 200
@@ -215,7 +204,7 @@ def test_update_skill_resets_user_loops(client, skill_api_tmp, monkeypatch):
     r = client.put(
         "/skills/update-reset",
         json={"content": "# Updated\n\nNew content", "scope": "workspace"},
-        params={"user_id": "u1", "workspace_id": "ws1"},
+        params={"user_id": "u1"},
     )
 
     assert r.status_code == 200
@@ -228,7 +217,7 @@ def test_delete_skill_removes_scoped_dir(client, skill_api_tmp):
 
     r = client.delete(
         "/skills/delete-skill",
-        params={"user_id": "u1", "workspace_id": "ws1", "scope": "workspace"},
+        params={"user_id": "u1", "scope": "workspace"},
     )
 
     assert r.status_code == 200
@@ -246,7 +235,7 @@ def test_delete_skill_resets_user_loops(client, skill_api_tmp, monkeypatch):
 
     r = client.delete(
         "/skills/delete-reset",
-        params={"user_id": "u1", "workspace_id": "ws1", "scope": "workspace"},
+        params={"user_id": "u1", "scope": "workspace"},
     )
 
     assert r.status_code == 200
@@ -263,7 +252,7 @@ def test_create_skill_ignores_deprecated_scope_field(client, skill_api_tmp):
             "content": "Content",
             "scope": "team",
         },
-        params={"user_id": "u1", "workspace_id": "ws1"},
+        params={"user_id": "u1"},
     )
 
     assert r.status_code == 200
@@ -279,88 +268,7 @@ def test_invalid_skill_name_returns_400(client, skill_api_tmp):
             "content": "Content",
             "scope": "user",
         },
-        params={"user_id": "u1", "workspace_id": "ws1"},
-    )
-
-    assert r.status_code == 400
-
-
-@pytest.mark.parametrize(
-    ("method", "url", "kwargs"),
-    [
-        ("get", "/skills", {}),
-        ("get", "/skills/missing", {}),
-        (
-            "post",
-            "/skills",
-            {
-                "json": {
-                    "name": "invalid-workspace-create",
-                    "description": "Invalid workspace",
-                    "content": "Content",
-                    "scope": "workspace",
-                }
-            },
-        ),
-        (
-            "put",
-            "/skills/missing",
-            {"json": {"content": "Content", "scope": "workspace"}},
-        ),
-        ("delete", "/skills/missing", {"params": {"scope": "workspace"}}),
-    ],
-)
-def test_invalid_workspace_id_returns_400_for_all_endpoints(
-    client, skill_api_tmp, method, url, kwargs
-):
-    request_kwargs = {**kwargs}
-    params = dict(request_kwargs.pop("params", {}))
-    params.update({"user_id": "u1", "workspace_id": "../bad"})
-
-    r = getattr(client, method)(url, params=params, **request_kwargs)
-
-    assert r.status_code == 400
-
-
-def test_create_invalid_workspace_does_not_create_skill_file(client, skill_api_tmp):
-    _, workspace_root = skill_api_tmp
-
-    r = client.post(
-        "/skills",
-        json={
-            "name": "no-write",
-            "description": "No write",
-            "content": "Content",
-            "scope": "workspace",
-        },
-        params={"user_id": "u1", "workspace_id": "../bad"},
-    )
-
-    assert r.status_code == 400
-    assert not (workspace_root / "no-write").exists()
-
-
-def test_invalid_workspace_id_is_rejected_before_registry_or_paths(client, monkeypatch):
-    from src.http.routers import skills as skills_router
-
-    def fail_get_skill_registry(**kwargs):
-        raise AssertionError("registry should not be constructed")
-
-    def fail_get_paths(*args, **kwargs):
-        raise AssertionError("paths should not be constructed")
-
-    monkeypatch.setattr(skills_router, "get_skill_registry", fail_get_skill_registry)
-    monkeypatch.setattr(skills_router, "get_paths", fail_get_paths)
-
-    r = client.post(
-        "/skills",
-        json={
-            "name": "no-registry",
-            "description": "No registry",
-            "content": "Content",
-            "scope": "workspace",
-        },
-        params={"user_id": "u1", "workspace_id": "../../bad"},
+        params={"user_id": "u1"},
     )
 
     assert r.status_code == 400
@@ -386,7 +294,7 @@ def test_invalid_user_id_is_rejected_before_registry_or_paths(client, monkeypatc
             "content": "Content",
             "scope": "user",
         },
-        params={"user_id": "../../bad", "workspace_id": "personal"},
+        params={"user_id": "../../bad"},
     )
 
     assert r.status_code == 400
@@ -404,7 +312,7 @@ def test_create_duplicate_skill_returns_409(client, skill_api_tmp):
             "content": "New content",
             "scope": "workspace",
         },
-        params={"user_id": "u1", "workspace_id": "ws1"},
+        params={"user_id": "u1"},
     )
 
     assert r.status_code == 409
@@ -412,7 +320,7 @@ def test_create_duplicate_skill_returns_409(client, skill_api_tmp):
 
 
 def test_create_blank_description_returns_400_without_file(client, skill_api_tmp):
-    _, workspace_root = skill_api_tmp
+    user_root, _ = skill_api_tmp
 
     r = client.post(
         "/skills",
@@ -422,11 +330,11 @@ def test_create_blank_description_returns_400_without_file(client, skill_api_tmp
             "content": "Content",
             "scope": "workspace",
         },
-        params={"user_id": "u1", "workspace_id": "ws1"},
+        params={"user_id": "u1"},
     )
 
     assert r.status_code == 400
-    assert not (workspace_root / "blank-description" / "SKILL.md").exists()
+    assert not (user_root / "blank-description" / "SKILL.md").exists()
 
 
 def test_update_blank_description_returns_400_without_changing_file(client, skill_api_tmp):
@@ -438,7 +346,7 @@ def test_update_blank_description_returns_400_without_changing_file(client, skil
     r = client.put(
         "/skills/no-blank-update",
         json={"description": "   ", "scope": "workspace"},
-        params={"user_id": "u1", "workspace_id": "ws1"},
+        params={"user_id": "u1"},
     )
 
     assert r.status_code == 400
@@ -453,7 +361,7 @@ def test_update_picks_user_skill_when_both_exist(client, skill_api_tmp):
     r = client.put(
         "/skills/shared-skill",
         json={"description": "User updated", "content": "User new", "scope": "user"},
-        params={"user_id": "u1", "workspace_id": "ws1"},
+        params={"user_id": "u1"},
     )
 
     assert r.status_code == 200
@@ -479,7 +387,7 @@ def test_update_preserves_supported_top_level_frontmatter(client, skill_api_tmp)
     r = client.put(
         "/skills/frontmatter-skill",
         json={"description": "Updated", "scope": "workspace"},
-        params={"user_id": "u1", "workspace_id": "ws1"},
+        params={"user_id": "u1"},
     )
 
     assert r.status_code == 200

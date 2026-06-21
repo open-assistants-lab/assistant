@@ -29,22 +29,6 @@ class TestGetConversation:
             assert "content" in msg
             assert msg["role"] in ("user", "assistant", "tool", "summary")
 
-    def test_get_conversation_filters_workspace_before_limit(self, client, test_user_id):
-        from src.storage.messages import get_message_store
-
-        test_store = get_message_store(test_user_id, "test")
-        test_store.clear()
-        test_store.add_message("user", "test workspace message", metadata={"workspace_id": "test"})
-
-        r = client.get(
-            "/conversation",
-            params={"user_id": test_user_id, "workspace_id": "test", "limit": 100},
-        )
-
-        assert r.status_code == 200
-        assert [m["content"] for m in r.json()["messages"]] == ["test workspace message"]
-
-
 class TestClearConversation:
     """Tests for DELETE /conversation."""
 

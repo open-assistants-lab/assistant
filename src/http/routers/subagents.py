@@ -10,8 +10,16 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, ValidationError
 
 from src.sdk.subagent_models import TaskStatus
+from src.storage.paths import DEFAULT_USER_ID, _validate_path_id
 
 router = APIRouter(prefix="/subagents", tags=["subagents"])
+
+
+def _validate_user_id(user_id: str) -> None:
+    try:
+        _validate_path_id(user_id or DEFAULT_USER_ID, "user_id")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 class SubagentCreateRequest(BaseModel):
@@ -74,6 +82,7 @@ def _serialize_job(row: dict[str, Any]) -> dict[str, Any]:
 @router.get("")
 async def list_subagents(
     user_id: str = Query("default_user"),) -> dict[str, Any]:
+    _validate_user_id(user_id)
     from src.sdk.coordinator import get_coordinator
 
     coordinator = get_coordinator(user_id)
@@ -104,6 +113,7 @@ async def list_subagents(
 async def create_subagent(
     body: SubagentCreateRequest,
     user_id: str = Query("default_user"),) -> dict[str, Any]:
+    _validate_user_id(user_id)
     from src.sdk.agent_validation import validate_agent_def
     from src.sdk.coordinator import get_coordinator
 
@@ -149,6 +159,7 @@ async def create_subagent(
 async def list_subagent_jobs(
     user_id: str = Query("default_user"),
     status: TaskStatus | None = Query(None),) -> dict[str, Any]:
+    _validate_user_id(user_id)
     from src.sdk.work_queue import get_work_queue
 
     db = await get_work_queue(user_id)
@@ -160,6 +171,7 @@ async def list_subagent_jobs(
 async def get_subagent_job(
     job_id: str,
     user_id: str = Query("default_user"),) -> dict[str, Any]:
+    _validate_user_id(user_id)
     from src.sdk.work_queue import get_work_queue
 
     db = await get_work_queue(user_id)
@@ -174,6 +186,7 @@ async def instruct_subagent_job(
     job_id: str,
     body: SubagentInstructionRequest,
     user_id: str = Query("default_user"),) -> dict[str, Any]:
+    _validate_user_id(user_id)
     from src.sdk.coordinator import get_coordinator
     from src.sdk.work_queue import get_work_queue
 
@@ -191,6 +204,7 @@ async def instruct_subagent_job(
 async def cancel_subagent_job(
     job_id: str,
     user_id: str = Query("default_user"),) -> dict[str, Any]:
+    _validate_user_id(user_id)
     from src.sdk.coordinator import get_coordinator
     from src.sdk.work_queue import get_work_queue
 
@@ -209,6 +223,7 @@ async def update_subagent(
     name: str,
     body: SubagentUpdateRequest,
     user_id: str = Query("default_user"),) -> dict[str, Any]:
+    _validate_user_id(user_id)
     from src.sdk.agent_validation import validate_agent_def
     from src.sdk.coordinator import get_coordinator
 
@@ -241,6 +256,7 @@ async def update_subagent(
 async def delete_subagent(
     name: str,
     user_id: str = Query("default_user"),) -> dict[str, Any]:
+    _validate_user_id(user_id)
     from src.sdk.coordinator import get_coordinator
 
     coordinator = get_coordinator(user_id)
@@ -254,6 +270,7 @@ async def start_subagent(
     name: str,
     body: SubagentStartRequest,
     user_id: str = Query("default_user"),) -> dict[str, Any]:
+    _validate_user_id(user_id)
     from src.sdk.coordinator import get_coordinator
 
     coordinator = get_coordinator(user_id)

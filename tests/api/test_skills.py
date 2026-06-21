@@ -19,8 +19,6 @@ class TestSkillsEndpoints:
             for key in (
                 "name",
                 "description",
-                "scope",
-                "workspace_id",
                 "is_loaded",
                 "disable_model_invocation",
             ):
@@ -42,7 +40,6 @@ class TestSkillsEndpoints:
         assert r.status_code == 200
         data = r.json()
         assert data["name"] == "test-skill-api"
-        assert data["scope"] == "all"
 
     def test_delete_skill(self, client, test_user_id):
         client.post(
