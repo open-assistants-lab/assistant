@@ -1,4 +1,4 @@
-"""Skills API endpoints — user-level only, scoped via item_scopes."""
+"""Skills API endpoints — globally available skills."""
 
 import shutil
 from pathlib import Path
@@ -8,15 +8,11 @@ import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from src.sdk.item_scopes import ItemScopeDB, ScopeKind
 from src.skills.models import _is_valid_skill_name, parse_skill_file
 from src.skills.registry import get_skill_registry
 from src.storage.paths import DEFAULT_USER_ID, _validate_path_id, get_paths
 
 router = APIRouter(prefix="/skills", tags=["skills"])
-
-SkillScope = str  # "all" | "selected" | "none" (from item_scopes)
-
 
 class SkillCreateRequest(BaseModel):
     name: str
@@ -34,9 +30,6 @@ class SkillUpdateRequest(BaseModel):
 class SkillSummary(BaseModel):
     name: str
     description: str
-    scope: str = "all"
-    workspace_id: str | None = None
-    workspace_ids: list[str] = Field(default_factory=list)
     is_loaded: bool = False
     disable_model_invocation: bool = False
 
@@ -57,13 +50,6 @@ class SkillDetail(SkillSummary):
 def _validate_skill_name(name: str) -> None:
     if not _is_valid_skill_name(name):
         raise HTTPException(status_code=400, detail=f"Invalid skill name: {name!r}")
-
-
-def _validate_workspace_id(workspace_id: str) -> None:
-    try:
-        _validate_path_id(workspace_id or "personal", "workspace_id")
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 def _validate_user_id(user_id: str) -> None:
@@ -119,19 +105,11 @@ def _parse_skill_document(skill_file: Path) -> tuple[dict[str, Any], str]:
     return frontmatter, parts[2].strip()
 
 
-def _get_registry(user_id: str, workspace_id: str) -> Any:
-    try:
-        return get_skill_registry(user_id=user_id, workspace_id=workspace_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
 def _to_summary(skill: dict[str, Any] | Any, loaded_names: set[str]) -> SkillSummary:
     metadata = skill.get("metadata", {})
     return SkillSummary(
         name=skill["name"],
         description=skill.get("description", ""),
-        scope="all",
         is_loaded=skill["name"] in loaded_names,
         disable_model_invocation=metadata.get("disable_model_invocation", False) is True,
     )
@@ -159,24 +137,15 @@ def _to_detail(skill: dict[str, Any] | Any, loaded_names: set[str]) -> SkillDeta
 
 
 @router.get("", response_model=SkillListResponse)
-async def list_skills(user_id: str = "default_user", workspace_id: str = "personal") -> SkillListResponse:
+async def list_skills(user_id: str = "default_user") -> SkillListResponse:
     _validate_user_id(user_id)
-    _validate_workspace_id(workspace_id)
-    registry = _get_registry(user_id, workspace_id)
+    registry = get_skill_registry(user_id=user_id)
     loaded_names = set(registry.get_loaded_skills())
-    paths = get_paths(user_id)
-    scope_db = ItemScopeDB(paths.base)
-    all_scoped = scope_db.get_all_scoped(user_id, "skill")
 
-    summaries = []
-    for skill in registry.get_all_skills():
-        name = skill["name"]
-        summary = _to_summary(skill, loaded_names)
-        if name in all_scoped:
-            item = all_scoped[name]
-            summary.scope = item.scope
-            summary.workspace_ids = item.workspace_ids
-        summaries.append(summary)
+    summaries = [
+        _to_summary(skill, loaded_names)
+        for skill in registry.get_all_skills()
+    ]
 
     return SkillListResponse(skills=summaries)
 
@@ -185,12 +154,10 @@ async def list_skills(user_id: str = "default_user", workspace_id: str = "person
 async def get_skill(
     skill_name: str,
     user_id: str = "default_user",
-    workspace_id: str = "personal",
 ) -> SkillDetail:
     _validate_user_id(user_id)
-    _validate_workspace_id(workspace_id)
     _validate_skill_name(skill_name)
-    registry = _get_registry(user_id, workspace_id)
+    registry = get_skill_registry(user_id=user_id)
     skill = registry.get_skill(skill_name)
     if not skill:
         raise HTTPException(status_code=404, detail="Skill not found")
@@ -201,10 +168,8 @@ async def get_skill(
 async def create_skill(
     request: SkillCreateRequest,
     user_id: str = "default_user",
-    workspace_id: str = "personal",
 ) -> SkillDetail:
     _validate_user_id(user_id)
-    _validate_workspace_id(workspace_id)
     _validate_skill_name(request.name)
     description = request.description.strip()
     if not description:
@@ -219,13 +184,13 @@ async def create_skill(
         _format_skill_file(_new_frontmatter(request.name, description), request.content),
         encoding="utf-8",
     )
-    _get_registry(user_id, workspace_id).reload()
+    get_skill_registry(user_id=user_id).reload()
     _reset_user_loops(user_id)
 
     skill = parse_skill_file(skill_file)
     if not skill:
         raise HTTPException(status_code=500, detail="Skill could not be loaded")
-    return _to_detail(skill, set(_get_registry(user_id, workspace_id).get_loaded_skills()))
+    return _to_detail(skill, set(get_skill_registry(user_id=user_id).get_loaded_skills()))
 
 
 @router.put("/{skill_name}", response_model=SkillDetail)
@@ -233,10 +198,8 @@ async def update_skill(
     skill_name: str,
     request: SkillUpdateRequest,
     user_id: str = "default_user",
-    workspace_id: str = "personal",
 ) -> SkillDetail:
     _validate_user_id(user_id)
-    _validate_workspace_id(workspace_id)
     _validate_skill_name(skill_name)
 
     skill_file = _skill_file_path(user_id, skill_name)
@@ -252,23 +215,21 @@ async def update_skill(
         frontmatter["description"] = d
     content = request.content if request.content is not None else current_content
     skill_file.write_text(_format_skill_file(frontmatter, content), encoding="utf-8")
-    _get_registry(user_id, workspace_id).reload()
+    get_skill_registry(user_id=user_id).reload()
     _reset_user_loops(user_id)
 
     skill = parse_skill_file(skill_file)
     if not skill:
         raise HTTPException(status_code=500, detail="Skill could not be loaded")
-    return _to_detail(skill, set(_get_registry(user_id, workspace_id).get_loaded_skills()))
+    return _to_detail(skill, set(get_skill_registry(user_id=user_id).get_loaded_skills()))
 
 
 @router.delete("/{skill_name}")
 async def delete_skill(
     skill_name: str,
     user_id: str = "default_user",
-    workspace_id: str = "personal",
 ) -> dict[str, Any]:
     _validate_user_id(user_id)
-    _validate_workspace_id(workspace_id)
     _validate_skill_name(skill_name)
 
     skill_file = _skill_file_path(user_id, skill_name)
@@ -277,7 +238,7 @@ async def delete_skill(
         raise HTTPException(status_code=404, detail="Skill not found")
 
     shutil.rmtree(skill_dir)
-    _get_registry(user_id, workspace_id).reload()
+    get_skill_registry(user_id=user_id).reload()
     _reset_user_loops(user_id)
     return {"status": "deleted", "name": skill_name}
 
@@ -290,11 +251,4 @@ async def set_skill_scope(
 ) -> dict[str, Any]:
     _validate_user_id(user_id)
     _validate_skill_name(skill_name)
-    scope: ScopeKind = body.get("scope", "all")
-    if scope not in ("all", "selected", "none"):
-        raise HTTPException(status_code=400, detail="scope must be all, selected, or none")
-    wids = body.get("workspace_ids", [])
-    paths = get_paths(user_id)
-    scope_db = ItemScopeDB(paths.base)
-    scope_db.set(user_id, "skill", skill_name, scope, wids)
-    return {"name": skill_name, "scope": scope, "workspace_ids": wids}
+    return {"name": skill_name, "scope": "all", "workspace_ids": []}

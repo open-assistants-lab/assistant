@@ -9,9 +9,7 @@ from agentprofile.models import AgentProfile
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, ValidationError
 
-from src.sdk.item_scopes import ItemScopeDB, ScopeKind
 from src.sdk.subagent_models import TaskStatus
-from src.storage.paths import get_paths
 
 router = APIRouter(prefix="/subagents", tags=["subagents"])
 
@@ -73,34 +71,13 @@ def _serialize_job(row: dict[str, Any]) -> dict[str, Any]:
     return job
 
 
-def _validate_context_ids(user_id: str, workspace_id: str) -> None:
-    from src.storage.paths import get_paths
-
-    try:
-        get_paths(user_id, workspace_id=workspace_id)
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e)) from e
-
-
 @router.get("")
 async def list_subagents(
-    user_id: str = Query("default_user"),
-    workspace_id: str = Query("personal"),) -> dict[str, Any]:
+    user_id: str = Query("default_user"),) -> dict[str, Any]:
     from src.sdk.coordinator import get_coordinator
 
-    _validate_context_ids(user_id, workspace_id)
-    coordinator = get_coordinator(user_id, workspace_id)
-    scoped_defs = await coordinator.list_defs_with_scope()
-
-    paths = get_paths(user_id)
-    scope_db = ItemScopeDB(paths.base)
-    all_scoped = scope_db.get_all_scoped(user_id, "subagent")
-
-    def resolve(name: str, default_scope: str) -> tuple[str, list[str]]:
-        if name in all_scoped:
-            item = all_scoped[name]
-            return item.scope, item.workspace_ids
-        return ("all", [])
+    coordinator = get_coordinator(user_id)
+    defs = await coordinator.list_defs()
 
     return {
         "agents": [
@@ -117,11 +94,8 @@ async def list_subagents(
                 "provider_options": d.provider_options,
                 "output_schema": d.output_schema_def,
                 "handoff_instructions": d.handoff_instructions,
-                "scope": scp,
-                "workspace_ids": wids,
             }
-            for d, scope in scoped_defs
-            for scp, wids in [resolve(d.name, scope)]
+            for d in defs
         ]
     }
 
@@ -129,13 +103,11 @@ async def list_subagents(
 @router.post("")
 async def create_subagent(
     body: SubagentCreateRequest,
-    user_id: str = Query("default_user"),
-    workspace_id: str = Query("personal"),) -> dict[str, Any]:
+    user_id: str = Query("default_user"),) -> dict[str, Any]:
     from src.sdk.agent_validation import validate_agent_def
     from src.sdk.coordinator import get_coordinator
 
-    _validate_context_ids(user_id, workspace_id)
-    coordinator = get_coordinator(user_id, workspace_id)
+    coordinator = get_coordinator(user_id)
     if coordinator.load_def(body.name) is not None:
         raise HTTPException(status_code=400, detail=f"Subagent '{body.name}' already exists.")
 
@@ -165,23 +137,21 @@ async def create_subagent(
                 err["ctx"]["error"] = str(err["ctx"]["error"])
         raise HTTPException(status_code=422, detail=errors) from e
 
-    validation_errors = validate_agent_def(agent_profile, user_id=user_id, workspace_id=workspace_id)
+    validation_errors = validate_agent_def(agent_profile, user_id=user_id)
     if validation_errors:
         raise HTTPException(status_code=400, detail={"errors": validation_errors})
 
     await coordinator.create(agent_profile)
-    return {"status": "created", "name": body.name, "workspace_id": workspace_id}
+    return {"status": "created", "name": body.name}
 
 
 @router.get("/jobs")
 async def list_subagent_jobs(
     user_id: str = Query("default_user"),
-    workspace_id: str = Query("personal"),
     status: TaskStatus | None = Query(None),) -> dict[str, Any]:
     from src.sdk.work_queue import get_work_queue
 
-    _validate_context_ids(user_id, workspace_id)
-    db = await get_work_queue(user_id, workspace_id)
+    db = await get_work_queue(user_id)
     jobs = await db.check_progress(status=status)
     return {"jobs": [_serialize_job(job) for job in jobs]}
 
@@ -189,12 +159,10 @@ async def list_subagent_jobs(
 @router.get("/jobs/{job_id}")
 async def get_subagent_job(
     job_id: str,
-    user_id: str = Query("default_user"),
-    workspace_id: str = Query("personal"),) -> dict[str, Any]:
+    user_id: str = Query("default_user"),) -> dict[str, Any]:
     from src.sdk.work_queue import get_work_queue
 
-    _validate_context_ids(user_id, workspace_id)
-    db = await get_work_queue(user_id, workspace_id)
+    db = await get_work_queue(user_id)
     row = await db.get_task(job_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -205,17 +173,15 @@ async def get_subagent_job(
 async def instruct_subagent_job(
     job_id: str,
     body: SubagentInstructionRequest,
-    user_id: str = Query("default_user"),
-    workspace_id: str = Query("personal"),) -> dict[str, Any]:
+    user_id: str = Query("default_user"),) -> dict[str, Any]:
     from src.sdk.coordinator import get_coordinator
     from src.sdk.work_queue import get_work_queue
 
-    _validate_context_ids(user_id, workspace_id)
-    db = await get_work_queue(user_id, workspace_id)
+    db = await get_work_queue(user_id)
     if await db.get_task(job_id) is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    coordinator = get_coordinator(user_id, workspace_id)
+    coordinator = get_coordinator(user_id)
     if not await coordinator.instruct(job_id, body.instruction):
         raise HTTPException(status_code=404, detail="Job not found")
     return {"status": "instruction_added", "job_id": job_id}
@@ -224,17 +190,15 @@ async def instruct_subagent_job(
 @router.post("/jobs/{job_id}/cancel")
 async def cancel_subagent_job(
     job_id: str,
-    user_id: str = Query("default_user"),
-    workspace_id: str = Query("personal"),) -> dict[str, Any]:
+    user_id: str = Query("default_user"),) -> dict[str, Any]:
     from src.sdk.coordinator import get_coordinator
     from src.sdk.work_queue import get_work_queue
 
-    _validate_context_ids(user_id, workspace_id)
-    db = await get_work_queue(user_id, workspace_id)
+    db = await get_work_queue(user_id)
     if await db.get_task(job_id) is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    coordinator = get_coordinator(user_id, workspace_id)
+    coordinator = get_coordinator(user_id)
     if not await coordinator.cancel(job_id):
         raise HTTPException(status_code=404, detail="Job not found")
     return {"status": "cancel_requested", "job_id": job_id}
@@ -244,13 +208,11 @@ async def cancel_subagent_job(
 async def update_subagent(
     name: str,
     body: SubagentUpdateRequest,
-    user_id: str = Query("default_user"),
-    workspace_id: str = Query("personal"),) -> dict[str, Any]:
+    user_id: str = Query("default_user"),) -> dict[str, Any]:
     from src.sdk.agent_validation import validate_agent_def
     from src.sdk.coordinator import get_coordinator
 
-    _validate_context_ids(user_id, workspace_id)
-    coordinator = get_coordinator(user_id, workspace_id)
+    coordinator = get_coordinator(user_id)
     update_data = body.model_dump(exclude_unset=True)
     update_data.pop("name", None)
 
@@ -265,7 +227,7 @@ async def update_subagent(
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=e.errors()) from e
 
-    errors = validate_agent_def(candidate, user_id=user_id, workspace_id=workspace_id)
+    errors = validate_agent_def(candidate, user_id=user_id)
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors})
 
@@ -278,27 +240,23 @@ async def update_subagent(
 @router.delete("/{name}")
 async def delete_subagent(
     name: str,
-    user_id: str = Query("default_user"),
-    workspace_id: str = Query("personal"),) -> dict[str, Any]:
+    user_id: str = Query("default_user"),) -> dict[str, Any]:
     from src.sdk.coordinator import get_coordinator
 
-    _validate_context_ids(user_id, workspace_id)
-    coordinator = get_coordinator(user_id, workspace_id)
+    coordinator = get_coordinator(user_id)
     if not await coordinator.delete(name):
         raise HTTPException(status_code=404, detail=f"Subagent '{name}' not found.")
-    return {"status": "deleted", "name": name, "workspace_id": workspace_id}
+    return {"status": "deleted", "name": name}
 
 
 @router.post("/{name}/start")
 async def start_subagent(
     name: str,
     body: SubagentStartRequest,
-    user_id: str = Query("default_user"),
-    workspace_id: str = Query("personal"),) -> dict[str, Any]:
+    user_id: str = Query("default_user"),) -> dict[str, Any]:
     from src.sdk.coordinator import get_coordinator
 
-    _validate_context_ids(user_id, workspace_id)
-    coordinator = get_coordinator(user_id, workspace_id)
+    coordinator = get_coordinator(user_id)
     try:
         task_id = await coordinator.start(name, body.task, parent_id=body.parent_id)
     except ValueError as e:
@@ -312,12 +270,4 @@ async def set_subagent_scope(
     body: dict[str, Any],
     user_id: str = Query("default_user"),
 ) -> dict[str, Any]:
-    """Set scope via item_scopes."""
-    scope: ScopeKind = body.get("scope", "all")
-    if scope not in ("all", "selected", "none"):
-        raise HTTPException(status_code=400, detail="scope must be all, selected, or none")
-    wids = body.get("workspace_ids", [])
-    paths = get_paths(user_id)
-    scope_db = ItemScopeDB(paths.base)
-    scope_db.set(user_id, "subagent", name, scope, wids)
-    return {"name": name, "scope": scope, "workspace_ids": wids}
+    return {"name": name, "scope": "all", "workspace_ids": []}

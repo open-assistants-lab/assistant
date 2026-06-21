@@ -105,14 +105,14 @@ def parse_directives(text: str) -> tuple[str, list[dict[str, Any]]]:
     return text, events
 
 
-def resolve_ea_path(file_path: str, user_id: str, workspace_id: str) -> Path | None:
+def resolve_ea_path(file_path: str, user_id: str) -> Path | None:
     """Resolve a file path within the EA user directory.
 
     Returns None if the path is outside the ea_root (security guard).
     """
     from src.storage.paths import get_paths
 
-    paths = get_paths(user_id, workspace_id=workspace_id)
+    paths = get_paths(user_id)
     full_path = Path(file_path)
     if not full_path.is_absolute():
         full_path = paths.workspace_files_dir() / file_path
@@ -133,7 +133,6 @@ async def _run_agent_stream(
     conversation: Any,
     session_id: str = "",
     pending_ref: list[Any] | None = None,
-    workspace_id: str = "personal",
     model: str | None = None,
     provider_keys: dict[str, str] | None = None,
     current_tab: str = "canvas",
@@ -141,9 +140,6 @@ async def _run_agent_stream(
 ) -> None:
     """Run the agent streaming loop and handle all chunk types."""
     import uuid as _uuid
-
-    def _with_workspace(payload: dict[str, Any]) -> dict[str, Any]:
-        return {**payload, "workspace_id": workspace_id}
 
     ai_content_parts: list[str] = []
     reasoning_parts: list[str] = []
@@ -157,7 +153,6 @@ async def _run_agent_stream(
         async for chunk in run_sdk_agent_stream(
             user_id=user_id,
             messages=sdk_messages,
-            workspace_id=workspace_id,
             model=model,
             provider_keys=provider_keys,
         ):
@@ -166,13 +161,13 @@ async def _run_agent_stream(
 
             if canonical == "text_delta" and chunk.content and not is_compat_alias:
                 ai_content_parts.append(chunk.content)
-                await websocket.send_json(_with_workspace(chunk.to_ws_message()))
+                await websocket.send_json(chunk.to_ws_message())
 
             elif canonical == "text_start" and not is_compat_alias:
-                await websocket.send_json(_with_workspace(chunk.to_ws_message()))
+                await websocket.send_json(chunk.to_ws_message())
 
             elif canonical == "text_end" and not is_compat_alias:
-                await websocket.send_json(_with_workspace(chunk.to_ws_message()))
+                await websocket.send_json(chunk.to_ws_message())
 
             elif canonical == "tool_input_start" and not is_compat_alias:
                 tool_name = chunk.tool or "unknown"
@@ -182,23 +177,23 @@ async def _run_agent_stream(
                 )
                 if tool_name == "skills_load":
                     skill_load_names[call_id] = (chunk.args or {}).get("name", "unknown")
-                await websocket.send_json(_with_workspace(chunk.to_ws_message()))
+                await websocket.send_json(chunk.to_ws_message())
 
             elif canonical == "tool_input_delta":
-                await websocket.send_json(_with_workspace(chunk.to_ws_message()))
+                await websocket.send_json(chunk.to_ws_message())
 
             elif canonical == "tool_input_end":
-                await websocket.send_json(_with_workspace(chunk.to_ws_message()))
+                await websocket.send_json(chunk.to_ws_message())
 
             elif canonical == "reasoning_start" and not is_compat_alias:
-                await websocket.send_json(_with_workspace(chunk.to_ws_message()))
+                await websocket.send_json(chunk.to_ws_message())
 
             elif canonical == "reasoning_delta" and not is_compat_alias:
                 reasoning_parts.append(chunk.content or "")
-                await websocket.send_json(_with_workspace(chunk.to_ws_message()))
+                await websocket.send_json(chunk.to_ws_message())
 
             elif canonical == "reasoning_end" and not is_compat_alias:
-                await websocket.send_json(_with_workspace(chunk.to_ws_message()))
+                await websocket.send_json(chunk.to_ws_message())
 
             elif canonical == "tool_result" or chunk.type == "tool_result":
                 tool_name = chunk.tool or "unknown"
@@ -211,19 +206,18 @@ async def _run_agent_stream(
                         tool=tool_name,
                         call_id=call_id,
                         result_preview=result_preview[:500],
-                    ).model_dump() | {"workspace_id": workspace_id}
+                    ).model_dump()
                 )
 
                 if tool_name == "skills_load":
                     skill_name = skill_load_names.pop(call_id, "unknown")
                     await websocket.send_json(
                         SkillsLoadMessage(name=skill_name).model_dump()
-                        | {"workspace_id": workspace_id}
                     )
 
                 tool_result_outputs[call_id] = result_preview[:500]
                 await _handle_canvas_update_from_preview(
-                    call_id, result_preview, workspace_id, websocket, {},
+                    call_id, result_preview, websocket, {},
                 )
 
             elif chunk.type == "interrupt":
@@ -233,7 +227,7 @@ async def _run_agent_stream(
                         "call_id": chunk.call_id or "unknown",
                         "args": chunk.args or {},
                     }
-                await websocket.send_json(_with_workspace(chunk.to_ws_message()))
+                await websocket.send_json(chunk.to_ws_message())
 
             elif chunk.type == "done":
                 response = "".join(ai_content_parts)
@@ -252,7 +246,7 @@ async def _run_agent_stream(
                     for event in directive_events:
                         if event["type"] == "tab_update" and connection_state is not None:
                             connection_state["current_tab"] = event["tab"]
-                        await websocket.send_json({**event, "workspace_id": workspace_id})
+                        await websocket.send_json(event)
 
                 canvas_blocks = _extract_surfaces(response)
                 for surface in canvas_blocks:
@@ -261,7 +255,6 @@ async def _run_agent_stream(
                         surface_id=surface["surface_id"],
                         action="create",
                         html=surface["html"],
-                        workspace_id=workspace_id,
                     )
 
                 diffs, suggestions = _extract_coedit_surfaces(response)
@@ -270,25 +263,25 @@ async def _run_agent_stream(
                     suggestion_id = f"diff_{i}"
                     from src.http.suggestion_store import store_suggestion
                     store_suggestion(suggestion_id, diff["diff"], diff["file_path"])
-                    await websocket.send_json(_with_workspace({
+                    await websocket.send_json({
                         "type": "diff_card",
                         "file_path": diff["file_path"],
                         "diff": diff["diff"],
                         "suggestion_id": suggestion_id,
-                    }))
+                    })
 
                 for i, sug in enumerate(suggestions):
                     suggestion_id = f"sug_{i}"
                     from src.http.suggestion_store import store_suggestion
                     store_suggestion(suggestion_id, sug["content"], sug["file_path"])
-                    await websocket.send_json(_with_workspace({
+                    await websocket.send_json({
                         "type": "suggestion_push",
                         "file_path": sug["file_path"],
                         "content": sug["content"],
                         "suggestion_id": suggestion_id,
                         "from": -1,
                         "to": -1,
-                    }))
+                    })
 
                 response = _strip_canvas_fences(response)
 
@@ -298,7 +291,7 @@ async def _run_agent_stream(
                     call_id = tm.get("tool_call_id", "")
                     output = tool_result_outputs.get(call_id, "")
                     conversation.add_message(
-                        "tool", output, session_id=session_id, metadata={**tm, "workspace_id": workspace_id}
+                        "tool", output, session_id=session_id, metadata={**tm}
                     )
 
                 if reasoning_content:
@@ -306,7 +299,7 @@ async def _run_agent_stream(
                         "reasoning",
                         reasoning_content,
                         session_id=session_id,
-                        metadata={"workspace_id": workspace_id},
+                        metadata={},
                     )
 
                 msg_id = conversation.add_message(
@@ -315,7 +308,6 @@ async def _run_agent_stream(
                     session_id=session_id,
                     metadata={
                         "stream": True,
-                        "workspace_id": workspace_id,
                     },
                 )
 
@@ -327,13 +319,12 @@ async def _run_agent_stream(
                             {"tool": tm["tool_name"], "call_id": tm["tool_call_id"]}
                             for tm in tool_metadata_list
                         ],
-                    ).model_dump() | {"workspace_id": workspace_id}
+                    ).model_dump()
                 )
 
             elif chunk.type == "error":
                 await websocket.send_json(
                     ErrorMessage(message=str(chunk.content), code="AGENT_ERROR").model_dump()
-                    | {"workspace_id": workspace_id}
                 )
 
     except Exception as e:
@@ -353,7 +344,6 @@ async def _handle_canvas_update(
     surface_id: str,
     action: Literal["create", "update", "destroy"],
     html: str = "",
-    workspace_id: str = "personal",
 ) -> None:
     """Broadcast a canvas_update event to the connected WebSocket client."""
     await websocket.send_json(
@@ -362,14 +352,12 @@ async def _handle_canvas_update(
             action=action,
             html=html,
         ).model_dump()
-        | {"workspace_id": workspace_id}
     )
 
 
 async def _handle_canvas_update_from_preview(
     call_id: str,
     result_preview: str,
-    workspace_id: str,
     websocket: WebSocket,
     tool_responses: dict[str, Any],
 ) -> None:
@@ -382,7 +370,6 @@ async def _handle_canvas_update_from_preview(
         surface_id=f"canvas-{abs(hash(html)) % 100000}",
         action="create",
         html=html,
-        workspace_id=workspace_id,
     )
 
 
@@ -451,7 +438,6 @@ async def ws_conversation(websocket: WebSocket) -> None:
     raw_sid = websocket.query_params.get("session_id", "").strip()
     session_id = raw_sid or str(uuid.uuid4())[:8]
     user_id = "default_user"
-    workspace_id = "personal"
     verbose = False
     current_model: str | None = None
     current_provider_keys: dict[str, str] | None = None
@@ -494,20 +480,19 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     tool_name = pending_container[0].get("tool", "unknown")
                     loop = await get_sdk_loop(
                         user_id,
-                        workspace_id,
                         model=current_model,
                         provider_keys=current_provider_keys,
                     )
                     loop._approved_tool_names.add(tool_name)
                     pending_container[0] = None
-                    conversation = get_message_store(user_id, workspace_id)
+                    conversation = get_message_store(user_id)
                     retry_msgs = _messages_from_conversation(
-                        conversation.get_messages_with_summary(50, workspace_id=workspace_id)
+                        conversation.get_messages_with_summary(50)
                     )
                     retry_msgs.append(Message.user(f"approve: please proceed with {tool_name}"))
                     await _run_agent_stream(
                         websocket, user_id, retry_msgs, conversation, session_id,
-                        pending_ref=pending_container, workspace_id=workspace_id,
+                        pending_ref=pending_container,
                         model=current_model, provider_keys=current_provider_keys,
                         current_tab=current_tab,
                         connection_state=connection_state,
@@ -536,20 +521,19 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     tool_name = pending_container[0].get("tool", "unknown")
                     loop = await get_sdk_loop(
                         user_id,
-                        workspace_id,
                         model=current_model,
                         provider_keys=current_provider_keys,
                     )
                     loop._approved_tool_names.add(tool_name)
                     pending_container[0] = None
-                    conversation = get_message_store(user_id, workspace_id)
+                    conversation = get_message_store(user_id)
                     retry_msgs = _messages_from_conversation(
-                        conversation.get_messages_with_summary(50, workspace_id=workspace_id)
+                        conversation.get_messages_with_summary(50)
                     )
                     retry_msgs.append(Message.user(f"approved: proceed with {tool_name} with edited args: {msg.edited_args}"))
                     await _run_agent_stream(
                         websocket, user_id, retry_msgs, conversation, session_id,
-                        pending_ref=pending_container, workspace_id=workspace_id,
+                        pending_ref=pending_container,
                         model=current_model, provider_keys=current_provider_keys,
                         current_tab=current_tab,
                         connection_state=connection_state,
@@ -568,7 +552,6 @@ async def ws_conversation(websocket: WebSocket) -> None:
                 break
 
             user_id = getattr(msg, "user_id", user_id) or user_id
-            workspace_id = getattr(msg, "workspace_id", workspace_id) or workspace_id
             verbose = getattr(msg, "verbose", verbose)
             msg_model: str | None = getattr(msg, "model", None)
             msg_provider_keys: dict[str, str] | None = getattr(msg, "provider_keys", None)
@@ -591,7 +574,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     }))
                     continue
 
-                file_path = resolve_ea_path(msg.file_path, user_id, workspace_id)
+                file_path = resolve_ea_path(msg.file_path, user_id)
                 if file_path is None:
                     await websocket.send_text(json.dumps({
                         "type": "diff_card_error",
@@ -630,7 +613,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                 from src.http.suggestion_store import remove_suggestion as _rm_sug
 
                 pending = get_all_suggestions_for_file(msg.file_path)
-                file_path = resolve_ea_path(msg.file_path, user_id, workspace_id)
+                file_path = resolve_ea_path(msg.file_path, user_id)
                 if file_path is None:
                     await websocket.send_text(json.dumps({
                         "type": "diff_card_error",
@@ -688,7 +671,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     }))
                     continue
 
-                file_path = resolve_ea_path(msg.file_path, user_id, workspace_id)
+                file_path = resolve_ea_path(msg.file_path, user_id)
                 if file_path is None:
                     await websocket.send_text(json.dumps({
                         "type": "diff_card_error",
@@ -762,12 +745,12 @@ async def ws_conversation(websocket: WebSocket) -> None:
                 continue
 
             content = msg.content
-            conversation = get_message_store(user_id, workspace_id)
+            conversation = get_message_store(user_id)
 
             # If user types "approve" while a tool is pending, trigger retry
             if pending_container[0] and content.strip().lower() in ("approve", "yes", "accept"):
                 tool_name = pending_container[0].get("tool", "unknown")
-                loop = await get_sdk_loop(user_id, workspace_id, model=msg_model, provider_keys=msg_provider_keys)
+                loop = await get_sdk_loop(user_id, model=msg_model, provider_keys=msg_provider_keys)
                 loop._approved_tool_names.add(tool_name)
                 pending_container[0] = None
                 # Fall through — the message is added below once
@@ -777,10 +760,10 @@ async def ws_conversation(websocket: WebSocket) -> None:
 
             t1 = time.monotonic()
 
-            conversation.add_message("user", content, session_id=session_id, metadata={"workspace_id": workspace_id})
+            conversation.add_message("user", content, session_id=session_id, metadata={})
             t2 = time.monotonic()
 
-            recent_messages = conversation.get_messages_with_summary(50, workspace_id=workspace_id)
+            recent_messages = conversation.get_messages_with_summary(50)
             t3 = time.monotonic()
 
             sdk_messages = _messages_from_conversation(recent_messages)
@@ -802,7 +785,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
 
             await _run_agent_stream(
                 websocket, user_id, sdk_messages, conversation, session_id,
-                pending_ref=pending_container, workspace_id=workspace_id,
+                pending_ref=pending_container,
                 model=msg_model, provider_keys=msg_provider_keys,
                 current_tab=current_tab,
                 connection_state=connection_state,
@@ -831,17 +814,17 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     and content.strip().lower() in ("reject", "rejected", "no", "deny")
                 )
                 if is_approve:
-                    loop = await get_sdk_loop(user_id, workspace_id, model=msg_model, provider_keys=msg_provider_keys)
+                    loop = await get_sdk_loop(user_id, model=msg_model, provider_keys=msg_provider_keys)
                     loop._approved_tool_names.add(tool_name)
                     pending_container[0] = None
                     # Retry with approval context
                     retry_msgs = _messages_from_conversation(
-                        conversation.get_messages_with_summary(50, workspace_id=workspace_id)
+                        conversation.get_messages_with_summary(50)
                     )
                     retry_msgs.append(Message.user(f"approve: please proceed with {tool_name}"))
                     await _run_agent_stream(
                         websocket, user_id, retry_msgs, conversation, session_id,
-                        pending_ref=pending_container, workspace_id=workspace_id,
+                        pending_ref=pending_container,
                         model=msg_model, provider_keys=msg_provider_keys,
                         current_tab=current_tab,
                         connection_state=connection_state,

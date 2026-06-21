@@ -34,7 +34,6 @@ class UserMessage(BaseModel):
     content: str
     user_id: str = "default_user"
     verbose: bool = False
-    workspace_id: str = "personal"
     model: str | None = None
     provider_keys: dict[str, str] | None = None
 
