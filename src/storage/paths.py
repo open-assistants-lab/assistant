@@ -184,6 +184,11 @@ class DataPaths:
         p.mkdir(parents=True, exist_ok=True)
         return p
 
+    def versions_dir(self) -> Path:
+        p = self.root / ".versions"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
     def research_dir(self) -> Path:
         p = self.root / "Research" / self.user_id
         p.mkdir(parents=True, exist_ok=True)

@@ -11,12 +11,12 @@ from src.storage.paths import get_paths
 logger = get_logger()
 
 
-def _get_version_root(user_id: str, workspace_id: str = "personal") -> Path:
-    return get_paths(user_id, workspace_id=workspace_id).versions_dir()
+def _get_version_root(user_id: str) -> Path:
+    return get_paths(user_id).versions_dir()
 
 
-def _resolve_path(path: str | None, user_id: str, workspace_id: str = "personal") -> Path:
-    root_path = get_paths(user_id, workspace_id=workspace_id).workspace_files_dir().resolve()
+def _resolve_path(path: str | None, user_id: str) -> Path:
+    root_path = get_paths(user_id).user_files_dir().resolve()
 
     if path is None:
         return root_path
@@ -31,14 +31,14 @@ def _resolve_path(path: str | None, user_id: str, workspace_id: str = "personal"
     return resolved
 
 
-def _version_path(user_id: str, file_path: str, workspace_id: str = "personal") -> Path:
-    root = _get_version_root(user_id, workspace_id)
+def _version_path(user_id: str, file_path: str) -> Path:
+    root = _get_version_root(user_id)
     return root / file_path
 
 
-def capture_version(user_id: str, file_path: str, new_content: str, workspace_id: str = "personal") -> str | None:
+def capture_version(user_id: str, file_path: str, new_content: str) -> str | None:
     try:
-        target = _resolve_path(file_path, user_id, workspace_id)
+        target = _resolve_path(file_path, user_id)
 
         if not target.exists() or not target.is_file():
             return None
@@ -47,7 +47,7 @@ def capture_version(user_id: str, file_path: str, new_content: str, workspace_id
         if current_content == new_content:
             return None
 
-        ver_dir = _version_path(user_id, file_path, workspace_id)
+        ver_dir = _version_path(user_id, file_path)
         ver_dir.mkdir(parents=True, exist_ok=True)
 
         timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%S")
@@ -63,19 +63,18 @@ def capture_version(user_id: str, file_path: str, new_content: str, workspace_id
 
 
 @tool
-def files_versions_list(path: str, user_id: str = "default_user", workspace_id: str = "personal") -> str:
+def files_versions_list(path: str, user_id: str = "default_user") -> str:
     """List all versions of a file.
 
     Args:
         path: File path relative to user files
         user_id: User identifier
-        workspace_id: Workspace ID (defaults to current workspace)
 
     Returns:
         List of versions with timestamps
     """
     try:
-        ver_dir = _version_path(user_id, path, workspace_id)
+        ver_dir = _version_path(user_id, path)
 
         if not ver_dir.exists():
             return f"No versions found for: {path}"
@@ -102,26 +101,25 @@ files_versions_list.annotations = ToolAnnotations(
 
 
 @tool
-def files_versions_restore(path: str, version: str, user_id: str = "default_user", workspace_id: str = "personal") -> str:
+def files_versions_restore(path: str, version: str, user_id: str = "default_user") -> str:
     """Restore a file to a specific version.
 
     Args:
         path: File path relative to user files
         version: Version timestamp to restore (e.g., "2026-03-16T10-30-00")
         user_id: User identifier
-        workspace_id: Workspace ID (defaults to current workspace)
 
     Returns:
         Success or error message
     """
     try:
-        ver_dir = _version_path(user_id, path, workspace_id)
+        ver_dir = _version_path(user_id, path)
         version_file = ver_dir / version
 
         if not version_file.exists():
             return f"Version not found: {version}"
 
-        target = _resolve_path(path, user_id, workspace_id)
+        target = _resolve_path(path, user_id)
 
         content = version_file.read_text(encoding="utf-8")
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -142,20 +140,19 @@ files_versions_restore.annotations = ToolAnnotations(title="Restore File Version
 
 
 @tool
-def files_versions_delete(path: str, version: str | None = None, user_id: str = "default_user", workspace_id: str = "personal") -> str:
+def files_versions_delete(path: str, version: str | None = None, user_id: str = "default_user") -> str:
     """Delete a specific version or all versions of a file.
 
     Args:
         path: File path relative to user files
         version: Version timestamp to delete (omit to delete all versions)
         user_id: User identifier
-        workspace_id: Workspace ID (defaults to current workspace)
 
     Returns:
         Success or error message
     """
     try:
-        ver_dir = _version_path(user_id, path, workspace_id)
+        ver_dir = _version_path(user_id, path)
 
         if not ver_dir.exists():
             return f"No versions found for: {path}"
@@ -180,7 +177,7 @@ files_versions_delete.annotations = ToolAnnotations(title="Delete File Version",
 
 
 @tool
-def files_versions_clean(user_id: str = "default_user", workspace_id: str = "personal") -> str:
+def files_versions_clean(user_id: str = "default_user") -> str:
     """Clean up old versions based on retention policy.
 
     Daily: keep all for 7 days
@@ -189,13 +186,12 @@ def files_versions_clean(user_id: str = "default_user", workspace_id: str = "per
 
     Args:
         user_id: User identifier
-        workspace_id: Workspace ID (defaults to current workspace)
 
     Returns:
         Cleanup summary
     """
     try:
-        ver_root = _get_version_root(user_id, workspace_id)
+        ver_root = _get_version_root(user_id)
 
         if not ver_root.exists():
             return "No versions to clean"
