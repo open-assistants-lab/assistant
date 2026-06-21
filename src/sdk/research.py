@@ -60,13 +60,11 @@ class PromptTarget(ResearchTarget):
         prompt_path: Path,
         eval_task: str = "",
         user_id: str = "default_user",
-        workspace_id: str = "personal",
         tools: list[Any] | None = None,
     ):
         self.prompt_path = prompt_path
         self.eval_task = eval_task
         self.user_id = user_id
-        self.workspace_id = workspace_id
         self._tools = tools or []
         self._backup: str | None = None
 
@@ -90,7 +88,6 @@ class PromptTarget(ResearchTarget):
                 system_prompt=self.get_current(),
                 run_config=RunConfig(max_llm_calls=3, cost_limit_usd=0.05),
                 user_id=self.user_id,
-                workspace_id=self.workspace_id,
             )
             messages = [Message.user(self.eval_task)]
             result = await loop.run(messages)
@@ -118,13 +115,11 @@ class SkillTarget(ResearchTarget):
         skill_path: Path,
         eval_queries: list[dict[str, Any]] | None = None,
         user_id: str = "default_user",
-        workspace_id: str = "personal",
     ):
         self.skill_name = skill_name
         self.skill_path = skill_path
         self.eval_queries = eval_queries or []
         self.user_id = user_id
-        self.workspace_id = workspace_id
         self._backup: str | None = None
 
     def get_current(self) -> str:
@@ -151,12 +146,10 @@ class SubagentTarget(ResearchTarget):
         agent_def_path: Path,
         eval_task: str = "",
         user_id: str = "default_user",
-        workspace_id: str = "personal",
     ):
         self.agent_def_path = agent_def_path
         self.eval_task = eval_task
         self.user_id = user_id
-        self.workspace_id = workspace_id
         self._backup: str | None = None
 
     def get_current(self) -> str:
@@ -170,7 +163,7 @@ class SubagentTarget(ResearchTarget):
         try:
             from src.sdk.coordinator import SubagentCoordinator
 
-            coord = SubagentCoordinator(self.user_id, self.workspace_id)
+            coord = SubagentCoordinator(self.user_id)
             result: SubagentResult = await coord.delegate(self.agent_def_path.stem, self.eval_task)  # type: ignore[assignment]
             if result.success:
                 return 1.0

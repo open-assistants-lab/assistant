@@ -163,7 +163,6 @@ class ToolIndex:
 
 def compute_source_hashes(
     tools_dir: Path,
-    workspace_tools_dir: Path | None,
     mcp_config: Path,
     connectkit_bridge: Any | None = None,
 ) -> dict[str, str]:
@@ -178,13 +177,6 @@ def compute_source_hashes(
                 hashes[key] = hashlib.sha256(tool_file.read_bytes()).hexdigest()
             else:
                 hashes[key] = ""
-
-    if workspace_tools_dir and workspace_tools_dir.exists():
-        for tool_dir in sorted(workspace_tools_dir.iterdir()):
-            tool_file = tool_dir / "TOOL.md"
-            key = f"workspace:{tool_dir.name}"
-            if tool_file.exists():
-                hashes[key] = hashlib.sha256(tool_file.read_bytes()).hexdigest()
 
     if mcp_config.exists():
         hashes["mcp:config"] = hashlib.sha256(mcp_config.read_bytes()).hexdigest()
@@ -221,21 +213,18 @@ def save_source_hashes(hashes_path: Path, hashes: dict[str, str]) -> None:
 
 def needs_rebuild(
     tools_dir: Path,
-    workspace_tools_dir: Path | None,
     mcp_config: Path,
     index_dir: Path,
 ) -> bool:
     hashes_path = index_dir / ".index_hashes.json"
-    current = compute_source_hashes(tools_dir, workspace_tools_dir, mcp_config)
+    current = compute_source_hashes(tools_dir, mcp_config)
     return check_needs_reindex(hashes_path, current)
 
 
 def get_or_create_index(
     tools_dir: Path,
-    workspace_tools_dir: Path | None,
     mcp_config: Path,
     user_id: str = "default_user",
-    workspace_id: str = "personal",
     index_dir: Path | None = None,
     connectkit_bridge: Any | None = None,
 ) -> ToolIndex:
@@ -246,11 +235,11 @@ def get_or_create_index(
     """
     from src.storage.paths import get_paths
 
-    paths = get_paths(user_id=user_id, workspace_id=workspace_id)
+    paths = get_paths(user_id=user_id)
     index_dir = index_dir or (paths.user_tools_dir() / ".index")
     hashes_path = index_dir / ".index_hashes.json"
 
-    current_hashes = compute_source_hashes(tools_dir, workspace_tools_dir, mcp_config, connectkit_bridge)
+    current_hashes = compute_source_hashes(tools_dir, mcp_config, connectkit_bridge)
     needs_reindex = check_needs_reindex(hashes_path, current_hashes)
 
     idx = ToolIndex(index_dir)

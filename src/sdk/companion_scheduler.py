@@ -1,6 +1,6 @@
 """Companion scheduler — user-global background loop for proactive check-ins.
 
-V1: No tool calls. Pre-computed context across all workspaces.
+V1: No tool calls. Pre-computed user context.
 LLM decides: nudge with 1-2 sentences, or skip ([SKIP]).
 """
 
@@ -14,7 +14,6 @@ from src.sdk.loop import AgentLoop, RunConfig
 from src.sdk.messages import Message
 from src.sdk.providers.factory import create_model_from_config
 from src.sdk.tools_core.companion_db import CompanionMemoryDB, CompanionNotificationDB
-from src.sdk.workspace_models import list_workspaces
 
 logger = get_logger()
 
@@ -24,10 +23,9 @@ MAX_INTERVAL_MINUTES = 30
 DISMISSAL_STREAK_THRESHOLD = 3
 
 COMPANION_SYSTEM_PROMPT = """You are EA's companion personality — a warm, attentive executive assistant
-that checks in throughout the day. You work across ALL the user's workspaces
-(projects), maintaining awareness of what's happening everywhere.
+that checks in throughout the day. You maintain awareness of what's happening.
 
-Your job: read the context below (time, email urgency, workspace activity,
+Your job: read the context below (time, email urgency, recent activity,
 what you know about the user) and decide to either:
 
   A) Write ONE brief, warm check-in message (1-2 sentences max)
@@ -40,9 +38,7 @@ Never repeat yourself. Vary your phrasing across cycles.
 Morning: energetic. Midday: focused. Evening: reflective.
 
 If the user has urgent emails → gentle nudge.
-If specific workspaces have activity → mention which one.
-If multiple workspaces have urgent items → pick the most impactful.
-If workspaces are quiet → a brief hello or skip.
+If quiet → a brief hello or skip.
 If late at night → skip.
 
 You are NOT a chatbot. You are an executive's personal assistant who
@@ -155,13 +151,17 @@ class CompanionScheduler:
         tod = _time_of_day(hour)
         urgent = _count_urgent_emails(self.user_id)
 
-        workspaces = list_workspaces()
-        ws_lines: list[str] = []
-        for ws in workspaces:
-            activity = _summarize_workspace_activity(ws.id)
-            if activity:
-                ws_lines.append(f"  - {ws.name}: {activity}")
-        ws_text = "\n".join(ws_lines) if ws_lines else "  No recent activity across any workspace."
+        from src.storage.messages import get_message_store
+        store = get_message_store(user_id=self.user_id)
+        msgs = store.get_messages(limit=15)
+        if msgs:
+            user_count = sum(1 for m in msgs if m.role == "user")
+            assistant_count = sum(1 for m in msgs if m.role == "assistant")
+            latest = msgs[0]
+            last_activity = _relative_time(latest.ts)
+            ws_text = f"{user_count} user messages, {assistant_count} assistant responses (last activity: {last_activity})"
+        else:
+            ws_text = "No recent activity."
 
         recent = await self._db.recent_messages(3)
         personality = await self._get_personality_text()
@@ -170,7 +170,7 @@ class CompanionScheduler:
 
 TIME: {now.strftime('%I:%M %p %A %B %d')} ({tod})
 URGENT UNREAD EMAILS: {urgent}
-WORKSPACES ({len(workspaces)} total):
+RECENT ACTIVITY:
 {ws_text}
 
 WHAT I KNOW ABOUT THE USER:
@@ -254,33 +254,6 @@ def _count_urgent_emails(user_id: str) -> int:
             user_id=user_id,
         )
         return 0
-
-
-def _summarize_workspace_activity(workspace_id: str) -> str | None:
-    """Get a brief activity summary for a workspace."""
-    try:
-        from src.storage.messages import get_message_store
-
-        store = get_message_store(workspace_id=workspace_id)
-        msgs = store.get_messages(limit=15)
-        if not msgs:
-            return None
-
-        user_count = sum(1 for m in msgs if m.role == "user")
-        assistant_count = sum(1 for m in msgs if m.role == "assistant")
-        latest = msgs[0]
-
-        parts: list[str] = []
-        parts.append(f"{user_count} user messages, {assistant_count} assistant responses")
-        parts.append(f"last activity: {_relative_time(latest.ts)}")
-        return "; ".join(parts)
-    except Exception as e:
-        logger.debug(
-            "companion.workspace_activity_failed",
-            {"workspace_id": workspace_id, "error": str(e)},
-            user_id="system",
-        )
-        return None
 
 
 def _relative_time(ts: datetime | str) -> str:
