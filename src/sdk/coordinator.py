@@ -65,9 +65,7 @@ def _build_tools_for_subagent(profile: AgentProfile) -> list[Any]:
     return [tool_map[n] for n in sorted(final) if n in tool_map]
 
 
-def _build_system_prompt(
-    profile: AgentProfile, user_id: str, workspace_id: str = "personal"
-) -> str:
+def _build_system_prompt(profile: AgentProfile, user_id: str) -> str:
     """Build the system prompt for a subagent, including loaded skill content."""
     parts: list[str] = []
 
@@ -82,7 +80,7 @@ def _build_system_prompt(
         try:
             from src.skills.registry import get_skill_registry
 
-            sr = get_skill_registry(user_id=user_id, workspace_id=workspace_id)
+            sr = get_skill_registry(user_id=user_id)
             skill_entries = []
             for skill_name in profile.skills:
                 skill = sr.get_skill(skill_name)
@@ -113,7 +111,7 @@ def _extract_output(messages: list[Any], max_chars: int = 2000) -> tuple[str, bo
             content = msg.content
             if isinstance(content, str) and content.strip():
                 if len(output) + len(content) > max_chars:
-                    output = content[:max_chars - len(output)] + "..."
+                    output = content[: max_chars - len(output)] + "..."
                     return output, True
                 output = content + "\n" + output
     return output.strip(), False
@@ -122,11 +120,10 @@ def _extract_output(messages: list[Any], max_chars: int = 2000) -> tuple[str, bo
 class SubagentCoordinator:
     """Creates, invokes, and supervises subagents via work_queue."""
 
-    def __init__(self, user_id: str, workspace_id: str = "personal"):
+    def __init__(self, user_id: str):
         self.user_id = user_id
-        self.workspace_id = workspace_id
         self.settings = get_settings()
-        self.base_path = _paths.get_paths(user_id=self.user_id, workspace_id=self.workspace_id).workspace_subagents_dir()
+        self.base_path = _paths.get_paths(user_id=self.user_id).user_subagents_dir()
         self.base_path.mkdir(parents=True, exist_ok=True)
         self._db: WorkQueueDB | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
@@ -142,14 +139,14 @@ class SubagentCoordinator:
         if count > 0:
             logger.warning(
                 "subagent.stale_tasks_recovered",
-                {"count": count, "user_id": self.user_id, "workspace_id": self.workspace_id},
+                {"count": count, "user_id": self.user_id},
                 user_id="system",
             )
         return count
 
     async def _get_db(self) -> WorkQueueDB:
         if self._db is None:
-            self._db = await get_work_queue(self.user_id, self.workspace_id)
+            self._db = await get_work_queue(self.user_id)
             if self._recovery_task is None:
                 self._recovery_task = asyncio.create_task(self._recover_stale_jobs())
         return self._db
@@ -178,9 +175,7 @@ class SubagentCoordinator:
             )
 
         # Write PROFILE.md (frontmatter + body)
-        (agent_path / "PROFILE.md").write_text(
-            dumps_profile(profile)
-        )
+        (agent_path / "PROFILE.md").write_text(dumps_profile(profile))
 
         # Write companion files
         if profile.provider_options:
@@ -243,7 +238,9 @@ class SubagentCoordinator:
         """
         profile = self.load_def(agent_name)
         if profile is None:
-            raise ValueError(f"Subagent '{agent_name}' not found. Create it first with subagent_create.")
+            raise ValueError(
+                f"Subagent '{agent_name}' not found. Create it first with subagent_create."
+            )
 
         db = await self._get_db()
         task_id = await db.insert_task(agent_name, task, profile, parent_id)
@@ -295,11 +292,10 @@ class SubagentCoordinator:
         profile = self.load_def(agent_name)
         if profile is None:
             raise ValueError(
-                f"Subagent '{agent_name}' not found. "
-                f"Create it first with subagent_create."
+                f"Subagent '{agent_name}' not found. Create it first with subagent_create."
             )
 
-        errors = validate_agent_def(profile, user_id=self.user_id, workspace_id=self.workspace_id)
+        errors = validate_agent_def(profile, user_id=self.user_id)
         if errors:
             raise ValueError("Invalid subagent definition: " + "; ".join(errors))
 
@@ -356,9 +352,11 @@ class SubagentCoordinator:
     ) -> str:
         profile = self.load_def(agent_name)
         if profile is None:
-            raise ValueError(f"Subagent '{agent_name}' not found. Create it first with subagent_create.")
+            raise ValueError(
+                f"Subagent '{agent_name}' not found. Create it first with subagent_create."
+            )
 
-        errors = validate_agent_def(profile, user_id=self.user_id, workspace_id=self.workspace_id)
+        errors = validate_agent_def(profile, user_id=self.user_id)
         if errors:
             raise ValueError("Invalid subagent definition: " + "; ".join(errors))
 
@@ -401,7 +399,7 @@ class SubagentCoordinator:
 
     async def _run_job(self, task_id: str, ctx: SubagentContext | None = None) -> None:
         db = await self._get_db()
-        worker_id = f"{self.user_id}:{self.workspace_id}:{id(self)}"
+        worker_id = f"{self.user_id}:{id(self)}"
         claimed = await db.claim_task(task_id, worker_id)
         if not claimed:
             return
@@ -466,7 +464,7 @@ class SubagentCoordinator:
         provider = create_model_from_config(model_str)
 
         tools = _build_tools_for_subagent(profile)
-        system_prompt = _build_system_prompt(profile, self.user_id, self.workspace_id)
+        system_prompt = _build_system_prompt(profile, self.user_id)
 
         run_config = RunConfig(
             max_llm_calls=profile.max_llm_calls,
@@ -484,7 +482,6 @@ class SubagentCoordinator:
             middlewares=middlewares,  # type: ignore[arg-type]
             run_config=run_config,
             user_id=self.user_id,
-            workspace_id=self.workspace_id,
         )
         loop.subagent_ctx = ctx or SubagentContext()
 
@@ -504,6 +501,7 @@ class SubagentCoordinator:
 
         try:
             from src.sdk.registry import get_model_info
+
             model_info = get_model_info(model_str)
             cost = model_info.cost if model_info and model_info.cost else None
         except Exception:
@@ -511,7 +509,9 @@ class SubagentCoordinator:
 
         cost_usd = 0.0
         if cost:
-            cost_usd = (total_input / 1_000_000) * cost.input + (total_output / 1_000_000) * cost.output
+            cost_usd = (total_input / 1_000_000) * cost.input + (
+                total_output / 1_000_000
+            ) * cost.output
             if cost.reasoning and total_reasoning:
                 cost_usd += (total_reasoning / 1_000_000) * cost.reasoning
 
@@ -531,17 +531,21 @@ class SubagentCoordinator:
         async def _cb(step: int, phase: str, message: str) -> None:
             try:
                 db = await self._get_db()
-                await db.update_progress(task_id, {
-                    "steps_completed": step,
-                    "phase": phase,
-                    "message": message,
-                })
+                await db.update_progress(
+                    task_id,
+                    {
+                        "steps_completed": step,
+                        "phase": phase,
+                        "message": message,
+                    },
+                )
             except Exception:
                 logger.warning(
                     "subagent.progress_update_error",
                     {"task_id": task_id, "step": step},
                     user_id=self.user_id,
                 )
+
         return _cb
 
     async def cancel(self, task_id: str) -> bool:
@@ -588,7 +592,7 @@ class SubagentCoordinator:
         return defs
 
     async def list_defs_with_scope(self) -> list[tuple[AgentProfile, str]]:
-        """Return agent defs from user-level dir, filtered by item_scopes."""
+        """Return agent defs from user-level dir."""
         scoped: list[tuple[AgentProfile, str]] = []
 
         if self.base_path.exists():
@@ -598,36 +602,21 @@ class SubagentCoordinator:
                     if profile:
                         scoped.append((profile, "user"))
 
-        # 3. Filter by item_scopes (All / Selected / None)
-        try:
-            from src.sdk.item_scopes import ItemScopeDB
-
-            paths = _paths.get_paths(user_id=self.user_id)
-            scope_db = ItemScopeDB(paths.base)
-            all_scoped = scope_db.get_all_scoped(self.user_id, "subagent")
-        except Exception:
-            all_scoped = {}
-
-        filtered: list[tuple[AgentProfile, str]] = []
-        for profile, file_scope in scoped:
-            if profile.name in all_scoped:
-                item = all_scoped[profile.name]
-                if item.scope == "none":
-                    continue
-                if item.scope == "selected" and self.workspace_id not in item.workspace_ids:
-                    continue
-            filtered.append((profile, file_scope))
-
-        return filtered
+        return scoped
 
     def load_def(self, name: str) -> AgentProfile | None:
         profile_path = self.base_path / name / "PROFILE.md"
         if profile_path.exists():
             try:
                 from agentprofile.parser import load_profile as _load_ap
+
                 return _load_ap(str(profile_path))
             except Exception as e:
-                logger.error("subagent.load_failed", {"name": name, "error": str(e), "error_type": type(e).__name__}, user_id=self.user_id)
+                logger.error(
+                    "subagent.load_failed",
+                    {"name": name, "error": str(e), "error_type": type(e).__name__},
+                    user_id=self.user_id,
+                )
         return None
 
     def is_valid(self, name: str) -> bool:
@@ -642,8 +631,8 @@ class SubagentCoordinator:
 _coordinators: dict[str, SubagentCoordinator] = {}
 
 
-def get_coordinator(user_id: str, workspace_id: str = "personal") -> SubagentCoordinator:
-    key = f"{user_id}:{workspace_id}"
+def get_coordinator(user_id: str) -> SubagentCoordinator:
+    key = f"{user_id}"
     if key not in _coordinators:
-        _coordinators[key] = SubagentCoordinator(user_id, workspace_id)
+        _coordinators[key] = SubagentCoordinator(user_id)
     return _coordinators[key]
