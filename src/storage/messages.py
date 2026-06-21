@@ -52,17 +52,12 @@ class MessageStore:
         └── vectors/ # ChromaDB for semantic search
     """
 
-    def __init__(self, user_id: str, base_dir: Path | str | None = None, workspace_id: str = "personal"):
+    def __init__(self, user_id: str, base_dir: Path | str | None = None):
         self.user_id = user_id
-        self.workspace_id = workspace_id
         if base_dir is not None:
             base_path = Path(base_dir)
         else:
-            paths = get_paths(user_id, workspace_id=workspace_id)
-            if workspace_id == "personal":
-                base_path = paths.conversation_dir()
-            else:
-                base_path = paths.workspace_conversation_path().parent
+            base_path = get_paths(user_id).conversation_dir()
         base_path.mkdir(parents=True, exist_ok=True)
 
         # Migrate id column BEFORE MemoryCore initializes HybridDB+FTS triggers
@@ -75,7 +70,6 @@ class MessageStore:
             path=str(base_path),
             enable_observations=True,
             enable_reflections=True,
-            observation_kwargs={"session_id": workspace_id},
         )
 
         try:
@@ -83,7 +77,7 @@ class MessageStore:
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role)")
         except Exception:
-            logger.warning("messages.index_creation_error")
+            logger.warning("messages.index_creation_error", {})
 
         try:
             self._core.db.register_duckdb_table("messages")
@@ -234,7 +228,7 @@ class MessageStore:
             new_conn.close()
             old_conn.close()
         except Exception:
-            logger.warning("messages.migration_error")  # non-fatal, old DB still exists
+            logger.warning("messages.migration_error", {})  # non-fatal, old DB still exists
 
         sentinel.touch()
 
@@ -313,20 +307,20 @@ class MessageStore:
         memories = self._core.fetch(limit=count)
         return [self._to_msg(m) for m in reversed(memories)]
 
-    def get_recent_messages_for_workspace(
-        self, workspace_id: str = "personal", count: int = 100
+    def get_recent_messages_for_session(
+        self, session_id: str = "", count: int = 100
     ) -> list[Message]:
-        memories = self._core.fetch(limit=count, metadata={"workspace_id": workspace_id})
+        memories = self._core.fetch(limit=count, session_id=session_id)
         return [self._to_msg(m) for m in reversed(memories)]
 
-    def get_messages_with_summary(self, limit: int = 50, workspace_id: str | None = None) -> list[Message]:
+    def get_messages_with_summary(self, limit: int = 50, session_id: str | None = None) -> list[Message]:
         if limit <= 0:
             return []
         summaries = self._core.fetch(limit=1, role="summary")
         if not summaries:
-            memories = self._core.fetch(limit=limit, metadata={"workspace_id": workspace_id}) if workspace_id else self._core.fetch(limit=limit)
+            memories = self._core.fetch(limit=limit, session_id=session_id) if session_id else self._core.fetch(limit=limit)
             return [self._to_msg(m) for m in reversed(memories)]
-        non_summaries = self._core.fetch(limit=limit, metadata={"workspace_id": workspace_id}) if workspace_id else self._core.fetch(limit=limit)
+        non_summaries = self._core.fetch(limit=limit, session_id=session_id) if session_id else self._core.fetch(limit=limit)
         non_summaries = [m for m in non_summaries if m.role != "summary"]
         result: list[Message] = [self._to_msg(summaries[0])]
         result += [self._to_msg(m) for m in non_summaries]
@@ -357,8 +351,8 @@ class MessageStore:
         except Exception:
             return len(self._core.fetch_all(ts_after=ts_after, ts_before=ts_before))
 
-    def delete_messages_for_workspace(self, workspace_id: str) -> int:
-        """Delete all messages for a workspace.
+    def delete_messages_for_session(self, session_id: str) -> int:
+        """Delete all messages for a session.
 
         Uses direct SQLite DELETE because coremem's delete method cannot
         resolve auto-assigned integer ids via DuckDB (id shows as None
@@ -367,18 +361,18 @@ class MessageStore:
         """
         with self._core.db._connect() as cur:
             cur.execute(
-                "DELETE FROM messages WHERE json_extract(metadata, '$.workspace_id') = ?",
-                [workspace_id],
+                "DELETE FROM messages WHERE json_extract(metadata, '$.session_id') = ?",
+                [session_id],
             )
             count = cur.rowcount
             cur.execute(
                 "DELETE FROM _journal WHERE app_table = 'messages'"
-                " AND json_extract(metadata, '$.workspace_id') = ?",
-                [workspace_id],
+                " AND json_extract(metadata, '$.session_id') = ?",
+                [session_id],
             )
         if self._core.db._chroma is not None:
             try:
-                memories = self._core.fetch(limit=10000, metadata={"workspace_id": workspace_id})
+                memories = self._core.fetch(limit=10000, metadata={"session_id": session_id})
                 ids = [m.id for m in memories if m.id != "None"]
                 if ids:
                     self._core.db._chroma.delete(
@@ -386,11 +380,11 @@ class MessageStore:
                         ids=ids,
                     )
             except Exception:
-                logger.warning("messages.chroma_delete_error", {"workspace_id": workspace_id})
+                logger.warning("messages.chroma_delete_error", {})
         try:
             self._core.db.sync_duckdb_table("messages")
         except Exception:
-            logger.warning("messages.duckdb_sync_error", {"workspace_id": workspace_id})
+            logger.warning("messages.duckdb_sync_error", {})
         return cast(int, count)
 
     def clear(self) -> None:
@@ -400,14 +394,14 @@ class MessageStore:
 _stores: dict[str, MessageStore] = {}
 
 
-def get_message_store(user_id: str = "default_user", workspace_id: str = "personal") -> MessageStore:
-    key = f"{user_id}:{workspace_id}:msgstore"
+def get_message_store(user_id: str = "default_user") -> MessageStore:
+    key = f"{user_id}:msgstore"
     if key not in _stores:
-        _stores[key] = MessageStore(user_id, workspace_id=workspace_id)
+        _stores[key] = MessageStore(user_id)
     return _stores[key]
 
 
-def clear_message_store(user_id: str, workspace_id: str) -> None:
-    """Evict a MessageStore from the cache (e.g. after workspace deletion)."""
-    key = f"{user_id}:{workspace_id}:msgstore"
+def clear_message_store(user_id: str) -> None:
+    """Evict a MessageStore from the cache."""
+    key = f"{user_id}:msgstore"
     _stores.pop(key, None)

@@ -66,7 +66,6 @@ class DataPaths:
         data_path: str | None = None,
         user_id: str | None = None,
         team_id: str | None = None,
-        workspace_id: str | None = None,
         ea_root: str | None = None,
     ):
         settings = get_settings()
@@ -74,7 +73,6 @@ class DataPaths:
         self.base = Path(data_path or settings.data_path or "data")
         self.user_id = _validate_path_id(user_id or DEFAULT_USER_ID, "user_id")
         self.team_id = team_id
-        self.workspace_id = _validate_path_id(workspace_id or "personal", "workspace_id")
         self.base.mkdir(parents=True, exist_ok=True)
 
         if ea_root:
@@ -181,8 +179,13 @@ class DataPaths:
     def user_mcp_config(self) -> Path:
         return self.root / ".mcp.json"
 
+    def user_files_dir(self) -> Path:
+        p = self.root / "Files"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
     def research_dir(self) -> Path:
-        p = self.root / "Research" / self.user_id / self.workspace_id
+        p = self.root / "Research" / self.user_id
         p.mkdir(parents=True, exist_ok=True)
         return p
 
@@ -196,44 +199,6 @@ class DataPaths:
 
     def companion_memory_db(self) -> Path:
         return self.companion_dir() / "memory.db"
-
-    # -- Workspace-scoped methods (all under root/Workspaces/{workspace_id}/) --
-
-    def workspace_skills_dir(self) -> Path:
-        p = self.root / "Workspaces" / self.workspace_id / "Skills"
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-
-    def workspace_subagents_dir(self) -> Path:
-        p = self.root / "Workspaces" / self.workspace_id / "Subagents"
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-
-    def workspace_tools_dir(self) -> Path:
-        p = self.root / "Workspaces" / self.workspace_id / "Tools"
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-
-    def workspace_files_dir(self) -> Path:
-        p = self.root / "Workspaces" / self.workspace_id / "Files"
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-
-    def workspace_memory_dir(self) -> Path:
-        p = self.root / "Workspaces" / self.workspace_id / "Memory"
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-
-    def workspace_conversation_path(self) -> Path:
-        return self.root / "Workspaces" / self.workspace_id / "conversation.app.db"
-
-    def workspace_cache(self) -> Path:
-        return self.root / "Workspaces" / self.workspace_id / ".file_cache.json"
-
-    def versions_dir(self) -> Path:
-        p = self.root / "Workspaces" / self.workspace_id / ".versions"
-        p.mkdir(parents=True, exist_ok=True)
-        return p
 
     # -- Convenience: DB file paths --
 
@@ -253,15 +218,6 @@ class DataPaths:
         return self.user_subagents_dir() / "work_queue.db"
 
     # -- Deprecated wrappers (redirect to new methods with warnings) --
-
-    def workspace_dir(self) -> Path:
-        """Deprecated: use workspace_files_dir() instead."""
-        warnings.warn(
-            "workspace_dir() is deprecated, use workspace_files_dir()",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.workspace_files_dir()
 
     def skills_dir(self) -> Path:
         warnings.warn(
@@ -461,13 +417,11 @@ _paths_cache: dict[tuple[str, str], DataPaths] = {}
 def get_paths(
     user_id: str | None = None,
     team_id: str | None = None,
-    workspace_id: str | None = None,
 ) -> DataPaths:
     """Get DataPaths instance (cached per user_id+team_id pair).
 
     In solo mode: user_id defaults to "default_user", team_id is None.
     In team mode: user_id comes from auth (JWT), team_id from config.
-    workspace_id is NOT part of the cache key — it changes per session.
     """
     uid = _validate_path_id(user_id or DEFAULT_USER_ID, "user_id")
     tid = team_id  # None for solo mode
@@ -476,7 +430,4 @@ def get_paths(
     if cache_key not in _paths_cache:
         _paths_cache[cache_key] = DataPaths(user_id=uid, team_id=tid)
 
-    dp = _paths_cache[cache_key]
-    if workspace_id and workspace_id != dp.workspace_id:
-        return DataPaths(user_id=uid, team_id=tid, workspace_id=workspace_id)
-    return dp
+    return _paths_cache[cache_key]
