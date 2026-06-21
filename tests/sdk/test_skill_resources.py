@@ -30,7 +30,6 @@ class TestSkillResourceEnumeration:
                 result = skills_load.invoke({
                     "name": "my-skill",
                     "user_id": "test_user",
-                    "workspace_id": "personal",
                 })
 
                 assert "Do the thing." in result

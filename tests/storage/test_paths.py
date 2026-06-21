@@ -7,40 +7,10 @@ import pytest
 from src.storage.paths import DataPaths
 
 
-def test_workspace_dir_rejects_traversal_workspace_id(monkeypatch, tmp_path):
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-
-    with pytest.raises(ValueError, match="Invalid workspace_id"):
-        DataPaths(workspace_id="../../escaped")
-
-    assert not (tmp_path / "escaped").exists()
-
-
 @pytest.mark.parametrize("user_id", ["alice/../bob", "alice:bob"])
 def test_user_id_rejects_aliasing_and_separators(tmp_path, user_id):
     with pytest.raises(ValueError, match="Invalid user_id"):
         DataPaths(data_path=str(tmp_path / "data"), user_id=user_id)
-
-
-@pytest.mark.parametrize("workspace_id", ["sales/../support", "sales:support"])
-def test_workspace_id_rejects_aliasing_and_separators(tmp_path, monkeypatch, workspace_id):
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-
-    with pytest.raises(ValueError, match="Invalid workspace_id"):
-        DataPaths(workspace_id=workspace_id)
-
-
-def test_workspace_dir_accepts_normal_workspace_ids(monkeypatch, tmp_path):
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-
-    for workspace_id in ("personal", "project-x"):
-        paths = DataPaths(workspace_id=workspace_id)
-
-        workspace_dir = paths.workspace_skills_dir().parent
-
-
-        assert workspace_dir == tmp_path / "Executive Assistant" / "Workspaces" / workspace_id
-        assert workspace_dir.exists()
 
 
 def test_user_dir_rejects_traversal_user_id(tmp_path):

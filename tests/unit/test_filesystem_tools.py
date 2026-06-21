@@ -12,13 +12,13 @@ def user_workspace(tmp_path, monkeypatch):
     """Create a temporary user workspace with mocked get_paths."""
     from src.storage.paths import DataPaths
 
-    def mock_get_paths(user_id="default_user", workspace_id="personal"):
-        return DataPaths(ea_root=str(tmp_path), user_id=user_id, workspace_id=workspace_id)
+    def mock_get_paths(user_id="default_user"):
+        return DataPaths(ea_root=str(tmp_path), user_id=user_id)
 
     monkeypatch.setattr("src.sdk.tools_core.filesystem.get_paths", mock_get_paths)
     monkeypatch.setattr("src.sdk.tools_core.file_search.get_paths", mock_get_paths)
 
-    workspace = DataPaths(ea_root=str(tmp_path), user_id=TEST_USER_ID).workspace_files_dir()
+    workspace = DataPaths(ea_root=str(tmp_path), user_id=TEST_USER_ID).user_files_dir()
     yield workspace
 
 
