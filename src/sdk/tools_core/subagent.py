@@ -523,7 +523,6 @@ def subagent_instruct(
     task_id: str,
     message: str,
     user_id: str,
-    workspace_id: str = "personal",
 ) -> str:
     """Send a course-correction instruction to a running subagent.
 
@@ -533,7 +532,6 @@ def subagent_instruct(
         task_id: The task ID to instruct
         message: The instruction message to inject
         user_id: The user ID (required)
-        workspace_id: Workspace ID (defaults to current workspace)
 
     Returns:
         Confirmation message
@@ -564,7 +562,7 @@ subagent_instruct.annotations = ToolAnnotations(title="Instruct Subagent")
 
 
 @tool
-def subagent_cancel(task_id: str, user_id: str, workspace_id: str = "personal") -> str:
+def subagent_cancel(task_id: str, user_id: str) -> str:
     """Cancel a running or pending subagent task.
 
     Sets cancel_requested flag. The subagent's InstructionMiddleware will
@@ -573,7 +571,6 @@ def subagent_cancel(task_id: str, user_id: str, workspace_id: str = "personal") 
     Args:
         task_id: The task ID to cancel
         user_id: The user ID (required)
-        workspace_id: Workspace ID (defaults to current workspace)
 
     Returns:
         Cancellation confirmation
@@ -594,13 +591,12 @@ subagent_cancel.annotations = ToolAnnotations(title="Cancel Subagent", destructi
 
 
 @tool
-def subagent_delete(name: str, user_id: str, workspace_id: str = "personal") -> str:
+def subagent_delete(name: str, user_id: str) -> str:
     """Delete a subagent definition and cancel any running tasks.
 
     Args:
         name: Subagent name to delete
         user_id: The user ID (required)
-        workspace_id: Workspace ID (defaults to current workspace)
 
     Returns:
         Deletion confirmation

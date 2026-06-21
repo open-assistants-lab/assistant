@@ -58,11 +58,10 @@ async def create_workspace(req: CreateWorkspaceRequest) -> dict[str, Any]:
         ws.model_override = req.model_override
 
     from src.storage.paths import DataPaths
-    dp = DataPaths(workspace_id=ws.id)
-    dp.workspace_files_dir()
-    dp.workspace_memory_dir()
-    dp.workspace_subagents_dir()
-    dp.workspace_skills_dir()
+    dp = DataPaths(user_id="system")
+    dp.user_files_dir()
+    dp.user_skills_dir()
+    dp.user_subagents_dir()
 
     save_workspace(ws)
     return {"id": ws.id, "name": ws.name, "model_override": ws.model_override}
@@ -93,10 +92,5 @@ async def delete_workspace_endpoint(workspace_id: str, user_id: str = "default_u
     if ws is None or ws.id == "personal":
         return {"error": "Cannot delete"}, 400
 
-    from src.storage.messages import clear_message_store, get_message_store
-    store = get_message_store(user_id, workspace_id)
-    _ = store.delete_messages_for_workspace(ws.id)
-    clear_message_store(user_id, workspace_id)
-
     _delete_ws(ws.id)
-    return {"status": "deleted", "messages_deleted": 0}
+    return {"status": "deleted"}

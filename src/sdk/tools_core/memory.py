@@ -6,15 +6,14 @@ from typing import Any
 from src.sdk.tools import ToolAnnotations, tool
 
 
-def _get_core(user_id: str, workspace_id: str) -> Any:
+def _get_core(user_id: str) -> Any:
     from src.storage.messages import get_message_store
-    return get_message_store(user_id, workspace_id).core
+    return get_message_store(user_id).core
 
 
 @tool
 def memory_profile(
     user_id: str = "default_user",
-    workspace_id: str = "personal",
 ) -> str:
     """Return observations about the user — may be empty if Observer hasn't run.
 
@@ -27,11 +26,10 @@ def memory_profile(
 
     Args:
         user_id: User identifier
-        workspace_id: Workspace ID (defaults to current workspace)
     """
-    core = _get_core(user_id, workspace_id)
+    core = _get_core(user_id)
     cutoff = (datetime.now(UTC) - timedelta(days=7)).isoformat()
-    results = core.get_observations(ts_after=cutoff, limit=50, session_id=workspace_id)
+    results = core.get_observations(ts_after=cutoff, limit=50, session_id=user_id)
 
     if not results:
         return "No observations available. Try message_search to find specific facts from conversation history."
@@ -57,7 +55,6 @@ def memory_reflection(
     method: str = "hybrid",
     limit: int = 5,
     user_id: str = "default_user",
-    workspace_id: str = "personal",
 ) -> str:
     """Search synthesized reflections — patterns and insights about the user.
 
@@ -73,9 +70,8 @@ def memory_reflection(
         method: Search method (fts, semantic, or hybrid) — default: hybrid
         limit: Maximum results (default: 5)
         user_id: User identifier
-        workspace_id: Workspace ID (defaults to current workspace)
     """
-    core = _get_core(user_id, workspace_id)
+    core = _get_core(user_id)
     results = core.reflections(query=query, limit=limit)
 
     if not results:

@@ -17,8 +17,8 @@ _coremem_cache: dict[str, Any] = {}
 
 # ── message core factory ──────────────────────────────────────────────────────
 
-def _get_message_core(user_id: str, workspace_id: str = "personal") -> Any:
-    """Get or create a cached MemoryCore instance for the given user/workspace.
+def _get_message_core(user_id: str) -> Any:
+    """Get or create a cached MemoryCore instance for the given user.
 
     Uses the SAME HybridDB path as MessageStore so messages imported
     via /conversation/import are immediately searchable.
@@ -59,22 +59,6 @@ def _try_create_llm_provider() -> Any | None:
         return create_model_from_config(model_str)
     except Exception:
         return None
-
-
-def _list_workspace_ids(user_id: str) -> list[str]:
-    """List workspace IDs that have conversation data for a user."""
-    from src.storage.paths import DataPaths
-
-    workspace_ids: list[str] = []
-    ws_base = DataPaths().root / "Workspaces"
-    if not ws_base.exists():
-        return workspace_ids
-    for entry in sorted(ws_base.iterdir()):
-        if entry.is_dir():
-            conv_path = entry / "conversation.app.db"
-            if conv_path.exists():
-                workspace_ids.append(entry.name)
-    return workspace_ids
 
 
 def _fetch_session_ids(conversation: Any, msg_ids: list[str]) -> dict[str, str]:
@@ -152,7 +136,6 @@ def message_history(
     days: int = 7,
     date_str: str | None = None,
     user_id: str = "default_user",
-    workspace_id: str = "personal",
 ) -> str:
     """Get conversation history for progressive disclosure.
 
@@ -163,12 +146,11 @@ def message_history(
         days: Number of days to look back (default: 7)
         date_str: Specific date in YYYY-MM-DD format (optional)
         user_id: User identifier
-        workspace_id: Workspace ID (defaults to current workspace)
 
     Returns:
         Formatted conversation history
     """
-    conversation = get_message_store(user_id, workspace_id)
+    conversation = get_message_store(user_id)
 
     if date_str:
         try:
@@ -179,11 +161,10 @@ def message_history(
             )
             if not messages:
                 if conversation.count_messages() == 0:
-                    return (
-                        "No persisted messages found. Conversation history has not been persisted "
-                        f"for workspace '{workspace_id}'."
-                    )
-                return f"No messages found for {date_str}"
+            return (
+                "No persisted messages found. Conversation history has not been persisted."
+            )
+        return f"No messages found for {date_str}"
 
             result = f"Conversation on {date_str}:\n"
             for msg in messages:
@@ -198,10 +179,9 @@ def message_history(
 
     if not messages:
         if conversation.count_messages() == 0:
-            return (
-                "No persisted messages found. Conversation history has not been persisted "
-                f"for workspace '{workspace_id}'."
-            )
+        return (
+            "No persisted messages found. Conversation history has not been persisted."
+        )
         return f"No messages in the last {days} days."
 
     result = f"Recent conversation (last {days} days):\n\n"

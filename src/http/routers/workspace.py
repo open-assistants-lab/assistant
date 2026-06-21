@@ -13,14 +13,14 @@ router = APIRouter(tags=["workspace"])
 
 
 @router.get("/workspace/json")
-async def list_workspace_json(user_id: str = "default_user", workspace_id: str = "personal") -> dict[str, Any]:
+async def list_workspace_json(user_id: str = "default_user") -> dict[str, Any]:
     """List files in workspace as structured JSON."""
     from src.storage.paths import DataPaths
-    paths = DataPaths(user_id=user_id, workspace_id=workspace_id)
-    workspace_dir = paths.workspace_files_dir()
+    paths = DataPaths(user_id=user_id)
+    files_dir = paths.user_files_dir()
     items = []
-    if workspace_dir.exists():
-        for item in sorted(workspace_dir.iterdir()):
+    if files_dir.exists():
+        for item in sorted(files_dir.iterdir()):
             is_dir = item.is_dir()
             stat = item.stat()
             items.append({
@@ -29,20 +29,20 @@ async def list_workspace_json(user_id: str = "default_user", workspace_id: str =
                 "size": stat.st_size if not is_dir else 0,
                 "modified": stat.st_mtime,
             })
-    return {"files": items, "path": str(workspace_dir)}
+    return {"files": items, "path": str(files_dir)}
 
 
 @router.get("/workspace/read/{path:path}")
-async def read_workspace_file(path: str, user_id: str = "default_user", workspace_id: str = "personal") -> dict[str, Any]:
+async def read_workspace_file(path: str, user_id: str = "default_user") -> dict[str, Any]:
     from src.http.workspace_cache import get_file_cache
     from src.sdk.tools_core.filesystem import files_read
 
-    result = await files_read.ainvoke({"path": path, "user_id": user_id, "workspace_id": workspace_id})
+    result = await files_read.ainvoke({"path": path, "user_id": user_id})
 
-    file_cache = get_file_cache(user_id, workspace_id)
-    workspace_root = get_paths(user_id, workspace_id=workspace_id).workspace_files_dir()
-    workspace_path = workspace_root / path
-    server_modified = str(workspace_path.stat().st_mtime) if workspace_path.exists() else ""
+    file_cache = get_file_cache(user_id)
+    files_root = get_paths(user_id).user_files_dir()
+    file_path = files_root / path
+    server_modified = str(file_path.stat().st_mtime) if file_path.exists() else ""
 
     file_cache.update_sync(path, server_modified)
 
@@ -50,11 +50,11 @@ async def read_workspace_file(path: str, user_id: str = "default_user", workspac
 
 
 @router.get("/workspace/{path:path}")
-async def list_workspace_files(path: str = "", user_id: str = "default_user", workspace_id: str = "personal") -> dict[str, Any]:
+async def list_workspace_files(path: str = "", user_id: str = "default_user") -> dict[str, Any]:
     """List files in workspace."""
     from src.sdk.tools_core.filesystem import files_list
 
-    result = await files_list.ainvoke({"path": path, "user_id": user_id, "workspace_id": workspace_id})
+    result = await files_list.ainvoke({"path": path, "user_id": user_id})
     return {"response": str(result)}
 
 
@@ -62,7 +62,6 @@ async def list_workspace_files(path: str = "", user_id: str = "default_user", wo
 async def write_workspace_file(
     path: str,
     user_id: str = "default_user",
-    workspace_id: str = "personal",
     request: dict[str, Any] | None = Body(default=None),
 ) -> dict[str, Any]:
     """Write file to workspace."""
@@ -74,68 +73,68 @@ async def write_workspace_file(
     from src.sdk.tools_core.filesystem import files_write
 
     result = await files_write.ainvoke(
-        {"path": path, "content": content, "user_id": user_id, "workspace_id": workspace_id}
+        {"path": path, "content": content, "user_id": user_id}
     )
     return {"response": str(result)}
 
 
 @router.delete("/workspace/{path:path}")
-async def delete_workspace_file(path: str, user_id: str = "default_user", workspace_id: str = "personal") -> dict[str, Any]:
+async def delete_workspace_file(path: str, user_id: str = "default_user") -> dict[str, Any]:
     """Delete file from workspace."""
     from src.sdk.tools_core.filesystem import files_delete
 
-    result = await files_delete.ainvoke({"path": path, "user_id": user_id, "workspace_id": workspace_id})
+    result = await files_delete.ainvoke({"path": path, "user_id": user_id})
     return {"response": str(result)}
 
 
 @router.get("/sync/status")
-async def get_sync_status(user_id: str = "default_user", workspace_id: str = "personal") -> dict[str, Any]:
+async def get_sync_status(user_id: str = "default_user") -> dict[str, Any]:
     from src.http.workspace_cache import get_file_cache
 
-    cache = get_file_cache(user_id, workspace_id)
+    cache = get_file_cache(user_id)
     return {"status": cache.get_all()}
 
 
 @router.post("/sync/pin/{path:path}")
-async def pin_file(path: str, user_id: str = "default_user", workspace_id: str = "personal") -> dict[str, Any]:
+async def pin_file(path: str, user_id: str = "default_user") -> dict[str, Any]:
     from src.http.workspace_cache import get_file_cache
 
-    cache = get_file_cache(user_id, workspace_id)
+    cache = get_file_cache(user_id)
     cache.mark_pinned(path)
     return {"status": "pinned", "path": path}
 
 
 @router.delete("/sync/pin/{path:path}")
-async def unpin_file(path: str, user_id: str = "default_user", workspace_id: str = "personal") -> dict[str, Any]:
+async def unpin_file(path: str, user_id: str = "default_user") -> dict[str, Any]:
     from src.http.workspace_cache import get_file_cache
 
-    cache = get_file_cache(user_id, workspace_id)
+    cache = get_file_cache(user_id)
     cache.mark_cloud_only(path)
     return {"status": "cloud_only", "path": path}
 
 
 @router.post("/sync/download/{path:path}")
-async def mark_downloaded(path: str, user_id: str = "default_user", workspace_id: str = "personal") -> dict[str, Any]:
+async def mark_downloaded(path: str, user_id: str = "default_user") -> dict[str, Any]:
     from src.http.workspace_cache import get_file_cache
 
-    cache = get_file_cache(user_id, workspace_id)
+    cache = get_file_cache(user_id)
     cache.mark_downloaded(path)
     return {"status": "downloaded", "path": path}
 
 
 @router.get("/sync/stream")
-async def sync_stream(user_id: str = "default_user", workspace_id: str = "personal") -> StreamingResponse:
+async def sync_stream(user_id: str = "default_user") -> StreamingResponse:
     """SSE stream for real-time file change notifications."""
 
     async def event_generator() -> AsyncGenerator[str, None]:
-        paths = get_paths(user_id, workspace_id=workspace_id)
-        workspace_path = paths.workspace_files_dir()
+        paths = get_paths(user_id)
+        files_path = paths.user_files_dir()
 
         skills_path = get_paths(user_id).user_skills_dir()
         subagents_path = get_paths(user_id).subagents_dir()
 
         last_state: dict[str, Any] = {
-            "workspace": {},
+            "files": {},
             "skills": {},
             "subagents": {},
         }
@@ -143,17 +142,17 @@ async def sync_stream(user_id: str = "default_user", workspace_id: str = "person
         while True:
             try:
                 current_state: dict[str, Any] = {
-                    "workspace": {},
+                    "files": {},
                     "skills": {},
                     "subagents": {},
                 }
 
-                if workspace_path.exists():
-                    for f in workspace_path.rglob("*"):
+                if files_path.exists():
+                    for f in files_path.rglob("*"):
                         if f.is_file():
-                            rel_path = str(f.relative_to(workspace_path))
+                            rel_path = str(f.relative_to(files_path))
                             mtime = str(f.stat().st_mtime)
-                            current_state["workspace"][rel_path] = mtime
+                            current_state["files"][rel_path] = mtime
 
                 if skills_path.exists():
                     for f in skills_path.glob("*/SKILL.md"):
@@ -165,7 +164,7 @@ async def sync_stream(user_id: str = "default_user", workspace_id: str = "person
                         agent_name = f.parent.name
                         current_state["subagents"][agent_name] = str(f.stat().st_mtime)
 
-                for category in ["workspace", "skills", "subagents"]:
+                for category in ["files", "skills", "subagents"]:
                     new_items = set(current_state[category].keys()) - set(
                         last_state[category].keys()
                     )
