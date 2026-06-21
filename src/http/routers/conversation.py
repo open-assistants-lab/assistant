@@ -112,7 +112,7 @@ def _strip_canvas_fences(text: str) -> str:
     return text.strip()
 
 
-def _persist_tool_messages(conversation: Any, tool_events: list[dict[str, Any]], workspace_id: str) -> None:
+def _persist_tool_messages(conversation: Any, tool_events: list[dict[str, Any]]) -> None:
     for event in tool_events:
         output = event.get("output")
         if event.get("stage") != "end" or not output:
@@ -123,16 +123,15 @@ def _persist_tool_messages(conversation: Any, tool_events: list[dict[str, Any]],
             metadata={
                 "tool_name": event.get("tool") or event.get("tool_name") or "unknown",
                 "tool_call_id": event.get("call_id") or event.get("tool_call_id") or "",
-                "workspace_id": workspace_id,
             },
         )
 
 
 @router.get("/conversation")
-async def get_conversation(user_id: str = "default_user", limit: int = 100, workspace_id: str = "personal") -> dict[str, Any]:
-    """Get conversation history filtered by workspace."""
-    conversation = get_message_store(user_id, workspace_id)
-    messages = conversation.get_recent_messages_for_workspace(workspace_id, limit)
+async def get_conversation(user_id: str = "default_user", limit: int = 100) -> dict[str, Any]:
+    """Get conversation history."""
+    conversation = get_message_store(user_id)
+    messages = conversation.get_messages_by_session_id("default", limit)
 
     return {
         "messages": [
@@ -147,27 +146,12 @@ async def get_conversation(user_id: str = "default_user", limit: int = 100, work
     }
 
 
-def _filter_by_workspace(messages: list[Any], workspace_id: str) -> list[Any]:
-    """Filter messages to only those matching the given workspace_id."""
-    if not workspace_id:
-        return messages
-    if workspace_id == "personal":
-        return [
-            m for m in messages
-            if (m.metadata or {}).get("workspace_id", "personal") == "personal"
-        ]
-    return [
-        m for m in messages
-        if (m.metadata or {}).get("workspace_id", "personal") == workspace_id
-    ]
-
-
 @router.delete("/conversation")
-async def clear_conversation(user_id: str = "default_user", workspace_id: str = "personal") -> dict[str, Any]:
+async def clear_conversation(user_id: str = "default_user") -> dict[str, Any]:
     """Clear conversation history."""
-    conversation = get_message_store(user_id, workspace_id)
-    conversation.delete_messages_for_workspace(workspace_id)
-    return {"status": "cleared", "user_id": user_id, "workspace_id": workspace_id}
+    conversation = get_message_store(user_id)
+    conversation.clear()
+    return {"status": "cleared", "user_id": user_id}
 
 
 @router.post("/message", response_model=MessageResponse)
@@ -175,7 +159,6 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
     """Send a message to the agent (SDK-powered)."""
     try:
         user_id = req.user_id or "default_user"
-        workspace_id = getattr(req, "workspace_id", "personal") or "personal"
         msg_content = req.message.strip()
 
         if user_id in _pending_approvals and msg_content.lower() in ("approve", "reject", "edit"):
@@ -191,11 +174,10 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
 
             return MessageResponse(response=f"{tool_name} approved (execution pending).")
 
-        conversation = get_message_store(user_id, workspace_id)
-        conversation.add_message("user", req.message, metadata={"workspace_id": workspace_id})
+        conversation = get_message_store(user_id)
+        conversation.add_message("user", req.message, metadata={})
 
         recent_messages = conversation.get_messages_with_summary(50)
-        recent_messages = _filter_by_workspace(recent_messages, workspace_id)
         sdk_messages = _messages_from_conversation(recent_messages)
 
         logger = get_logger()
@@ -212,7 +194,6 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
                 async for chunk in run_sdk_agent_stream(
                     user_id=user_id,
                     messages=sdk_messages,
-                    workspace_id=workspace_id,
                     model=req.model,
                     provider_keys=req.provider_keys,
                 ):
@@ -267,10 +248,10 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
                 if not response:
                     response = "Task completed."
 
-                _persist_tool_messages(conversation, tool_events, workspace_id)
+                _persist_tool_messages(conversation, tool_events)
             else:
                 result_messages = await run_sdk_agent(
-                    user_id=user_id, messages=sdk_messages, workspace_id=workspace_id,
+                    user_id=user_id, messages=sdk_messages,
                     model=req.model, provider_keys=req.provider_keys,
                 )
 
@@ -282,7 +263,7 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
                         conversation.add_message(
                             "tool",
                             content,
-                            metadata={"tool_name": m.name or "unknown", "workspace_id": workspace_id},
+                            metadata={"tool_name": m.name or "unknown"},
                         )
 
                 response = ""
@@ -326,7 +307,7 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
                     seen_call_ids.add(call_id)
                     tool_calls_list.append({"name": tool_name, "tool_call_id": call_id})
 
-        assistant_metadata: dict[str, Any] = {"workspace_id": workspace_id}
+        assistant_metadata: dict[str, Any] = {}
         if verbose_data and verbose_data.get("tool_events"):
             assistant_metadata["tool_events"] = verbose_data["tool_events"]
         conversation.add_message("assistant", response, metadata=assistant_metadata)
@@ -360,13 +341,11 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
     """Send a message and stream response using SSE (SDK-powered)."""
     try:
         user_id = req.user_id or "default_user"
-        workspace_id = getattr(req, "workspace_id", "personal") or "personal"
 
-        conversation = get_message_store(user_id, workspace_id)
-        conversation.add_message("user", req.message, metadata={"workspace_id": workspace_id})
+        conversation = get_message_store(user_id)
+        conversation.add_message("user", req.message, metadata={})
 
         recent_messages = conversation.get_messages_with_summary(50)
-        recent_messages = _filter_by_workspace(recent_messages, workspace_id)
         sdk_messages = _messages_from_conversation(recent_messages)
 
         logger = get_logger()
@@ -379,7 +358,6 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
             async for chunk in run_sdk_agent_stream(
                 user_id=user_id,
                 messages=sdk_messages,
-                workspace_id=workspace_id,
                 model=req.model,
                 provider_keys=req.provider_keys,
             ):
@@ -428,10 +406,9 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
             }
             for tm in tool_metadata_list:
                 output = result_by_call_id.get(tm.get("tool_call_id", ""), "")
-                tm["workspace_id"] = workspace_id
                 conversation.add_message("tool", output, metadata=tm)
 
-            conversation.add_message("assistant", response, metadata={"stream": True, "workspace_id": workspace_id})
+            conversation.add_message("assistant", response, metadata={"stream": True})
             logger.info(
                 "agent.response", {"response": response[:80]}, user_id=user_id, channel="http"
             )
@@ -444,7 +421,6 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
 
 class ConversationImportRequest(BaseModel):
     user_id: str = "default_user"
-    workspace_id: str = "personal"
     messages: list[dict[str, Any]]  # [{"role": "user", "content": "..."}, ...]
 
 
@@ -458,7 +434,7 @@ async def import_conversation(req: ConversationImportRequest, _: None = Depends(
     """
     from src.storage.messages import get_message_store
 
-    conversation = get_message_store(req.user_id, req.workspace_id)
+    conversation = get_message_store(req.user_id)
     for msg in req.messages:
         role = msg.get("role", "user")
         content = msg.get("content", "")

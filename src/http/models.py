@@ -10,7 +10,6 @@ class MessageRequest(BaseModel):
     model: str | None = None
     user_id: str | None = None
     verbose: bool = False
-    workspace_id: str = "personal"
     provider_keys: dict[str, str] | None = None
 
 
