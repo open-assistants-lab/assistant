@@ -1,8 +1,7 @@
 """Skill registry — unified storage for all skills.
 
 Bundled seed skills (src/skills_seed/) are seeded to the user's skills directory on first
-run. After seeding, all skills live in user or workspace directories. Workspace skills
-override user skills by name.
+run. After seeding, all skills live in the user's skills directory.
 """
 
 import threading
@@ -11,25 +10,24 @@ from pathlib import Path
 from src.skills.models import Skill, _is_valid_skill_name
 from src.skills.storage import SkillStorage
 
-_registries: dict[tuple[str, str], "SkillRegistry"] = {}
+_registries: dict[tuple[str], "SkillRegistry"] = {}
 _lock = threading.Lock()
 
 
 def get_skill_registry(
-    user_id: str = "default_user", workspace_id: str = "personal"
+    user_id: str = "default_user",
 ) -> "SkillRegistry":
-    """Get or create a cached SkillRegistry for a user+workspace pair.
+    """Get or create a cached SkillRegistry for a user.
 
     All code should use this factory instead of constructing SkillRegistry
-    directly, to ensure a single cached instance per (user_id, workspace_id).
+    directly, to ensure a single cached instance per user_id.
     """
     uid = user_id or "default_user"
-    wid = workspace_id or "personal"
-    cache_key = (uid, wid)
+    cache_key = (uid,)
     with _lock:
         if cache_key not in _registries:
             _registries[cache_key] = SkillRegistry(
-                user_id=uid, workspace_id=wid
+                user_id=uid
             )
         return _registries[cache_key]
 
@@ -41,9 +39,8 @@ def reset_skill_registries() -> None:
 
 
 class SkillRegistry:
-    """Registry for skills across user and workspace scopes.
+    """Registry for skills.
 
-    Workspace skills override user skills by name.
     On first run, bundled seed skills are seeded from src/skills_seed/ to
     the user's skills directory.
     """
@@ -51,24 +48,14 @@ class SkillRegistry:
     def __init__(
         self,
         skills_dir: str | Path | None = None,
-        workspace_skills_dir: str | Path | None = None,
         user_id: str | None = None,
-        workspace_id: str = "personal",
     ):
         from src.storage.paths import DataPaths
 
-        paths = DataPaths(user_id=user_id, workspace_id=workspace_id)
-        self.workspace_id = workspace_id
+        paths = DataPaths(user_id=user_id)
 
         self.skills_dir = Path(skills_dir) if skills_dir else paths.user_skills_dir()
         self.storage = SkillStorage(self.skills_dir)
-
-        if workspace_skills_dir:
-            self.workspace_skills_dir = Path(workspace_skills_dir)
-        else:
-            self.workspace_skills_dir = paths.workspace_skills_dir()
-
-        self.ws_storage = SkillStorage(self.workspace_skills_dir)
         self._loaded_skills: dict[str, int] = {}
         self._seeded = False
 
@@ -119,52 +106,16 @@ class SkillRegistry:
         return self._loaded_skills.get(skill_name, 0)
 
     def get_all_skills(self) -> list[Skill]:
-        """Get all available skills, merged (workspace overrides user by name)."""
+        """Get all available skills."""
         self._seed_system_skills()
-        user_skills = {s["name"]: s for s in self.storage.load_skills()}
-
-        for s in user_skills.values():
-            if "metadata" not in s:
-                s["metadata"] = {}
-            s["metadata"]["scope"] = "user"
-            s["metadata"]["workspace_id"] = ""
-
-        ws_skills_raw = self.ws_storage.load_skills()
-        ws_skills = {}
-        for s in ws_skills_raw:
-            if "metadata" not in s:
-                s["metadata"] = {}
-            s["metadata"]["scope"] = "workspace"
-            s["metadata"]["workspace_id"] = self.workspace_id
-            ws_skills[s["name"]] = s
-
-        merged = {**user_skills, **ws_skills}
-        return list(merged.values())
+        return self.storage.load_skills()
 
     def get_skill(self, skill_name: str) -> Skill | None:
-        """Get a specific skill by name (workspace overrides user)."""
+        """Get a specific skill by name."""
         if not _is_valid_skill_name(skill_name):
             return None
-
         self._seed_system_skills()
-
-        ws_skill = self.ws_storage.load_skill(skill_name)
-        if ws_skill:
-            if "metadata" not in ws_skill:
-                ws_skill["metadata"] = {}
-            ws_skill["metadata"]["scope"] = "workspace"
-            ws_skill["metadata"]["workspace_id"] = self.workspace_id
-            return ws_skill
-
-        user_skill = self.storage.load_skill(skill_name)
-        if user_skill:
-            if "metadata" not in user_skill:
-                user_skill["metadata"] = {}
-            user_skill["metadata"]["scope"] = "user"
-            user_skill["metadata"]["workspace_id"] = ""
-            return user_skill
-
-        return None
+        return self.storage.load_skill(skill_name)
 
     def list_skills(self) -> list[str]:
         """List all available skill names."""

@@ -27,7 +27,6 @@ DENIED_SKILL_MANAGEMENT_TOOLS: set[str] = {"skill_delete", "skill_update"}
 def validate_agent_profile(
     profile: AgentProfile,
     user_id: str = "default",
-    workspace_id: str = "personal",
 ) -> list[str]:
     """Validate an AgentProfile for subagent use. Returns list of error strings (empty = valid)."""
     from src.sdk.native_tools import get_native_tools
@@ -48,7 +47,7 @@ def validate_agent_profile(
     try:
         from src.skills.registry import get_skill_registry
 
-        skill_registry = get_skill_registry(user_id=user_id, workspace_id=workspace_id)
+        skill_registry = get_skill_registry(user_id=user_id)
         for skill_name in profile.skills:
             if skill_registry.get_skill(skill_name) is None:
                 errors.append(f"Unknown skill: {skill_name}")

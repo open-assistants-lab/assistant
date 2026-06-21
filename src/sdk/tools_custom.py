@@ -163,32 +163,23 @@ def scan_tools_dir(tools_dir: Path) -> list[ToolDefinition]:
     return results
 
 
-def get_custom_tools(user_id: str = "default_user", workspace_id: str = "personal") -> list[ToolDefinition]:
-    """Load custom tools from user and workspace dirs. Workspace overrides user by name."""
+def get_custom_tools(user_id: str = "default_user") -> list[ToolDefinition]:
+    """Load custom tools from user tools dir."""
     from src.storage.paths import get_paths
 
-    paths = get_paths(user_id=user_id, workspace_id=workspace_id)
-
-    user_tools = scan_tools_dir(paths.user_tools_dir())
-    workspace_tools = scan_tools_dir(paths.workspace_tools_dir())
-
-    merged = {t.name: t for t in user_tools}
-    for t in workspace_tools:
-        merged[t.name] = t
-
-    return list(merged.values())
+    paths = get_paths(user_id=user_id)
+    return scan_tools_dir(paths.user_tools_dir())
 
 
 def is_core_tool(name: str) -> bool:
     return name in CORE_TOOL_NAMES
 
 
-def find_tool_file(name: str, user_dir: Path, workspace_dir: Path | None) -> Path | None:
-    for d in [workspace_dir, user_dir]:
-        if d and d.exists():
-            candidate = d / name / "TOOL.md"
-            if candidate.exists():
-                return candidate
+def find_tool_file(name: str, user_dir: Path) -> Path | None:
+    if user_dir.exists():
+        candidate = user_dir / name / "TOOL.md"
+        if candidate.exists():
+            return candidate
     return None
 
 
