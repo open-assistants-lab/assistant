@@ -80,10 +80,10 @@ class MCPManager:
                     logger.info(
                         "mcp.idle_timeout",
                         {
-                            "user_id": self.user_id,
                             "idle_seconds": int(idle_time),
                             "timeout": timeout,
                         },
+                        user_id=self.user_id,
                     )
                     await self._stop_all()
 
@@ -98,7 +98,7 @@ class MCPManager:
 
         config = load_mcp_config(self.user_id)
         if not config:
-            logger.info("mcp.no_config", {"user_id": self.user_id})
+            logger.info("mcp.no_config", {}, user_id=self.user_id)
             return
 
         self._config_mtime = get_config_mtime(self.user_id)
@@ -232,7 +232,7 @@ class MCPManager:
 
     async def _restart_all(self) -> None:
         """Stop all servers and restart from config."""
-        logger.info("mcp.reloading", {"user_id": self.user_id})
+        logger.info("mcp.reloading", {}, user_id=self.user_id)
         await self._stop_all()
 
         config = load_mcp_config(self.user_id)

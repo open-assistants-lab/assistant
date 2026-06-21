@@ -9,6 +9,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from src.app_logging import get_logger
+
+logger = get_logger()
+
 
 def _get_db(user_id: str) -> Any:
     """Get or create a HybridDB instance for the user's email store."""
@@ -39,7 +43,7 @@ def _get_db(user_id: str) -> Any:
             },
         )
     except Exception:
-        pass
+        logger.warning("email_db.create_table_error", {"user_id": user_id})
 
     return db
 
@@ -70,7 +74,7 @@ def store_emails(user_id: str, emails: list[dict[str, Any]], account: str = "def
             db.insert("emails", row)
             count += 1
         except Exception:
-            pass
+            logger.warning("email_db.insert_error", {"user_id": user_id, "email_id": eid})
     return count
 
 
@@ -151,7 +155,7 @@ def mark_read(user_id: str, email_id: str) -> None:
     try:
         db.update("emails", email_id, {"is_read": 1})
     except Exception:
-        pass
+        logger.warning("email_db.mark_read_error", {"user_id": user_id, "email_id": email_id})
 
 
 def count_emails(user_id: str, is_read: bool | None = None) -> int:
@@ -176,7 +180,7 @@ def clear_emails(user_id: str) -> None:
     try:
         db.raw_query("DELETE FROM emails")
     except Exception:
-        pass
+        logger.warning("email_db.clear_error", {"user_id": user_id})
 
 
 def _row_to_email(row: dict[str, Any]) -> dict[str, Any]:

@@ -85,6 +85,10 @@ class OllamaCloud(LLMProvider):
         msg = data.get("message", {})
         content = msg.get("content", "")
         reasoning = msg.get("thinking", None)
+        # Reasoning models (deepseek, etc.) may return content in thinking
+        # with empty content. Use thinking as content fallback.
+        if not content and reasoning:
+            content = reasoning
         tool_calls = msg.get("tool_calls", [])
         parsed_tcs = []
         for tc in tool_calls:

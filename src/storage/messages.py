@@ -3,7 +3,6 @@
 Thin adapter over MemoryCore, preserving the
 Message/SearchResult dataclasses and public API for callers.
 """
-
 import asyncio
 import json
 import sqlite3
@@ -16,7 +15,10 @@ from coremem.core import MemoryCore
 from coremem.types import Memory as _CoreMem
 from coremem.types import SearchResult as _CoreMemResult
 
+from src.app_logging import get_logger
 from src.storage.paths import get_paths
+
+logger = get_logger()
 
 
 @dataclass
@@ -81,7 +83,7 @@ class MessageStore:
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role)")
         except Exception:
-            pass
+            logger.warning("messages.index_creation_error")
 
         try:
             self._core.db.register_duckdb_table("messages")
@@ -232,7 +234,7 @@ class MessageStore:
             new_conn.close()
             old_conn.close()
         except Exception:
-            pass  # Migration failed — non-fatal, old DB still exists
+            logger.warning("messages.migration_error")  # non-fatal, old DB still exists
 
         sentinel.touch()
 
@@ -384,11 +386,11 @@ class MessageStore:
                         ids=ids,
                     )
             except Exception:
-                pass
+                logger.warning("messages.chroma_delete_error", {"workspace_id": workspace_id})
         try:
             self._core.db.sync_duckdb_table("messages")
         except Exception:
-            pass
+            logger.warning("messages.duckdb_sync_error", {"workspace_id": workspace_id})
         return cast(int, count)
 
     def clear(self) -> None:

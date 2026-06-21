@@ -111,14 +111,14 @@ Respond with valid JSON only, no other text."""
                 saved_todos.append(result)
 
         logger.info(
-            "todos_extracted", {"user_id": user_id, "email_id": email_id, "count": len(saved_todos)}
+            "todos_extracted", {"email_id": email_id, "count": len(saved_todos)}, user_id=user_id
         )
 
         return saved_todos
 
     except Exception as e:
         logger.error(
-            "todo_extraction_error", {"user_id": user_id, "email_id": email_id, "error": str(e)}
+            "todo_extraction_error", {"email_id": email_id, "error": str(e)}, user_id=user_id
         )
         return []
 

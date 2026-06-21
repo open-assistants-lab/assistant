@@ -25,7 +25,7 @@ class FakeConversation:
     def add_message(self, role: str, content: str, metadata: dict | None = None) -> None:
         self.messages.append(StoredMessage(role, content, metadata))
 
-    def get_messages_with_summary(self, limit: int) -> list[StoredMessage]:
+    def get_messages_with_summary(self, limit: int = 50, workspace_id: str | None = None) -> list[StoredMessage]:
         return self.messages[-limit:]
 
 

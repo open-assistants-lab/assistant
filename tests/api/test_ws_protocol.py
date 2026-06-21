@@ -380,7 +380,7 @@ class TestParseDirectives:
     def test_switch_tab(self):
         text, events = parse_directives("Here are your emails. [SWITCH_TAB:email]")
         assert "[SWITCH_TAB:email]" not in text
-        assert events == [{"type": "switch_tab", "tab": "email"}]
+        assert events == [{"type": "tab_update", "tab": "email"}]
 
     def test_switch_tab_lowercased(self):
         text, events = parse_directives("[SWITCH_TAB:Canvas]")
@@ -395,8 +395,8 @@ class TestParseDirectives:
     def test_multiple_switch_tab(self):
         text, events = parse_directives("[SWITCH_TAB:email][SWITCH_TAB:contacts]")
         assert len(events) == 2
-        assert events[0] == {"type": "switch_tab", "tab": "email"}
-        assert events[1] == {"type": "switch_tab", "tab": "contacts"}
+        assert events[0] == {"type": "tab_update", "tab": "email"}
+        assert events[1] == {"type": "tab_update", "tab": "contacts"}
 
     def test_widget_refresh_param(self):
         text, events = parse_directives("Done. [WIDGET_REFRESH:email]")
@@ -424,7 +424,7 @@ class TestParseDirectives:
             "[SWITCH_TAB:email][WIDGET_REFRESH:email]Check your mail[NEW_SESSION]"
         )
         assert len(events) == 3
-        assert events[0] == {"type": "switch_tab", "tab": "email"}
+        assert events[0] == {"type": "tab_update", "tab": "email"}
         assert events[1] == {"type": "widget_refresh", "tab": "email"}
         assert events[2] == {"type": "new_session"}
         assert "Check your mail" in text

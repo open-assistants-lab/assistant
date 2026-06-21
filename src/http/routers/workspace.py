@@ -37,7 +37,7 @@ async def read_workspace_file(path: str, user_id: str = "default_user", workspac
     from src.http.workspace_cache import get_file_cache
     from src.sdk.tools_core.filesystem import files_read
 
-    result = files_read.invoke({"path": path, "user_id": user_id, "workspace_id": workspace_id})
+    result = await files_read.ainvoke({"path": path, "user_id": user_id, "workspace_id": workspace_id})
 
     file_cache = get_file_cache(user_id, workspace_id)
     workspace_root = get_paths(user_id, workspace_id=workspace_id).workspace_files_dir()
@@ -54,7 +54,7 @@ async def list_workspace_files(path: str = "", user_id: str = "default_user", wo
     """List files in workspace."""
     from src.sdk.tools_core.filesystem import files_list
 
-    result = files_list.invoke({"path": path, "user_id": user_id, "workspace_id": workspace_id})
+    result = await files_list.ainvoke({"path": path, "user_id": user_id, "workspace_id": workspace_id})
     return {"response": str(result)}
 
 
@@ -73,7 +73,7 @@ async def write_workspace_file(
 
     from src.sdk.tools_core.filesystem import files_write
 
-    result = files_write.invoke(
+    result = await files_write.ainvoke(
         {"path": path, "content": content, "user_id": user_id, "workspace_id": workspace_id}
     )
     return {"response": str(result)}
@@ -84,7 +84,7 @@ async def delete_workspace_file(path: str, user_id: str = "default_user", worksp
     """Delete file from workspace."""
     from src.sdk.tools_core.filesystem import files_delete
 
-    result = files_delete.invoke({"path": path, "user_id": user_id, "workspace_id": workspace_id})
+    result = await files_delete.ainvoke({"path": path, "user_id": user_id, "workspace_id": workspace_id})
     return {"response": str(result)}
 
 

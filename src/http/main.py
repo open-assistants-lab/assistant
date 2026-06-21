@@ -36,14 +36,14 @@ load_dotenv()
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Lifespan context manager — SDK runtime (no LangChain agent pool needed)."""
+    from src.app_logging import get_logger
+
     try:
         from src.subagent.scheduler import get_scheduler
 
         get_scheduler()
     except Exception:
-        pass
-
-    # Start companion scheduler if enabled
+        get_logger().warning("http.startup.scheduler_error", {}, user_id="system")
     try:
         from src.app_logging import get_logger
         from src.config import get_settings
@@ -62,15 +62,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     bridge = ConnectKitBridge("system")
                     await bridge.refresh_all()
                 except Exception:
-                    pass
+                    get_logger().warning("http.token_refresh_error", {}, user_id="system")
 
         try:
             loop = asyncio.get_event_loop()
             _token_refresh_task = loop.create_task(_refresh_loop())
         except Exception:
-            pass
+            get_logger().warning("http.startup.task_creation_error", {}, user_id="system")
     except Exception:
-        pass
+        get_logger().warning("http.startup.outer_error", {}, user_id="system")
 
     print("HTTP server ready (SDK runtime)")
     yield
@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             _token_refresh_task.cancel()
             get_logger().info("companion.stopped", {}, user_id="system")
     except Exception:
-        pass
+        get_logger().warning("http.shutdown.token_refresh_cancel_error", {}, user_id="system")
 
 
 app = FastAPI(
@@ -149,10 +149,12 @@ app.include_router(settings_router)
 
 # POC route for canvas 2.0 workspace concept
 from src.http.routers.poc import router as poc_router
+
 app.include_router(poc_router)
 
 # Widget router for Canvas 2.0
 from src.http.routers.widgets import router as widgets_router
+
 app.include_router(widgets_router)
 
 # ConnectKit OAuth + catalog routers (safe if connectkit not installed)

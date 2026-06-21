@@ -72,7 +72,7 @@ def parse_directives(text: str) -> tuple[str, list[dict[str, Any]]]:
     # [SWITCH_TAB:tab] — collect all, strip all
     switch_pat = re.compile(r'\[SWITCH_TAB:(\w+)\]', re.IGNORECASE)
     for match in switch_pat.finditer(text):
-        events.append({"type": "switch_tab", "tab": match.group(1).lower()})
+        events.append({"type": "tab_update", "tab": match.group(1).lower()})
     text = switch_pat.sub("", text)
 
     # [WIDGET_REFRESH:tab] — must be handled before bare [WIDGET_REFRESH]
@@ -148,6 +148,7 @@ async def _run_agent_stream(
     ai_content_parts: list[str] = []
     reasoning_parts: list[str] = []
     tool_metadata_list: list[dict[str, Any]] = []
+    tool_result_outputs: dict[str, str] = {}
     skill_load_names: dict[str, str] = {}
 
     try:
@@ -220,6 +221,11 @@ async def _run_agent_stream(
                         | {"workspace_id": workspace_id}
                     )
 
+                tool_result_outputs[call_id] = result_preview[:500]
+                await _handle_canvas_update_from_preview(
+                    call_id, result_preview, workspace_id, websocket, {},
+                )
+
             elif chunk.type == "interrupt":
                 if pending_ref is not None:
                     pending_ref[0] = {
@@ -231,13 +237,20 @@ async def _run_agent_stream(
 
             elif chunk.type == "done":
                 response = "".join(ai_content_parts)
+                # For reasoning models (deepseek via OllamaCloud) that output
+                # only reasoning_delta with no text_delta, use reasoning as
+                # response for directive/canvas/diff extraction and display.
+                if not response:
+                    reasoning_as_text = "".join(reasoning_parts)
+                    if reasoning_as_text:
+                        response = reasoning_as_text
 
                 # Parse and apply directives BEFORE canvas extraction
                 cleaned_response, directive_events = parse_directives(response)
                 if directive_events:
                     response = cleaned_response
                     for event in directive_events:
-                        if event["type"] == "switch_tab" and connection_state is not None:
+                        if event["type"] == "tab_update" and connection_state is not None:
                             connection_state["current_tab"] = event["tab"]
                         await websocket.send_json({**event, "workspace_id": workspace_id})
 
@@ -255,6 +268,8 @@ async def _run_agent_stream(
 
                 for i, diff in enumerate(diffs):
                     suggestion_id = f"diff_{i}"
+                    from src.http.suggestion_store import store_suggestion
+                    store_suggestion(suggestion_id, diff["diff"], diff["file_path"])
                     await websocket.send_json(_with_workspace({
                         "type": "diff_card",
                         "file_path": diff["file_path"],
@@ -280,8 +295,10 @@ async def _run_agent_stream(
                 reasoning_content = "".join(reasoning_parts) if reasoning_parts else None
 
                 for tm in tool_metadata_list:
+                    call_id = tm.get("tool_call_id", "")
+                    output = tool_result_outputs.get(call_id, "")
                     conversation.add_message(
-                        "tool", "", session_id=session_id, metadata={**tm, "workspace_id": workspace_id}
+                        "tool", output, session_id=session_id, metadata={**tm, "workspace_id": workspace_id}
                     )
 
                 if reasoning_content:
@@ -629,7 +646,16 @@ async def ws_conversation(websocket: WebSocket) -> None:
                 try:
                     content = file_path.read_text() if file_path.exists() else ""
                     for sug in pending:
-                        content = sug["content"]
+                        sug_content = sug.get("content", "")
+                        from_pos = int(sug.get("from", -1))
+                        to_pos = int(sug.get("to", -1))
+                        if from_pos >= 0 and to_pos >= 0:
+                            lines = content.split("\n")
+                            from_pos = min(from_pos, len(lines))
+                            to_pos = max(from_pos, min(to_pos, len(lines)))
+                            content = "\n".join(lines[:from_pos] + [sug_content] + lines[to_pos:])
+                        else:
+                            content = sug_content
                     file_path.write_text(content)
                 except Exception as e:
                     await websocket.send_text(json.dumps({
@@ -839,5 +865,5 @@ async def ws_conversation(websocket: WebSocket) -> None:
             await websocket.send_json(
                 ErrorMessage(message=str(e), code="WEBSOCKET_ERROR").model_dump()
             )
-        except Exception:
+        except WebSocketDisconnect:
             pass

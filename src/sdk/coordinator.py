@@ -97,7 +97,11 @@ def _build_system_prompt(
                     + "\n".join(skill_entries),
                 )
         except Exception:
-            pass
+            logger.warning(
+                "subagent.skill_entries_error",
+                {"profile": profile.name},
+                user_id=user_id,
+            )
 
     return "\n\n".join(parts)
 
@@ -167,7 +171,11 @@ class SubagentCoordinator:
                     user_id=self.user_id,
                 )
         except Exception:
-            pass
+            logger.warning(
+                "subagent.profile_validation_error",
+                {"name": profile.name},
+                user_id=self.user_id,
+            )
 
         # Write PROFILE.md (frontmatter + body)
         (agent_path / "PROFILE.md").write_text(
@@ -529,7 +537,11 @@ class SubagentCoordinator:
                     "message": message,
                 })
             except Exception:
-                pass
+                logger.warning(
+                    "subagent.progress_update_error",
+                    {"task_id": task_id, "step": step},
+                    user_id=self.user_id,
+                )
         return _cb
 
     async def cancel(self, task_id: str) -> bool:

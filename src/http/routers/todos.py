@@ -10,7 +10,7 @@ async def list_todos(user_id: str = "default_user") -> dict[str, Any]:
     """List all todos."""
     from src.sdk.tools_core.todos import todos_list
 
-    result = todos_list.invoke({"user_id": user_id})
+    result = await todos_list.ainvoke({"user_id": user_id})
     return {"todos": result}
 
 
@@ -26,7 +26,7 @@ async def add_todo(
     args: dict[str, Any] = {"user_id": user_id, "content": content}
     if priority is not None:
         args["priority"] = priority
-    result = todos_add.invoke(args)
+    result = await todos_add.ainvoke(args)
     return {"result": str(result)}
 
 
@@ -48,7 +48,7 @@ async def update_todo(
         args["status"] = status
     if priority is not None:
         args["priority"] = priority
-    result = todos_update.invoke(args)
+    result = await todos_update.ainvoke(args)
     return {"result": str(result)}
 
 
@@ -57,5 +57,5 @@ async def delete_todo(todo_id: str, user_id: str = "default_user") -> dict[str, 
     """Delete a todo."""
     from src.sdk.tools_core.todos import todos_delete
 
-    result = todos_delete.invoke({"user_id": user_id, "todo_id": todo_id})
+    result = await todos_delete.ainvoke({"user_id": user_id, "todo_id": todo_id})
     return {"result": str(result)}

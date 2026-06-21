@@ -722,7 +722,7 @@ class AgentNotifier extends StateNotifier<ChatState> {
 
     // --- Widget Refresh event (agent directive) ---
     if (type == 'widget_refresh') {
-      final widget = msg['widget']?.toString() ?? '';
+      final widget = msg['tab']?.toString() ?? '';
       onWidgetRefresh?.call(widget);
       return;
     }

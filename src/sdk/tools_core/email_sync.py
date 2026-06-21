@@ -414,7 +414,8 @@ def start_background_sync(user_id: str, account_id: str) -> None:
         count = await _sync_emails(user_id, account_id, "INBOX", "full", limit)
         logger.info(
             "email.backfill_complete",
-            {"user_id": user_id, "account_id": account_id, "count": count},
+            {"account_id": account_id, "count": count},
+            user_id=user_id,
         )
 
     try:
@@ -427,11 +428,11 @@ def start_background_sync(user_id: str, account_id: str) -> None:
         logger.error(
             "email.backfill_error",
             {
-                "user_id": user_id,
                 "account_id": account_id,
                 "error": str(e),
                 "error_type": type(e).__name__,
             },
+            user_id=user_id,
         )
 
 

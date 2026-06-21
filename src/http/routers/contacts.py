@@ -10,7 +10,7 @@ async def list_contacts(user_id: str = "default_user") -> dict[str, Any]:
     """List all contacts."""
     from src.sdk.tools_core.contacts import contacts_list
 
-    result = contacts_list.invoke({"user_id": user_id})
+    result = await contacts_list.ainvoke({"user_id": user_id})
     return {"contacts": result}
 
 
@@ -19,7 +19,7 @@ async def search_contacts(query: str, user_id: str = "default_user") -> dict[str
     """Search contacts."""
     from src.sdk.tools_core.contacts import contacts_search
 
-    result = contacts_search.invoke({"user_id": user_id, "query": query})
+    result = await contacts_search.ainvoke({"user_id": user_id, "query": query})
     return {"results": result}
 
 
@@ -34,7 +34,7 @@ async def add_contact(
     """Add a new contact."""
     from src.sdk.tools_core.contacts import contacts_add
 
-    result = contacts_add.invoke(
+    result = await contacts_add.ainvoke(
         {"user_id": user_id, "email": email, "name": name, "phone": phone, "company": company}
     )
     return {"result": str(result)}
@@ -52,7 +52,7 @@ async def update_contact(
     """Update a contact."""
     from src.sdk.tools_core.contacts import contacts_update
 
-    result = contacts_update.invoke(
+    result = await contacts_update.ainvoke(
         {
             "user_id": user_id,
             "contact_id": contact_id,
@@ -70,7 +70,7 @@ async def get_contact(contact_id: str, user_id: str = "default_user") -> dict[st
     """Get a contact by ID."""
     from src.sdk.tools_core.contacts import contacts_get
 
-    result = contacts_get.invoke({"user_id": user_id, "contact_id": contact_id})
+    result = await contacts_get.ainvoke({"user_id": user_id, "contact_id": contact_id})
     return {"contact": result}
 
 
@@ -79,5 +79,5 @@ async def delete_contact(contact_id: str, user_id: str = "default_user") -> dict
     """Delete a contact."""
     from src.sdk.tools_core.contacts import contacts_delete
 
-    result = contacts_delete.invoke({"user_id": user_id, "contact_id": contact_id})
+    result = await contacts_delete.ainvoke({"user_id": user_id, "contact_id": contact_id})
     return {"result": str(result)}

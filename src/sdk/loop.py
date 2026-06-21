@@ -967,7 +967,7 @@ class AgentLoop:
                                 model=None,
                                 provider_options=self.run_config.provider_options,
                             ):
-                                if chunk.type == "usage" and chunk.usage:
+                                if chunk.canonical_type == "usage" and chunk.usage:
                                     stream_usage.input_tokens += chunk.usage.input_tokens
                                     stream_usage.output_tokens += chunk.usage.output_tokens
                                     stream_usage.reasoning_tokens += chunk.usage.reasoning_tokens
@@ -985,13 +985,13 @@ class AgentLoop:
                                     in_reasoning_block,
                                 ):
                                     yield event
-                                    if event.type == "text_start":
+                                    if event.canonical_type == "text_start":
                                         in_text_block = True
-                                    elif event.type == "text_end":
+                                    elif event.canonical_type == "text_end":
                                         in_text_block = False
-                                    elif event.type == "reasoning_start":
+                                    elif event.canonical_type == "reasoning_start":
                                         in_reasoning_block = True
-                                    elif event.type == "reasoning_end":
+                                    elif event.canonical_type == "reasoning_end":
                                         in_reasoning_block = False
 
                             cost_tracker.add_usage(
@@ -1009,7 +1009,7 @@ class AgentLoop:
                             model=None,
                             provider_options=self.run_config.provider_options,
                         ):
-                            if chunk.type == "usage" and chunk.usage:
+                            if chunk.canonical_type == "usage" and chunk.usage:
                                 stream_usage.input_tokens += chunk.usage.input_tokens
                                 stream_usage.output_tokens += chunk.usage.output_tokens
                                 stream_usage.reasoning_tokens += chunk.usage.reasoning_tokens
@@ -1025,13 +1025,13 @@ class AgentLoop:
                                 in_reasoning_block,
                             ):
                                 yield event
-                                if event.type == "text_start":
+                                if event.canonical_type == "text_start":
                                     in_text_block = True
-                                elif event.type == "text_end":
+                                elif event.canonical_type == "text_end":
                                     in_text_block = False
-                                elif event.type == "reasoning_start":
+                                elif event.canonical_type == "reasoning_start":
                                     in_reasoning_block = True
-                                elif event.type == "reasoning_end":
+                                elif event.canonical_type == "reasoning_end":
                                     in_reasoning_block = False
 
                         cost_tracker.add_usage(

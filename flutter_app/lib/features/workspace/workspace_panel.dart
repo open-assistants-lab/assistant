@@ -109,7 +109,7 @@ class _WorkspacePanelState extends ConsumerState<WorkspacePanel> {
     try {
       final host = ref.read(hostProvider);
       final response = await http.get(
-        Uri.parse('http://$host/workspace/read/$filePath?user_id=default_user'),
+        Uri.parse('http://$host/workspace/read/${Uri.encodeFull(filePath)}?user_id=default_user'),
       );
       String content = '';
       if (response.statusCode == 200) {
@@ -195,7 +195,7 @@ window.parent.postMessage = function(msg) {
     try {
       final host = ref.read(hostProvider);
       await http.post(
-        Uri.parse('http://$host/workspace/$filePath?user_id=default_user'),
+        Uri.parse('http://$host/workspace/${Uri.encodeFull(filePath)}?user_id=default_user'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'content': content}),
       );

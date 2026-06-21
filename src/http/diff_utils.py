@@ -20,6 +20,28 @@ def apply_unified_diff(original: str, diff_lines: list[str]) -> str | None:
         if not dline:  # truly empty separator line between hunks, skip
             continue
 
+        # Skip standard unified diff headers and annotations
+        if dline.startswith("--- ") or dline.startswith("+++ "):
+            continue
+        if dline.startswith("@@") and dline.endswith("@@"):
+            continue
+        if dline.startswith("\\ "):  # \ No newline at end of file
+            continue
+        if dline.startswith("diff --git"):
+            continue
+        if dline.startswith("index "):
+            continue
+        if dline.startswith("new file mode ") or dline.startswith("deleted file mode "):
+            continue
+        if dline.startswith("rename from ") or dline.startswith("rename to "):
+            continue
+        if dline.startswith("old mode ") or dline.startswith("new mode "):
+            continue
+        if dline.startswith("similarity index ") or dline.startswith("copy from ") or dline.startswith("copy to "):
+            continue
+        if dline.startswith("Binary files "):
+            continue
+
         if dline.startswith("+"):
             result.append(dline[1:])
         elif dline.startswith("-"):

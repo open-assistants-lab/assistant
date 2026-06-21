@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from agentprofile.models import AgentProfile
 
+from src.app_logging import get_logger
+
+logger = get_logger()
+
 # Tools that subagents must always have access to
 MANDATORY_SUBAGENT_TOOLS: set[str] = set()
 OPTIONAL_SKILL_LOAD_TOOL = ""
@@ -49,7 +53,7 @@ def validate_agent_profile(
             if skill_registry.get_skill(skill_name) is None:
                 errors.append(f"Unknown skill: {skill_name}")
     except Exception:
-        pass
+        logger.warning("agent_profile.skill_validation_error", {}, user_id=user_id)
 
     if profile.max_llm_calls <= 0:
         errors.append("max_llm_calls must be positive")

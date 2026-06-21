@@ -19,9 +19,8 @@ from src.sdk.runner import (
 )
 from src.storage.messages import get_message_store
 
-_pending_approvals: dict[str, dict[str, Any]] = {}
-
 router = APIRouter(tags=["conversation"])
+_MARKDOWN = mistune.create_markdown(escape=True)
 logger = get_logger()
 
 # ── Canvas HTML fence block parser ──────────────────────────────────────────
@@ -53,7 +52,7 @@ def _load_editor_template() -> str:
 def _render_editor_surface(file_path: str, content: str) -> str:
     template = _load_editor_template()
     escaped_path = json.dumps(file_path)
-    escaped_content = json.dumps(mistune.html(content))
+    escaped_content = json.dumps(_MARKDOWN(content))
     html = template.replace("%%FILE_PATH%%", escaped_path)
     html = html.replace("%%INITIAL_HTML%%", escaped_content)
     return html
@@ -108,7 +107,7 @@ def _extract_diff(text: str) -> list[dict[str, Any]]:
     diffs: list[dict[str, Any]] = []
     for match in _DIFF_FENCE.finditer(text):
         file_path = match.group(1).strip()
-        diff_content = match.group(2).strip()
+        diff_content = match.group(2).strip("\n")
         if not diff_content or not file_path:
             continue
         diffs.append({
@@ -123,7 +122,7 @@ def _extract_suggestions(text: str) -> list[dict[str, Any]]:
     suggestions: list[dict[str, Any]] = []
     for match in _SUGGESTION_FENCE.finditer(text):
         file_path = match.group(1).strip()
-        content = match.group(2).strip()
+        content = match.group(2).strip("\n")
         if not content or not file_path:
             continue
         suggestions.append({
@@ -229,24 +228,10 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
         workspace_id = getattr(req, "workspace_id", "personal") or "personal"
         msg_content = req.message.strip()
 
-        if user_id in _pending_approvals and msg_content.lower() in ("approve", "reject", "edit"):
-            pending = _pending_approvals.pop(user_id)
-            tool_name = pending["tool_name"]
-
-            if msg_content.lower() == "reject":
-                return MessageResponse(response=f"{tool_name} rejected.")
-
-            tool_args = pending.get("tool_args", {})
-            if "user_id" not in tool_args:
-                tool_args["user_id"] = user_id
-
-            return MessageResponse(response=f"{tool_name} approved (execution pending).")
-
         conversation = get_message_store(user_id, workspace_id)
         conversation.add_message("user", req.message, metadata={"workspace_id": workspace_id})
 
-        recent_messages = conversation.get_messages_with_summary(50)
-        recent_messages = _filter_by_workspace(recent_messages, workspace_id)
+        recent_messages = conversation.get_messages_with_summary(50, workspace_id=workspace_id)
         sdk_messages = _messages_from_conversation(recent_messages)
 
         logger = get_logger()
@@ -256,7 +241,8 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
 
         with timer(
             "agent",
-            {"message": msg_content, "user_id": user_id, "verbose": req.verbose},
+            {"message": msg_content, "verbose": req.verbose},
+            user_id=user_id,
             channel="http",
         ):
             if req.verbose:
@@ -416,14 +402,14 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
         conversation = get_message_store(user_id, workspace_id)
         conversation.add_message("user", req.message, metadata={"workspace_id": workspace_id})
 
-        recent_messages = conversation.get_messages_with_summary(50)
-        recent_messages = _filter_by_workspace(recent_messages, workspace_id)
+        recent_messages = conversation.get_messages_with_summary(50, workspace_id=workspace_id)
         sdk_messages = _messages_from_conversation(recent_messages)
 
         logger = get_logger()
 
         async def generate() -> AsyncGenerator[str, None]:
             ai_content_parts: list[str] = []
+            reasoning_content_parts: list[str] = []
             tool_metadata_list: list[dict[str, Any]] = []
             tool_results: list[dict[str, Any]] = []
 
@@ -455,19 +441,29 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                         yield f"data: {json.dumps({'type': 'updates', 'data': {'content': output}})}\n\n"
 
                 elif canonical == "reasoning_delta" and chunk.content:
+                    reasoning_content_parts.append(chunk.content)
                     yield f"data: {json.dumps({'type': 'messages', 'data': {'content': f'[Reasoning] {chunk.content}'}})}\n\n"
 
                 elif canonical == "reasoning_start":
                     yield f"data: {json.dumps({'type': 'updates', 'data': {'content': '[Thinking...]'}})}\n\n"
 
-                elif chunk.type == "error":
+                elif canonical == "error":
                     yield f"data: {json.dumps({'type': 'error', 'data': {'content': chunk.content}})}\n\n"
 
             response = "".join(ai_content_parts) if ai_content_parts else ""
+            # For reasoning models with only reasoning_delta, use reasoning as response
+            if not response and reasoning_content_parts:
+                response = "".join(reasoning_content_parts)
             if not response and tool_results:
                 response = "\n".join(result["output"] for result in tool_results)
             if not response:
                 response = "Task completed."
+
+            diffs, suggestions = _extract_coedit_surfaces(response)
+            for i, diff in enumerate(diffs):
+                yield f"data: {json.dumps({'type': 'diff_card', 'data': {'file_path': diff['file_path'], 'diff': diff['diff'], 'suggestion_id': f'diff_{i}'}})}\n\n"
+            for i, sug in enumerate(suggestions):
+                yield f"data: {json.dumps({'type': 'suggestion_push', 'data': {'file_path': sug['file_path'], 'content': sug['content'], 'suggestion_id': f'sug_{i}', 'from': -1, 'to': -1}})}\n\n"
 
             canvas_blocks = _extract_surfaces(response)
             for surface in canvas_blocks:

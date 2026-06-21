@@ -250,7 +250,7 @@ class TestParseDirectivesOpenEditor:
         )
         types = [e["type"] for e in events]
         assert "open_editor" in types
-        assert "switch_tab" in types
+        assert "tab_update" in types
 
     def test_open_editor_empty_path_no_match(self):
         text, events = parse_directives("[OPEN_EDITOR:]")

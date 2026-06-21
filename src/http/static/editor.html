@@ -501,6 +501,14 @@ window.__cancel = function() {
 
 window.__addSuggestion = addSuggestion;
 
+window.addEventListener("unhandledrejection", function(e) {
+  document.body.innerHTML = '<div style="padding:2rem;color:var(--ea-danger);font-family:var(--ea-font)">' +
+    '<h2>Editor Failed to Load</h2>' +
+    '<p>Unable to load ProseMirror editor dependencies from CDN.</p>' +
+    '<p style="font-size:0.85rem;color:var(--ea-text-secondary)">' + e.reason + '</p>' +
+    '<button onclick="location.reload()" style="margin-top:1rem;padding:0.5rem 1rem;background:var(--ea-accent);color:var(--ea-text);border:none;border-radius:6px;cursor:pointer">Retry</button></div>';
+});
+
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", initEditor);
 } else {
