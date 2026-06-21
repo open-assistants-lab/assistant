@@ -132,7 +132,6 @@ def _format_task(row: dict[str, Any], task_id: str) -> str:
 def subagent_create(
     name: str,
     user_id: str,
-    workspace_id: str = "personal",
     description: str = "",
     model: str | None = None,
     tools: list[str] | None = None,
@@ -150,7 +149,6 @@ def subagent_create(
     Args:
         name: Unique name for the subagent (alphanumeric, hyphens, underscores)
         user_id: The user ID (required)
-        workspace_id: Workspace ID (defaults to current workspace)
         description: What this subagent does (shown to LLM for routing)
         model: Model to use (e.g., 'anthropic:claude-sonnet-4-20250514')
         tools: List of tool names to allow (None = all native tools)
@@ -191,11 +189,11 @@ def subagent_create(
         handoff_instructions=handoff_instructions,
     )
 
-    errors = validate_agent_def(agent_profile, user_id=user_id, workspace_id=workspace_id)
+    errors = validate_agent_def(agent_profile, user_id=user_id)
     if errors:
         return "Error: " + "; ".join(errors)
 
-    coordinator = get_coordinator(user_id, workspace_id)
+    coordinator = get_coordinator(user_id)
 
     existing = coordinator.load_def(name)
     if existing is not None:
@@ -220,7 +218,6 @@ subagent_create.annotations = ToolAnnotations(title="Create Subagent", destructi
 def subagent_update(
     name: str,
     user_id: str,
-    workspace_id: str = "personal",
     model: str | None = None,
     description: str | None = None,
     tools: list[str] | None = None,
@@ -238,7 +235,6 @@ def subagent_update(
     Args:
         name: Subagent name to update
         user_id: The user ID (required)
-        workspace_id: Workspace ID (defaults to current workspace)
         model: New model override
         description: New description
         tools: New tool allowlist (replaces entirely)
@@ -254,7 +250,7 @@ def subagent_update(
     Returns:
         Confirmation message
     """
-    coordinator = get_coordinator(user_id, workspace_id)
+    coordinator = get_coordinator(user_id)
     existing = coordinator.load_def(name)
     if existing is None:
         return f"Error: Subagent '{name}' not found."
@@ -293,7 +289,7 @@ def subagent_update(
         return f"No fields specified to update for subagent '{name}'."
 
     updated_def = existing.model_copy(update=update_kwargs)
-    errors = validate_agent_def(updated_def, user_id=user_id, workspace_id=workspace_id)
+    errors = validate_agent_def(updated_def, user_id=user_id)
     if errors:
         return "Error: " + "; ".join(errors)
 
@@ -313,7 +309,6 @@ def subagent_start(
     agent_name: str,
     task: str,
     user_id: str,
-    workspace_id: str = "personal",
     parent_id: str | None = None,
 ) -> str:
     """Start a subagent to execute a task. Returns job ID immediately.
@@ -326,13 +321,12 @@ def subagent_start(
         agent_name: Name of the subagent to start
         task: Task description/prompt
         user_id: The user ID (required)
-        workspace_id: Workspace ID (defaults to current workspace)
         parent_id: Correlation ID to group related tasks
 
     Returns:
         Job ID and status message
     """
-    coordinator = get_coordinator(user_id, workspace_id)
+    coordinator = get_coordinator(user_id)
 
     existing = coordinator.load_def(agent_name)
     if existing is None:
@@ -357,7 +351,6 @@ async def subagent_delegate(
     agent_name: str,
     task: str,
     user_id: str,
-    workspace_id: str = "personal",
     parent_id: str | None = None,
     timeout_seconds: int = 120,
 ) -> str:
@@ -376,14 +369,13 @@ async def subagent_delegate(
         agent_name: Name of the subagent to run
         task: Task description/prompt for the subagent
         user_id: The user ID (required)
-        workspace_id: Workspace ID (defaults to current workspace)
         parent_id: Correlation ID to group related tasks
         timeout_seconds: Maximum seconds to wait (default 120)
 
     Returns:
         The subagent's output text
     """
-    coordinator = get_coordinator(user_id, workspace_id)
+    coordinator = get_coordinator(user_id)
 
     existing = coordinator.load_def(agent_name)
     if existing is None:
@@ -408,17 +400,16 @@ subagent_delegate.annotations = ToolAnnotations(
 
 
 @tool
-def subagent_list(user_id: str, workspace_id: str = "personal") -> str:
+def subagent_list(user_id: str) -> str:
     """List all subagents for the user and their active tasks.
 
     Args:
         user_id: The user ID (required)
-        workspace_id: Workspace ID (defaults to current workspace)
 
     Returns:
         List of subagents with their configs and active tasks
     """
-    coordinator = get_coordinator(user_id, workspace_id)
+    coordinator = get_coordinator(user_id)
 
     defs = _run_async(coordinator.list_defs())
     tasks = _run_async(coordinator.check_progress())
@@ -456,19 +447,17 @@ subagent_list.annotations = ToolAnnotations(title="List Subagents", read_only=Tr
 def subagent_check(
     task_id: str,
     user_id: str = "default_user",
-    workspace_id: str = "personal",
 ) -> str:
     """Check progress/status of one subagent job.
 
     Args:
         task_id: Specific task/job ID to check
         user_id: The user ID (required)
-        workspace_id: Workspace ID (defaults to current workspace)
 
     Returns:
         Task status and progress information
     """
-    coordinator = get_coordinator(user_id, workspace_id)
+    coordinator = get_coordinator(user_id)
 
     async def _get_task() -> dict[str, Any] | None:
         db = await coordinator._get_db()
@@ -487,14 +476,12 @@ subagent_check.annotations = ToolAnnotations(title="Subagent Check", read_only=T
 @tool
 def subagent_tasks(
     user_id: str = "default_user",
-    workspace_id: str = "personal",
     status: str | None = None,
 ) -> str:
     """List active/recent subagent jobs.
 
     Args:
         user_id: The user ID (required)
-        workspace_id: Workspace ID (defaults to current workspace)
         status: Optional status filter: pending, running, cancelling, completed, failed, cancelled
 
     Returns:
@@ -508,7 +495,7 @@ def subagent_tasks(
             valid = ", ".join(s.value for s in TaskStatus)
             return f"Error: Invalid status '{status}'. Valid statuses: {valid}."
 
-    coordinator = get_coordinator(user_id, workspace_id)
+    coordinator = get_coordinator(user_id)
 
     async def _get_tasks() -> list[dict[str, Any]]:
         db = await coordinator._get_db()
@@ -551,7 +538,7 @@ def subagent_instruct(
     Returns:
         Confirmation message
     """
-    coordinator = get_coordinator(user_id, workspace_id)
+    coordinator = get_coordinator(user_id)
 
     async def _instruct() -> bool | None:
         db = await coordinator._get_db()
@@ -591,7 +578,7 @@ def subagent_cancel(task_id: str, user_id: str, workspace_id: str = "personal") 
     Returns:
         Cancellation confirmation
     """
-    coordinator = get_coordinator(user_id, workspace_id)
+    coordinator = get_coordinator(user_id)
 
     async def _cancel() -> bool:
         return await coordinator.cancel(task_id)
@@ -618,7 +605,7 @@ def subagent_delete(name: str, user_id: str, workspace_id: str = "personal") -> 
     Returns:
         Deletion confirmation
     """
-    coordinator = get_coordinator(user_id, workspace_id)
+    coordinator = get_coordinator(user_id)
 
     async def _delete() -> bool:
         return await coordinator.delete(name)
