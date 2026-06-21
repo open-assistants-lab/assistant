@@ -1,4 +1,3 @@
-from src.http.routers.capabilities import router as capabilities_router
 from src.http.routers.companion import router as companion_router
 from src.http.routers.contacts import router as contacts_router
 from src.http.routers.conversation import router as conversation_router
@@ -29,5 +28,4 @@ __all__ = [
     "settings_router",
     "subagents_router",
     "tools_router",
-    "capabilities_router",
 ]
