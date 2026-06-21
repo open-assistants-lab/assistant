@@ -11,7 +11,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from src.http.routers import (
-    capabilities_router,
     companion_router,
     contacts_router,
     conversation_router,
@@ -141,7 +140,6 @@ app.include_router(workspace_router)
 app.include_router(skills_router)
 app.include_router(subagents_router)
 app.include_router(tools_router)
-app.include_router(capabilities_router)
 app.include_router(ws_router)
 app.include_router(settings_router)
 
