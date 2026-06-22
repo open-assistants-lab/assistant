@@ -4,32 +4,72 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="stylesheet" href="/static/ea-tokens.css">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0">
   <style>
-    .inbox { padding: 8px; }
-    .thread { padding: 10px; border-bottom: 1px solid var(--border-subtle); cursor: pointer; }
+    * { box-sizing: border-box; }
+    .header { display: flex; align-items: center; justify-content: space-between; padding: 14px 12px; border-bottom: 1px solid var(--border-default); }
+    .header h2 { margin: 0; font-size: 15px; font-weight: 600; color: var(--text-primary); }
+    .header .count { font-size: 12px; color: var(--text-tertiary); font-weight: 400; }
+    .header .unread-badge { font-size: 11px; background: var(--accent); color: #fff; padding: 1px 7px; border-radius: 99px; margin-left: 8px; font-weight: 600; }
+    .email-list { overflow-y: auto; }
+    .thread { padding: 12px; border-bottom: 1px solid var(--border-subtle); cursor: pointer; transition: background var(--transition-fast); }
     .thread:hover { background: var(--bg-elevated); }
-    .thread .from { color: var(--text-primary); font-weight: 500; }
-    .thread .subject { color: var(--text-secondary); font-size: 13px; }
-    .thread .date { color: var(--text-tertiary); font-size: 12px; float: right; }
-    .thread .snippet { color: var(--text-tertiary); font-size: 12px; margin-top: 2px; }
-    .detail { padding: 12px; }
-    .detail h3 { margin: 0 0 8px; color: var(--text-primary); }
-    .detail .meta { color: var(--text-secondary); font-size: 13px; margin-bottom: 12px; }
-    .detail .body { color: var(--text-primary); line-height: 1.6; white-space: pre-wrap; }
-    .back-btn { color: var(--accent); cursor: pointer; margin-bottom: 8px; display: inline-block; }
-    .back-btn:hover { color: var(--accent-hover); }
+    .thread:active { background: var(--bg-field); }
+    .thread.unread .from { font-weight: 600; color: var(--text-primary); }
+    .thread.unread .subject { font-weight: 500; color: var(--text-primary); }
+    .thread.unread::before { content: ''; display: inline-block; width: 8px; height: 8px; background: var(--accent); border-radius: 50%; margin-right: 8px; flex-shrink: 0; }
+    .thread-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; }
+    .thread .from { color: var(--text-primary); font-size: 14px; font-weight: 500; flex: 1; }
+    .thread .date { color: var(--text-tertiary); font-size: 12px; flex-shrink: 0; }
+    .thread .subject { color: var(--text-secondary); font-size: 13px; margin-top: 1px; }
+    .thread .snippet { color: var(--text-tertiary); font-size: 12px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 48px 24px; color: var(--text-tertiary); }
+    .empty-state .icon { font-size: 40px; margin-bottom: 12px; opacity: 0.5; }
+    .empty-state .sub { font-size: 12px; margin-top: 4px; opacity: 0.7; }
+
+    .detail-view { display: none; flex-direction: column; height: 100%; }
+    .detail-header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border-default); }
+    .back-btn { display: flex; align-items: center; gap: 4px; background: none; border: none; color: var(--accent); cursor: pointer; font-size: 13px; padding: 4px 8px; border-radius: var(--radius-sm); transition: background var(--transition-fast); }
+    .back-btn:hover { background: var(--accent-muted); }
+    .back-btn .icon { font-size: 18px; }
+    .detail-body { overflow-y: auto; flex: 1; }
+    .detail-subject { padding: 14px 12px 0; font-size: 16px; font-weight: 600; color: var(--text-primary); }
+    .detail-meta { padding: 8px 12px 14px; border-bottom: 1px solid var(--border-subtle); }
+    .detail-meta .row { display: flex; gap: 6px; font-size: 13px; margin-bottom: 2px; }
+    .detail-meta .label { color: var(--text-tertiary); min-width: 44px; }
+    .detail-meta .value { color: var(--text-secondary); }
+    .detail-content { padding: 14px 12px; font-size: 14px; line-height: 1.65; color: var(--text-primary); white-space: pre-wrap; word-break: break-word; }
+
+    .fade-in { animation: fadeIn var(--transition-moment); }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
   </style>
 </head>
 <body>
-  <div id="email-app">
-    <div id="inbox-view" class="inbox">
-      <div style="padding:12px 8px; font-weight:600; color:var(--text-primary); border-bottom:1px solid var(--border-default);">Inbox</div>
-      <div id="email-list"></div>
+  <div id="inbox-view">
+    <div class="header">
+      <h2>Inbox <span class="unread-badge" id="unread-count"></span></h2>
+      <span class="count" id="email-count"></span>
     </div>
-    <div id="detail-view" class="detail" style="display:none;"></div>
+    <div class="email-list" id="email-list"></div>
   </div>
+
+  <div id="detail-view" class="detail-view">
+    <div class="detail-header">
+      <button class="back-btn" onclick="showInbox()"><span class="icon material-symbols-outlined">arrow_back</span> Back</button>
+    </div>
+    <div class="detail-body">
+      <div class="detail-subject" id="d-subject"></div>
+      <div class="detail-meta">
+        <div class="row"><span class="label">From</span><span class="value" id="d-from"></span></div>
+        <div class="row"><span class="label">Date</span><span class="value" id="d-date"></span></div>
+      </div>
+      <div class="detail-content" id="d-body"></div>
+    </div>
+  </div>
+
   <script>
     let emails = [];
+
     async function fetchInbox() {
       try {
         const res = await fetch('/emails?limit=50');
@@ -38,44 +78,65 @@
       } catch { emails = []; }
       renderInbox();
     }
+
     function renderInbox() {
       const list = document.getElementById('email-list');
+      const unread = emails.filter(e => !e.is_read).length;
+      document.getElementById('unread-count').textContent = unread;
+      document.getElementById('unread-count').style.display = unread > 0 ? '' : 'none';
+      document.getElementById('email-count').textContent = emails.length + ' total';
+
       if (emails.length === 0) {
-        list.innerHTML = '<div style="padding:16px;text-align:center;color:var(--text-tertiary);">No emails</div>';
+        list.innerHTML = '<div class="empty-state fade-in"><div class="icon">📬</div><div class="text">No emails</div><div class="sub">Connect Gmail in Settings to get started</div></div>';
         return;
       }
-      list.innerHTML = emails.map(e => `
-        <div class="thread" data-id="${esc(e.id)}" onclick="showDetail(this.dataset.id)">
-          <span class="date">${esc(e.date || '')}</span>
-          <div class="from">${esc(e.from || '')}</div>
+
+      list.innerHTML = emails.map((e, i) => {
+        const unreadClass = !e.is_read ? 'unread' : '';
+        return `<div class="thread ${unreadClass} fade-in" style="animation-delay:${i * 15}ms" onclick="showDetail('${esc(e.id)}')">
+          <div class="thread-top">
+            <div class="from">${esc(e.from || '')}</div>
+            <span class="date">${esc(fmtDate(e.date || e.received_at || ''))}</span>
+          </div>
           <div class="subject">${esc(e.subject || '(no subject)')}</div>
-          <div class="snippet">${esc((e.snippet || '').slice(0, 80))}</div>
-        </div>
-      `).join('');
+          <div class="snippet">${esc((e.snippet || '').slice(0, 100))}</div>
+        </div>`;
+      }).join('');
     }
+
+    function fmtDate(d) {
+      if (!d) return '';
+      const dt = new Date(d);
+      if (isNaN(dt)) return d;
+      const now = new Date();
+      const diff = now - dt;
+      if (diff < 86400000) return dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      if (diff < 604800000) return dt.toLocaleDateString([], { weekday: 'short' });
+      return dt.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    }
+
     async function showDetail(id) {
       try {
         const res = await fetch('/emails/' + encodeURIComponent(id));
         const e = await res.json();
         if (e.error) { showInbox(); return; }
         document.getElementById('inbox-view').style.display = 'none';
-        document.getElementById('detail-view').style.display = 'block';
-        document.getElementById('detail-view').innerHTML = `
-          <span class="back-btn" onclick="showInbox()">← Back to inbox</span>
-          <h3>${esc(e.subject || '(no subject)')}</h3>
-          <div class="meta">
-            <div>From: ${esc(e.from || '')}</div>
-            <div>Date: ${e.date || ''}</div>
-          </div>
-          <div class="body">${esc(e.body || e.snippet || '')}</div>
-        `;
+        document.getElementById('detail-view').style.display = 'flex';
+        document.getElementById('d-subject').textContent = e.subject || '(no subject)';
+        document.getElementById('d-from').textContent = e.from || '';
+        document.getElementById('d-date').textContent = e.date || e.received_at || '';
+        document.getElementById('d-body').textContent = e.body || e.snippet || '';
       } catch { showInbox(); }
     }
+
     function showInbox() {
-      document.getElementById('inbox-view').style.display = 'block';
       document.getElementById('detail-view').style.display = 'none';
+      document.getElementById('inbox-view').style.display = 'block';
+      fetchInbox();
     }
+
     function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
     fetchInbox();
   </script>
 </body>

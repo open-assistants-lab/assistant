@@ -248,9 +248,9 @@ window.parent.postMessage = function(msg) {
         children: [
           if (showChecklist) _buildChecklistBanner(),
           Expanded(
-            child: IndexedStack(
-              index: _tab.index,
-              children: [
+            child: _TabTransition(
+              tab: _tab,
+              tabs: [
                 const CanvasTab(),
                 _buildWidgetWebView('email'),
                 _buildWidgetWebView('todos'),
@@ -412,6 +412,33 @@ class _ChecklistChip extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _TabTransition extends StatelessWidget {
+  final _WorkspacePanelTab tab;
+  final List<Widget> tabs;
+  const _TabTransition({required this.tab, required this.tabs});
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    return Stack(
+      children: [
+        for (int i = 0; i < tabs.length; i++)
+          Positioned.fill(
+            child: IgnorePointer(
+              ignoring: i != tab.index,
+              child: AnimatedOpacity(
+                opacity: i == tab.index ? 1.0 : 0.0,
+                duration: tokens.motion.moment,
+                curve: tokens.motion.curveStandard,
+                child: tabs[i],
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

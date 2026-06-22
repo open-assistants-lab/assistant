@@ -4,70 +4,128 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="stylesheet" href="/static/ea-tokens.css">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0">
   <style>
-    .files { padding: 8px; }
-    .file-item { padding: 8px; border-bottom: 1px solid var(--border-subtle); cursor: pointer; display: flex; align-items: center; gap: 8px; }
+    * { box-sizing: border-box; }
+    .header { display: flex; align-items: center; justify-content: space-between; padding: 14px 12px; border-bottom: 1px solid var(--border-default); }
+    .header h2 { margin: 0; font-size: 15px; font-weight: 600; color: var(--text-primary); }
+    .header .count { font-size: 12px; color: var(--text-tertiary); font-weight: 400; }
+    .path-bar { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); color: var(--text-secondary); font-size: 12px; }
+    .path-bar .icon { font-size: 14px; color: var(--text-tertiary); }
+    .file-list { overflow-y: auto; }
+    .file-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--border-subtle); cursor: pointer; transition: background var(--transition-fast); }
     .file-item:hover { background: var(--bg-elevated); }
-    .file-icon { color: var(--text-tertiary); flex-shrink: 0; }
-    .file-name { color: var(--text-primary); flex: 1; }
-    .file-size { color: var(--text-tertiary); font-size: 12px; }
-    .file-content { padding: 12px; }
-    .file-content pre { background: var(--bg-field); padding: 12px; border-radius: var(--radius-md); overflow-x: auto; font-size: 13px; margin: 0; }
-    .back-btn { color: var(--accent); cursor: pointer; margin-bottom: 8px; display: inline-block; }
-    .header { padding:12px 8px; font-weight:600; color:var(--text-primary); border-bottom:1px solid var(--border-default); }
-    .current-path { padding:4px 8px; color: var(--text-secondary); font-size: 12px; border-bottom: 1px solid var(--border-subtle); }
+    .file-item:active { background: var(--bg-field); }
+    .file-icon { font-size: 20px; color: var(--text-tertiary); width: 28px; text-align: center; flex-shrink: 0; }
+    .file-icon.folder { color: var(--warning); }
+    .file-icon.file { color: var(--accent); }
+    .file-info { flex: 1; min-width: 0; }
+    .file-name { color: var(--text-primary); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .file-size { color: var(--text-tertiary); font-size: 12px; flex-shrink: 0; }
+    .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 48px 24px; color: var(--text-tertiary); }
+    .empty-state .icon { font-size: 40px; margin-bottom: 12px; opacity: 0.5; }
+    .empty-state .text { font-size: 14px; }
+    .empty-state .sub { font-size: 12px; margin-top: 4px; color: var(--text-tertiary); opacity: 0.7; }
+
+    .detail-view { display: none; height: 100%; }
+    .detail-header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border-default); }
+    .back-btn { display: flex; align-items: center; gap: 4px; background: none; border: none; color: var(--accent); cursor: pointer; font-size: 13px; padding: 4px 8px; border-radius: var(--radius-sm); transition: background var(--transition-fast); }
+    .back-btn:hover { background: var(--accent-muted); }
+    .back-btn .icon { font-size: 18px; }
+    .detail-filename { padding: 10px 12px; font-size: 14px; font-weight: 500; color: var(--text-primary); border-bottom: 1px solid var(--border-subtle); }
+    .detail-body { padding: 12px; overflow-y: auto; }
+    .detail-body pre { margin: 0; background: var(--bg-field); padding: 14px; border-radius: var(--radius-md); font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.55; color: var(--text-primary); overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+
+    .fade-in { animation: fadeIn var(--transition-moment); }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
   </style>
 </head>
 <body>
   <div id="list-view">
-    <div class="header">Files</div>
-    <div class="current-path" id="current-path">/</div>
-    <div class="files" id="file-list"></div>
+    <div class="header">
+      <h2>Files</h2>
+      <span class="count" id="file-count"></span>
+    </div>
+    <div class="path-bar">
+      <span class="icon material-symbols-outlined">folder</span>
+      <span id="current-path">/</span>
+    </div>
+    <div class="file-list" id="file-list"></div>
   </div>
-  <div id="content-view" class="file-content" style="display:none;"></div>
+
+  <div id="detail-view" class="detail-view">
+    <div class="detail-header">
+      <button class="back-btn" onclick="showList()"><span class="icon material-symbols-outlined">arrow_back</span> Back</button>
+    </div>
+    <div class="detail-filename" id="detail-filename"></div>
+    <div class="detail-body"><pre id="detail-content"></pre></div>
+  </div>
+
   <script>
+    let currentFiles = [];
+
     async function fetchFiles() {
       try {
         const res = await fetch('/workspace/json');
         const data = await res.json();
-        const files = data.files || [];
+        currentFiles = data.files || [];
         document.getElementById('current-path').textContent = data.path || '/';
-        renderFiles(files);
-      } catch {}
+        renderFiles(currentFiles);
+      } catch { currentFiles = []; renderFiles([]); }
     }
+
     function renderFiles(files) {
       const list = document.getElementById('file-list');
+      document.getElementById('file-count').textContent = files.length + ' item' + (files.length !== 1 ? 's' : '');
+
       if (files.length === 0) {
-        list.innerHTML = '<div style="padding:16px;text-align:center;color:var(--text-tertiary);">No files</div>';
+        list.innerHTML = '<div class="empty-state fade-in"><div class="icon">📁</div><div class="text">No files yet</div><div class="sub">Files created by the agent will appear here</div></div>';
         return;
       }
-      list.innerHTML = files.map(f => `
-        <div class="file-item" data-name="${esc(f.name)}" onclick="${f.is_dir ? 'alert(\'Directory navigation coming soon\')' : 'showFile(this.dataset.name)'}">
-          <span class="file-icon">${f.is_dir ? '📁' : '📄'}</span>
-          <span class="file-name">${esc(f.name)}</span>
-          <span class="file-size">${f.size || ''}</span>
+
+      list.innerHTML = files.map((f, i) => `
+        <div class="file-item fade-in" style="animation-delay:${i * 20}ms" onclick="${f.is_dir ? 'alert(\'Directory navigation coming soon\')' : 'showFile(\'' + esc(f.name) + '\')'}">
+          <span class="file-icon ${f.is_dir ? 'folder' : 'file'}">${f.is_dir ? 'folder' : 'description'}</span>
+          <div class="file-info">
+            <div class="file-name">${esc(f.name)}</div>
+          </div>
+          <span class="file-size">${f.is_dir ? '' : fmtSize(f.size || 0)}</span>
         </div>
       `).join('');
     }
+
+    function fmtSize(bytes) {
+      if (!bytes || bytes === 0) return '';
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
     async function showFile(name) {
       try {
         const res = await fetch('/workspace/read/' + encodeURIComponent(name));
         const data = await res.json();
-        const content = data.response || '';
         document.getElementById('list-view').style.display = 'none';
-        document.getElementById('content-view').style.display = 'block';
-        document.getElementById('content-view').innerHTML = `
-          <span class="back-btn" onclick="showList()">← Back to files</span>
-          <div style="margin-bottom:8px; font-weight:500;">${esc(name)}</div>
-          <pre>${esc(content)}</pre>
-        `;
-      } catch {}
+        document.getElementById('detail-view').style.display = 'flex';
+        document.getElementById('detail-view').style.flexDirection = 'column';
+        document.getElementById('detail-filename').textContent = name;
+        document.getElementById('detail-content').textContent = data.response || '(empty file)';
+      } catch {
+        document.getElementById('detail-content').textContent = 'Error reading file';
+      }
     }
+
     function showList() {
+      document.getElementById('detail-view').style.display = 'none';
       document.getElementById('list-view').style.display = 'block';
-      document.getElementById('content-view').style.display = 'none';
     }
+
     function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+    document.querySelectorAll('.material-symbols-outlined').forEach(el => {
+      if (!getComputedStyle(el).fontFamily.includes('Material')) el.textContent = el.textContent === 'folder' ? '📁' : el.textContent;
+    });
+
     fetchFiles();
   </script>
 </body>
