@@ -120,6 +120,7 @@ class AgentNotifier extends StateNotifier<ChatState> {
 
   void setSessionId(String sessionId) {
     if (state.sessionId == sessionId) return;
+    clearHistory();
     _setState(state.copyWith(sessionId: sessionId));
     _wsClient.updateSessionId(sessionId);
     if (_transportConnected) {
