@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../theme/app_theme.dart';
 import '../../providers/agent_provider.dart';
-import '../../providers/chat_tab_provider.dart';
 import '../../widgets/app_input.dart';
 import '../../features/chat/widgets/chat_message_list.dart';
 import '../../features/chat/widgets/chat_input.dart';
@@ -338,7 +337,6 @@ class _ChatPanelState extends ConsumerState<_ChatPanel> {
 
   void _scrollToBottom() {
     if (!mounted) return;
-    // With reverse: true, bottom is always pixels 0. No timing issues.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       if (!_scrollController.hasClients) return;
@@ -358,34 +356,6 @@ class _ChatPanelState extends ConsumerState<_ChatPanel> {
   Widget build(BuildContext context) {
     final tokens = context.tokens;
     final state = ref.watch(agentProvider);
-    final tabs = ref.watch(chatTabNotifierProvider);
-    final activeTab = ref.watch(activeChatTabProvider);
-
-    ref.listen<String>(activeChatTabProvider, (prev, next) {
-      if (prev != null && prev != next) {
-        _pendingScrollToBottom = true;
-        _scrollToBottom();
-      }
-    });
-
-    // Fires on EVERY workspace switch, even when clicking the already-active
-    // tab (where activeChatTabProvider doesn't change).
-    ref.listen<int>(workspaceSwitchSignalProvider, (prev, next) {
-      if (prev != null && prev != next) {
-        // Reset unread state — switching workspaces clears the "new messages"
-        // context. The scroll listener may not fire on position reattachment
-        // (new ScrollPosition starts at 0 with no "change" event), so we
-        // explicitly reset here.
-        setState(() {
-          _showJumpToBottom = false;
-          _unreadCount = 0;
-          _lastSeenMessageCount = 0;
-          _hasAutoScrolled = false;
-        });
-        _pendingScrollToBottom = true;
-        _scrollToBottom();
-      }
-    });
 
     ref.listen<ChatState>(agentProvider, (prev, next) {
       final newMessageCount = next.messages.length - _lastSeenMessageCount;
@@ -419,35 +389,6 @@ class _ChatPanelState extends ConsumerState<_ChatPanel> {
       color: tokens.colors.bgCanvas,
       child: Column(
         children: [
-          SizedBox(
-            height: 40,
-            child: ListView(
-              scrollDirection: Axis.horizontal,
-              children: [
-                const SizedBox(width: 8),
-                ...tabs.entries.map((e) {
-                  final isActive = e.key == activeTab;
-                  return _ChatPanelTab(
-                    workspaceId: e.key,
-                    label: e.value.isNotEmpty ? e.value : e.key,
-                    isActive: isActive,
-                    canClose: tabs.length > 1,
-                    onTap: () {
-                      if (!isActive) {
-                        ref
-                            .read(chatTabNotifierProvider.notifier)
-                            .openWorkspace(e.key, e.value);
-                      }
-                    },
-                    onClose: () => ref
-                        .read(chatTabNotifierProvider.notifier)
-                        .closeTab(e.key),
-                  );
-                }),
-                const SizedBox(width: 8),
-              ],
-            ),
-          ),
           ConnectionBanner(
             connected: state.connected,
             isDisconnected: state.status == ChatStatus.disconnected,
@@ -496,10 +437,7 @@ class _PanelMessageList extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final tokens = context.tokens;
-    final activeWs = ref.watch(activeChatTabProvider);
-    return KeyedSubtree(
-      key: ValueKey('chat_list_inner_$activeWs'),
-      child: ChatMessageList(
+    return ChatMessageList(
         key: const ValueKey('desktop-chat-message-list'),
         messages: state.messages,
         isStreaming: state.status == ChatStatus.streaming,
@@ -510,9 +448,7 @@ class _PanelMessageList extends ConsumerWidget {
         isLoading: state.loadingHistory,
         messageKeys: messageKeys,
         header: state.messages.isNotEmpty
-            ? CompanionContextPill(
-                activeWorkspaceId: activeWs,
-              )
+            ? const CompanionContextPill()
             : null,
         emptyBuilder: (_) => Center(
           child: Padding(
@@ -529,97 +465,7 @@ class _PanelMessageList extends ConsumerWidget {
           horizontal: AppSpacing.cardPadding,
           vertical: AppSpacing.itemGap,
         ),
-      ),
     );
   }
 }
 
-class _ChatPanelTab extends StatefulWidget {
-  final String workspaceId;
-  final String label;
-  final bool isActive;
-  final bool canClose;
-  final VoidCallback onTap;
-  final VoidCallback onClose;
-  const _ChatPanelTab({
-    required this.workspaceId,
-    required this.label,
-    required this.isActive,
-    required this.canClose,
-    required this.onTap,
-    required this.onClose,
-  });
-
-  @override
-  State<_ChatPanelTab> createState() => _ChatPanelTabState();
-}
-
-class _ChatPanelTabState extends State<_ChatPanelTab> {
-  bool _hover = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final tokens = context.tokens;
-    final color = widget.isActive
-        ? tokens.colors.textPrimary
-        : _hover
-            ? tokens.colors.textSecondary
-            : tokens.colors.textTertiary;
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      onEnter: (_) => setState(() => _hover = true),
-      onExit: (_) => setState(() => _hover = false),
-      child: GestureDetector(
-        onTap: widget.onTap,
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            AnimatedContainer(
-              duration: tokens.motion.base,
-              curve: tokens.motion.curveStandard,
-              padding: EdgeInsets.symmetric(
-                horizontal: tokens.spacing.md,
-                vertical: tokens.spacing.sm,
-              ),
-              decoration: BoxDecoration(
-                border: Border(
-                  bottom: BorderSide(
-                    color: widget.isActive
-                        ? tokens.colors.accent
-                        : Colors.transparent,
-                    width: 2,
-                  ),
-                ),
-              ),
-              child: Center(
-                child: AnimatedDefaultTextStyle(
-                  duration: tokens.motion.base,
-                  curve: tokens.motion.curveStandard,
-                  style: tokens.typography.textTheme.titleSmall?.copyWith(
-                        fontWeight:
-                            widget.isActive ? FontWeight.w600 : FontWeight.w400,
-                        color: color,
-                      ) ??
-                      TextStyle(color: color),
-                  child: Text(widget.label),
-                ),
-              ),
-            ),
-            if (widget.canClose)
-              Padding(
-                padding: EdgeInsets.only(right: tokens.spacing.sm),
-                child: InkWell(
-                  onTap: widget.onClose,
-                  child: Icon(
-                    Symbols.close,
-                    size: 12,
-                    color: color,
-                  ),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}

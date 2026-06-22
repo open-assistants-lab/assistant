@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../theme/app_theme.dart';
 import '../../providers/agent_provider.dart';
-import '../../providers/workspace_provider.dart';
 import 'widgets/chat_message_list.dart';
 import 'widgets/chat_input.dart';
 import '../../widgets/diff_card.dart';
@@ -54,7 +53,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(agentProvider);
-    final wsId = ref.watch(currentWorkspaceIdProvider);
 
     ref.listen<ChatState>(agentProvider, (prev, next) {
       if (!mounted) return;
@@ -72,12 +70,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       if (next.status == ChatStatus.streaming) {
         _scrollToBottom();
       }
-    });
-
-    ref.listen<String>(currentWorkspaceIdProvider, (prev, next) {
-      if (prev == null || prev == next) return;
-      _pendingScrollToBottom = true;
-      _scrollToBottom();
     });
 
     final isConnected = state.connected;
@@ -116,7 +108,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             child: _MessageList(
               state: state,
               scrollController: _scrollController,
-              workspaceId: wsId,
               onDiffCardAccept: (data) {
                 ref.read(agentProvider.notifier).acceptDiffCard(
                       data.suggestionId,
@@ -199,7 +190,6 @@ class _SuggestionChips extends StatelessWidget {
 class _MessageList extends StatelessWidget {
   final ChatState state;
   final ScrollController scrollController;
-  final String workspaceId;
   final void Function(DiffCardData data)? onDiffCardAccept;
   final void Function(DiffCardData data)? onDiffCardReject;
   final VoidCallback? onDiffCardRerequest;
@@ -207,7 +197,6 @@ class _MessageList extends StatelessWidget {
   const _MessageList({
     required this.state,
     required this.scrollController,
-    required this.workspaceId,
     this.onDiffCardAccept,
     this.onDiffCardReject,
     this.onDiffCardRerequest,
@@ -216,7 +205,6 @@ class _MessageList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ChatMessageList(
-      key: ValueKey('chat_list_$workspaceId'),
       messages: state.messages,
       isStreaming: state.status == ChatStatus.streaming,
       streamingText: state.streamingText,

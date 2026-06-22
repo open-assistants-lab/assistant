@@ -5,7 +5,7 @@ import '../../../models/message.dart';
 import '../../../widgets/app_input.dart';
 import '../../../providers/agent_provider.dart';
 import '../../../providers/draft_provider.dart';
-import '../../../providers/workspace_provider.dart';
+import '../../../providers/chat_tab_provider.dart';
 import 'model_switcher.dart';
 
 class ChatInput extends ConsumerStatefulWidget {
@@ -18,13 +18,13 @@ class ChatInput extends ConsumerStatefulWidget {
 class _ChatInputState extends ConsumerState<ChatInput> {
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
-  String? _activeWorkspaceId;
+  String _sessionId = 'default';
 
   @override
   void initState() {
     super.initState();
-    _activeWorkspaceId = ref.read(currentWorkspaceIdProvider);
-    final draft = ref.read(draftProvider.notifier).load(_activeWorkspaceId!);
+    _sessionId = ref.read(activeChatTabProvider);
+    final draft = ref.read(draftProvider.notifier).load(_sessionId);
     if (draft != null) _controller.text = draft;
   }
 
@@ -37,12 +37,12 @@ class _ChatInputState extends ConsumerState<ChatInput> {
 
   @override
   Widget build(BuildContext context) {
-    ref.listen<String>(currentWorkspaceIdProvider, (prev, next) {
+    ref.listen<String>(activeChatTabProvider, (prev, next) {
       if (prev == next) return;
       if (prev != null) {
         ref.read(draftProvider.notifier).save(prev, _controller.text);
       }
-      _activeWorkspaceId = next;
+      _sessionId = next;
       final draft = ref.read(draftProvider.notifier).load(next) ?? '';
       _controller.value = TextEditingValue(
         text: draft,
@@ -70,14 +70,10 @@ class _ChatInputState extends ConsumerState<ChatInput> {
           enabled: state.connected,
           sending: isSending,
           onChanged: (text) {
-            if (_activeWorkspaceId != null) {
-              ref.read(draftProvider.notifier).save(_activeWorkspaceId!, text);
-            }
+            ref.read(draftProvider.notifier).save(_sessionId, text);
           },
           onSend: (text) {
-            if (_activeWorkspaceId != null) {
-              ref.read(draftProvider.notifier).clear(_activeWorkspaceId!);
-            }
+            ref.read(draftProvider.notifier).clear(_sessionId);
             ref.read(agentProvider.notifier).sendMessage(text);
           },
           onCancel: isSending

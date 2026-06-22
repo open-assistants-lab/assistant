@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../models/subagent.dart';
 import '../../providers/agent_provider.dart';
 import '../../providers/subagent_provider.dart';
-import '../../providers/workspace_provider.dart';
 import '../../theme/app_theme.dart';
 import 'widgets/ea_list_tile.dart';
 import 'widgets/job_result_dialog.dart';
@@ -32,18 +31,13 @@ class _SubagentsPanelState extends ConsumerState<SubagentsPanel> {
 
   Future<void> _load() async {
     final requestId = ++_loadSequence;
-    final wsId = ref.read(currentWorkspaceIdProvider);
-    await ref.read(subagentProvider.notifier).loadList(workspaceId: wsId);
+    await ref.read(subagentProvider.notifier).loadList();
     if (!mounted || requestId != _loadSequence) return;
     _initialized = true;
   }
 
   @override
   Widget build(BuildContext context) {
-    ref.listen(currentWorkspaceIdProvider, (prev, next) {
-      if (prev != next) _load();
-    });
-
     ref.listen<ChatState>(agentProvider, (prev, next) {
       if (prev?.status == ChatStatus.streaming &&
           next.status == ChatStatus.idle) {
@@ -192,7 +186,7 @@ class _SubagentsPanelState extends ConsumerState<SubagentsPanel> {
                     icon: Icon(Symbols.stop_circle, size: 16, color: context.tokens.colors.warning),
                     onPressed: () => ref
                         .read(subagentProvider.notifier)
-                        .cancelJob(runningJobs.first.jobId, workspaceId: runningJobs.first.workspaceId),
+                        .cancelJob(runningJobs.first.jobId),
                   )
                 else
                   IconButton(
@@ -219,7 +213,6 @@ class _SubagentsPanelState extends ConsumerState<SubagentsPanel> {
   }
 
   Future<void> _showCreateDialog() async {
-    final wsId = ref.read(currentWorkspaceIdProvider);
     final nameCtrl = TextEditingController();
     final descriptionCtrl = TextEditingController();
     final modelCtrl = TextEditingController();
@@ -406,16 +399,6 @@ class _SubagentsPanelState extends ConsumerState<SubagentsPanel> {
                         return;
                       }
                       setDialogState(() => nameError = null);
-                      if (ref.read(currentWorkspaceIdProvider) != wsId) {
-                        if (!ctx.mounted) return;
-                        ScaffoldMessenger.of(ctx).showSnackBar(
-                          const SnackBar(
-                            content: Text('Workspace changed; cancelled.'),
-                          ),
-                        );
-                        Navigator.pop(ctx, false);
-                        return;
-                      }
                       setDialogState(() => submitting = true);
                       try {
                         await ref
@@ -426,14 +409,12 @@ class _SubagentsPanelState extends ConsumerState<SubagentsPanel> {
                               model: modelCtrl.text.trim().isEmpty
                                   ? null
                                   : modelCtrl.text.trim(),
-                              scope: 'user',
                               maxLlmCalls: maxLlmCalls,
                               costLimitUsd: costLimitUsd,
                               timeoutSeconds: timeoutSeconds,
                               systemPrompt: systemPromptCtrl.text.trim().isEmpty
                                   ? null
                                   : systemPromptCtrl.text.trim(),
-                              workspaceId: wsId,
                               tools: selectedTools.length ==
                                       (allTools?.length ?? 0)
                                   ? null
@@ -746,7 +727,6 @@ class _SubagentsPanelState extends ConsumerState<SubagentsPanel> {
   }
 
   void _confirmDelete(SubagentAgentDef agent) async {
-    final wsId = ref.read(currentWorkspaceIdProvider);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => _DeferredPopScope(
@@ -773,7 +753,7 @@ class _SubagentsPanelState extends ConsumerState<SubagentsPanel> {
     try {
       await ref
           .read(subagentProvider.notifier)
-          .deleteAgent(agent.name, workspaceId: wsId);
+          .deleteAgent(agent.name);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(

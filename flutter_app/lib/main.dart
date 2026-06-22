@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -8,14 +6,11 @@ import 'package:uuid/uuid.dart';
 import 'core/crash_reporting.dart';
 import 'core/router/app_router.dart';
 import 'providers/agent_provider.dart';
-import 'providers/workspace_provider.dart';
 import 'services/instrumented_app.dart';
-import 'services/test_instrumentation.dart';
 import 'theme/app_theme.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await loadScrollPositionsFromPrefs();
   await initCrashReporting();
 
   final prefs = await SharedPreferences.getInstance();

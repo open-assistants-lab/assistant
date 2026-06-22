@@ -84,12 +84,11 @@ class ToolsNotifier extends StateNotifier<ToolsState> {
   Future<void> loadTools({
     required String host,
     required String userId,
-    required String workspaceId,
   }) async {
     state = _copyWith(state, loading: true, error: null);
     try {
       final uri = Uri.parse(
-        'http://$host/tools?user_id=$userId&workspace_id=$workspaceId',
+        'http://$host/tools?user_id=$userId',
       );
       final response = await _client.get(uri);
       if (response.statusCode != 200) {
@@ -119,7 +118,6 @@ class ToolsNotifier extends StateNotifier<ToolsState> {
   Future<void> toggleTool({
     required String host,
     required String userId,
-    required String workspaceId,
     required String toolName,
     required bool enabled,
   }) async {
@@ -139,7 +137,7 @@ class ToolsNotifier extends StateNotifier<ToolsState> {
 
     try {
       final uri = Uri.parse(
-        'http://$host/tools/$toolName?user_id=$userId&workspace_id=$workspaceId',
+        'http://$host/tools/$toolName?user_id=$userId',
       );
       await _client.patch(
         uri,
@@ -163,58 +161,6 @@ class ToolsNotifier extends StateNotifier<ToolsState> {
     }
   }
 
-  Future<void> setScope({
-    required String host,
-    required String userId,
-    required String toolName,
-    required String scope,
-    required List<String> workspaceIds,
-  }) async {
-    // Optimistic update — compute enabled from scope
-    final enabled = scope == 'all' ||
-        (scope == 'selected' && workspaceIds.isNotEmpty);
-
-    final updated = state.tools.map((t) {
-      if (t.name == toolName) {
-        return ToolItem(
-          name: t.name, description: t.description, category: t.category,
-          annotations: t.annotations, parameters: t.parameters,
-          enabled: enabled, source: t.source,
-          scope: scope, workspaceIds: workspaceIds,
-        );
-      }
-      return t;
-    }).toList();
-    state = _copyWith(state, tools: updated);
-
-    try {
-      final uri = Uri.parse(
-        'http://$host/tools/$toolName?user_id=$userId',
-      );
-      await _client.patch(
-        uri,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'scope': scope,
-          'workspace_ids': workspaceIds,
-        }),
-      );
-    } catch (_) {
-      // Revert on failure
-      final reverted = state.tools.map((t) {
-        if (t.name == toolName) {
-          return ToolItem(
-            name: t.name, description: t.description, category: t.category,
-            annotations: t.annotations, parameters: t.parameters,
-            enabled: !enabled, source: t.source,
-            scope: t.scope, workspaceIds: t.workspaceIds,
-          );
-        }
-        return t;
-      }).toList();
-      state = _copyWith(state, tools: reverted);
-    }
-  }
 }
 
 ToolsState _copyWith(

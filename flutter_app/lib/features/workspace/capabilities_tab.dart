@@ -1,9 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/agent_provider.dart';
-import '../../providers/workspace_provider.dart';
 import '../../theme/app_theme.dart';
-import '../../widgets/scope_picker.dart';
 import '../tools/tools_provider.dart';
 
 class CapabilitiesTab extends ConsumerStatefulWidget {
@@ -26,11 +24,9 @@ class _CapabilitiesTabState extends ConsumerState<CapabilitiesTab> {
   void _load() {
     final host = ref.read(hostProvider);
     final userId = ref.read(userIdProvider);
-    final wsId = ref.read(currentWorkspaceIdProvider);
     ref.read(toolsProvider.notifier).loadTools(
           host: host,
           userId: userId,
-          workspaceId: wsId,
         );
   }
 
@@ -152,7 +148,7 @@ class _CapabilitiesTabState extends ConsumerState<CapabilitiesTab> {
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
                 child: Text(
-                  placeholder!,
+                    placeholder,
                   style: context.tokens.typography.textTheme.bodySmall?.copyWith(
                     color: context.tokens.colors.textTertiary,
                   ),
@@ -164,12 +160,6 @@ class _CapabilitiesTabState extends ConsumerState<CapabilitiesTab> {
   }
 
   Widget _buildToolTile(ToolItem tool) {
-    final scope = switch (tool.scope) {
-      'all' => ScopeState.all,
-      'none' => ScopeState.none,
-      _ => ScopeState.selected,
-    };
-
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       child: Row(
@@ -200,12 +190,6 @@ class _CapabilitiesTabState extends ConsumerState<CapabilitiesTab> {
           ),
           const SizedBox(width: 8),
           _buildBadges(tool),
-          const SizedBox(width: 8),
-          ScopePicker(
-            scope: scope,
-            selectedWorkspaceIds: tool.workspaceIds,
-            onChanged: (_) {},
-          ),
         ],
       ),
     );

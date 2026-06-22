@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 class MessageRequest(BaseModel):
     message: str
+    session_id: str = "default"
     model: str | None = None
     user_id: str | None = None
     verbose: bool = False

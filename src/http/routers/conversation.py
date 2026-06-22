@@ -155,7 +155,7 @@ def _strip_canvas_fences(text: str) -> str:
     return text.strip()
 
 
-def _persist_tool_messages(conversation: Any, tool_events: list[dict[str, Any]]) -> None:
+def _persist_tool_messages(conversation: Any, tool_events: list[dict[str, Any]], session_id: str = "") -> None:
     for event in tool_events:
         output = event.get("output")
         if event.get("stage") != "end" or not output:
@@ -167,6 +167,7 @@ def _persist_tool_messages(conversation: Any, tool_events: list[dict[str, Any]])
                 "tool_name": event.get("tool") or event.get("tool_name") or "unknown",
                 "tool_call_id": event.get("call_id") or event.get("tool_call_id") or "",
             },
+            session_id=session_id,
         )
 
 
@@ -190,11 +191,11 @@ async def get_conversation(user_id: str = "default_user", limit: int = 100, sess
 
 
 @router.delete("/conversation")
-async def clear_conversation(user_id: str = "default_user") -> dict[str, Any]:
-    """Clear conversation history."""
+async def clear_conversation(user_id: str = "default_user", session_id: str = "default") -> dict[str, Any]:
+    """Clear conversation history for a session."""
     conversation = get_message_store(user_id)
-    conversation.clear()
-    return {"status": "cleared", "user_id": user_id}
+    deleted = conversation.delete_messages_for_session(session_id)
+    return {"status": "cleared", "user_id": user_id, "session_id": session_id, "deleted": deleted}
 
 
 @router.get("/editor", response_class=HTMLResponse)
@@ -209,12 +210,13 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
     """Send a message to the agent (SDK-powered)."""
     try:
         user_id = req.user_id or "default_user"
+        session_id = req.session_id
         msg_content = req.message.strip()
 
         conversation = get_message_store(user_id)
-        conversation.add_message("user", req.message, metadata={})
+        conversation.add_message("user", req.message, metadata={}, session_id=session_id)
 
-        recent_messages = conversation.get_messages_with_summary(50)
+        recent_messages = conversation.get_messages_with_summary(50, session_id=session_id)
         sdk_messages = _messages_from_conversation(recent_messages)
 
         logger = get_logger()
@@ -286,7 +288,7 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
                 if not response:
                     response = "Task completed."
 
-                _persist_tool_messages(conversation, tool_events)
+                _persist_tool_messages(conversation, tool_events, session_id=session_id)
             else:
                 result_messages = await run_sdk_agent(
                     user_id=user_id, messages=sdk_messages,
@@ -302,6 +304,7 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
                             "tool",
                             content,
                             metadata={"tool_name": m.name or "unknown"},
+                            session_id=session_id,
                         )
 
                 response = ""
@@ -348,7 +351,7 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
         assistant_metadata: dict[str, Any] = {}
         if verbose_data and verbose_data.get("tool_events"):
             assistant_metadata["tool_events"] = verbose_data["tool_events"]
-        conversation.add_message("assistant", response, metadata=assistant_metadata)
+        conversation.add_message("assistant", response, metadata=assistant_metadata, session_id=session_id)
 
         logger.info(
             "agent.response",
@@ -379,11 +382,12 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
     """Send a message and stream response using SSE (SDK-powered)."""
     try:
         user_id = req.user_id or "default_user"
+        session_id = req.session_id
 
         conversation = get_message_store(user_id)
-        conversation.add_message("user", req.message, metadata={})
+        conversation.add_message("user", req.message, metadata={}, session_id=session_id)
 
-        recent_messages = conversation.get_messages_with_summary(50)
+        recent_messages = conversation.get_messages_with_summary(50, session_id=session_id)
         sdk_messages = _messages_from_conversation(recent_messages)
 
         logger = get_logger()
@@ -455,9 +459,9 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
             }
             for tm in tool_metadata_list:
                 output = result_by_call_id.get(tm.get("tool_call_id", ""), "")
-                conversation.add_message("tool", output, metadata=tm)
+                conversation.add_message("tool", output, metadata=tm, session_id=session_id)
 
-            conversation.add_message("assistant", response, metadata={"stream": True})
+            conversation.add_message("assistant", response, metadata={"stream": True}, session_id=session_id)
             logger.info(
                 "agent.response", {"response": response[:80]}, user_id=user_id, channel="http"
             )
@@ -470,6 +474,7 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
 
 class ConversationImportRequest(BaseModel):
     user_id: str = "default_user"
+    session_id: str = "default"
     messages: list[dict[str, Any]]  # [{"role": "user", "content": "..."}, ...]
 
 
@@ -489,7 +494,7 @@ async def import_conversation(req: ConversationImportRequest, _: None = Depends(
         content = msg.get("content", "")
         if content.strip():
             meta = msg.get("metadata")
-            conversation.add_message(role, content, metadata=meta)
+            conversation.add_message(role, content, metadata=meta, session_id=req.session_id)
     return {"imported": len(req.messages)}
 
 

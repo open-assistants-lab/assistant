@@ -5,7 +5,6 @@ import 'package:material_symbols_icons/symbols.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import '../../../providers/agent_provider.dart';
-import '../../../providers/workspace_provider.dart';
 import '../../../features/settings/settings_screen.dart';
 
 class ProviderInfo {
@@ -115,11 +114,7 @@ class _ModelSwitcherState extends ConsumerState<ModelSwitcher> {
   }
 
   String _selectedModelKey() {
-    final workspaceId = ref.read(currentWorkspaceIdProvider);
-    final override = ref.read(workspaceModelOverridesProvider)[workspaceId];
-    final effective = override != null && override.isNotEmpty
-        ? override
-        : ref.read(selectedModelProvider);
+    final effective = ref.read(selectedModelProvider);
     return _formatModelLabel(effective);
   }
 
@@ -135,11 +130,7 @@ class _ModelSwitcherState extends ConsumerState<ModelSwitcher> {
       return;
     }
 
-    final workspaceId = ref.read(currentWorkspaceIdProvider);
-    final override = ref.read(workspaceModelOverridesProvider)[workspaceId];
-    final selectedModel = override != null && override.isNotEmpty
-        ? override
-        : ref.read(selectedModelProvider);
+    final selectedModel = ref.read(selectedModelProvider);
     final result = await showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
@@ -148,25 +139,23 @@ class _ModelSwitcherState extends ConsumerState<ModelSwitcher> {
       builder: (_) => _ModelPickerSheet(
         providers: authorized,
         selectedModel: selectedModel,
-        hasOverride: override != null && override.isNotEmpty,
+        hasOverride: false,
       ),
     );
 
     if (result == null || result == selectedModel) return;
 
-    await ref
-        .read(workspaceNotifierProvider.notifier)
-        .setModelOverride(result == '__default__' ? null : result);
+    final prefs = await SharedPreferences.getInstance();
+    if (result != '__default__') {
+      await prefs.setString('ea_last_model', result);
+    }
+    ref.read(selectedModelProvider.notifier).state = result;
+    ref.read(agentProvider.notifier).updateModel(result);
 
     final keys = await _loadProviderKeys();
     if (keys.isNotEmpty) {
       ref.read(providerKeysProvider.notifier).state = keys;
       ref.read(agentProvider.notifier).updateProviderKeys(keys);
-    }
-
-    if (result != '__default__') {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('ea_last_workspace_model', result);
     }
   }
 

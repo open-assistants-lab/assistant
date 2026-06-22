@@ -1,12 +1,7 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:http/http.dart' as http;
 import '../../providers/agent_provider.dart';
-import '../../providers/workspace_provider.dart';
 import '../../theme/app_theme.dart';
-import '../../widgets/scope_picker.dart';
 
 class SkillsSidebarPanel extends ConsumerStatefulWidget {
   const SkillsSidebarPanel({super.key});
@@ -38,7 +33,6 @@ class _SkillsSidebarPanelState extends ConsumerState<SkillsSidebarPanel> {
   Future<void> _loadSkills() async {
     if (!mounted) return;
     final seq = ++_loadSeq;
-    final ws = ref.read(currentWorkspaceIdProvider);
     setState(() {
       _loading = _skills.isEmpty;
       _error = null;
@@ -46,10 +40,8 @@ class _SkillsSidebarPanelState extends ConsumerState<SkillsSidebarPanel> {
     try {
       final skills = await ref
           .read(apiClientProvider)
-          .listSkills(workspaceId: ws);
-      if (!mounted ||
-          seq != _loadSeq ||
-          ref.read(currentWorkspaceIdProvider) != ws) return;
+          .listSkills();
+      if (!mounted || seq != _loadSeq) return;
       setState(() {
         _skills = skills.whereType<Map<String, dynamic>>().toList();
         _loading = false;
@@ -63,19 +55,6 @@ class _SkillsSidebarPanelState extends ConsumerState<SkillsSidebarPanel> {
     }
   }
 
-  Future<void> _setScope(
-      String name, String scope, List<String> wids) async {
-    try {
-      final host = ref.read(hostProvider);
-      final uri = Uri.parse(
-          'http://$host/skills/$name/scope?user_id=default_user');
-      await http.Client().patch(uri,
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'scope': scope, 'workspace_ids': wids}));
-    } catch (_) {}
-    await _loadSkills();
-  }
-
   List<Map<String, dynamic>> get _filtered {
     final q = _searchController.text.toLowerCase();
     if (q.isEmpty) return _skills;
@@ -86,24 +65,10 @@ class _SkillsSidebarPanelState extends ConsumerState<SkillsSidebarPanel> {
     }).toList();
   }
 
-  String _scope(Map<String, dynamic> skill) =>
-      skill['scope']?.toString() ?? 'all';
-
-  List<String> _wids(Map<String, dynamic> skill) {
-    final v = skill['workspace_ids'];
-    if (v is List) return v.cast<String>();
-    return [];
-  }
-
   @override
   Widget build(BuildContext context) {
-    ref.listen(currentWorkspaceIdProvider, (prev, next) {
-      if (prev != next) _loadSkills();
-    });
-
     final tokens = context.tokens;
     final filtered = _filtered;
-    final workspaces = ref.watch(workspaceListProvider).valueOrNull ?? [];
 
     return Container(
       color: tokens.colors.bgCanvas,
@@ -155,7 +120,7 @@ class _SkillsSidebarPanelState extends ConsumerState<SkillsSidebarPanel> {
                                 EdgeInsets.symmetric(horizontal: tokens.spacing.md),
                             itemCount: filtered.length,
                             itemBuilder: (_, i) =>
-                                _buildRow(filtered[i], tokens, workspaces),
+                                _buildRow(filtered[i], tokens),
                           ),
           ),
         ],
@@ -190,12 +155,10 @@ class _SkillsSidebarPanelState extends ConsumerState<SkillsSidebarPanel> {
     );
   }
 
-  Widget _buildRow(Map<String, dynamic> skill, EaTokens tokens, List<Map<String, dynamic>> workspaces) {
+  Widget _buildRow(Map<String, dynamic> skill, EaTokens tokens) {
     final name = skill['name']?.toString() ?? '';
     final desc = skill['description']?.toString() ?? '';
     final isLoaded = skill['is_loaded'] == true;
-    final scp = _scope(skill);
-    final wids = _wids(skill);
     return Container(
       margin: EdgeInsets.only(bottom: tokens.spacing.sm),
       padding: EdgeInsets.all(tokens.spacing.sm),
@@ -224,17 +187,6 @@ class _SkillsSidebarPanelState extends ConsumerState<SkillsSidebarPanel> {
             ),
           ),
           if (isLoaded) _badge('loaded', tokens.colors.accent, tokens),
-          const SizedBox(width: 8),
-          ScopePicker(
-            scope: scp == 'selected' && wids.isNotEmpty
-                ? ScopeState.selected
-                : scp == 'none'
-                    ? ScopeState.none
-                    : ScopeState.all,
-            selectedWorkspaceIds: wids,
-            allWorkspaces: workspaces,
-            onChanged: (c) => _setScope(name, c.scope.name, c.workspaceIds),
-          ),
         ],
       ),
     );

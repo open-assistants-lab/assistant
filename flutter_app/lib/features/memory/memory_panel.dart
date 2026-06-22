@@ -9,7 +9,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 import '../../theme/app_theme.dart';
 import '../../providers/agent_provider.dart';
-import '../../providers/workspace_provider.dart';
 import '../../widgets/app_input.dart';
 
 class MemoryPanel extends ConsumerStatefulWidget {
@@ -46,10 +45,9 @@ class _MemoryPanelState extends ConsumerState<MemoryPanel> {
     try {
       final host = ref.read(hostProvider);
       final userId = ref.read(userIdProvider);
-      final wsId = ref.read(currentWorkspaceIdProvider);
       final url = query != null && query.isNotEmpty
-          ? Uri.parse('http://$host/memories/search?q=$query&user_id=$userId&workspace_id=$wsId')
-          : Uri.parse('http://$host/memories?user_id=$userId&workspace_id=$wsId&limit=100');
+          ? Uri.parse('http://$host/memories/search?q=$query&user_id=$userId')
+          : Uri.parse('http://$host/memories?user_id=$userId&limit=100');
       final response = await http.get(url);
 
       if (response.statusCode == 200) {
@@ -76,8 +74,7 @@ class _MemoryPanelState extends ConsumerState<MemoryPanel> {
     try {
       final host = ref.read(hostProvider);
       final userId = ref.read(userIdProvider);
-      final wsId = ref.read(currentWorkspaceIdProvider);
-      final url = Uri.parse('http://$host/memories/$id?user_id=$userId&workspace_id=$wsId');
+      final url = Uri.parse('http://$host/memories/$id?user_id=$userId');
       final response = await http.delete(url);
       if (response.statusCode == 200) {
         setState(() {

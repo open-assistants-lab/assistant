@@ -4,17 +4,13 @@ import '../../providers/companion_provider.dart';
 import '../../theme/app_theme.dart';
 
 class CompanionContextPill extends ConsumerWidget {
-  final String activeWorkspaceId;
-
-  const CompanionContextPill({super.key, required this.activeWorkspaceId});
+  const CompanionContextPill({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final notifications = ref.watch(companionNotifierProvider);
     final relevant = notifications
-        .where((n) =>
-            !n.dismissed &&
-            (n.workspaceId == null || n.workspaceId == activeWorkspaceId))
+        .where((n) => !n.dismissed)
         .toList();
 
     if (relevant.isEmpty) return const SizedBox.shrink();

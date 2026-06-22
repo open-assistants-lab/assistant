@@ -6,7 +6,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import '../../theme/app_theme.dart';
 import '../../providers/agent_provider.dart';
-import '../../providers/workspace_provider.dart';
 
 // ── Data Model ───────────────────────────────────────────────
 
@@ -37,51 +36,39 @@ class CanvasSurface {
 }
 
 class CanvasState {
-  final Map<String, List<CanvasSurface>> _surfacesByWs;
-  final String activeWorkspaceId;
+  final List<CanvasSurface> surfaces;
   final String? lastAction;
 
   const CanvasState({
-    Map<String, List<CanvasSurface>>? surfacesByWs,
-    this.activeWorkspaceId = 'personal',
+    this.surfaces = const [],
     this.lastAction,
-  }) : _surfacesByWs = surfacesByWs ?? const {};
-
-  List<CanvasSurface> get surfaces =>
-      _surfacesByWs[activeWorkspaceId] ?? const [];
-
-  Map<String, List<CanvasSurface>> get allSurfaces =>
-      Map.unmodifiable(_surfacesByWs);
+  });
 }
 
 // ── Persistence ──────────────────────────────────────────────
 
 const _kStorageKey = 'canvas_surfaces';
 
-Future<Map<String, List<CanvasSurface>>> _loadSurfaces() async {
+Future<List<CanvasSurface>> _loadSurfaces() async {
   final prefs = await SharedPreferences.getInstance();
   final raw = prefs.getString(_kStorageKey);
-  if (raw == null || raw.isEmpty) return {};
+  if (raw == null || raw.isEmpty) return [];
   try {
-    final decoded = jsonDecode(raw) as Map<String, dynamic>;
-    final result = <String, List<CanvasSurface>>{};
-    for (final entry in decoded.entries) {
-      result[entry.key] = (entry.value as List)
-          .map((e) => CanvasSurface.fromJson(e as Map<String, dynamic>))
-          .toList();
-    }
-    return result;
+    final decoded = jsonDecode(raw) as List;
+    return decoded
+        .map((e) => CanvasSurface.fromJson(e as Map<String, dynamic>))
+        .toList();
   } catch (_) {
-    return {};
+    return [];
   }
 }
 
-Future<void> _saveSurfaces(Map<String, List<CanvasSurface>> data) async {
+Future<void> _saveSurfaces(List<CanvasSurface> data) async {
   final prefs = await SharedPreferences.getInstance();
-  final encoded = data.map(
-    (k, v) => MapEntry(k, v.map((s) => s.toJson()).toList()),
+  await prefs.setString(
+    _kStorageKey,
+    jsonEncode(data.map((s) => s.toJson()).toList()),
   );
-  await prefs.setString(_kStorageKey, jsonEncode(encoded));
 }
 
 // ── Provider ─────────────────────────────────────────────────
@@ -94,44 +81,28 @@ class CanvasProvider extends StateNotifier<CanvasState> {
   Future<void> _init() async {
     final loaded = await _loadSurfaces();
     if (loaded.isNotEmpty) {
-      state = CanvasState(surfacesByWs: loaded, activeWorkspaceId: 'personal');
+      state = CanvasState(surfaces: loaded);
     }
   }
 
   void _persist() {
-    _saveSurfaces(state._surfacesByWs);
-  }
-
-  void setActiveWorkspace(String id) {
-    state = CanvasState(
-      surfacesByWs: state._surfacesByWs,
-      activeWorkspaceId: id,
-      lastAction: state.lastAction,
-    );
+    _saveSurfaces(state.surfaces);
   }
 
   void destroyTutorialSurfaces() {
-    final wsId = state.activeWorkspaceId;
-    final updated = Map<String, List<CanvasSurface>>.from(state._surfacesByWs);
-    final surfaces = List<CanvasSurface>.from(updated[wsId] ?? [])
-      ..removeWhere((s) => s.surfaceId.startsWith('learn_'));
-    updated[wsId] = surfaces;
-    state = CanvasState(
-      surfacesByWs: updated,
-      activeWorkspaceId: state.activeWorkspaceId,
-      lastAction: 'destroy',
-    );
+    final surfaces = state.surfaces
+        .where((s) => !s.surfaceId.startsWith('learn_'))
+        .toList();
+    state = CanvasState(surfaces: surfaces, lastAction: 'destroy');
     _persist();
   }
 
-  void onCanvasUpdate(Map<String, dynamic> event, {String? workspaceId}) {
-    final wsId = workspaceId ?? event['workspace_id']?.toString() ?? 'personal';
+  void onCanvasUpdate(Map<String, dynamic> event) {
     final action = event['action'] as String? ?? 'create';
     final surfaceId = event['surface_id'] as String? ?? '';
     final html = event['html'] as String? ?? '';
 
-    final updated = Map<String, List<CanvasSurface>>.from(state._surfacesByWs);
-    var surfaces = List<CanvasSurface>.from(updated[wsId] ?? []);
+    var surfaces = List<CanvasSurface>.from(state.surfaces);
 
     if (action == 'destroy') {
       surfaces.removeWhere((s) => s.surfaceId == surfaceId);
@@ -153,13 +124,7 @@ class CanvasProvider extends StateNotifier<CanvasState> {
       ));
     }
 
-    updated[wsId] = surfaces;
-
-    state = CanvasState(
-      surfacesByWs: updated,
-      activeWorkspaceId: state.activeWorkspaceId,
-      lastAction: action,
-    );
+    state = CanvasState(surfaces: surfaces, lastAction: action);
     _persist();
   }
 }
@@ -258,26 +223,21 @@ class _CanvasTabState extends ConsumerState<CanvasTab> {
   Widget build(BuildContext context) {
     final state = ref.watch(canvasProvider);
     final surfaces = state.surfaces;
-    final wsId = ref.watch(currentWorkspaceIdProvider);
 
     if (surfaces.isNotEmpty) {
       final allKeys = <String>{};
-      for (final ws in state.allSurfaces.entries) {
-        for (final s in ws.value) {
-          final key = '${ws.key}::${s.surfaceId}';
-          allKeys.add(key);
-          _ensureController(s, key);
-        }
+      for (final s in surfaces) {
+        final key = s.surfaceId;
+        allKeys.add(key);
+        _ensureController(s, key);
       }
 
-      final activeKeys = surfaces.map((s) => '$wsId::${s.surfaceId}').toSet();
       _controllers.keys.where((k) => !allKeys.contains(k)).toList().forEach(_controllers.remove);
 
       return Stack(
         children: [
-          for (final entry in state.allSurfaces.entries)
-            for (final s in entry.value)
-              _webViewFor(s, '${entry.key}::${s.surfaceId}', activeKeys),
+          for (final s in surfaces)
+            _webViewFor(s, s.surfaceId),
         ],
       );
     }
@@ -296,15 +256,12 @@ class _CanvasTabState extends ConsumerState<CanvasTab> {
     );
   }
 
-  Widget _webViewFor(CanvasSurface surface, String cacheKey, Set<String> activeKeys) {
+  Widget _webViewFor(CanvasSurface surface, String cacheKey) {
     _ensureController(surface, cacheKey);
-    return Offstage(
-      offstage: !activeKeys.contains(cacheKey),
-      child: SizedBox.expand(
-        child: Container(
-          color: const Color(0xFF1e1e2e),
-          child: WebViewWidget(controller: _controllers[cacheKey]!),
-        ),
+    return SizedBox.expand(
+      child: Container(
+        color: const Color(0xFF1e1e2e),
+        child: WebViewWidget(controller: _controllers[cacheKey]!),
       ),
     );
   }

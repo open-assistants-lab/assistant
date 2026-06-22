@@ -12,7 +12,6 @@ import '../../features/subagents/subagents_sidebar_panel.dart';
 import '../../features/settings/settings_screen.dart';
 import '../layout/responsive_shell.dart';
 import '../../theme/tokens/motion.dart';
-import '../../theme/app_theme.dart';
 import '../../services/instrumented_app.dart';
 
 final _rootNavigatorKey = GlobalKey<NavigatorState>();

@@ -5,7 +5,6 @@ import 'package:http/http.dart' as http;
 import 'package:webview_flutter/webview_flutter.dart';
 import '../../theme/app_theme.dart';
 import '../../providers/agent_provider.dart';
-import '../../providers/workspace_provider.dart';
 import 'canvas_tab.dart';
 import 'learn_checklist_provider.dart';
 import 'learn_checklist_widget.dart' show htmlForChecklistItem;
@@ -227,12 +226,6 @@ window.parent.postMessage = function(msg) {
 
   @override
   Widget build(BuildContext context) {
-    ref.listen(currentWorkspaceIdProvider, (prev, next) {
-      if (prev != next) {
-        ref.read(canvasProvider.notifier).setActiveWorkspace(next);
-      }
-    });
-
     ref.listen(canvasProvider, (prev, next) {
       final addedSurfaces = next.surfaces.length - (prev?.surfaces.length ?? 0);
       if (addedSurfaces > 0) {

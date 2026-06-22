@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../theme/app_theme.dart';
 import '../../providers/agent_provider.dart';
-import '../../providers/workspace_provider.dart';
 import 'tools_provider.dart';
 
 class ToolsWorkspaceTab extends ConsumerStatefulWidget {
@@ -24,11 +23,9 @@ class _ToolsWorkspaceTabState extends ConsumerState<ToolsWorkspaceTab> {
   void _load() {
     final host = ref.read(hostProvider);
     final userId = ref.read(userIdProvider);
-    final wsId = ref.read(currentWorkspaceIdProvider);
     ref.read(toolsProvider.notifier).loadTools(
           host: host,
           userId: userId,
-          workspaceId: wsId,
         );
   }
 

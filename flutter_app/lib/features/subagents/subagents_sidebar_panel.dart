@@ -1,12 +1,7 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:http/http.dart' as http;
 import '../../providers/agent_provider.dart';
-import '../../providers/workspace_provider.dart';
 import '../../theme/app_theme.dart';
-import '../../widgets/scope_picker.dart';
 
 class SubagentsSidebarPanel extends ConsumerStatefulWidget {
   const SubagentsSidebarPanel({super.key});
@@ -39,7 +34,6 @@ class _SubagentsSidebarPanelState
   Future<void> _loadAgents() async {
     if (!mounted) return;
     final seq = ++_loadSeq;
-    final ws = ref.read(currentWorkspaceIdProvider);
     setState(() {
       _loading = _agents.isEmpty;
       _error = null;
@@ -47,10 +41,8 @@ class _SubagentsSidebarPanelState
     try {
       final agents = await ref
           .read(apiClientProvider)
-          .listSubagents(workspaceId: ws);
-      if (!mounted ||
-          seq != _loadSeq ||
-          ref.read(currentWorkspaceIdProvider) != ws) return;
+          .listSubagents();
+      if (!mounted || seq != _loadSeq) return;
       setState(() {
         _agents = agents.whereType<Map<String, dynamic>>().toList();
         _loading = false;
@@ -64,19 +56,6 @@ class _SubagentsSidebarPanelState
     }
   }
 
-  Future<void> _setScope(
-      String name, String scope, List<String> wids) async {
-    try {
-      final host = ref.read(hostProvider);
-      final uri = Uri.parse(
-          'http://$host/subagents/$name/scope?user_id=default_user');
-      await http.Client().patch(uri,
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'scope': scope, 'workspace_ids': wids}));
-    } catch (_) {}
-    await _loadAgents();
-  }
-
   List<Map<String, dynamic>> get _filtered {
     final q = _searchController.text.toLowerCase();
     if (q.isEmpty) return _agents;
@@ -87,24 +66,10 @@ class _SubagentsSidebarPanelState
     }).toList();
   }
 
-  String _scope(Map<String, dynamic> agent) =>
-      agent['scope']?.toString() ?? 'all';
-
-  List<String> _wids(Map<String, dynamic> agent) {
-    final v = agent['workspace_ids'];
-    if (v is List) return v.cast<String>();
-    return [];
-  }
-
   @override
   Widget build(BuildContext context) {
-    ref.listen(currentWorkspaceIdProvider, (prev, next) {
-      if (prev != next) _loadAgents();
-    });
-
     final tokens = context.tokens;
     final filtered = _filtered;
-    final workspaces = ref.watch(workspaceListProvider).valueOrNull ?? [];
 
     return Container(
       color: tokens.colors.bgCanvas,
@@ -156,7 +121,7 @@ class _SubagentsSidebarPanelState
                                 EdgeInsets.symmetric(horizontal: tokens.spacing.md),
                             itemCount: filtered.length,
                             itemBuilder: (_, i) =>
-                                _buildRow(filtered[i], tokens, workspaces),
+                                _buildRow(filtered[i], tokens),
                           ),
           ),
         ],
@@ -191,12 +156,10 @@ class _SubagentsSidebarPanelState
     );
   }
 
-  Widget _buildRow(Map<String, dynamic> agent, EaTokens tokens, List<Map<String, dynamic>> workspaces) {
+  Widget _buildRow(Map<String, dynamic> agent, EaTokens tokens) {
     final name = agent['name']?.toString() ?? '';
     final desc = agent['description']?.toString() ?? '';
     final status = agent['status']?.toString() ?? '';
-    final scp = _scope(agent);
-    final wids = _wids(agent);
     return Container(
       margin: EdgeInsets.only(bottom: tokens.spacing.sm),
       padding: EdgeInsets.all(tokens.spacing.sm),
@@ -226,17 +189,6 @@ class _SubagentsSidebarPanelState
           ),
           if (status.isNotEmpty)
             _badge(status, tokens.colors.accent, tokens),
-          const SizedBox(width: 8),
-          ScopePicker(
-            scope: scp == 'selected' && wids.isNotEmpty
-                ? ScopeState.selected
-                : scp == 'none'
-                    ? ScopeState.none
-                    : ScopeState.all,
-            selectedWorkspaceIds: wids,
-            allWorkspaces: workspaces,
-            onChanged: (c) => _setScope(name, c.scope.name, c.workspaceIds),
-          ),
         ],
       ),
     );

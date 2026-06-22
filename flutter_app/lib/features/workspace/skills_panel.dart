@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../models/subagent.dart';
 import '../../providers/agent_provider.dart';
-import '../../providers/workspace_provider.dart';
 import '../../theme/app_theme.dart';
 import 'widgets/ea_list_tile.dart';
 
@@ -29,7 +28,6 @@ class _SkillsPanelState extends ConsumerState<SkillsPanel> {
   Future<void> _loadSkills() async {
     if (!mounted) return;
     final requestId = ++_loadSequence;
-    final requestedWorkspaceId = ref.read(currentWorkspaceIdProvider);
     setState(() {
       _loading = _skills.isEmpty;
       _error = null;
@@ -37,38 +35,26 @@ class _SkillsPanelState extends ConsumerState<SkillsPanel> {
     try {
       final skills = await ref
           .read(apiClientProvider)
-          .listSkills(workspaceId: requestedWorkspaceId);
-      if (!mounted ||
-          requestId != _loadSequence ||
-          ref.read(currentWorkspaceIdProvider) != requestedWorkspaceId) {
-        return;
-      }
+          .listSkills();
+      if (!mounted || requestId != _loadSequence) return;
       List<SubagentAgentDef>? agents;
       try {
         final agentsJson = await ref
             .read(apiClientProvider)
-            .listSubagents(workspaceId: requestedWorkspaceId);
+            .listSubagents();
         agents = agentsJson
             .map((j) => SubagentAgentDef.fromJson(j as Map<String, dynamic>))
             .toList();
       } catch (_) {}
 
-      if (!mounted ||
-          requestId != _loadSequence ||
-          ref.read(currentWorkspaceIdProvider) != requestedWorkspaceId) {
-        return;
-      }
+      if (!mounted || requestId != _loadSequence) return;
       setState(() {
         _skills = skills.whereType<Map<String, dynamic>>().toList();
         _allAgents = agents;
         _loading = false;
       });
     } catch (e) {
-      if (!mounted ||
-          requestId != _loadSequence ||
-          ref.read(currentWorkspaceIdProvider) != requestedWorkspaceId) {
-        return;
-      }
+      if (!mounted || requestId != _loadSequence) return;
       setState(() {
         _error = 'Cannot load skills: $e';
         _loading = false;
@@ -78,10 +64,6 @@ class _SkillsPanelState extends ConsumerState<SkillsPanel> {
 
   @override
   Widget build(BuildContext context) {
-    ref.listen(currentWorkspaceIdProvider, (prev, next) {
-      if (prev != next) _loadSkills();
-    });
-
     return Container(
       color: context.tokens.colors.bgCanvas,
       child: Column(
@@ -214,10 +196,9 @@ class _SkillsPanelState extends ConsumerState<SkillsPanel> {
   Future<void> _showEditDialog(Map<String, dynamic> skill) async {
     final name = skill['name']?.toString() ?? '';
     if (name.isEmpty) return;
-    final workspaceId = ref.read(currentWorkspaceIdProvider);
     final detail = await ref
         .read(apiClientProvider)
-        .getSkillDetail(name, workspaceId: workspaceId);
+        .getSkillDetail(name);
     final descriptionCtrl = TextEditingController(
       text: detail['description']?.toString() ?? skill['description']?.toString() ?? '',
     );
@@ -265,18 +246,6 @@ class _SkillsPanelState extends ConsumerState<SkillsPanel> {
                 onPressed: submitting
                     ? null
                     : () async {
-                        if (ref.read(currentWorkspaceIdProvider) != workspaceId) {
-                          if (!ctx.mounted) return;
-                          ScaffoldMessenger.of(ctx).showSnackBar(
-                            const SnackBar(
-                              content: Text('Workspace changed; edit cancelled.'),
-                            ),
-                          );
-                          WidgetsBinding.instance.addPostFrameCallback((_) {
-                            if (ctx.mounted) Navigator.pop(ctx, false);
-                          });
-                          return;
-                        }
                         setDialogState(() => submitting = true);
                         try {
                           await ref
@@ -285,8 +254,6 @@ class _SkillsPanelState extends ConsumerState<SkillsPanel> {
                                 name,
                                 description: descriptionCtrl.text.trim(),
                                 content: contentCtrl.text,
-                                scope: 'user',
-                                workspaceId: workspaceId,
                               );
                           if (ctx.mounted) Navigator.pop(ctx, true);
                         } catch (e) {
@@ -319,7 +286,6 @@ class _SkillsPanelState extends ConsumerState<SkillsPanel> {
   Future<void> _confirmDelete(Map<String, dynamic> skill) async {
     final name = skill['name']?.toString() ?? '';
     if (name.isEmpty) return;
-    final workspaceId = ref.read(currentWorkspaceIdProvider);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => _DeferredPopScope(
@@ -344,16 +310,10 @@ class _SkillsPanelState extends ConsumerState<SkillsPanel> {
     );
     if (!mounted) return;
     if (confirmed != true) return;
-    if (ref.read(currentWorkspaceIdProvider) != workspaceId) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Workspace changed; delete cancelled.')),
-      );
-      return;
-    }
     try {
       await ref
           .read(apiClientProvider)
-          .deleteSkill(name, scope: 'user', workspaceId: workspaceId);
+          .deleteSkill(name);
       await _loadSkills();
     } catch (e) {
       if (!mounted) return;
@@ -364,7 +324,6 @@ class _SkillsPanelState extends ConsumerState<SkillsPanel> {
   }
 
   Future<void> _showCreateDialog() async {
-    final workspaceId = ref.read(currentWorkspaceIdProvider);
     final nameCtrl = TextEditingController();
     final descriptionCtrl = TextEditingController();
     final contentCtrl = TextEditingController();
@@ -417,20 +376,6 @@ class _SkillsPanelState extends ConsumerState<SkillsPanel> {
                     : () async {
                         final name = nameCtrl.text.trim();
                         if (name.isEmpty) return;
-                        if (ref.read(currentWorkspaceIdProvider) != workspaceId) {
-                          if (!ctx.mounted) return;
-                          ScaffoldMessenger.of(ctx).showSnackBar(
-                            const SnackBar(
-                              content: Text(
-                                'Workspace changed; create cancelled.',
-                              ),
-                            ),
-                          );
-                          WidgetsBinding.instance.addPostFrameCallback((_) {
-                            if (ctx.mounted) Navigator.pop(ctx, false);
-                          });
-                          return;
-                        }
                         setDialogState(() => submitting = true);
                         try {
                           await ref
@@ -439,8 +384,6 @@ class _SkillsPanelState extends ConsumerState<SkillsPanel> {
                                 name,
                                 descriptionCtrl.text.trim(),
                                 contentCtrl.text,
-                                scope: 'user',
-                                workspaceId: workspaceId,
                               );
                           if (ctx.mounted) Navigator.pop(ctx, true);
                         } catch (e) {

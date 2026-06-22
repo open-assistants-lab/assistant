@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/companion_provider.dart';
-import '../../providers/chat_tab_provider.dart';
 import '../../theme/app_theme.dart';
 
 class CompanionFeed extends ConsumerStatefulWidget {
@@ -148,12 +147,7 @@ class _CompanionFeedState extends ConsumerState<CompanionFeed> {
         ...items.map((n) => CompanionEntry(
               notification: n as dynamic,
               onDismiss: () => ref.read(companionNotifierProvider.notifier).dismiss(n.id),
-              onSwitchWorkspace: n.workspaceId != null
-                  ? () => ref.read(chatTabNotifierProvider.notifier).openWorkspace(
-                        n.workspaceId!,
-                        n.workspaceId ?? 'Workspace',
-                      )
-                  : null,
+                onSwitchWorkspace: null,
             )),
       ],
     );

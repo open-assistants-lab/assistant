@@ -2,8 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../theme/app_theme.dart';
 import '../../providers/agent_provider.dart';
-import '../../providers/workspace_provider.dart';
-import '../../widgets/scope_picker.dart';
 import 'tools_provider.dart';
 
 class ToolsPanel extends ConsumerStatefulWidget {
@@ -29,11 +27,9 @@ class _ToolsPanelState extends ConsumerState<ToolsPanel> {
   void _load() {
     final host = ref.read(hostProvider);
     final userId = ref.read(userIdProvider);
-    final wsId = ref.read(currentWorkspaceIdProvider);
     ref.read(toolsProvider.notifier).loadTools(
           host: host,
           userId: userId,
-          workspaceId: wsId,
         );
   }
 
@@ -205,7 +201,6 @@ class _ToolRow extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final workspaces = ref.watch(workspaceListProvider).valueOrNull ?? [];
     return Padding(
       padding: EdgeInsets.symmetric(
         horizontal: tokens.spacing.md,
@@ -251,26 +246,6 @@ class _ToolRow extends ConsumerWidget {
                 ),
               ],
             ),
-          ),
-          ScopePicker(
-            scope: tool.scope == 'selected' && tool.workspaceIds.isNotEmpty
-                ? ScopeState.selected
-                : tool.scope == 'none'
-                    ? ScopeState.none
-                    : ScopeState.all,
-            selectedWorkspaceIds: tool.workspaceIds,
-            allWorkspaces: workspaces,
-            onChanged: (change) {
-              final host = ref.read(hostProvider);
-              final userId = ref.read(userIdProvider);
-              ref.read(toolsProvider.notifier).setScope(
-                    host: host,
-                    userId: userId,
-                    toolName: tool.name,
-                    scope: change.scope.name,
-                    workspaceIds: change.workspaceIds,
-                  );
-            },
           ),
         ],
       ),
