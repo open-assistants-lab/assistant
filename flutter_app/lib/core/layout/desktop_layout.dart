@@ -112,12 +112,13 @@ class _DesktopLayoutState extends ConsumerState<DesktopLayout> {
         children: [
           LayoutBuilder(
             builder: (context, constraints) {
-              final total = constraints.maxWidth;
-              final sidebarW = _sidebarWidth.clamp(_minSidebar, total * 0.35).toDouble();
-              final remaining = total - sidebarW;
+              const dividerW = 6.0;
+              final panelTotal = constraints.maxWidth - dividerW * 2;
+              final sidebarW = _sidebarWidth.clamp(_minSidebar, panelTotal * 0.35).toDouble();
+              final remaining = panelTotal - sidebarW;
               final minEach = _minChat.clamp(0, remaining * 0.3);
               final chatW = (remaining * _chatFraction).clamp(minEach, remaining - minEach).toDouble();
-              final contentW = (remaining - chatW).clamp(minEach, remaining - minEach).toDouble();
+              final contentW = remaining - chatW;
 
               return Row(
                 children: [
