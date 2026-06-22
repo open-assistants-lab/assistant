@@ -294,7 +294,7 @@ async def create_sdk_loop(user_id: str, model: str | None = None, provider_keys:
     mcp_config = paths.user_mcp_config()
 
     idx = get_or_create_index(
-        user_tools_dir, None, mcp_config,
+        user_tools_dir, mcp_config,
         user_id=user_id,
         connectkit_bridge=connectkit_bridge,
     )

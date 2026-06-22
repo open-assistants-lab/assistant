@@ -50,7 +50,6 @@ def tool_reload() -> str:
 
     paths = get_paths(user_id=loop.user_id or "default_user")
     user_tools_dir = paths.user_tools_dir()
-    workspace_tools_dir = paths.workspace_tools_dir()
     mcp_config = paths.user_mcp_config()
     index_dir = user_tools_dir / ".index"
     hashes_path = index_dir / ".index_hashes.json"
@@ -67,7 +66,7 @@ def tool_reload() -> str:
         custom_count = 0
         for td in get_custom_tools(user_id=loop.user_id or "default_user"):
             if not is_core_tool(td.name):
-                tool_file = find_tool_file(td.name, user_tools_dir, workspace_tools_dir)
+                tool_file = find_tool_file(td.name, user_tools_dir)
                 reconstruct_data = {"command": "", "install": [], "tool_dir": ""}
                 if tool_file:
                     meta = load_tool_meta(tool_file)
@@ -106,7 +105,7 @@ def tool_reload() -> str:
                     connector_count += 1
 
         current_hashes = compute_source_hashes(
-            user_tools_dir, workspace_tools_dir, mcp_config,
+            user_tools_dir, mcp_config,
             connectkit_bridge=connectkit_bridge,
         )
         save_source_hashes(hashes_path, current_hashes)

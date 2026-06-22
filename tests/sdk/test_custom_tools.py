@@ -330,7 +330,7 @@ class TestChangeDetection:
         mcp_config = d / ".mcp.json"
         mcp_config.write_text("{}")
 
-        hashes = compute_source_hashes(tools_dir, None, mcp_config)
+        hashes = compute_source_hashes(tools_dir, mcp_config)
         assert len(hashes) >= 1
 
     def test_check_needs_reindex(self) -> None:
