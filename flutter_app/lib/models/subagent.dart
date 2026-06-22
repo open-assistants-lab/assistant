@@ -63,7 +63,6 @@ class SubagentJob {
   final String agentName;
   final String task;
   final String status;
-  final String workspaceId;
   final Map<String, dynamic>? progress;
   final String? result;
   final String? error;
@@ -77,7 +76,6 @@ class SubagentJob {
     required this.agentName,
     required this.task,
     required this.status,
-    required this.workspaceId,
     this.progress,
     this.result,
     this.error,
@@ -93,7 +91,6 @@ class SubagentJob {
       agentName: json['agent_name']?.toString() ?? '',
       task: json['task']?.toString() ?? '',
       status: json['status']?.toString() ?? 'pending',
-      workspaceId: json['workspace_id']?.toString() ?? 'personal',
       progress: json['progress'] as Map<String, dynamic>?,
       result: json['result']?.toString(),
       error: json['error']?.toString(),

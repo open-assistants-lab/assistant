@@ -3,7 +3,6 @@ class CompanionNotification {
   final String userId;
   final String message;
   final String category;
-  final String? workspaceId;
   final bool dismissed;
   final String createdAt;
 
@@ -12,7 +11,6 @@ class CompanionNotification {
     required this.userId,
     required this.message,
     this.category = 'general',
-    this.workspaceId,
     this.dismissed = false,
     required this.createdAt,
   });
@@ -23,7 +21,6 @@ class CompanionNotification {
       userId: json['user_id']?.toString() ?? '',
       message: json['message']?.toString() ?? '',
       category: json['category']?.toString() ?? 'general',
-      workspaceId: json['workspace_id']?.toString(),
       dismissed: json['dismissed'] == 1 || json['dismissed'] == true,
       createdAt: json['created_at']?.toString() ?? '',
     );
@@ -35,7 +32,6 @@ class CompanionNotification {
       userId: userId,
       message: message,
       category: category,
-      workspaceId: workspaceId,
       dismissed: dismissed ?? this.dismissed,
       createdAt: createdAt,
     );

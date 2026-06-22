@@ -5,7 +5,6 @@ import '../models/companion.dart';
 class ApiClient {
   String _host;
   String _userId;
-  String _workspaceId;
   String? _apiKey;
   String? _model;
   Map<String, String>? _providerKeys;
@@ -14,18 +13,15 @@ class ApiClient {
   ApiClient({
     String host = '127.0.0.1:8080',
     String userId = 'default_user',
-    String workspaceId = 'personal',
     String? apiKey,
     String? model,
     http.Client? httpClient,
   }) : _host = host,
        _userId = userId,
-       _workspaceId = workspaceId,
        _apiKey = apiKey,
        _model = model,
        _httpClient = httpClient ?? http.Client();
 
-  set workspaceId(String id) => _workspaceId = id;
   set apiKey(String? key) => _apiKey = key;
   set model(String? m) => _model = m;
   set providerKeys(Map<String, String>? keys) => _providerKeys = keys;
@@ -217,22 +213,15 @@ class ApiClient {
 
   // ─── Skills ───
 
-  Future<List<dynamic>> listSkills({String? workspaceId}) async {
-    final extra = <String, String>{};
-    if (workspaceId != null) extra['workspace_id'] = workspaceId;
-    final response = await _get(Uri.parse(_buildUrl('/skills', extra)));
+  Future<List<dynamic>> listSkills() async {
+    final response = await _get(Uri.parse(_buildUrl('/skills')));
     return _handleListResponse(response, 'skills');
   }
 
-  Future<Map<String, dynamic>> getSkillDetail(
-    String name, {
-    String? workspaceId,
-  }) async {
-    final extra = <String, String>{};
-    if (workspaceId != null) extra['workspace_id'] = workspaceId;
+  Future<Map<String, dynamic>> getSkillDetail(String name) async {
     final encodedName = Uri.encodeComponent(name);
     final response = await _get(
-      Uri.parse(_buildUrl('/skills/$encodedName', extra)),
+      Uri.parse(_buildUrl('/skills/$encodedName')),
     );
     return _handleResponse(response);
   }
@@ -242,12 +231,9 @@ class ApiClient {
     String description,
     String content, {
     String scope = 'user',
-    String? workspaceId,
   }) async {
-    final extra = <String, String>{};
-    if (workspaceId != null) extra['workspace_id'] = workspaceId;
     final response = await _post(
-      Uri.parse(_buildUrl('/skills', extra)),
+      Uri.parse(_buildUrl('/skills')),
       body: jsonEncode({
         'name': name,
         'description': description,
@@ -263,16 +249,13 @@ class ApiClient {
     String? description,
     String? content,
     String scope = 'user',
-    String? workspaceId,
   }) async {
-    final extra = <String, String>{};
-    if (workspaceId != null) extra['workspace_id'] = workspaceId;
     final encodedName = Uri.encodeComponent(name);
     final body = <String, dynamic>{'scope': scope};
     if (description != null) body['description'] = description;
     if (content != null) body['content'] = content;
     final response = await _put(
-      Uri.parse(_buildUrl('/skills/$encodedName', extra)),
+      Uri.parse(_buildUrl('/skills/$encodedName')),
       body: jsonEncode(body),
     );
     return _handleResponse(response);
@@ -281,10 +264,8 @@ class ApiClient {
   Future<void> deleteSkill(
     String name, {
     String scope = 'user',
-    String? workspaceId,
   }) async {
     final extra = <String, String>{'scope': scope};
-    if (workspaceId != null) extra['workspace_id'] = workspaceId;
     final encodedName = Uri.encodeComponent(name);
     final response = await _delete(
       Uri.parse(_buildUrl('/skills/$encodedName', extra)),
@@ -296,10 +277,8 @@ class ApiClient {
 
   // ─── Subagents ───
 
-  Future<List<dynamic>> listSubagents({String? workspaceId}) async {
-    final extra = <String, String>{};
-    if (workspaceId != null) extra['workspace_id'] = workspaceId;
-    final response = await _get(Uri.parse(_buildUrl('/subagents', extra)));
+  Future<List<dynamic>> listSubagents() async {
+    final response = await _get(Uri.parse(_buildUrl('/subagents')));
     final data = await _handleResponse(response);
     return data['agents'] as List<dynamic>? ?? [];
   }
@@ -319,12 +298,9 @@ class ApiClient {
     Map<String, dynamic>? outputSchema,
     String? handoffInstructions,
     String? artifactPolicy,
-    String? workspaceId,
   }) async {
-    final extra = <String, String>{};
-    if (workspaceId != null) extra['workspace_id'] = workspaceId;
     final response = await _post(
-      Uri.parse(_buildUrl('/subagents', extra)),
+      Uri.parse(_buildUrl('/subagents')),
       body: jsonEncode({
         'name': name,
         'description': description,
@@ -355,13 +331,10 @@ class ApiClient {
     int? maxLlmCalls,
     double? costLimitUsd,
     int? timeoutSeconds,
-    String? workspaceId,
   }) async {
-    final extra = <String, String>{};
-    if (workspaceId != null) extra['workspace_id'] = workspaceId;
     final encodedName = Uri.encodeComponent(name);
     final response = await _patch(
-      Uri.parse(_buildUrl('/subagents/$encodedName', extra)),
+      Uri.parse(_buildUrl('/subagents/$encodedName')),
       body: jsonEncode({
         'description': ?description,
         'model': ?model,
@@ -378,15 +351,10 @@ class ApiClient {
     }
   }
 
-  Future<void> deleteSubagent(
-    String name, {
-    String? workspaceId,
-  }) async {
-    final extra = <String, String>{};
-    if (workspaceId != null) extra['workspace_id'] = workspaceId;
+  Future<void> deleteSubagent(String name) async {
     final encodedName = Uri.encodeComponent(name);
     final response = await _delete(
-      Uri.parse(_buildUrl('/subagents/$encodedName', extra)),
+      Uri.parse(_buildUrl('/subagents/$encodedName')),
     );
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw ApiException(response.statusCode, response.body);
@@ -397,13 +365,10 @@ class ApiClient {
     String name, {
     required String task,
     String? parentId,
-    String? workspaceId,
   }) async {
-    final extra = <String, String>{};
-    if (workspaceId != null) extra['workspace_id'] = workspaceId;
     final encodedName = Uri.encodeComponent(name);
     final response = await _post(
-      Uri.parse(_buildUrl('/subagents/$encodedName/start', extra)),
+      Uri.parse(_buildUrl('/subagents/$encodedName/start')),
       body: jsonEncode({
         'task': task,
         'parent_id': ?parentId,
@@ -414,48 +379,32 @@ class ApiClient {
 
   Future<List<dynamic>> listSubagentJobs({
     String? status,
-    String? workspaceId,
   }) async {
     final extra = <String, String>{};
     if (status != null) extra['status'] = status;
-    if (workspaceId != null) extra['workspace_id'] = workspaceId;
     final response = await _get(Uri.parse(_buildUrl('/subagents/jobs', extra)));
     final data = await _handleResponse(response);
     return data['jobs'] as List<dynamic>? ?? [];
   }
 
-  Future<Map<String, dynamic>> getSubagentJob(
-    String jobId, {
-    String? workspaceId,
-  }) async {
-    final extra = <String, String>{};
-    if (workspaceId != null) extra['workspace_id'] = workspaceId;
+  Future<Map<String, dynamic>> getSubagentJob(String jobId) async {
     final response = await _get(
-      Uri.parse(_buildUrl('/subagents/jobs/$jobId', extra)),
+      Uri.parse(_buildUrl('/subagents/jobs/$jobId')),
     );
     return _handleResponse(response);
   }
 
-  Future<void> cancelSubagentJob(
-    String jobId, {
-    String? workspaceId,
-  }) async {
-    final extra = <String, String>{};
-    if (workspaceId != null) extra['workspace_id'] = workspaceId;
+  Future<void> cancelSubagentJob(String jobId) async {
     await _post(
-      Uri.parse(_buildUrl('/subagents/jobs/$jobId/cancel', extra)),
+      Uri.parse(_buildUrl('/subagents/jobs/$jobId/cancel')),
     );
   }
 
-  Future<void> instructSubagentJob(
-    String jobId, {
+  Future<void> instructSubagentJob(String jobId, {
     required String instruction,
-    String? workspaceId,
   }) async {
-    final extra = <String, String>{};
-    if (workspaceId != null) extra['workspace_id'] = workspaceId;
     await _post(
-      Uri.parse(_buildUrl('/subagents/jobs/$jobId/instructions', extra)),
+      Uri.parse(_buildUrl('/subagents/jobs/$jobId/instructions')),
       body: jsonEncode({'instruction': instruction}),
     );
   }
@@ -470,28 +419,15 @@ class ApiClient {
 
   Future<List<dynamic>> getConversation({
     int limit = 20,
-    String workspaceId = 'personal',
     String? sessionId,
   }) async {
     final extra = <String, String>{
       'limit': limit.toString(),
       'user_id': _userId,
-      'workspace_id': workspaceId,
       if (sessionId != null && sessionId.isNotEmpty) 'session_id': sessionId,
     };
     final response = await _get(Uri.parse(_buildUrl('/conversation', extra)));
     return _handleListResponse(response, 'messages');
-  }
-
-  Future<Map<String, dynamic>> updateWorkspaceModelOverride(
-    String workspaceId,
-    String? modelOverride,
-  ) async {
-    final response = await _patch(
-      Uri.parse('$_baseUrl/workspaces/$workspaceId?user_id=$_userId'),
-      body: jsonEncode({'model_override': modelOverride}),
-    );
-    return _handleResponse(response);
   }
 
   /// Send a non-streaming message to the agent.
@@ -501,7 +437,6 @@ class ApiClient {
       body: jsonEncode({
         'message': content,
         'user_id': _userId,
-        'workspace_id': _workspaceId,
         if (_model != null) 'model': _model,
         if (_providerKeys != null && _providerKeys!.isNotEmpty)
           'provider_keys': _providerKeys,

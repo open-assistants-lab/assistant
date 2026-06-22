@@ -169,12 +169,11 @@ class WsClient {
 
   final _pendingMessages = <Map<String, dynamic>>[];
 
-  void sendMessage(String content, {bool verbose = false, String workspaceId = 'personal'}) {
+  void sendMessage(String content, {bool verbose = false}) {
     final payload = <String, dynamic>{
       'type': 'user_message',
       'content': content,
       'user_id': _userId,
-      'workspace_id': workspaceId,
       'verbose': verbose,
       if (_sessionId != null && _sessionId!.isNotEmpty) 'session_id': _sessionId,
       if (_model != null) 'model': _model,

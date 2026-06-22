@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/subagent.dart';
 import '../services/api_client.dart';
 import 'agent_provider.dart';
-import 'workspace_provider.dart';
 
 class SubagentPanelState {
   final List<SubagentAgentDef> agents;
@@ -53,14 +52,12 @@ class SubagentNotifier extends StateNotifier<SubagentPanelState> {
 
   ApiClient get _api => _ref.read(apiClientProvider);
 
-  Future<void> loadList({String? workspaceId}) async {
+  Future<void> loadList() async {
     final seq = state.loadSequence + 1;
-    final targetWs = workspaceId ?? _ref.read(currentWorkspaceIdProvider);
     state = state.copyWith(loading: state.agents.isEmpty, loadSequence: seq);
     try {
-      final raw = await _api.listSubagents(workspaceId: targetWs);
-      if (seq != state.loadSequence ||
-          _ref.read(currentWorkspaceIdProvider) != targetWs) {
+      final raw = await _api.listSubagents();
+      if (seq != state.loadSequence) {
         return;
       }
       final agents = raw
@@ -85,9 +82,7 @@ class SubagentNotifier extends StateNotifier<SubagentPanelState> {
     int maxLlmCalls = 50,
     double costLimitUsd = 1.0,
     int timeoutSeconds = 300,
-    String? workspaceId,
   }) async {
-    final targetWs = workspaceId ?? _ref.read(currentWorkspaceIdProvider);
     await _api.createSubagent(
       name: name,
       description: description,
@@ -99,22 +94,17 @@ class SubagentNotifier extends StateNotifier<SubagentPanelState> {
       maxLlmCalls: maxLlmCalls,
       costLimitUsd: costLimitUsd,
       timeoutSeconds: timeoutSeconds,
-      workspaceId: targetWs,
     );
-    await loadList(workspaceId: targetWs);
+    await loadList();
   }
 
-  Future<void> deleteAgent(String name, {String? workspaceId}) async {
-    final targetWs = workspaceId ?? _ref.read(currentWorkspaceIdProvider);
-    await _api.deleteSubagent(name, workspaceId: targetWs);
-    await loadList(workspaceId: targetWs);
+  Future<void> deleteAgent(String name) async {
+    await _api.deleteSubagent(name);
+    await loadList();
   }
 
-  Future<String> startJob(String agentName, String task,
-      {String? workspaceId}) async {
-    final targetWs = (workspaceId ?? _ref.read(currentWorkspaceIdProvider)) as String;
-    final result =
-        await _api.startSubagent(agentName, task: task, workspaceId: targetWs);
+  Future<String> startJob(String agentName, String task) async {
+    final result = await _api.startSubagent(agentName, task: task);
     final jobId = result['job_id']?.toString() ?? '';
     if (jobId.isNotEmpty) {
       final job = SubagentJob(
@@ -122,7 +112,6 @@ class SubagentNotifier extends StateNotifier<SubagentPanelState> {
         agentName: agentName,
         task: task,
         status: 'pending',
-        workspaceId: targetWs,
       );
       state = state.copyWith(
         activeJobs: {...state.activeJobs, jobId: job},
@@ -133,17 +122,13 @@ class SubagentNotifier extends StateNotifier<SubagentPanelState> {
     return jobId;
   }
 
-  Future<void> cancelJob(String jobId, {String? workspaceId}) async {
-    final targetWs = workspaceId ?? _ref.read(currentWorkspaceIdProvider);
-    await _api.cancelSubagentJob(jobId, workspaceId: targetWs);
+  Future<void> cancelJob(String jobId) async {
+    await _api.cancelSubagentJob(jobId);
     _updateJob(jobId, status: 'cancelling');
   }
 
-  Future<void> instructJob(String jobId, String instruction,
-      {String? workspaceId}) async {
-    final targetWs = workspaceId ?? _ref.read(currentWorkspaceIdProvider);
-    await _api.instructSubagentJob(jobId,
-        instruction: instruction, workspaceId: targetWs);
+  Future<void> instructJob(String jobId, String instruction) async {
+    await _api.instructSubagentJob(jobId, instruction: instruction);
   }
 
   void _updateJob(String jobId,
@@ -159,7 +144,6 @@ class SubagentNotifier extends StateNotifier<SubagentPanelState> {
       agentName: existing.agentName,
       task: existing.task,
       status: status ?? existing.status,
-      workspaceId: existing.workspaceId,
       progress: progress ?? existing.progress,
       result: result ?? existing.result,
       error: error ?? existing.error,
@@ -225,7 +209,6 @@ class SubagentNotifier extends StateNotifier<SubagentPanelState> {
     try {
       final data = await _api.getSubagentJob(
         jobId,
-        workspaceId: existing.workspaceId,
       );
       final job = data['job'] as Map<String, dynamic>? ?? data;
       _updateJob(

@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import '../models/message.dart';
 import '../services/backend_service.dart';
@@ -11,8 +10,6 @@ import '../services/api_client.dart';
 import '../widgets/diff_card.dart';
 
 String resolvedUserId = 'default_user';
-
-const _sessionIdPrefsKey = 'workspace_session_ids';
 
 enum ChatStatus { idle, streaming, error, awaitingApproval, disconnected }
 
@@ -101,10 +98,6 @@ class AgentNotifier extends StateNotifier<ChatState> {
   bool _disposed = false;
   bool _loadingHistory = false;
   final List<WsMessage> _bufferedMessages = [];
-  String _workspaceId = 'personal';
-  String? _activeStreamWorkspaceId;
-  final Map<String, ChatState> _workspaceStates = {};
-  final Set<String> _historyLoadedWorkspaces = {};
   final Map<String, StringBuffer> _toolInputAccum = {};
   final Map<String, DateTime> _toolStartTimes = {};
   final Set<String> _seenContentHashes = {};
@@ -125,16 +118,6 @@ class AgentNotifier extends StateNotifier<ChatState> {
     _backendService.start();
   }
 
-  void setWorkspaceId(String id) {
-    _workspaceStates[_workspaceId] = state;
-    _workspaceId = id;
-    final saved = _workspaceStates[id];
-    if (saved != null) {
-      state = _withCurrentTransport(saved);
-      _workspaceStates[id] = state;
-    }
-  }
-
   void setSessionId(String sessionId) {
     if (state.sessionId == sessionId) return;
     _setState(state.copyWith(sessionId: sessionId));
@@ -145,53 +128,8 @@ class AgentNotifier extends StateNotifier<ChatState> {
     }
   }
 
-  Future<String> createSession(String workspaceId, String name) async {
-    final sessionId = const Uuid().v4().substring(0, 8);
-    final prefs = await SharedPreferences.getInstance();
-    final saved = prefs.getString(_sessionIdPrefsKey);
-    final sessions = saved != null
-        ? Map<String, String>.from(jsonDecode(saved))
-        : <String, String>{};
-    sessions[workspaceId] = sessionId;
-    await prefs.setString(_sessionIdPrefsKey, jsonEncode(sessions));
-    return sessionId;
-  }
-
-  Future<String?> getSessionId(String workspaceId) async {
-    final prefs = await SharedPreferences.getInstance();
-    final saved = prefs.getString(_sessionIdPrefsKey);
-    if (saved == null) return null;
-    final sessions = Map<String, String>.from(jsonDecode(saved));
-    return sessions[workspaceId];
-  }
-
-  bool hasWorkspaceState(String id) => _workspaceStates.containsKey(id);
-
-  bool needsHistory(String id) {
-    final workspaceState = id == _workspaceId ? state : _workspaceStates[id];
-    if (workspaceState?.messages.isNotEmpty == true) return false;
-    return !_historyLoadedWorkspaces.contains(id);
-  }
-
-  void removeWorkspaceState(String id) {
-    _workspaceStates.remove(id);
-  }
-
   void _setState(ChatState next) {
     state = next;
-    _workspaceStates[_workspaceId] = next;
-  }
-
-  ChatState _withCurrentTransport(ChatState workspaceState) {
-    if (!_transportConnected) return workspaceState.copyWith(connected: false);
-    final restoredStatus = workspaceState.status == ChatStatus.disconnected
-        ? ChatStatus.idle
-        : workspaceState.status;
-    return workspaceState.copyWith(
-      connected: true,
-      status: restoredStatus,
-      error: restoredStatus == ChatStatus.idle ? null : workspaceState.error,
-    );
   }
 
   void _flushStreamingTextToMessage() {
@@ -273,15 +211,12 @@ class AgentNotifier extends StateNotifier<ChatState> {
 
   Future<void> loadHistory({int limit = 100}) async {
     try {
-      final targetWorkspaceId = _workspaceId;
       final targetSessionId = state.sessionId;
       final apiMessages = await _apiClient.getConversation(
         limit: limit,
-        workspaceId: targetWorkspaceId,
         sessionId: targetSessionId.isNotEmpty ? targetSessionId : null,
       );
-      if (_disposed || targetWorkspaceId != _workspaceId) return;
-      _historyLoadedWorkspaces.add(targetWorkspaceId);
+      if (_disposed) return;
       final now = DateTime.now();
       var idx = 0;
       final chatMessages = <ChatMessage>[];
@@ -410,8 +345,7 @@ class AgentNotifier extends StateNotifier<ChatState> {
       ),
     );
 
-    _activeStreamWorkspaceId = _workspaceId;
-    _wsClient.sendMessage(content, workspaceId: _workspaceId);
+    _wsClient.sendMessage(content);
   }
 
   void updateModel(String model) {
@@ -497,9 +431,6 @@ class AgentNotifier extends StateNotifier<ChatState> {
   void clearHistory({bool loading = false}) {
     _seenContentHashes.clear();
     _welcomeSent = false;
-    if (loading) {
-      _historyLoadedWorkspaces.remove(_workspaceId);
-    }
     _setState(
       state.copyWith(
         messages: [],
@@ -552,16 +483,6 @@ class AgentNotifier extends StateNotifier<ChatState> {
 
   void _onMessage(WsMessage msg) {
     if (_disposed) return;
-    final eventWorkspaceId = msg['workspace_id']?.toString();
-    final streamWorkspaceId = eventWorkspaceId?.isNotEmpty == true
-        ? eventWorkspaceId
-        : _activeStreamWorkspaceId;
-    if (streamWorkspaceId != null && streamWorkspaceId != _workspaceId) {
-      if (msg.type == 'done' || msg.type == 'error') {
-        _activeStreamWorkspaceId = null;
-      }
-      return;
-    }
     if (_loadingHistory) {
       _bufferedMessages.add(msg);
       return;
@@ -835,7 +756,6 @@ class AgentNotifier extends StateNotifier<ChatState> {
         ),
       );
       _toolInputAccum.clear();
-      _activeStreamWorkspaceId = null;
       return;
     }
 
@@ -849,7 +769,6 @@ class AgentNotifier extends StateNotifier<ChatState> {
           loadingHistory: false,
         ),
       );
-      _activeStreamWorkspaceId = null;
       return;
     }
 
