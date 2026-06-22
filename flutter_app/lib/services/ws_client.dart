@@ -110,7 +110,10 @@ class WsClient {
     _cleanupExisting();
     _safeAddStatus(ConnectionStatus.connecting);
     final scheme = wsScheme;
-    final host = cleanHost;
+    final raw = cleanHost;
+    // Split "host:port" into separate components
+    final host = raw.contains(':') ? raw.split(':').first : raw;
+    final port = raw.contains(':') ? int.tryParse(raw.split(':').last) : null;
     try {
       final queryParams = <String, String>{};
       if (_sessionId != null && _sessionId!.isNotEmpty) {
@@ -119,6 +122,7 @@ class WsClient {
       final uri = Uri(
         scheme: scheme,
         host: host,
+        port: port,
         path: '/ws/conversation',
         queryParameters: queryParams.isNotEmpty ? queryParams : null,
       );

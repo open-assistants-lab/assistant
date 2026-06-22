@@ -141,8 +141,6 @@ app.include_router(skills_router)
 app.include_router(subagents_router)
 app.include_router(tools_router)
 app.include_router(ws_router)
-from src.http.routers.sessions import router as sessions_router
-app.include_router(sessions_router)
 app.include_router(settings_router)
 
 # POC route for canvas 2.0 workspace concept
@@ -154,6 +152,11 @@ app.include_router(poc_router)
 from src.http.routers.widgets import router as widgets_router
 
 app.include_router(widgets_router)
+
+# Session listing
+from src.http.routers.sessions import router as sessions_router
+
+app.include_router(sessions_router)
 
 # ConnectKit OAuth + catalog routers (safe if connectkit not installed)
 try:
