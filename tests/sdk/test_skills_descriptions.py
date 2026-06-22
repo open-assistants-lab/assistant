@@ -18,7 +18,7 @@ class TestSkillDescriptionBudget:
             mock_reg.return_value.get_all_skills.return_value = skills
             mock_reg.return_value.get_loaded_skills.return_value = []
             mock_reg.return_value.get_load_count.return_value = 0
-            result = _get_skills_context("test_user", "personal")
+            result = _get_skills_context("test_user")
             assert "skill-a" in result
             assert "skill-b" in result
 
@@ -36,7 +36,7 @@ class TestSkillDescriptionBudget:
                 return 5 if name == "skill-a" else 0
 
             mock_reg.return_value.get_load_count.side_effect = load_count
-            result = _get_skills_context("test_user", "personal")
+            result = _get_skills_context("test_user")
             assert "skill-a" in result
             assert "skill-b" not in result
 
@@ -50,5 +50,5 @@ class TestSkillDescriptionBudget:
             mock_reg.return_value.get_all_skills.return_value = skills
             mock_reg.return_value.get_loaded_skills.return_value = []
             mock_reg.return_value.get_load_count.return_value = 0
-            result = _get_skills_context("test_user", "personal")
+            result = _get_skills_context("test_user")
             assert result == ""

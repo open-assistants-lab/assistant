@@ -22,14 +22,13 @@ def test_subagent_start_returns_job_id(monkeypatch):
             return "job123"
 
     monkeypatch.setattr(
-        mod, "get_coordinator", lambda user_id, workspace_id: FakeCoordinator(), raising=False
+        mod, "get_coordinator", lambda user_id: FakeCoordinator(), raising=False
     )
     result = mod.subagent_start.invoke(
         {
             "agent_name": "worker",
             "task": "do work",
             "user_id": "u",
-            "workspace_id": "w",
         }
     )
     assert "job123" in result
@@ -55,11 +54,11 @@ def test_subagent_check_returns_single_job_status(monkeypatch):
             return FakeDB()
 
     monkeypatch.setattr(
-        mod, "get_coordinator", lambda user_id, workspace_id: FakeCoordinator(), raising=False
+        mod, "get_coordinator", lambda user_id: FakeCoordinator(), raising=False
     )
 
     result = mod.subagent_check.invoke(
-        {"task_id": "job123", "user_id": "u", "workspace_id": "w"}
+        {"task_id": "job123", "user_id": "u"}
     )
 
     assert "job123" in result
@@ -83,11 +82,11 @@ def test_subagent_tasks_filters_by_status(monkeypatch):
             return FakeDB()
 
     monkeypatch.setattr(
-        mod, "get_coordinator", lambda user_id, workspace_id: FakeCoordinator(), raising=False
+        mod, "get_coordinator", lambda user_id: FakeCoordinator(), raising=False
     )
 
     result = mod.subagent_tasks.invoke(
-        {"status": "running", "user_id": "u", "workspace_id": "w"}
+        {"status": "running", "user_id": "u"}
     )
 
     assert seen["status"] == TaskStatus.RUNNING
@@ -99,7 +98,7 @@ def test_subagent_tasks_rejects_invalid_status(monkeypatch):
     from src.sdk.tools_core import subagent as mod
 
     result = mod.subagent_tasks.invoke(
-        {"status": "not-a-status", "user_id": "u", "workspace_id": "w"}
+        {"status": "not-a-status", "user_id": "u"}
     )
 
     assert result.startswith("Error: Invalid status")
@@ -120,15 +119,14 @@ def test_subagent_create_parses_new_json_fields_and_validates(monkeypatch):
             return profile
 
     monkeypatch.setattr(
-        mod, "get_coordinator", lambda user_id, workspace_id: FakeCoordinator(), raising=False
+        mod, "get_coordinator", lambda user_id: FakeCoordinator(), raising=False
     )
-    monkeypatch.setattr(mod, "validate_agent_def", lambda profile, **kwargs: [], raising=False)
+    monkeypatch.setattr(mod, "validate_agent_def", lambda profile, user_id=None: [], raising=False)
 
     result = mod.subagent_create.invoke(
         {
             "name": "worker",
             "user_id": "u",
-            "workspace_id": "w",
             "description": "test worker",
             "model": "anthropic:claude-sonnet-4-20250514",
             "provider_options": '{"anthropic": {"thinking": {"type": "enabled"}}}',
@@ -178,7 +176,7 @@ def test_subagent_update_parses_new_fields_and_validates_before_save(monkeypatch
         return []
 
     monkeypatch.setattr(
-        mod, "get_coordinator", lambda user_id, workspace_id: FakeCoordinator(), raising=False
+        mod, "get_coordinator", lambda user_id: FakeCoordinator(), raising=False
     )
     monkeypatch.setattr(mod, "validate_agent_def", fake_validate, raising=False)
 
@@ -186,7 +184,6 @@ def test_subagent_update_parses_new_fields_and_validates_before_save(monkeypatch
         {
             "name": "worker",
             "user_id": "u",
-            "workspace_id": "w",
             "provider_options": '{"anthropic": {"thinking": {"type": "enabled"}}}',
             "output_schema": '{"type": "object"}',
             "handoff_instructions": "return concise output",
@@ -205,7 +202,7 @@ def test_subagent_update_parses_new_fields_and_validates_before_save(monkeypatch
     }
     assert validated["profile"].output_schema_def == {"type": "object"}
     assert validated["profile"].handoff_instructions == "return concise output"
-    assert validated["kwargs"] == {"user_id": "u", "workspace_id": "w"}
+    assert validated["kwargs"] == {"user_id": "u"}
 
 
 def test_subagent_update_rejects_invalid_provider_options_json(monkeypatch):
@@ -221,7 +218,7 @@ def test_subagent_update_rejects_invalid_provider_options_json(monkeypatch):
             raise AssertionError("update should not be called")
 
     monkeypatch.setattr(
-        mod, "get_coordinator", lambda user_id, workspace_id: FakeCoordinator(), raising=False
+        mod, "get_coordinator", lambda user_id: FakeCoordinator(), raising=False
     )
 
     result = mod.subagent_update.invoke(
@@ -244,7 +241,7 @@ def test_subagent_update_rejects_invalid_output_schema_json(monkeypatch):
             raise AssertionError("update should not be called")
 
     monkeypatch.setattr(
-        mod, "get_coordinator", lambda user_id, workspace_id: FakeCoordinator(), raising=False
+        mod, "get_coordinator", lambda user_id: FakeCoordinator(), raising=False
     )
 
     result = mod.subagent_update.invoke(
@@ -273,7 +270,7 @@ def test_subagent_update_rejects_validation_errors_before_save(monkeypatch):
         return ["Unknown tool: not_a_tool"]
 
     monkeypatch.setattr(
-        mod, "get_coordinator", lambda user_id, workspace_id: FakeCoordinator(), raising=False
+        mod, "get_coordinator", lambda user_id: FakeCoordinator(), raising=False
     )
     monkeypatch.setattr(mod, "validate_agent_def", fake_validate, raising=False)
 
@@ -304,14 +301,13 @@ async def test_subagent_delegate_returns_output(monkeypatch):
             return "finished work"
 
     monkeypatch.setattr(
-        mod, "get_coordinator", lambda user_id, workspace_id: FakeCoordinator(), raising=False
+        mod, "get_coordinator", lambda user_id: FakeCoordinator(), raising=False
     )
     result = await mod.subagent_delegate.ainvoke(
         {
             "agent_name": "worker",
             "task": "do work",
             "user_id": "u",
-            "workspace_id": "w",
         }
     )
     assert result == "finished work"
@@ -326,7 +322,7 @@ async def test_subagent_delegate_error_for_nonexistent_agent(monkeypatch):
             return None
 
     monkeypatch.setattr(
-        mod, "get_coordinator", lambda user_id, workspace_id: FakeCoordinator(), raising=False
+        mod, "get_coordinator", lambda user_id: FakeCoordinator(), raising=False
     )
     result = await mod.subagent_delegate.ainvoke(
         {
@@ -350,7 +346,7 @@ async def test_subagent_delegate_timeout(monkeypatch):
             raise TimeoutError("timed out")
 
     monkeypatch.setattr(
-        mod, "get_coordinator", lambda user_id, workspace_id: FakeCoordinator(), raising=False
+        mod, "get_coordinator", lambda user_id: FakeCoordinator(), raising=False
     )
     result = await mod.subagent_delegate.ainvoke(
         {

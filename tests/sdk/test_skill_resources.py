@@ -46,7 +46,6 @@ class TestSkillResourceEnumeration:
                 result = skills_load.invoke({
                     "name": "nonexistent",
                     "user_id": "test_user",
-                    "workspace_id": "personal",
                 })
 
                 assert "not found" in result.lower()
@@ -70,7 +69,6 @@ class TestSkillResourceEnumeration:
                 result = skills_load.invoke({
                     "name": "empty-skill",
                     "user_id": "test_user",
-                    "workspace_id": "personal",
                 })
 
                 assert "exists but has no content" in result

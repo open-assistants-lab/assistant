@@ -14,7 +14,6 @@ class TestResearchTools:
 
         result = research_list.invoke({
             "user_id": "test_user",
-            "workspace_id": "personal",
         })
 
         assert "No research experiments found" in result
@@ -37,7 +36,6 @@ class TestResearchTools:
 
             result = research_list.invoke({
                 "user_id": "t_user",
-                "workspace_id": "t_ws",
             })
             assert "abc1234" in result
             assert "0.950000" in result

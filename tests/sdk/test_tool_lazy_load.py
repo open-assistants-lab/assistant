@@ -35,7 +35,6 @@ def mock_loop():
         provider=_MockProvider(),
         tools=[],
         user_id="test_user",
-        workspace_id="personal",
     )
     return loop
 

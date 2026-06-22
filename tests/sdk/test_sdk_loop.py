@@ -92,17 +92,15 @@ def echo(text: str = "hello") -> str:
 
 
 @tool
-def context_probe(user_id: str = "default_user", workspace_id: str = "personal") -> str:
+def context_probe(user_id: str = "default_user") -> str:
     """Return the execution context ids."""
-    return json.dumps({"user_id": user_id, "workspace_id": workspace_id})
+    return json.dumps({"user_id": user_id})
 
 
 @tool
-def destructive_context_probe(
-    user_id: str = "default_user", workspace_id: str = "personal"
-) -> str:
+def destructive_context_probe(user_id: str = "default_user") -> str:
     """Destructive context probe."""
-    return json.dumps({"user_id": user_id, "workspace_id": workspace_id})
+    return json.dumps({"user_id": user_id})
 
 
 destructive_context_probe.annotations = ToolAnnotations(destructive=True)
@@ -591,7 +589,6 @@ class TestAgentLoopHITL:
                             name="destructive_context_probe",
                             arguments={
                                 "user_id": "default_user",
-                                "workspace_id": "personal",
                             },
                         ),
                     ],
@@ -602,14 +599,13 @@ class TestAgentLoopHITL:
             provider=provider,
             tools=[destructive_context_probe],
             user_id="real_user",
-            workspace_id="test12345",
         )
 
         result = await loop.run([Message.user("Create subagent")])
 
         interrupt_result = next(m for m in result if m.role == "tool")
         content = json.loads(interrupt_result.content)
-        assert content["args"] == {"user_id": "real_user", "workspace_id": "test12345"}
+        assert content["args"] == {"user_id": "real_user"}
 
     async def test_interrupt_on_destructive_tool_stream(self):
         """run_stream yields interrupt chunk when a destructive tool is called."""
@@ -874,25 +870,23 @@ class TestToolDefinition:
         assert not result.is_error
 
     async def test_tool_context_ids_override_model_arguments(self):
-        """Model-supplied context ids cannot override runtime user/workspace."""
+        """Model-supplied context ids cannot override runtime user."""
         loop = AgentLoop(
             provider=MockProvider(),
             tools=[context_probe],
             user_id="real_user",
-            workspace_id="subagent-test",
         )
 
         result = await loop._execute_tool(
             ToolCall(
                 id="c1",
                 name="context_probe",
-                arguments={"user_id": "fake_user", "workspace_id": "invalid workspace"},
+                arguments={"user_id": "fake_user"},
             )
         )
 
         assert json.loads(result.content) == {
             "user_id": "real_user",
-            "workspace_id": "subagent-test",
         }
 
     async def test_tool_result_from_raw(self):

@@ -33,26 +33,24 @@ class TestCompanionNotificationDB:
 
         db = CompanionNotificationDB("test_user")
         try:
-            nid = await db.insert("Good morning!", "checkin", None)
+            nid = await db.insert("Good morning!", "checkin")
             assert nid
 
             notifs = await db.list(limit=50)
             assert len(notifs) == 1
             assert notifs[0]["message"] == "Good morning!"
             assert notifs[0]["category"] == "checkin"
-            assert notifs[0]["workspace_id"] is None
             assert notifs[0]["dismissed"] == 0
         finally:
             await db.close()
 
-    async def test_insert_with_workspace(self, mock_paths):
+    async def test_insert_with_category(self, mock_paths):
         from src.sdk.tools_core.companion_db import CompanionNotificationDB
 
         db = CompanionNotificationDB("test_user")
         try:
-            await db.insert("3 overdue tasks", "deadline", "q2-planning")
+            await db.insert("3 overdue tasks", "deadline")
             notifs = await db.list(limit=50)
-            assert notifs[0]["workspace_id"] == "q2-planning"
             assert notifs[0]["category"] == "deadline"
         finally:
             await db.close()
@@ -62,7 +60,7 @@ class TestCompanionNotificationDB:
 
         db = CompanionNotificationDB("test_user")
         try:
-            nid = await db.insert("Test notification", "general", None)
+            nid = await db.insert("Test notification", "general")
             ok = await db.dismiss(nid)
             assert ok
 
@@ -90,9 +88,9 @@ class TestCompanionNotificationDB:
 
         db = CompanionNotificationDB("test_user")
         try:
-            await db.insert("First", "checkin", None)
-            await db.insert("Second", "general", None)
-            await db.insert("Third", "deadline", None)
+            await db.insert("First", "checkin")
+            await db.insert("Second", "general")
+            await db.insert("Third", "deadline")
             recent = await db.recent_messages(2)
             assert "Third" in recent
             assert "Second" in recent
@@ -106,7 +104,7 @@ class TestCompanionNotificationDB:
         db = CompanionNotificationDB("test_user")
         try:
             assert (await db.last_check_time()) == "never"
-            await db.insert("Test", "checkin", None)
+            await db.insert("Test", "checkin")
             last = await db.last_check_time()
             assert last != "never"
         finally:
@@ -119,9 +117,9 @@ class TestCompanionNotificationDB:
         try:
             assert (await db.dismissal_streak()) == 0
 
-            nid2 = await db.insert("Second", "general", None)
-            nid3 = await db.insert("Third", "general", None)
-            nid4 = await db.insert("Fourth", "general", None)
+            nid2 = await db.insert("Second", "general")
+            nid3 = await db.insert("Third", "general")
+            nid4 = await db.insert("Fourth", "general")
 
             await db.dismiss(nid4)
             await db.dismiss(nid3)

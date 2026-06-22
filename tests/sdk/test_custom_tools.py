@@ -493,8 +493,8 @@ command: echo hi
 ---
 """)
 
-        idx = get_or_create_index(tools_dir, None, mcp_config,
-                                  user_id="test_index_user", workspace_id="personal",
+        idx = get_or_create_index(tools_dir, mcp_config,
+                                  user_id="test_index_user",
                                   index_dir=index_dir)
         names = idx.list_all_names()
         for core in list(CORE_TOOL_NAMES)[:3]:

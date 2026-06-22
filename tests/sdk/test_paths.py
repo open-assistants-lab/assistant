@@ -84,8 +84,8 @@ def test_user_mcp_config():
 
 
 def test_research_dir():
-    dp = DataPaths(user_id="tester", ea_root="/tmp/ea-test-root", workspace_id="testws")
-    assert str(dp.research_dir()) == "/tmp/ea-test-root/Research/tester/testws"
+    dp = DataPaths(user_id="tester", ea_root="/tmp/ea-test-root")
+    assert str(dp.research_dir()) == "/tmp/ea-test-root/Research/tester"
 
 
 def test_companion_dir():
@@ -101,31 +101,6 @@ def test_companion_notifications_db():
 def test_companion_memory_db():
     dp = DataPaths(user_id="tester", ea_root="/tmp/ea-test-root")
     assert str(dp.companion_memory_db()) == "/tmp/ea-test-root/Companion/memory.db"
-
-
-def test_workspace_skills_dir_uppercase():
-    dp = DataPaths(user_id="tester", ea_root="/tmp/ea-test-root", workspace_id="testws")
-    assert str(dp.workspace_skills_dir()) == "/tmp/ea-test-root/Workspaces/testws/Skills"
-
-
-def test_workspace_subagents_dir_uppercase():
-    dp = DataPaths(user_id="tester", ea_root="/tmp/ea-test-root", workspace_id="testws")
-    assert str(dp.workspace_subagents_dir()) == "/tmp/ea-test-root/Workspaces/testws/Subagents"
-
-
-def test_workspace_files_dir_uppercase():
-    dp = DataPaths(user_id="tester", ea_root="/tmp/ea-test-root", workspace_id="testws")
-    assert str(dp.workspace_files_dir()) == "/tmp/ea-test-root/Workspaces/testws/Files"
-
-
-def test_workspace_memory_dir_uppercase():
-    dp = DataPaths(user_id="tester", ea_root="/tmp/ea-test-root", workspace_id="testws")
-    assert str(dp.workspace_memory_dir()) == "/tmp/ea-test-root/Workspaces/testws/Memory"
-
-
-def test_workspace_conversation_path():
-    dp = DataPaths(user_id="tester", ea_root="/tmp/ea-test-root", workspace_id="testws")
-    assert str(dp.workspace_conversation_path()) == "/tmp/ea-test-root/Workspaces/testws/conversation.app.db"
 
 
 def test_deprecated_skills_dir_warns():
@@ -249,25 +224,8 @@ def test_deprecated_mcp_config_path_warns():
     assert str(result) == "/tmp/ea-test-root/.mcp.json"
 
 
-def test_deprecated_workspace_dir_warns():
-    import warnings
-    dp = DataPaths(user_id="tester", ea_root="/tmp/ea-test-root", workspace_id="testws")
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        result = dp.workspace_dir()
-        assert len(w) >= 1
-        assert "deprecated" in str(w[0].message).lower()
-    assert str(result) == "/tmp/ea-test-root/Workspaces/testws/Files"
-
-
-def test_workspace_cache():
-    dp = DataPaths(user_id="tester", ea_root="/tmp/ea-test-root", workspace_id="testws")
-    result = dp.workspace_cache()
-    assert ".file_cache.json" in str(result)
-
-
 def test_versions_dir():
-    dp = DataPaths(user_id="tester", ea_root="/tmp/ea-test-root", workspace_id="testws")
+    dp = DataPaths(user_id="tester", ea_root="/tmp/ea-test-root")
     result = dp.versions_dir()
     assert ".versions" in str(result)
 

@@ -37,17 +37,11 @@ def mock_paths(tmp_dir):
     from src.storage.paths import DataPaths
 
     mock = DataPaths(data_path=tmp_dir, user_id="test_user", ea_root=tmp_dir)
-    # Alias old user-level paths to workspace-scoped for backwards test compat
+    # Use user_subagents_dir instead of old workspace-scoped paths
     def temp_workspace_dir(name: str):
-        path = Path(tmp_dir) / "workspaces" / "personal" / name
+        path = Path(tmp_dir) / name
         path.mkdir(parents=True, exist_ok=True)
         return path
-
-        mock.workspace_subagents_dir = lambda: temp_workspace_dir("subagents")
-        mock.workspace_memory_dir = lambda: temp_workspace_dir("memory")
-        mock.subagents_dir = mock.workspace_subagents_dir
-        mock.user_subagents_dir = mock.workspace_subagents_dir
-        mock.memory_dir = mock.workspace_memory_dir
     with patch("src.storage.paths.get_paths", return_value=mock):
         with patch("src.sdk.work_queue.get_paths", return_value=mock):
             with patch("src.sdk.coordinator.get_paths", return_value=mock):
@@ -397,41 +391,33 @@ class TestWorkQueueDB:
         assert running[0]["id"] == t1
 
     @pytest.mark.asyncio
-    async def test_get_task_is_scoped_to_user_and_workspace(self, mock_paths, profile):
+    async def test_get_task_is_scoped_to_user(self, mock_paths, profile):
         from src.sdk.work_queue import WorkQueueDB
 
-        db = WorkQueueDB("test_user", workspace_id="personal")
-        other_workspace = WorkQueueDB("test_user", workspace_id="other")
-        other_user = WorkQueueDB("other_user", workspace_id="personal")
+        db = WorkQueueDB("test_user")
+        other_user = WorkQueueDB("other_user")
         try:
             task_id = await db.insert_task("test_agent", "task", profile)
 
             assert await db.get_task(task_id) is not None
-            assert await other_workspace.get_task(task_id) is None
             assert await other_user.get_task(task_id) is None
         finally:
             await db.close()
-            await other_workspace.close()
             await other_user.close()
 
     @pytest.mark.asyncio
-    async def test_check_progress_is_scoped_to_user_and_workspace(self, mock_paths, profile):
+    async def test_check_progress_is_scoped_to_user(self, mock_paths, profile):
         from src.sdk.subagent_models import TaskStatus
         from src.sdk.work_queue import WorkQueueDB
 
-        db = WorkQueueDB("test_user", workspace_id="personal")
-        other_workspace = WorkQueueDB("test_user", workspace_id="other")
-        other_user = WorkQueueDB("other_user", workspace_id="personal")
+        db = WorkQueueDB("test_user")
+        other_user = WorkQueueDB("other_user")
         try:
             own_id = await db.insert_task("test_agent", "own", profile, parent_id="shared")
-            other_workspace_id = await other_workspace.insert_task(
-                "test_agent", "other workspace", profile, parent_id="shared"
-            )
             other_user_id = await other_user.insert_task(
                 "test_agent", "other user", profile, parent_id="shared"
             )
             await db.set_running(own_id)
-            await other_workspace.set_running(other_workspace_id)
             await other_user.set_running(other_user_id)
 
             all_tasks = await db.check_progress()
@@ -447,7 +433,6 @@ class TestWorkQueueDB:
             assert {t["id"] for t in parent_status_tasks} == {own_id}
         finally:
             await db.close()
-            await other_workspace.close()
             await other_user.close()
 
     @pytest.mark.asyncio
@@ -754,7 +739,7 @@ class TestSubagentCoordinator:
 
         profile = AgentProfile(name="a", skills=["skill-creator"])
         with patch("src.skills.registry.get_skill_registry", return_value=FakeSkillRegistry()):
-            prompt = _build_system_prompt(profile, user_id="test_user", workspace_id="personal")
+            prompt = _build_system_prompt(profile, user_id="test_user")
 
         assert "## Available Skills" in prompt
         assert "skill-creator" in prompt
@@ -763,27 +748,25 @@ class TestSubagentCoordinator:
         assert "SECRET FULL SKILL CONTENT" not in prompt
 
     @pytest.mark.asyncio
-    async def test_run_loop_passes_provider_options_and_workspace_to_agent_loop(self, mock_paths):
+    async def test_run_loop_passes_provider_options_to_agent_loop(self, mock_paths):
         from agentprofile.models import AgentProfile
 
         from src.sdk.coordinator import SubagentCoordinator
         from src.sdk.messages import Message
 
         captured_run_config = None
-        captured_workspace_id = None
 
         class FakeAgentLoop:
             def __init__(self, **kwargs):
-                nonlocal captured_run_config, captured_workspace_id
+                nonlocal captured_run_config
                 captured_run_config = kwargs["run_config"]
-                captured_workspace_id = kwargs["workspace_id"]
 
             async def run(self, messages):
                 return [*messages, Message.assistant("done")]
 
         provider_options = {"anthropic": {"thinking": {"type": "enabled"}}}
         profile = AgentProfile(name="researcher", provider_options=provider_options)
-        coord = SubagentCoordinator("test_user", workspace_id="sales")
+        coord = SubagentCoordinator("test_user")
 
         with patch("src.sdk.providers.factory.create_model_from_config", return_value=object()):
             with patch("src.sdk.coordinator._build_tools_for_subagent", return_value=[]):
@@ -793,7 +776,6 @@ class TestSubagentCoordinator:
 
         assert captured_run_config is not None
         assert captured_run_config.provider_options == provider_options
-        assert captured_workspace_id == "sales"
 
     @pytest.mark.asyncio
     async def test_start_returns_before_runner_finishes(self, mock_paths, profile, monkeypatch):
@@ -1014,7 +996,7 @@ class TestSubagentCoordinator:
         profile = AgentProfile(name="writer", description="Report writer", tools=["time_get"])
         await coord.create(profile)
 
-        profile_path = mock_paths.workspace_subagents_dir() / "writer" / "PROFILE.md"
+        profile_path = mock_paths.user_subagents_dir() / "writer" / "PROFILE.md"
         assert profile_path.exists()
         loaded = load_profile(str(profile_path))
         assert loaded.name == "writer"
@@ -1285,12 +1267,12 @@ class TestStaleJobRecovery:
 
         # Patch get_paths to use tmp dir (both coordinator and work_queue paths)
         mock_paths = mock.MagicMock()
-        mock_paths.workspace_subagents_dir = mock.MagicMock(return_value=db_dir)
+        mock_paths.user_subagents_dir = mock.MagicMock(return_value=db_dir)
         mock_paths.work_queue_db = mock.MagicMock(return_value=db_dir / "work_queue.db")
 
         with mock.patch('src.sdk.coordinator.get_paths', return_value=mock_paths), \
              mock.patch('src.sdk.work_queue.get_paths', return_value=mock_paths):
-            coordinator = SubagentCoordinator("test_user", "test_ws")
+            coordinator = SubagentCoordinator("test_user")
             db = await coordinator._get_db()
             await coordinator._recovery_task
             task = await db.get_task("stale-job")

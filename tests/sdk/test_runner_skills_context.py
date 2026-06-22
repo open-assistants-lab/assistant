@@ -31,9 +31,9 @@ def test_get_skills_context_uses_workspace_registry(monkeypatch):
 
     monkeypatch.setattr(skills_registry, "get_skill_registry", fake_get_skill_registry)
 
-    context = runner._get_skills_context("u", "ws1")
+    context = runner._get_skills_context("u")
 
-    assert calls == [{"user_id": "u", "workspace_id": "ws1"}]
+    assert calls == [{"user_id": "u"}]
     assert "project-helper" in context
     assert "Project-specific instructions." in context
     assert "FULL CONTENT SHOULD NOT BE INCLUDED" not in context
@@ -41,7 +41,7 @@ def test_get_skills_context_uses_workspace_registry(monkeypatch):
     assert "(workspace)" not in context.lower()
 
 
-def test_get_system_prompt_passes_workspace_id_to_skills_context(monkeypatch):
+def test_get_system_prompt_calls_skills_context(monkeypatch):
     calls = []
 
     def fake_get_skill_registry(**kwargs):
@@ -52,9 +52,9 @@ def test_get_system_prompt_passes_workspace_id_to_skills_context(monkeypatch):
 
     monkeypatch.setattr(skills_registry, "get_skill_registry", fake_get_skill_registry)
 
-    prompt = runner._get_system_prompt("u", "ws1")
+    prompt = runner._get_system_prompt("u")
 
-    assert calls == [{"user_id": "u", "workspace_id": "ws1"}]
+    assert calls == [{"user_id": "u"}]
     assert "ws-skill" in prompt
 
 
@@ -102,16 +102,9 @@ async def test_run_sdk_agent_stream_does_not_mutate_system_message(monkeypatch):
         return FakeLoop()
 
     monkeypatch.setattr(runner, "get_sdk_loop", fake_get_sdk_loop)
-    monkeypatch.setattr(
-        runner,
-        "_get_workspace_context",
-        lambda workspace_id: "\n\n## Current Workspace: X",
-    )
-
     chunks = runner.run_sdk_agent_stream(
         user_id="u",
         messages=[Message.system("base")],
-        workspace_id="ws1",
     )
     async for _ in chunks:
         pass
@@ -131,32 +124,19 @@ async def test_get_sdk_loop_reuses_provider_key_loop_for_runtime_state(monkeypat
     monkeypatch.setattr(runner, "create_sdk_loop", fake_create_sdk_loop)
 
     keys = {"openai": "test-key"}
-    first = await runner.get_sdk_loop("u", "ws", model="openai:gpt-4.1", provider_keys=keys)
-    second = await runner.get_sdk_loop("u", "ws", model="openai:gpt-4.1", provider_keys=keys)
+    first = await runner.get_sdk_loop("u", model="openai:gpt-4.1", provider_keys=keys)
+    second = await runner.get_sdk_loop("u", model="openai:gpt-4.1", provider_keys=keys)
 
     assert second is first
     assert created == [first]
 
 
-def test_reset_sdk_loop_removes_all_model_specific_workspace_loops(monkeypatch):
+def test_reset_sdk_loop_removes_user_loops(monkeypatch):
     runner._loop_cache.clear()
-    runner._loop_cache["u:ws:default"] = object()
-    runner._loop_cache["u:ws:openai:gpt-4.1"] = object()
-    runner._loop_cache["u:other:default"] = object()
-    runner._loop_cache["other:ws:default"] = object()
+    runner._loop_cache["u:default"] = object()
+    runner._loop_cache["u:openai:gpt-4.1"] = object()
+    runner._loop_cache["other:default"] = object()
 
-    runner.reset_sdk_loop("u", "ws")
+    runner.reset_sdk_loop("u")
 
-    assert set(runner._loop_cache) == {"u:other:default", "other:ws:default"}
-
-
-def test_reset_user_sdk_loops_removes_all_workspaces_for_user(monkeypatch):
-    runner._loop_cache.clear()
-    runner._loop_cache["u:ws:default"] = object()
-    runner._loop_cache["u:ws:openai:gpt-4.1"] = object()
-    runner._loop_cache["u:other:default"] = object()
-    runner._loop_cache["other:ws:default"] = object()
-
-    runner.reset_user_sdk_loops("u")
-
-    assert set(runner._loop_cache) == {"other:ws:default"}
+    assert set(runner._loop_cache) == {"other:default"}

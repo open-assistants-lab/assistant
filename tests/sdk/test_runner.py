@@ -19,7 +19,6 @@ async def test_create_sdk_loop_wires_on_summarize():
         patch("src.sdk.runner.get_settings") as mock_settings,
         patch("src.sdk.runner.create_model_from_config") as mock_create_provider,
         patch("src.sdk.runner.get_native_tools", return_value=[]),
-        patch("src.sdk.runner._seed_default_workspace"),
         patch("src.sdk.runner._get_system_prompt", return_value="You are a test assistant."),
         patch("src.storage.messages.get_message_store") as mock_get_store,
     ):
@@ -37,7 +36,7 @@ async def test_create_sdk_loop_wires_on_summarize():
         mock_store = MagicMock()
         mock_get_store.return_value = mock_store
 
-        loop = await create_sdk_loop(user_id="test_user", workspace_id="personal")
+        loop = await create_sdk_loop(user_id="test_user")
 
         summarization_mw = None
         for mw in loop.middlewares:
@@ -69,7 +68,7 @@ async def test_create_sdk_loop_wires_on_summarize():
 
         assert result is not None, "Summarization should have triggered"
 
-        mock_get_store.assert_called_with("test_user", "personal")
+        mock_get_store.assert_called_with("test_user")
         mock_store.add_summary_message.assert_called_once()
         call_arg = mock_store.add_summary_message.call_args[0][0]
         assert "test summary of the conversation" in call_arg
@@ -84,7 +83,6 @@ async def test_create_sdk_loop_no_on_summarize_when_disabled():
         patch("src.sdk.runner.get_settings") as mock_settings,
         patch("src.sdk.runner.create_model_from_config") as mock_create_provider,
         patch("src.sdk.runner.get_native_tools", return_value=[]),
-        patch("src.sdk.runner._seed_default_workspace"),
         patch("src.sdk.runner._get_system_prompt", return_value="You are a test assistant."),
     ):
         settings = mock_settings.return_value
@@ -123,7 +121,6 @@ async def test_run_sdk_agent_stream_triggers_summarization():
         patch("src.sdk.runner.get_settings") as mock_settings,
         patch("src.sdk.runner.create_model_from_config") as mock_create_provider,
         patch("src.sdk.runner.get_native_tools", return_value=[]),
-        patch("src.sdk.runner._seed_default_workspace"),
         patch("src.sdk.runner._get_system_prompt", return_value="You are test assistant."),
         patch("src.storage.messages.get_message_store") as mock_get_store,
     ):
@@ -140,7 +137,7 @@ async def test_run_sdk_agent_stream_triggers_summarization():
         mock_get_store.return_value = mock_store
 
         # Pre-create the loop so we can mock _generate_summary on the middleware
-        loop = await get_sdk_loop(user_id="test_stream_user", workspace_id="personal")
+        loop = await get_sdk_loop(user_id="test_stream_user")
 
         summarization_mw = None
         for mw in loop.middlewares:
@@ -169,7 +166,6 @@ async def test_run_sdk_agent_stream_triggers_summarization():
         async for chunk in run_sdk_agent_stream(
             user_id="test_stream_user",
             messages=long_msgs,
-            workspace_id="personal",
         ):
             chunks.append(chunk)
 
