@@ -63,37 +63,72 @@ final desktopSidebarProvider = StateProvider<DesktopSidebarItem>(
   (ref) => DesktopSidebarItem.chat,
 );
 
-class DesktopLayout extends ConsumerWidget {
+class _Divider extends StatelessWidget {
+  final void Function(double delta) onDrag;
+  const _Divider({required this.onDrag});
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeColumn,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onHorizontalDragUpdate: (d) => onDrag(d.delta.dx),
+        child: Container(
+          width: 6,
+          color: Colors.transparent,
+          child: Center(
+            child: Container(width: 2, height: 40, decoration: BoxDecoration(
+              color: tokens.colors.borderSubtle, borderRadius: BorderRadius.circular(1),
+            )),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class DesktopLayout extends ConsumerStatefulWidget {
   final Widget child;
   const DesktopLayout({super.key, required this.child});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    const sidebarWidth = 240.0;
-    const dividerCount = 2;
+  ConsumerState<DesktopLayout> createState() => _DesktopLayoutState();
+}
 
+class _DesktopLayoutState extends ConsumerState<DesktopLayout> {
+  double _sidebarWidth = 240;
+  double _chatFraction = 0.5;
+
+  static const double _minSidebar = 180;
+  static const double _maxSidebar = 400;
+  static const double _minChat = 200;
+
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
       body: Stack(
         children: [
           LayoutBuilder(
             builder: (context, constraints) {
-              final totalWidth = constraints.maxWidth;
-              final remainingWidth = totalWidth - sidebarWidth - dividerCount;
-              final chatPanelWidth = remainingWidth * 0.28;
-              final contentWidth = remainingWidth * 0.72;
+              final total = constraints.maxWidth;
+              final remaining = total - _sidebarWidth;
+              final chatWidth = (remaining * _chatFraction).clamp(_minChat, remaining - _minChat);
+              final contentWidth = (remaining - chatWidth).clamp(_minChat, remaining - _minChat);
+
               return Row(
                 children: [
-                  const Sidebar(width: sidebarWidth),
-                  Container(
-                    width: 1,
-                    color: context.tokens.colors.borderSubtle,
-                  ),
-                  SizedBox(width: chatPanelWidth, child: const _ChatPanel()),
-                  Container(
-                    width: 1,
-                    color: context.tokens.colors.borderSubtle,
-                  ),
-                  SizedBox(width: contentWidth, child: child),
+                  SizedBox(width: _sidebarWidth, child: const Sidebar()),
+                  _Divider(onDrag: (dx) {
+                    setState(() => _sidebarWidth = (_sidebarWidth + dx).clamp(_minSidebar, _maxSidebar));
+                  }),
+                  SizedBox(width: chatWidth, child: const _ChatPanel()),
+                  _Divider(onDrag: (dx) {
+                    final newChat = (chatWidth + dx).clamp(_minChat, remaining - _minChat);
+                    setState(() => _chatFraction = newChat / remaining);
+                  }),
+                  SizedBox(width: contentWidth, child: widget.child),
                 ],
               );
             },
@@ -106,8 +141,7 @@ class DesktopLayout extends ConsumerWidget {
 }
 
 class Sidebar extends ConsumerStatefulWidget {
-  final double width;
-  const Sidebar({super.key, required this.width});
+  const Sidebar({super.key});
 
   @override
   ConsumerState<Sidebar> createState() => _SidebarState();
@@ -141,7 +175,6 @@ class _SidebarState extends ConsumerState<Sidebar> {
     final activeSessionId = ref.watch(agentProvider).sessionId;
 
     return Container(
-      width: widget.width,
       color: tokens.colors.bgCanvas,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
