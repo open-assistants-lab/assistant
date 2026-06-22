@@ -172,10 +172,11 @@ def _persist_tool_messages(conversation: Any, tool_events: list[dict[str, Any]],
 
 
 @router.get("/conversation")
-async def get_conversation(user_id: str = "default_user", limit: int = 100, session_id: str = "default") -> dict[str, Any]:
+async def get_conversation(user_id: str = "default_user", workspace_id: str = "personal", limit: int = 100, session_id: str = "default") -> dict[str, Any]:
     """Get conversation history."""
-    conversation = get_message_store(user_id)
-    messages = conversation.get_recent_messages_for_session(session_id, limit)
+    effective_session = workspace_id if session_id == "default" else session_id
+    conversation = get_message_store(user_id, workspace_id)
+    messages = conversation.get_recent_messages_for_session(effective_session, limit)
 
     return {
         "messages": [

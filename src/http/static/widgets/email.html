@@ -4,140 +4,107 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="stylesheet" href="/static/ea-tokens.css">
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0">
   <style>
     * { box-sizing: border-box; }
-    .header { display: flex; align-items: center; justify-content: space-between; padding: 14px 12px; border-bottom: 1px solid var(--border-default); }
-    .header h2 { margin: 0; font-size: 15px; font-weight: 600; color: var(--text-primary); }
-    .header .count { font-size: 12px; color: var(--text-tertiary); font-weight: 400; }
-    .header .unread-badge { font-size: 11px; background: var(--accent); color: #fff; padding: 1px 7px; border-radius: 99px; margin-left: 8px; font-weight: 600; }
-    .email-list { overflow-y: auto; }
-    .thread { padding: 12px; border-bottom: 1px solid var(--border-subtle); cursor: pointer; transition: background var(--transition-fast); }
+    .pane { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+    .pane-header { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid var(--border-default); flex-shrink: 0; }
+    .pane-header h2 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: -0.01em; color: var(--text-primary); }
+    .pane-header .badge { font-size: 11px; color: var(--text-tertiary); font-weight: 500; }
+    .pane-header .unread-pill { font-size: 11px; font-weight: 600; background: var(--accent); color: #fff; padding: 1px 7px; border-radius: 99px; margin-left: 8px; }
+
+    .scroll-list { flex: 1; overflow-y: auto; }
+    .thread { padding: 11px 14px; border-bottom: 1px solid var(--border-subtle); cursor: pointer; transition: background 120ms; }
     .thread:hover { background: var(--bg-elevated); }
-    .thread:active { background: var(--bg-field); }
-    .thread.unread .from { font-weight: 600; color: var(--text-primary); }
-    .thread.unread .subject { font-weight: 500; color: var(--text-primary); }
-    .thread.unread::before { content: ''; display: inline-block; width: 8px; height: 8px; background: var(--accent); border-radius: 50%; margin-right: 8px; flex-shrink: 0; }
-    .thread-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; }
-    .thread .from { color: var(--text-primary); font-size: 14px; font-weight: 500; flex: 1; }
-    .thread .date { color: var(--text-tertiary); font-size: 12px; flex-shrink: 0; }
-    .thread .subject { color: var(--text-secondary); font-size: 13px; margin-top: 1px; }
-    .thread .snippet { color: var(--text-tertiary); font-size: 12px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 48px 24px; color: var(--text-tertiary); }
-    .empty-state .icon { font-size: 40px; margin-bottom: 12px; opacity: 0.5; }
-    .empty-state .sub { font-size: 12px; margin-top: 4px; opacity: 0.7; }
+    .thread-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1px; gap: 8px; }
+    .thread-from { font-size: 13.5px; color: var(--text-primary); font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .thread-date { font-size: 12px; color: var(--text-tertiary); flex-shrink: 0; }
+    .thread-subj { font-size: 13px; color: var(--text-secondary); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .thread-snip { font-size: 12px; color: var(--text-tertiary); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .thread.unread { border-left: 2px solid var(--accent); padding-left: 12px; }
+    .thread.unread .thread-from { font-weight: 600; }
+    .thread.unread .thread-subj { color: var(--text-primary); font-weight: 500; }
 
-    .detail-view { display: none; flex-direction: column; height: 100%; }
-    .detail-header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border-default); }
-    .back-btn { display: flex; align-items: center; gap: 4px; background: none; border: none; color: var(--accent); cursor: pointer; font-size: 13px; padding: 4px 8px; border-radius: var(--radius-sm); transition: background var(--transition-fast); }
-    .back-btn:hover { background: var(--accent-muted); }
-    .back-btn .icon { font-size: 18px; }
-    .detail-body { overflow-y: auto; flex: 1; }
-    .detail-subject { padding: 14px 12px 0; font-size: 16px; font-weight: 600; color: var(--text-primary); }
-    .detail-meta { padding: 8px 12px 14px; border-bottom: 1px solid var(--border-subtle); }
-    .detail-meta .row { display: flex; gap: 6px; font-size: 13px; margin-bottom: 2px; }
-    .detail-meta .label { color: var(--text-tertiary); min-width: 44px; }
-    .detail-meta .value { color: var(--text-secondary); }
-    .detail-content { padding: 14px 12px; font-size: 14px; line-height: 1.65; color: var(--text-primary); white-space: pre-wrap; word-break: break-word; }
+    .empty { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 56px 24px; color: var(--text-tertiary); flex: 1; }
+    .empty .ico { font-size: 32px; margin-bottom: 12px; opacity: 0.4; }
+    .empty .msg { font-size: 13.5px; font-weight: 500; }
+    .empty .sub { font-size: 12px; margin-top: 4px; opacity: 0.65; }
 
-    .fade-in { animation: fadeIn var(--transition-moment); }
-    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+    .detail { display: none; flex-direction: column; height: 100vh; }
+    .detail-top { display: flex; align-items: center; gap: 4px; padding: 8px 10px; border-bottom: 1px solid var(--border-default); flex-shrink: 0; }
+    .back { display: inline-flex; align-items: center; gap: 4px; background: none; border: none; color: var(--accent); cursor: pointer; font-size: 13px; padding: 4px 8px; border-radius: var(--radius-sm); transition: background 120ms; }
+    .back:hover { background: var(--accent-muted); }
+    .detail-subj { padding: 14px 14px 0; font-size: 15px; font-weight: 600; color: var(--text-primary); flex-shrink: 0; }
+    .detail-meta { padding: 8px 14px 12px; border-bottom: 1px solid var(--border-subtle); flex-shrink: 0; }
+    .detail-meta .r { display: flex; gap: 6px; font-size: 13px; margin-bottom: 2px; }
+    .detail-meta .l { color: var(--text-tertiary); min-width: 42px; }
+    .detail-meta .v { color: var(--text-secondary); }
+    .detail-body { flex: 1; padding: 14px; font-size: 13.5px; line-height: 1.6; color: var(--text-primary); white-space: pre-wrap; word-break: break-word; overflow-y: auto; }
+
+    .fi { animation: fi 280ms both; }
+    @keyframes fi { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
   </style>
 </head>
 <body>
-  <div id="inbox-view">
-    <div class="header">
-      <h2>Inbox <span class="unread-badge" id="unread-count"></span></h2>
-      <span class="count" id="email-count"></span>
+  <div class="pane" id="inbox">
+    <div class="pane-header">
+      <h2>Inbox</h2>
+      <span class="badge" id="count"></span>
     </div>
-    <div class="email-list" id="email-list"></div>
+    <div class="scroll-list" id="list"></div>
   </div>
-
-  <div id="detail-view" class="detail-view">
-    <div class="detail-header">
-      <button class="back-btn" onclick="showInbox()"><span class="icon material-symbols-outlined">arrow_back</span> Back</button>
+  <div class="detail" id="detail">
+    <div class="detail-top"><button class="back" onclick="showInbox()">← Back</button></div>
+    <div class="detail-subj" id="d-subj"></div>
+    <div class="detail-meta">
+      <div class="r"><span class="l">From</span><span class="v" id="d-from"></span></div>
+      <div class="r"><span class="l">Date</span><span class="v" id="d-date"></span></div>
     </div>
-    <div class="detail-body">
-      <div class="detail-subject" id="d-subject"></div>
-      <div class="detail-meta">
-        <div class="row"><span class="label">From</span><span class="value" id="d-from"></span></div>
-        <div class="row"><span class="label">Date</span><span class="value" id="d-date"></span></div>
-      </div>
-      <div class="detail-content" id="d-body"></div>
-    </div>
+    <div class="detail-body" id="d-body"></div>
   </div>
-
   <script>
-    let emails = [];
-
-    async function fetchInbox() {
-      try {
-        const res = await fetch('/emails?limit=50');
-        const data = await res.json();
-        emails = data.emails || [];
-      } catch { emails = []; }
-      renderInbox();
+    let msgs = [];
+    async function fetch() {
+      try { const r = await fetch('/emails?limit=50'); const d = await r.json(); msgs = d.emails || []; } catch { msgs = []; }
+      render();
     }
-
-    function renderInbox() {
-      const list = document.getElementById('email-list');
-      const unread = emails.filter(e => !e.is_read).length;
-      document.getElementById('unread-count').textContent = unread;
-      document.getElementById('unread-count').style.display = unread > 0 ? '' : 'none';
-      document.getElementById('email-count').textContent = emails.length + ' total';
-
-      if (emails.length === 0) {
-        list.innerHTML = '<div class="empty-state fade-in"><div class="icon">📬</div><div class="text">No emails</div><div class="sub">Connect Gmail in Settings to get started</div></div>';
-        return;
-      }
-
-      list.innerHTML = emails.map((e, i) => {
-        const unreadClass = !e.is_read ? 'unread' : '';
-        return `<div class="thread ${unreadClass} fade-in" style="animation-delay:${i * 15}ms" onclick="showDetail('${esc(e.id)}')">
-          <div class="thread-top">
-            <div class="from">${esc(e.from || '')}</div>
-            <span class="date">${esc(fmtDate(e.date || e.received_at || ''))}</span>
-          </div>
-          <div class="subject">${esc(e.subject || '(no subject)')}</div>
-          <div class="snippet">${esc((e.snippet || '').slice(0, 100))}</div>
-        </div>`;
-      }).join('');
+    function render() {
+      const el = document.getElementById('list');
+      const unread = msgs.filter(e => !e.is_read).length;
+      document.getElementById('count').innerHTML = msgs.length + ' total' + (unread ? ' <span class="unread-pill">' + unread + '</span>' : '');
+      if (!msgs.length) { el.innerHTML = '<div class="empty"><div class="ico">📬</div><div class="msg">No emails</div><div class="sub">Connect Gmail in Settings to get started</div></div>'; return; }
+      el.innerHTML = msgs.map((e, i) =>
+        '<div class="thread ' + (!e.is_read ? 'unread' : '') + ' fi" style="animation-delay:' + (i * 12) + 'ms" onclick="open(\'' + esc(e.id) + '\')">' +
+          '<div class="thread-row"><span class="thread-from">' + esc(e.from || '') + '</span><span class="thread-date">' + fmtDate(e.date || e.received_at || '') + '</span></div>' +
+          '<div class="thread-subj">' + esc(e.subject || '(no subject)') + '</div>' +
+          '<div class="thread-snip">' + esc((e.snippet || '').slice(0, 100)) + '</div>' +
+        '</div>'
+      ).join('');
     }
-
     function fmtDate(d) {
       if (!d) return '';
       const dt = new Date(d);
       if (isNaN(dt)) return d;
-      const now = new Date();
-      const diff = now - dt;
-      if (diff < 86400000) return dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      if (diff < 604800000) return dt.toLocaleDateString([], { weekday: 'short' });
-      return dt.toLocaleDateString([], { month: 'short', day: 'numeric' });
+      const n = new Date();
+      if (n - dt < 86400000) return dt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+      if (n - dt < 604800000) return dt.toLocaleDateString([], {weekday:'short'});
+      return dt.toLocaleDateString([], {month:'short',day:'numeric'});
     }
-
-    async function showDetail(id) {
+    async function open(id) {
       try {
-        const res = await fetch('/emails/' + encodeURIComponent(id));
-        const e = await res.json();
+        const r = await fetch('/emails/' + encodeURIComponent(id));
+        const e = await r.json();
         if (e.error) { showInbox(); return; }
-        document.getElementById('inbox-view').style.display = 'none';
-        document.getElementById('detail-view').style.display = 'flex';
-        document.getElementById('d-subject').textContent = e.subject || '(no subject)';
+        document.getElementById('inbox').style.display = 'none';
+        document.getElementById('detail').style.display = 'flex';
+        document.getElementById('d-subj').textContent = e.subject || '(no subject)';
         document.getElementById('d-from').textContent = e.from || '';
         document.getElementById('d-date').textContent = e.date || e.received_at || '';
         document.getElementById('d-body').textContent = e.body || e.snippet || '';
       } catch { showInbox(); }
     }
-
-    function showInbox() {
-      document.getElementById('detail-view').style.display = 'none';
-      document.getElementById('inbox-view').style.display = 'block';
-      fetchInbox();
-    }
-
+    function showInbox() { document.getElementById('detail').style.display = 'none'; document.getElementById('inbox').style.display = 'flex'; fetch(); }
     function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
-
-    fetchInbox();
+    fetch();
   </script>
 </body>
 </html>

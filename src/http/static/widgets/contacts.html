@@ -4,123 +4,87 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="stylesheet" href="/static/ea-tokens.css">
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0">
   <style>
     * { box-sizing: border-box; }
-    .header { display: flex; align-items: center; justify-content: space-between; padding: 14px 12px; border-bottom: 1px solid var(--border-default); }
-    .header h2 { margin: 0; font-size: 15px; font-weight: 600; color: var(--text-primary); }
-    .header .count { font-size: 12px; color: var(--text-tertiary); font-weight: 400; }
-    .contact-list { overflow-y: auto; }
-    .contact-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--border-subtle); cursor: pointer; transition: background var(--transition-fast); }
-    .contact-item:hover { background: var(--bg-elevated); }
-    .contact-item:active { background: var(--bg-field); }
-    .contact-avatar { width: 36px; height: 36px; border-radius: 50%; background: var(--accent-muted); display: flex; align-items: center; justify-content: center; color: var(--accent); font-weight: 600; font-size: 15px; flex-shrink: 0; }
+    .pane { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+    .pane-header { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid var(--border-default); flex-shrink: 0; }
+    .pane-header h2 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: -0.01em; color: var(--text-primary); }
+    .pane-header .badge { font-size: 11px; color: var(--text-tertiary); font-weight: 500; }
+
+    .scroll-list { flex: 1; overflow-y: auto; }
+    .contact { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-bottom: 1px solid var(--border-subtle); cursor: pointer; transition: background 120ms; }
+    .contact:hover { background: var(--bg-elevated); }
+    .avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--accent-muted); display: flex; align-items: center; justify-content: center; color: var(--accent); font-weight: 600; font-size: 14px; flex-shrink: 0; }
     .contact-info { flex: 1; min-width: 0; }
-    .contact-name { color: var(--text-primary); font-size: 14px; font-weight: 500; }
+    .contact-name { color: var(--text-primary); font-size: 13.5px; font-weight: 500; }
     .contact-email { color: var(--text-secondary); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 48px 24px; color: var(--text-tertiary); }
-    .empty-state .icon { font-size: 40px; margin-bottom: 12px; opacity: 0.5; }
-    .empty-state .sub { font-size: 12px; margin-top: 4px; opacity: 0.7; }
+    .contact-arrow { color: var(--text-tertiary); font-size: 14px; flex-shrink: 0; opacity: 0; transition: opacity 120ms; }
+    .contact:hover .contact-arrow { opacity: 1; }
 
-    .detail-view { display: none; flex-direction: column; height: 100%; }
-    .detail-header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border-default); }
-    .back-btn { display: flex; align-items: center; gap: 4px; background: none; border: none; color: var(--accent); cursor: pointer; font-size: 13px; padding: 4px 8px; border-radius: var(--radius-sm); transition: background var(--transition-fast); }
-    .back-btn:hover { background: var(--accent-muted); }
-    .back-btn .icon { font-size: 18px; }
-    .detail-avatar { display: flex; justify-content: center; padding: 24px 12px 16px; }
-    .detail-avatar .avatar { width: 56px; height: 56px; border-radius: 50%; background: var(--accent-muted); display: flex; align-items: center; justify-content: center; color: var(--accent); font-weight: 600; font-size: 24px; }
-    .detail-fields { padding: 0 12px 12px; }
-    .detail-field { display: flex; flex-direction: column; gap: 2px; padding: 10px 0; border-bottom: 1px solid var(--border-subtle); }
-    .detail-field:last-child { border-bottom: none; }
-    .detail-field .label { font-size: 11px; font-weight: 500; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.04em; }
-    .detail-field .value { font-size: 14px; color: var(--text-primary); }
+    .empty { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 56px 24px; color: var(--text-tertiary); flex: 1; }
+    .empty .ico { font-size: 32px; margin-bottom: 12px; opacity: 0.4; }
+    .empty .msg { font-size: 13.5px; font-weight: 500; }
+    .empty .sub { font-size: 12px; margin-top: 4px; opacity: 0.65; }
 
-    .fade-in { animation: fadeIn var(--transition-moment); }
-    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+    .detail { display: none; flex-direction: column; height: 100vh; }
+    .detail-top { display: flex; align-items: center; gap: 4px; padding: 8px 10px; border-bottom: 1px solid var(--border-default); flex-shrink: 0; }
+    .back { display: inline-flex; align-items: center; gap: 4px; background: none; border: none; color: var(--accent); cursor: pointer; font-size: 13px; padding: 4px 8px; border-radius: var(--radius-sm); transition: background 120ms; }
+    .back:hover { background: var(--accent-muted); }
+    .detail-av { display: flex; justify-content: center; padding: 20px 12px 12px; flex-shrink: 0; }
+    .detail-av .av { width: 48px; height: 48px; border-radius: 50%; background: var(--accent-muted); display: flex; align-items: center; justify-content: center; color: var(--accent); font-weight: 600; font-size: 20px; }
+    .detail-fields { padding: 0 14px 12px; }
+    .detail-f { padding: 10px 0; border-bottom: 1px solid var(--border-subtle); }
+    .detail-f:last-child { border-bottom: none; }
+    .detail-f .l { font-size: 11px; font-weight: 500; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }
+    .detail-f .v { font-size: 14px; color: var(--text-primary); }
+
+    .fi { animation: fi 280ms both; }
+    @keyframes fi { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
   </style>
 </head>
 <body>
-  <div id="list-view">
-    <div class="header">
-      <h2>Contacts</h2>
-      <span class="count" id="contact-count"></span>
-    </div>
-    <div class="contact-list" id="contact-list"></div>
+  <div class="pane" id="list-view">
+    <div class="pane-header"><h2>Contacts</h2><span class="badge" id="count"></span></div>
+    <div class="scroll-list" id="list"></div>
   </div>
-
-  <div id="detail-view" class="detail-view">
-    <div class="detail-header">
-      <button class="back-btn" onclick="showList()"><span class="icon material-symbols-outlined">arrow_back</span> Back</button>
-    </div>
-    <div class="detail-avatar">
-      <div class="avatar" id="d-avatar"></div>
-    </div>
+  <div class="detail" id="detail-view">
+    <div class="detail-top"><button class="back" onclick="showList()">← Back</button></div>
+    <div class="detail-av"><div class="av" id="d-av"></div></div>
     <div class="detail-fields">
-      <div class="detail-field"><span class="label">Name</span><span class="value" id="d-name"></span></div>
-      <div class="detail-field"><span class="label">Email</span><span class="value" id="d-email"></span></div>
-      <div class="detail-field"><span class="label">Phone</span><span class="value" id="d-phone"></span></div>
-      <div class="detail-field"><span class="label">Company</span><span class="value" id="d-company"></span></div>
+      <div class="detail-f"><div class="l">Name</div><div class="v" id="d-n"></div></div>
+      <div class="detail-f"><div class="l">Email</div><div class="v" id="d-e"></div></div>
+      <div class="detail-f"><div class="l">Phone</div><div class="v" id="d-p"></div></div>
+      <div class="detail-f"><div class="l">Company</div><div class="v" id="d-c"></div></div>
     </div>
   </div>
-
   <script>
     let contacts = [];
-
-    async function fetchContacts() {
-      try {
-        const res = await fetch('/contacts');
-        const data = await res.json();
-        contacts = data.contacts || [];
-      } catch { contacts = []; }
-      renderList();
+    async function fetch() { try { const r = await fetch('/contacts'); const d = await r.json(); contacts = d.contacts || []; } catch { contacts = []; } render(); }
+    function render() {
+      const el = document.getElementById('list');
+      document.getElementById('count').textContent = contacts.length + ' contact' + (contacts.length !== 1 ? 's' : '');
+      if (!contacts.length) { el.innerHTML = '<div class="empty"><div class="ico">👤</div><div class="msg">No contacts</div><div class="sub">Add contacts through the agent or import from email</div></div>'; return; }
+      el.innerHTML = contacts.map((c, i) =>
+        '<div class="contact fi" style="animation-delay:' + (i * 12) + 'ms" onclick="open(\'' + esc(c.id || c.email) + '\')">' +
+          '<div class="avatar">' + (c.name || c.email || '?')[0].toUpperCase() + '</div>' +
+          '<div class="contact-info"><div class="contact-name">' + esc(c.name || '(no name)') + '</div><div class="contact-email">' + esc(c.email || '') + '</div></div>' +
+          '<span class="contact-arrow">›</span>' +
+        '</div>'
+      ).join('');
     }
-
-    function renderList() {
-      const list = document.getElementById('contact-list');
-      document.getElementById('contact-count').textContent = contacts.length + ' contact' + (contacts.length !== 1 ? 's' : '');
-
-      if (contacts.length === 0) {
-        list.innerHTML = '<div class="empty-state fade-in"><div class="icon">👤</div><div class="text">No contacts</div><div class="sub">Add contacts through the agent or import from email</div></div>';
-        return;
-      }
-
-      list.innerHTML = contacts.map((c, i) => `
-        <div class="contact-item fade-in" style="animation-delay:${i * 15}ms" onclick="showDetail('${esc(c.id || c.email)}')">
-          <div class="contact-avatar">${(c.name || c.email || '?')[0].toUpperCase()}</div>
-          <div class="contact-info">
-            <div class="contact-name">${esc(c.name || '(no name)')}</div>
-            <div class="contact-email">${esc(c.email || '')}</div>
-          </div>
-          <span class="material-symbols-outlined" style="font-size:18px;color:var(--text-tertiary)">chevron_right</span>
-        </div>
-      `).join('');
-    }
-
-    async function showDetail(id) {
+    async function open(id) {
       try {
-        const res = await fetch('/contacts/' + encodeURIComponent(id));
-        const data = await res.json();
-        const c = data.contact || data;
+        const r = await fetch('/contacts/' + encodeURIComponent(id)); const d = await r.json(); const c = d.contact || d;
         if (c.error) { showList(); return; }
-        document.getElementById('list-view').style.display = 'none';
-        document.getElementById('detail-view').style.display = 'flex';
-        const initial = (c.name || c.email || '?')[0].toUpperCase();
-        document.getElementById('d-avatar').textContent = initial;
-        document.getElementById('d-name').textContent = c.name || '-';
-        document.getElementById('d-email').textContent = c.email || '-';
-        document.getElementById('d-phone').textContent = c.phone || '-';
-        document.getElementById('d-company').textContent = c.company || '-';
+        document.getElementById('list-view').style.display = 'none'; document.getElementById('detail-view').style.display = 'flex';
+        document.getElementById('d-av').textContent = (c.name || c.email || '?')[0].toUpperCase();
+        document.getElementById('d-n').textContent = c.name || '-'; document.getElementById('d-e').textContent = c.email || '-';
+        document.getElementById('d-p').textContent = c.phone || '-'; document.getElementById('d-c').textContent = c.company || '-';
       } catch { showList(); }
     }
-
-    function showList() {
-      document.getElementById('detail-view').style.display = 'none';
-      document.getElementById('list-view').style.display = 'block';
-    }
-
+    function showList() { document.getElementById('detail-view').style.display = 'none'; document.getElementById('list-view').style.display = 'flex'; }
     function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
-
-    fetchContacts();
+    fetch();
   </script>
 </body>
 </html>

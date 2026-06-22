@@ -4,128 +4,104 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="stylesheet" href="/static/ea-tokens.css">
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0">
   <style>
     * { box-sizing: border-box; }
-    .header { display: flex; align-items: center; justify-content: space-between; padding: 14px 12px; border-bottom: 1px solid var(--border-default); }
-    .header h2 { margin: 0; font-size: 15px; font-weight: 600; color: var(--text-primary); }
-    .header .count { font-size: 12px; color: var(--text-tertiary); font-weight: 400; }
-    .path-bar { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); color: var(--text-secondary); font-size: 12px; }
-    .path-bar .icon { font-size: 14px; color: var(--text-tertiary); }
-    .file-list { overflow-y: auto; }
-    .file-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--border-subtle); cursor: pointer; transition: background var(--transition-fast); }
-    .file-item:hover { background: var(--bg-elevated); }
-    .file-item:active { background: var(--bg-field); }
-    .file-icon { font-size: 20px; color: var(--text-tertiary); width: 28px; text-align: center; flex-shrink: 0; }
-    .file-icon.folder { color: var(--warning); }
-    .file-icon.file { color: var(--accent); }
-    .file-info { flex: 1; min-width: 0; }
-    .file-name { color: var(--text-primary); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .file-size { color: var(--text-tertiary); font-size: 12px; flex-shrink: 0; }
-    .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 48px 24px; color: var(--text-tertiary); }
-    .empty-state .icon { font-size: 40px; margin-bottom: 12px; opacity: 0.5; }
-    .empty-state .text { font-size: 14px; }
-    .empty-state .sub { font-size: 12px; margin-top: 4px; color: var(--text-tertiary); opacity: 0.7; }
 
-    .detail-view { display: none; height: 100%; }
-    .detail-header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border-default); }
-    .back-btn { display: flex; align-items: center; gap: 4px; background: none; border: none; color: var(--accent); cursor: pointer; font-size: 13px; padding: 4px 8px; border-radius: var(--radius-sm); transition: background var(--transition-fast); }
-    .back-btn:hover { background: var(--accent-muted); }
-    .back-btn .icon { font-size: 18px; }
-    .detail-filename { padding: 10px 12px; font-size: 14px; font-weight: 500; color: var(--text-primary); border-bottom: 1px solid var(--border-subtle); }
-    .detail-body { padding: 12px; overflow-y: auto; }
-    .detail-body pre { margin: 0; background: var(--bg-field); padding: 14px; border-radius: var(--radius-md); font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.55; color: var(--text-primary); overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+    /* ===== Layout ===== */
+    .pane { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 
-    .fade-in { animation: fadeIn var(--transition-moment); }
-    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+    /* ===== Header ===== */
+    .pane-header { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid var(--border-default); flex-shrink: 0; }
+    .pane-header h2 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: -0.01em; color: var(--text-primary); }
+    .pane-header .badge { font-size: 11px; color: var(--text-tertiary); font-weight: 500; }
+
+    /* ===== Path / Sub-header ===== */
+    .sub-bar { display: flex; align-items: center; gap: 6px; padding: 6px 14px; border-bottom: 1px solid var(--border-subtle); color: var(--text-secondary); font-size: 12px; flex-shrink: 0; }
+
+    /* ===== List ===== */
+    .scroll-list { flex: 1; overflow-y: auto; }
+    .list-item { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-bottom: 1px solid var(--border-subtle); cursor: pointer; transition: background 120ms; }
+    .list-item:hover { background: var(--bg-elevated); }
+    .list-icon { width: 20px; text-align: center; flex-shrink: 0; }
+    .list-icon.folder { font-size: 16px; }
+    .list-icon.file { font-size: 15px; }
+    .list-info { flex: 1; min-width: 0; }
+    .list-title { color: var(--text-primary); font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .list-meta { color: var(--text-tertiary); font-size: 12px; flex-shrink: 0; }
+
+    /* ===== Empty State ===== */
+    .empty { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 56px 24px; color: var(--text-tertiary); flex: 1; }
+    .empty .ico { font-size: 32px; margin-bottom: 12px; opacity: 0.4; }
+    .empty .msg { font-size: 13.5px; font-weight: 500; }
+    .empty .sub { font-size: 12px; margin-top: 4px; opacity: 0.65; }
+
+    /* ===== Detail View ===== */
+    .detail { display: none; flex-direction: column; height: 100vh; }
+    .detail-top { display: flex; align-items: center; gap: 4px; padding: 8px 10px; border-bottom: 1px solid var(--border-default); flex-shrink: 0; }
+    .back { display: inline-flex; align-items: center; gap: 4px; background: none; border: none; color: var(--accent); cursor: pointer; font-size: 13px; padding: 4px 8px; border-radius: var(--radius-sm); transition: background 120ms; }
+    .back:hover { background: var(--accent-muted); }
+    .detail-name { padding: 10px 14px; font-size: 13.5px; font-weight: 500; color: var(--text-primary); border-bottom: 1px solid var(--border-subtle); flex-shrink: 0; }
+    .detail-body { flex: 1; padding: 12px 14px; overflow-y: auto; }
+    .detail-body pre { margin: 0; background: var(--bg-field); padding: 12px 14px; border-radius: var(--radius-md); font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 13px; line-height: 1.55; color: var(--text-primary); overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+
+    /* ===== Anim ===== */
+    .fi { animation: fi 280ms both; }
+    @keyframes fi { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
   </style>
 </head>
 <body>
-  <div id="list-view">
-    <div class="header">
+  <div class="pane" id="list-view">
+    <div class="pane-header">
       <h2>Files</h2>
-      <span class="count" id="file-count"></span>
+      <span class="badge" id="count"></span>
     </div>
-    <div class="path-bar">
-      <span class="icon material-symbols-outlined">folder</span>
-      <span id="current-path">/</span>
-    </div>
-    <div class="file-list" id="file-list"></div>
+    <div class="sub-bar"><span id="cur-path">/</span></div>
+    <div class="scroll-list" id="file-list"></div>
   </div>
-
-  <div id="detail-view" class="detail-view">
-    <div class="detail-header">
-      <button class="back-btn" onclick="showList()"><span class="icon material-symbols-outlined">arrow_back</span> Back</button>
-    </div>
-    <div class="detail-filename" id="detail-filename"></div>
-    <div class="detail-body"><pre id="detail-content"></pre></div>
+  <div class="detail" id="detail-view">
+    <div class="detail-top"><button class="back" onclick="showList()">← Back</button></div>
+    <div class="detail-name" id="detail-fn"></div>
+    <div class="detail-body"><pre id="detail-ct"></pre></div>
   </div>
-
   <script>
-    let currentFiles = [];
-
+    let files = [];
     async function fetchFiles() {
       try {
-        const res = await fetch('/workspace/json');
-        const data = await res.json();
-        currentFiles = data.files || [];
-        document.getElementById('current-path').textContent = data.path || '/';
-        renderFiles(currentFiles);
-      } catch { currentFiles = []; renderFiles([]); }
+        const r = await fetch('/workspace/json');
+        const d = await r.json();
+        files = d.files || [];
+        document.getElementById('cur-path').textContent = d.path || '/';
+      } catch { files = []; }
+      render();
     }
-
-    function renderFiles(files) {
-      const list = document.getElementById('file-list');
-      document.getElementById('file-count').textContent = files.length + ' item' + (files.length !== 1 ? 's' : '');
-
-      if (files.length === 0) {
-        list.innerHTML = '<div class="empty-state fade-in"><div class="icon">📁</div><div class="text">No files yet</div><div class="sub">Files created by the agent will appear here</div></div>';
-        return;
-      }
-
-      list.innerHTML = files.map((f, i) => `
-        <div class="file-item fade-in" style="animation-delay:${i * 20}ms" onclick="${f.is_dir ? 'alert(\'Directory navigation coming soon\')' : 'showFile(\'' + esc(f.name) + '\')'}">
-          <span class="file-icon ${f.is_dir ? 'folder' : 'file'}">${f.is_dir ? 'folder' : 'description'}</span>
-          <div class="file-info">
-            <div class="file-name">${esc(f.name)}</div>
-          </div>
-          <span class="file-size">${f.is_dir ? '' : fmtSize(f.size || 0)}</span>
-        </div>
-      `).join('');
+    function render() {
+      const el = document.getElementById('file-list');
+      const c = document.getElementById('count');
+      c.textContent = files.length + ' item' + (files.length !== 1 ? 's' : '');
+      if (!files.length) { el.innerHTML = '<div class="empty"><div class="ico">🗄️</div><div class="msg">No files yet</div><div class="sub">Files created by the agent appear here</div></div>'; return; }
+      el.innerHTML = files.map((f, i) => {
+        const click = f.is_dir ? "alert('Directory nav coming soon')" : "openFile('" + esc(f.name) + "')";
+        return '<div class="list-item fi" style="animation-delay:' + (i * 18) + 'ms" onclick="' + click + '">' +
+          '<span class="list-icon ' + (f.is_dir ? 'folder' : 'file') + '">' + (f.is_dir ? '📁' : '📄') + '</span>' +
+          '<span class="list-title">' + esc(f.name) + '</span>' +
+          '<span class="list-meta">' + (f.is_dir ? '' : fmt(f.size)) + '</span>' +
+        '</div>';
+      }).join('');
     }
-
-    function fmtSize(bytes) {
-      if (!bytes || bytes === 0) return '';
-      if (bytes < 1024) return bytes + ' B';
-      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-    }
-
-    async function showFile(name) {
+    function fmt(s) { if (!s || s === 0) return ''; if (s < 1024) return s + ' B'; if (s < 1048576) return (s / 1024).toFixed(1) + ' KB'; return (s / 1048576).toFixed(1) + ' MB'; }
+    async function openFile(n) {
       try {
-        const res = await fetch('/workspace/read/' + encodeURIComponent(name));
-        const data = await res.json();
+        const r = await fetch('/workspace/read/' + encodeURIComponent(n));
+        const d = await r.json();
         document.getElementById('list-view').style.display = 'none';
-        document.getElementById('detail-view').style.display = 'flex';
-        document.getElementById('detail-view').style.flexDirection = 'column';
-        document.getElementById('detail-filename').textContent = name;
-        document.getElementById('detail-content').textContent = data.response || '(empty file)';
-      } catch {
-        document.getElementById('detail-content').textContent = 'Error reading file';
-      }
+        const dv = document.getElementById('detail-view');
+        dv.style.display = 'flex';
+        document.getElementById('detail-fn').textContent = n;
+        document.getElementById('detail-ct').textContent = d.response || '(empty)';
+      } catch { document.getElementById('detail-ct').textContent = 'Error reading file'; }
     }
-
-    function showList() {
-      document.getElementById('detail-view').style.display = 'none';
-      document.getElementById('list-view').style.display = 'block';
-    }
-
+    function showList() { document.getElementById('detail-view').style.display = 'none'; document.getElementById('list-view').style.display = 'flex'; }
     function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
-
-    document.querySelectorAll('.material-symbols-outlined').forEach(el => {
-      if (!getComputedStyle(el).fontFamily.includes('Material')) el.textContent = el.textContent === 'folder' ? '📁' : el.textContent;
-    });
-
     fetchFiles();
   </script>
 </body>
