@@ -174,7 +174,7 @@ class TestSessionManagement:
 
         r = client.get(
             "/conversation",
-            params={"user_id": test_user_id, "limit": 50},
+            params={"user_id": test_user_id, "limit": 50, "session_id": "integ-session-1"},
         )
         assert r.status_code == 200
         messages = r.json()["messages"]
