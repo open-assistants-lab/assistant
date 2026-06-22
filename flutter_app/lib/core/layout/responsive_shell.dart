@@ -22,7 +22,7 @@ class ResponsiveShell extends ConsumerWidget {
         if (constraints.maxWidth >= Breakpoints.desktop) {
           return utility
               ? DesktopUtilityLayout(
-                  sidebar: const Sidebar(width: 240),
+                  sidebar: const Sidebar(),
                   child: child,
                 )
               : DesktopLayout(child: child);

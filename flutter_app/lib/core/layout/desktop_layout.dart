@@ -113,22 +113,24 @@ class _DesktopLayoutState extends ConsumerState<DesktopLayout> {
           LayoutBuilder(
             builder: (context, constraints) {
               final total = constraints.maxWidth;
-              final remaining = total - _sidebarWidth;
-              final chatWidth = (remaining * _chatFraction).clamp(_minChat, remaining - _minChat);
-              final contentWidth = (remaining - chatWidth).clamp(_minChat, remaining - _minChat);
+              final sidebarW = _sidebarWidth.clamp(_minSidebar, total * 0.35).toDouble();
+              final remaining = total - sidebarW;
+              final minEach = _minChat.clamp(0, remaining * 0.3);
+              final chatW = (remaining * _chatFraction).clamp(minEach, remaining - minEach).toDouble();
+              final contentW = (remaining - chatW).clamp(minEach, remaining - minEach).toDouble();
 
               return Row(
                 children: [
-                  SizedBox(width: _sidebarWidth, child: const Sidebar()),
+                  SizedBox(width: sidebarW, child: const Sidebar()),
                   _Divider(onDrag: (dx) {
                     setState(() => _sidebarWidth = (_sidebarWidth + dx).clamp(_minSidebar, _maxSidebar));
                   }),
-                  SizedBox(width: chatWidth, child: const _ChatPanel()),
+                  SizedBox(width: chatW, child: const _ChatPanel()),
                   _Divider(onDrag: (dx) {
-                    final newChat = (chatWidth + dx).clamp(_minChat, remaining - _minChat);
+                    final newChat = (chatW + dx).clamp(minEach, remaining - minEach);
                     setState(() => _chatFraction = newChat / remaining);
                   }),
-                  SizedBox(width: contentWidth, child: widget.child),
+                  SizedBox(width: contentW, child: widget.child),
                 ],
               );
             },
