@@ -14,7 +14,6 @@ Uses the SDK AgentLoop for all agent execution.
 import asyncio
 import json
 import re
-import uuid
 from pathlib import Path
 from typing import Any, Literal
 
@@ -436,7 +435,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
     # ── End auth ──────────────────────────────────────────────────────────
 
     raw_sid = websocket.query_params.get("session_id", "").strip()
-    session_id = raw_sid or str(uuid.uuid4())[:8]
+    session_id = raw_sid if raw_sid else "default"
     user_id = "default_user"
     verbose = False
     current_model: str | None = None
