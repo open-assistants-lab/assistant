@@ -361,8 +361,8 @@ class MessageStore:
         """
         with self._core.db._connect() as cur:
             cur.execute(
-                "DELETE FROM messages WHERE json_extract(metadata, '$.session_id') = ?",
-                [session_id],
+                "DELETE FROM messages WHERE session_id = ? OR json_extract(metadata, '$.session_id') = ?",
+                [session_id, session_id],
             )
             count = cur.rowcount
             cur.execute(
