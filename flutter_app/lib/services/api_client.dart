@@ -415,6 +415,19 @@ class ApiClient {
     return List<String>.from(data['tools'] ?? []);
   }
 
+  // ─── Sessions ───
+
+  Future<List<dynamic>> listSessions() async {
+    final response = await _get(Uri.parse(_buildUrl('/sessions')));
+    final data = await _handleResponse(response);
+    return data['sessions'] as List<dynamic>? ?? [];
+  }
+
+  Future<void> deleteSession(String sessionId) async {
+    final extra = <String, String>{'session_id': sessionId};
+    await _delete(Uri.parse(_buildUrl('/conversation', extra)));
+  }
+
   // ─── Conversation ───
 
   Future<List<dynamic>> getConversation({

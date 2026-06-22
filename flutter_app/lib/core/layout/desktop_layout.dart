@@ -3,7 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../theme/app_theme.dart';
 import '../../providers/agent_provider.dart';
-import '../../widgets/app_input.dart';
+import '../../providers/session_list_provider.dart';
+import '../../providers/chat_tab_provider.dart';
 import '../../features/chat/widgets/chat_message_list.dart';
 import '../../features/chat/widgets/chat_input.dart';
 import '../../features/chat/widgets/error_bar.dart';
@@ -104,39 +105,89 @@ class DesktopLayout extends ConsumerWidget {
   }
 }
 
-class Sidebar extends ConsumerWidget {
+class Sidebar extends ConsumerStatefulWidget {
   final double width;
   const Sidebar({super.key, required this.width});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<Sidebar> createState() => _SidebarState();
+}
+
+class _SidebarState extends ConsumerState<Sidebar> {
+  @override
+  void initState() {
+    super.initState();
+    Future.microtask(() {
+      ref.read(sessionListProvider.notifier).loadSessions();
+    });
+  }
+
+  String _formatTime(String? iso) {
+    if (iso == null) return '';
+    final dt = DateTime.tryParse(iso);
+    if (dt == null) return '';
+    final diff = DateTime.now().toUtc().difference(dt);
+    if (diff.inMinutes < 1) return 'now';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}m';
+    if (diff.inHours < 24) return '${diff.inHours}h';
+    if (diff.inDays < 7) return '${diff.inDays}d';
+    return '${(diff.inDays / 7).floor()}w';
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final tokens = context.tokens;
+    final sessionListState = ref.watch(sessionListProvider);
+    final activeSessionId = ref.watch(agentProvider).sessionId;
 
     return Container(
-      width: width,
+      width: widget.width,
       color: tokens.colors.bgCanvas,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const CompanionPulse(),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: AppSearchField(hint: 'Search chats...'),
+            padding: EdgeInsets.fromLTRB(
+              tokens.spacing.md,
+              tokens.spacing.xs,
+              tokens.spacing.sm,
+              0,
+            ),
+            child: Row(
+              children: [
+                Text(
+                  'Chats',
+                  style: tokens.typography.textTheme.labelLarge?.copyWith(
+                    color: tokens.colors.textSecondary,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const Spacer(),
+                SizedBox(
+                  width: 28,
+                  height: 28,
+                  child: IconButton(
+                    icon: Icon(Symbols.add, size: 16, color: tokens.colors.textSecondary),
+                    onPressed: () {
+                      final newId = ref.read(agentProvider.notifier).newSession();
+                      ref.read(activeChatTabProvider.notifier).state = newId;
+                    },
+                    padding: EdgeInsets.zero,
+                    tooltip: 'New chat',
+                    style: IconButton.styleFrom(
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 4),
           const Divider(height: 1),
           Expanded(
-            child: Padding(
-              padding: EdgeInsets.symmetric(
-                horizontal: tokens.spacing.md,
-                vertical: tokens.spacing.xs,
-              ),
-              child: SidebarItem(
-                item: DesktopSidebarItem.chat,
-                selected: true,
-                onTap: () => context.go('/workspace'),
-              ),
-            ),
+            child: _buildSessionList(tokens, sessionListState, activeSessionId),
           ),
           const Divider(height: 1),
           Column(
@@ -208,6 +259,200 @@ class Sidebar extends ConsumerWidget {
             ],
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildSessionList(
+    EaTokens tokens,
+    SessionListState state,
+    String activeSessionId,
+  ) {
+    if (state.loading) {
+      return const Center(child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)));
+    }
+
+    if (state.error != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Symbols.error, size: 20, color: tokens.colors.error),
+              const SizedBox(height: 8),
+              Text(
+                'Failed to load sessions',
+                style: tokens.typography.textTheme.bodySmall?.copyWith(
+                  color: tokens.colors.textTertiary,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (state.sessions.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Text(
+            'No conversations yet',
+            style: tokens.typography.textTheme.bodySmall?.copyWith(
+              color: tokens.colors.textTertiary,
+            ),
+          ),
+        ),
+      );
+    }
+
+    return ListView.builder(
+      padding: EdgeInsets.symmetric(vertical: tokens.spacing.xs),
+      itemCount: state.sessions.length,
+      itemBuilder: (context, index) {
+        final session = state.sessions[index];
+        final sessionId = session['session_id']?.toString() ?? '';
+        final lastMessage = session['last_message']?.toString() ?? '';
+        final lastUpdated = session['last_updated']?.toString();
+        final timeAgo = _formatTime(lastUpdated);
+        final isActive = sessionId == activeSessionId;
+        final preview = lastMessage.length > 50
+            ? '${lastMessage.substring(0, 50)}…'
+            : lastMessage;
+
+        return _SessionListItem(
+          sessionId: sessionId,
+          preview: preview,
+          timeAgo: timeAgo,
+          isActive: isActive,
+          onTap: () {
+            ref.read(agentProvider.notifier).setSessionId(sessionId);
+            ref.read(activeChatTabProvider.notifier).state = sessionId;
+          },
+          onDelete: () {
+            showDialog(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                title: const Text('Delete conversation?'),
+                content: const Text('This action cannot be undone.'),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    child: const Text('Cancel'),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      ref.read(agentProvider.notifier).deleteSession(sessionId);
+                      ref.read(sessionListProvider.notifier).removeSession(sessionId);
+                      Navigator.pop(ctx);
+                    },
+                    child: Text('Delete',
+                        style: TextStyle(color: tokens.colors.error)),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+class _SessionListItem extends StatefulWidget {
+  final String sessionId;
+  final String preview;
+  final String timeAgo;
+  final bool isActive;
+  final VoidCallback onTap;
+  final VoidCallback onDelete;
+
+  const _SessionListItem({
+    required this.sessionId,
+    required this.preview,
+    required this.timeAgo,
+    required this.isActive,
+    required this.onTap,
+    required this.onDelete,
+  });
+
+  @override
+  State<_SessionListItem> createState() => _SessionListItemState();
+}
+
+class _SessionListItemState extends State<_SessionListItem> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    final showBg = widget.isActive || _hover;
+    final textColor = (widget.isActive || _hover)
+        ? tokens.colors.textPrimary
+        : tokens.colors.textSecondary;
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        onLongPress: widget.onDelete,
+        child: AnimatedContainer(
+          duration: tokens.motion.fast,
+          curve: tokens.motion.curveStandard,
+          padding: EdgeInsets.symmetric(
+            horizontal: tokens.spacing.md,
+            vertical: tokens.spacing.sm + 2,
+          ),
+          decoration: BoxDecoration(
+            color: showBg ? tokens.colors.bgSurface : Colors.transparent,
+            borderRadius: BorderRadius.zero,
+            border: widget.isActive
+                ? Border(
+                    left: BorderSide(
+                      color: tokens.colors.accent,
+                      width: 3,
+                    ),
+                  )
+                : null,
+          ),
+          child: Row(
+            children: [
+              Icon(
+                Symbols.circle,
+                size: 6,
+                color: widget.isActive
+                    ? tokens.colors.accent
+                    : tokens.colors.textTertiary,
+              ),
+              SizedBox(width: tokens.spacing.sm + 2),
+              Expanded(
+                child: Text(
+                  widget.preview.isNotEmpty ? widget.preview : 'New chat',
+                  style: tokens.typography.textTheme.bodySmall?.copyWith(
+                    color: textColor,
+                    fontSize: 12,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                ),
+              ),
+              if (widget.timeAgo.isNotEmpty)
+                Padding(
+                  padding: EdgeInsets.only(left: tokens.spacing.xs),
+                  child: Text(
+                    widget.timeAgo,
+                    style: tokens.typography.textTheme.labelSmall?.copyWith(
+                      color: tokens.colors.textTertiary,
+                      fontSize: 10,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -468,4 +713,3 @@ class _PanelMessageList extends ConsumerWidget {
     );
   }
 }
-

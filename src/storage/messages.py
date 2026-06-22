@@ -387,6 +387,57 @@ class MessageStore:
             logger.warning("messages.duckdb_sync_error", {})
         return cast(int, count)
 
+    def list_sessions(self, limit: int = 50) -> list[dict[str, Any]]:
+        """List all sessions with metadata.
+
+        Returns dicts with: session_id, message_count, last_updated, last_message, created_at
+        """
+        with self._core.db._connect() as cur:
+            rows = cur.execute(
+                """
+                SELECT
+                    session_id,
+                    COUNT(*) as message_count,
+                    MAX(ts) as last_updated,
+                    MIN(ts) as created_at
+                FROM messages
+                WHERE session_id IS NOT NULL AND session_id != ''
+                GROUP BY session_id
+                ORDER BY last_updated DESC
+                LIMIT ?
+                """,
+                [limit],
+            ).fetchall()
+
+        sessions = []
+        for row in rows:
+            session_id = row[0]
+            message_count = row[1]
+            last_updated = row[2]
+            created_at = row[3]
+
+            preview = ""
+            try:
+                with self._core.db._connect() as cur:
+                    preview_row = cur.execute(
+                        "SELECT content FROM messages WHERE session_id = ? AND role = 'user' AND content IS NOT NULL AND content != '' ORDER BY ts DESC LIMIT 1",
+                        [session_id],
+                    ).fetchone()
+                    if preview_row and preview_row[0]:
+                        preview = preview_row[0][:100]
+            except Exception:
+                pass
+
+            sessions.append({
+                "session_id": session_id,
+                "message_count": message_count,
+                "last_updated": last_updated,
+                "created_at": created_at,
+                "last_message": preview,
+            })
+
+        return sessions
+
     def clear(self) -> None:
         self._core.clear()
 

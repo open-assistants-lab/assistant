@@ -444,6 +444,24 @@ class AgentNotifier extends StateNotifier<ChatState> {
     );
   }
 
+  String newSession() {
+    final newId = const Uuid().v4().substring(0, 8);
+    setSessionId(newId);
+    clearHistory();
+    return newId;
+  }
+
+  Future<void> deleteSession(String sessionId) async {
+    try {
+      await _apiClient.deleteSession(sessionId);
+      if (state.sessionId == sessionId) {
+        newSession();
+      }
+    } catch (e) {
+      debugPrint('[AgentNotifier] Failed to delete session: $e');
+    }
+  }
+
   void updateHost(String host) {
     _wsClient.updateHost(host);
     _apiClient.updateHost(host);
