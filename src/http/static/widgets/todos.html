@@ -3,15 +3,18 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200">
   <link rel="stylesheet" href="/static/ea-tokens.css">
   <style>
     * { box-sizing: border-box; }
     .pane { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
-    .pane-header { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid var(--border-default); flex-shrink: 0; }
-    .pane-header h2 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: -0.01em; color: var(--text-primary); }
-    .pane-header .badge { font-size: 11px; color: var(--text-tertiary); font-weight: 500; }
+    .pane-hdr { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid var(--border-default); flex-shrink: 0; }
+    .pane-hdr h2 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: -0.01em; color: var(--text-primary); display: flex; align-items: center; gap: 6px; }
+    .pane-hdr .badge { font-size: 11px; color: var(--text-tertiary); font-weight: 500; }
 
-    .scroll-list { flex: 1; overflow-y: auto; }
+    .list { flex: 1; overflow-y: auto; }
     .todo { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-bottom: 1px solid var(--border-subtle); transition: background 120ms; }
     .todo:hover { background: var(--bg-elevated); }
     .todo-cb { position: relative; width: 18px; height: 18px; flex-shrink: 0; }
@@ -22,7 +25,7 @@
     .todo-cb input:focus-visible + .check { outline: 2px solid var(--accent); outline-offset: 2px; }
     .todo-text { flex: 1; color: var(--text-primary); font-size: 13.5px; transition: all 180ms; }
     .todo-text.done { text-decoration: line-through; color: var(--text-tertiary); }
-    .todo-del { background: none; border: none; color: var(--text-tertiary); cursor: pointer; padding: 2px 4px; font-size: 15px; border-radius: var(--radius-sm); opacity: 0; transition: all 120ms; line-height: 1; }
+    .todo-del { background: none; border: none; color: var(--text-tertiary); cursor: pointer; font-size: 16px; padding: 2px 4px; border-radius: var(--radius-sm); opacity: 0; transition: all 120ms; line-height: 1; }
     .todo:hover .todo-del { opacity: 1; }
     .todo-del:hover { color: var(--error); background: rgba(229,91,91,0.1); }
 
@@ -35,7 +38,7 @@
     .bar button:active { transform: scale(0.95); }
 
     .empty { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 56px 24px; color: var(--text-tertiary); flex: 1; }
-    .empty .ico { font-size: 32px; margin-bottom: 12px; opacity: 0.4; }
+    .empty .mat { font-size: 36px; margin-bottom: 12px; opacity: 0.4; }
     .empty .msg { font-size: 13.5px; font-weight: 500; }
     .empty .sub { font-size: 12px; margin-top: 4px; opacity: 0.65; }
 
@@ -45,42 +48,26 @@
 </head>
 <body>
   <div class="pane">
-    <div class="pane-header">
-      <h2>To-Do</h2>
-      <span class="badge" id="count"></span>
-    </div>
-    <div class="scroll-list" id="list"></div>
-    <div class="bar">
-      <input type="text" id="input" placeholder="Add a task..." autocomplete="off">
-      <button onclick="add()">+</button>
-    </div>
+    <div class="pane-hdr"><h2><span class="mat material-symbols-outlined" style="font-size:18px;color:var(--text-tertiary)">checklist</span>To-Do</h2><span class="badge" id="count"></span></div>
+    <div class="list" id="list"></div>
+    <div class="bar"><input type="text" id="input" placeholder="Add a task..." autocomplete="off"><button onclick="add()">+</button></div>
   </div>
   <script>
     let todos = [];
     async function fetch() { try { const r = await fetch('/todos'); const d = await r.json(); todos = d.todos || []; } catch { todos = []; } render(); }
-    async function toggle(id, checked) {
-      const s = checked ? 'done' : 'active';
-      try { await fetch('/todos/' + encodeURIComponent(id) + '?status=' + s, {method:'PUT'}); } catch {}
-      await fetch();
-    }
+    async function toggle(id, checked) { const s = checked ? 'done' : 'active'; try { await fetch('/todos/' + encodeURIComponent(id) + '?status=' + s, {method:'PUT'}); } catch {} await fetch(); }
     async function del(id) { try { await fetch('/todos/' + encodeURIComponent(id), {method:'DELETE'}); } catch {} await fetch(); }
-    async function add() {
-      const inp = document.getElementById('input'); const t = inp.value.trim(); if (!t) return;
-      try { await fetch('/todos?content=' + encodeURIComponent(t), {method:'POST'}); } catch {}
-      inp.value = ''; inp.focus(); await fetch();
-    }
+    async function add() { const inp = document.getElementById('input'); const t = inp.value.trim(); if (!t) return; try { await fetch('/todos?content=' + encodeURIComponent(t), {method:'POST'}); } catch {} inp.value = ''; inp.focus(); await fetch(); }
     document.getElementById('input').addEventListener('keydown', function(e) { if (e.key === 'Enter') add(); });
     function render() {
-      const el = document.getElementById('list');
-      const done = todos.filter(t => t.done).length;
+      const el = document.getElementById('list'); const done = todos.filter(t => t.done).length;
       document.getElementById('count').textContent = todos.length + ' item' + (todos.length !== 1 ? 's' : '') + (done ? ' (' + done + ' done)' : '');
-      if (!todos.length) { el.innerHTML = '<div class="empty"><div class="ico">📋</div><div class="msg">No tasks yet</div><div class="sub">Add a task above to get started</div></div>'; return; }
+      if (!todos.length) { el.innerHTML = '<div class="empty"><span class="mat material-symbols-outlined">checklist</span><div class="msg">No tasks yet</div><div class="sub">Add a task above to get started</div></div>'; return; }
       el.innerHTML = todos.map((t, i) =>
         '<div class="todo fi" style="animation-delay:' + (i * 12) + 'ms">' +
           '<label class="todo-cb"><input type="checkbox" ' + (t.done ? 'checked' : '') + ' onchange="toggle(\'' + esc(t.id) + '\', this.checked)"><span class="check"></span></label>' +
           '<span class="todo-text ' + (t.done ? 'done' : '') + '">' + esc(t.title || t.text || '') + '</span>' +
-          '<button class="todo-del" onclick="del(\'' + esc(t.id) + '\')">✕</button>' +
-        '</div>'
+          '<button class="todo-del material-symbols-outlined" onclick="del(\'' + esc(t.id) + '\')">close</button></div>'
       ).join('');
     }
     function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
