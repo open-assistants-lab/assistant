@@ -27,7 +27,8 @@
       </for>
       <else>
         <row gap="8" padding="8" radius="sm" cross="center">
-          <text size="sm" foreground="text_muted">No chats yet</text>
+          <icon name="circle-dot" foreground="text_muted"/>
+          <text size="sm" grow="1" foreground="text_muted">No chats found</text>
         </row>
       </else>
     </scroll>
