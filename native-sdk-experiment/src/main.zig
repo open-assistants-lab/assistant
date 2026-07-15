@@ -334,6 +334,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .stream_done => {
             model.streaming = false;
+            var i: usize = 0;
+            while (i < model.chat_count) : (i += 1) {
+                if (i != model.active_chat_idx and model.chats[i].msg_count > 0) {
+                    model.chats[i].unread_count += 1;
+                }
+            }
         },
         .stream_error => |err| {
             addMessage(model.activeChat(), model.allocator, "system", err);
@@ -343,7 +349,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
     }
 }
 
-fn addMessage(chat: *Chat, allocator: std.mem.Allocator, role: []const u8, content: []const u8) void {
+pub fn addMessage(chat: *Chat, allocator: std.mem.Allocator, role: []const u8, content: []const u8) void {
     if (chat.msg_count >= max_messages) return;
     chat._messages[chat.msg_count] = .{
         .id = chat.next_id,

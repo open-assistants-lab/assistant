@@ -268,3 +268,44 @@ test "search: query accumulates text" {
     main.update(&model, .{ .search_input = .{ .insert_text = "tri" } }, &fx);
     try testing.expectEqualStrings("tri", model.search_query);
 }
+
+test "unread badge: increments for non-active chat on stream_done" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    main.update(&model, .new_chat, &fx);
+    main.update(&model, .new_chat, &fx);
+    model.active_chat_idx = 1;
+
+    model.chats[0].title = "First chat";
+    model.chats[1].title = "Second chat";
+    main.addMessage(&model.chats[0], arena, "user", "hi");
+
+    main.update(&model, .{ .stream_done = .{ .key = 0 } }, &fx);
+    try testing.expectEqual(@as(u32, 1), model.chats[0].unread_count);
+    try testing.expectEqual(@as(u32, 0), model.chats[1].unread_count);
+}
+
+test "unread badge: switch chat resets unread count" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    main.update(&model, .new_chat, &fx);
+    main.update(&model, .new_chat, &fx);
+    model.chats[0].unread_count = 3;
+    model.active_chat_idx = 1;
+
+    main.update(&model, .{ .switch_chat = model.chats[0].id }, &fx);
+    try testing.expectEqual(@as(u32, 0), model.chats[0].unread_count);
+    try testing.expectEqual(@as(usize, 0), model.active_chat_idx);
+}
