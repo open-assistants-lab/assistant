@@ -235,10 +235,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.input_text = "";
             model.streaming = true;
 
+            const escaped = escapeJsonString(model.allocator, text) catch return;
             const body = std.fmt.allocPrint(
                 model.allocator,
                 "{{\"message\":\"{s}\",\"user_id\":\"native_sdk_chat\",\"model\":\"deepseek:deepseek-v4-flash\"}}",
-                .{text},
+                .{escaped},
             ) catch return;
             fx.fetch(.{
                 .key = stream_key,
@@ -349,6 +350,42 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
     }
 }
 
+fn escapeJsonString(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+    var extra: usize = 0;
+    for (s) |c| {
+        switch (c) {
+            '"', '\\' => extra += 1,
+            '\n', '\r', '\t' => extra += 1,
+            0...8, 11, 12, 14...31 => extra += 5,
+            else => {},
+        }
+    }
+    if (extra == 0) return allocator.dupe(u8, s);
+    const buf = try allocator.alloc(u8, s.len + extra);
+    var i: usize = 0;
+    for (s) |c| {
+        switch (c) {
+            '"' => { buf[i] = '\\'; buf[i + 1] = '"'; i += 2; },
+            '\\' => { buf[i] = '\\'; buf[i + 1] = '\\'; i += 2; },
+            '\n' => { buf[i] = '\\'; buf[i + 1] = 'n'; i += 2; },
+            '\r' => { buf[i] = '\\'; buf[i + 1] = 'r'; i += 2; },
+            '\t' => { buf[i] = '\\'; buf[i + 1] = 't'; i += 2; },
+            0...8, 11, 12, 14...31 => {
+                buf[i] = '\\';
+                buf[i + 1] = 'u';
+                buf[i + 2] = '0';
+                buf[i + 3] = '0';
+                const hex = "0123456789abcdef";
+                buf[i + 4] = hex[c >> 4];
+                buf[i + 5] = hex[c & 0xf];
+                i += 6;
+            },
+            else => { buf[i] = c; i += 1; },
+        }
+    }
+    return buf;
+}
+
 pub fn addMessage(chat: *Chat, allocator: std.mem.Allocator, role: []const u8, content: []const u8) void {
     if (chat.msg_count >= max_messages) return;
     chat._messages[chat.msg_count] = .{
@@ -384,7 +421,13 @@ pub const app_markup = @embedFile("app.native");
 const ChatApp = native_sdk.UiApp(Model, Msg);
 
 pub fn initialModel() Model {
-    return .{};
+    var m: Model = .{};
+    m.chats[0] = .{ .id = 1 };
+    m.chat_count = 1;
+    m.active_chat_idx = 0;
+    m.active_chat_id = 1;
+    m.next_chat_id = 2;
+    return m;
 }
 
 pub fn main(init: std.process.Init) !void {

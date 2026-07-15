@@ -234,11 +234,11 @@ test "chat list: new chat creates empty chat and sets active" {
     var model = main.initialModel();
     model.allocator = arena;
     var fx = noopFx(arena);
-    try testing.expectEqual(@as(usize, 0), model.chat_count);
-    main.update(&model, .new_chat, &fx);
     try testing.expectEqual(@as(usize, 1), model.chat_count);
-    try testing.expectEqual(@as(usize, 0), model.active_chat_idx);
-    try testing.expectEqual(@as(usize, 0), model.chats[0].msg_count);
+    main.update(&model, .new_chat, &fx);
+    try testing.expectEqual(@as(usize, 2), model.chat_count);
+    try testing.expectEqual(@as(usize, 1), model.active_chat_idx);
+    try testing.expectEqual(@as(usize, 0), model.chats[1].msg_count);
 }
 
 test "chat list: switch chat sets active index" {
@@ -251,7 +251,7 @@ test "chat list: switch chat sets active index" {
     var fx = noopFx(arena);
     main.update(&model, .new_chat, &fx);
     main.update(&model, .new_chat, &fx);
-    try testing.expectEqual(@as(usize, 1), model.active_chat_idx);
+    try testing.expectEqual(@as(usize, 2), model.active_chat_idx);
     const first_chat_id = model.chats[0].id;
     main.update(&model, .{ .switch_chat = first_chat_id }, &fx);
     try testing.expectEqual(@as(usize, 0), model.active_chat_idx);
