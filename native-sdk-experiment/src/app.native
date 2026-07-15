@@ -103,7 +103,7 @@
       </row>
     </if>
     <row gap="8" padding="12" cross="center">
-      <input text="{input_text}" placeholder="Type a message..." grow="1" on-input="input_changed" on-submit="send_message" label="Message" />
+      <input text="{inputText}" placeholder="Type a message..." grow="1" on-input="input_changed" on-submit="send_message" label="Message" />
       <if test="{streaming}">
         <button on-press="cancel" variant="ghost">Stop</button>
       </if>

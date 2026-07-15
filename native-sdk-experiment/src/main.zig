@@ -52,15 +52,32 @@ pub const ChatMessage = struct {
 
 pub const Chat = struct {
     id: u64,
+    session_id: [32]u8 = undefined,
+    session_id_len: usize = 0,
     title: []const u8 = "New chat",
+    draft_text: []const u8 = "",
     _messages: [max_messages]ChatMessage = undefined,
     messages: []ChatMessage = &.{},
     msg_count: usize = 0,
     next_id: u64 = 1,
     unread_count: u32 = 0,
+    history_loaded: bool = false,
 
     pub fn hasUnread(self: *const Chat) bool {
         return self.unread_count > 0;
+    }
+
+    pub fn sessionId(self: *const Chat) []const u8 {
+        return self.session_id[0..self.session_id_len];
+    }
+
+    pub fn isEmpty(self: *const Chat) bool {
+        return self.msg_count == 0 and self.draft_text.len == 0;
+    }
+
+    pub fn setSessionId(self: *Chat, id: u64) void {
+        const buf = std.fmt.bufPrint(&self.session_id, "chat-{d}", .{id}) catch return;
+        self.session_id_len = buf.len;
     }
 };
 
@@ -85,6 +102,7 @@ pub const Msg = union(enum) {
     suggestion_contacts,
     sidebar_resized: f32,
     history_loaded: native_sdk.EffectResponse,
+    chat_history_loaded: native_sdk.EffectResponse,
 
     pub const view_unbound = .{
         "stream_line",
@@ -95,6 +113,7 @@ pub const Msg = union(enum) {
         "cancel_done",
         "search_input",
         "history_loaded",
+        "chat_history_loaded",
     };
 };
 
@@ -106,7 +125,6 @@ pub const Model = struct {
     active_chat_id: u64 = 0,
     next_chat_id: u64 = 1,
     search_query: []const u8 = "",
-    input_text: []const u8 = "",
     streaming: bool = false,
     has_pending: bool = false,
     pending_tool: []const u8 = "",
@@ -128,6 +146,10 @@ pub const Model = struct {
 
     pub fn activeChat(self: *Model) *Chat {
         return &self.chats[self.active_chat_idx];
+    }
+
+    pub fn inputText(self: *const Model) []const u8 {
+        return self.chats[self.active_chat_idx].draft_text;
     }
 
     pub fn messages(self: *const Model) []const ChatMessage {
@@ -153,18 +175,19 @@ fn tokensFn(model: *const Model) canvas.DesignTokens {
 pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
     switch (msg) {
         .input_changed => |event| {
+            const chat = model.activeChat();
             switch (event) {
                 .insert_text => |text| {
-                    model.input_text = std.fmt.allocPrint(
+                    chat.draft_text = std.fmt.allocPrint(
                         model.allocator,
                         "{s}{s}",
-                        .{ model.input_text, text },
+                        .{ chat.draft_text, text },
                     ) catch return;
                 },
-                .clear => model.input_text = "",
+                .clear => chat.draft_text = "",
                 .delete_backward => {
-                    if (model.input_text.len > 0) {
-                        model.input_text = model.input_text[0 .. model.input_text.len - 1];
+                    if (chat.draft_text.len > 0) {
+                        chat.draft_text = chat.draft_text[0 .. chat.draft_text.len - 1];
                     }
                 },
                 else => {},
@@ -177,13 +200,24 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             };
         },
         .new_chat => {
+            // Smart new chat: if there's already an empty chat with no messages, switch to it
+            var i: usize = 0;
+            while (i < model.chat_count) : (i += 1) {
+                if (model.chats[i].msg_count == 0) {
+                    model.active_chat_idx = i;
+                    model.active_chat_id = model.chats[i].id;
+                    model.chats[i].unread_count = 0;
+                    return;
+                }
+            }
+            // No empty chat found — create a new one
             if (model.chat_count >= max_chats) return;
             model.chats[model.chat_count] = .{ .id = model.next_chat_id };
+            model.chats[model.chat_count].setSessionId(model.next_chat_id);
             model.next_chat_id += 1;
             model.active_chat_idx = model.chat_count;
             model.active_chat_id = model.chats[model.active_chat_idx].id;
             model.chat_count += 1;
-            model.input_text = "";
         },
         .switch_chat => |chat_id| {
             var i: usize = 0;
@@ -192,7 +226,23 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     model.active_chat_idx = i;
                     model.active_chat_id = model.chats[i].id;
                     model.chats[i].unread_count = 0;
-                    model.input_text = "";
+                    // Load history for this chat if not yet loaded
+                    if (!model.chats[i].history_loaded and model.chats[i].msg_count == 0) {
+                        model.chats[i].history_loaded = true;
+                        const url = std.fmt.allocPrint(
+                            model.allocator,
+                            "http://127.0.0.1:8080/conversation?user_id=native_sdk_chat&session_id={s}&limit=100",
+                            .{model.chats[i].sessionId()},
+                        ) catch return;
+                        fx.fetch(.{
+                            .key = history_key,
+                            .url = url,
+                            .method = .GET,
+                            .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                            .response = .buffered,
+                            .on_response = Effects.responseMsg(.chat_history_loaded),
+                        });
+                    }
                     return;
                 }
             }
@@ -216,33 +266,33 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
         },
         .suggestion_inbox => {
-            model.input_text = "Triage my inbox";
+            model.activeChat().draft_text = "Triage my inbox";
         },
         .suggestion_summary => {
-            model.input_text = "Draft a weekly summary";
+            model.activeChat().draft_text = "Draft a weekly summary";
         },
         .suggestion_contacts => {
-            model.input_text = "Find contacts in marketing";
+            model.activeChat().draft_text = "Find contacts in marketing";
         },
         .sidebar_resized => |frac| {
             model.sidebar_split = frac;
         },
         .send_message => {
-            const text = std.mem.trim(u8, model.input_text, " ");
-            if (text.len == 0 or model.streaming) return;
             const chat = model.activeChat();
+            const text = std.mem.trim(u8, chat.draft_text, " ");
+            if (text.len == 0 or model.streaming) return;
             addMessage(chat, model.allocator, "user", text);
             if (chat.msg_count == 1) {
                 chat.title = model.allocator.dupe(u8, text) catch "New chat";
             }
-            model.input_text = "";
+            chat.draft_text = "";
             model.streaming = true;
 
             const escaped = escapeJsonString(model.allocator, text) catch return;
             const body = std.fmt.allocPrint(
                 model.allocator,
-                "{{\"message\":\"{s}\",\"user_id\":\"native_sdk_chat\",\"model\":\"deepseek:deepseek-v4-flash\"}}",
-                .{escaped},
+                "{{\"message\":\"{s}\",\"user_id\":\"native_sdk_chat\",\"session_id\":\"{s}\",\"model\":\"deepseek:deepseek-v4-flash\"}}",
+                .{ escaped, chat.sessionId() },
             ) catch return;
             fx.fetch(.{
                 .key = stream_key,
@@ -363,6 +413,40 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 else => return,
             };
             const chat = model.activeChat();
+            chat.history_loaded = true;
+            for (arr.items) |item| {
+                const role_val = item.object.get("role") orelse continue;
+                const content_val = item.object.get("content") orelse continue;
+                const role_str = switch (role_val) {
+                    .string => |s| s,
+                    else => continue,
+                };
+                const content_str = switch (content_val) {
+                    .string => |s| s,
+                    else => continue,
+                };
+                addMessage(chat, model.allocator, role_str, content_str);
+            }
+            if (chat.msg_count > 0) {
+                const first = chat._messages[0];
+                if (std.mem.eql(u8, first.role, "user")) {
+                    chat.title = model.allocator.dupe(u8, first.content) catch "New chat";
+                }
+            }
+        },
+        .chat_history_loaded => |response| {
+            if (response.outcome != .ok) return;
+            const body = response.body;
+            if (body.len == 0) return;
+            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
+            defer parsed.deinit();
+            const root = parsed.value;
+            const messages_arr = root.object.get("messages") orelse return;
+            const arr = switch (messages_arr) {
+                .array => |a| a,
+                else => return,
+            };
+            const chat = model.activeChat();
             for (arr.items) |item| {
                 const role_val = item.object.get("role") orelse continue;
                 const content_val = item.object.get("content") orelse continue;
@@ -459,6 +543,7 @@ const ChatApp = native_sdk.UiApp(Model, Msg);
 pub fn initialModel() Model {
     var m: Model = .{};
     m.chats[0] = .{ .id = 1 };
+    m.chats[0].setSessionId(1);
     m.chat_count = 1;
     m.active_chat_idx = 0;
     m.active_chat_id = 1;
@@ -466,10 +551,16 @@ pub fn initialModel() Model {
     return m;
 }
 
-fn initFx(_: *Model, fx: *Effects) void {
+fn initFx(model: *Model, fx: *Effects) void {
+    const chat = model.activeChat();
+    const url = std.fmt.allocPrint(
+        model.allocator,
+        "http://127.0.0.1:8080/conversation?user_id=native_sdk_chat&session_id={s}&limit=100",
+        .{chat.sessionId()},
+    ) catch return;
     fx.fetch(.{
         .key = history_key,
-        .url = "http://127.0.0.1:8080/conversation?user_id=native_sdk_chat&limit=100",
+        .url = url,
         .method = .GET,
         .headers = &.{.{ .name = "Accept", .value = "application/json" }},
         .response = .buffered,

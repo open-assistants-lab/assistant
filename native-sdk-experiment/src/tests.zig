@@ -56,7 +56,7 @@ test "send message adds user message" {
 
     main.update(&model, .new_chat, &fx);
     main.update(&model, .{ .input_changed = .{ .insert_text = "Hello" } }, &fx);
-    try testing.expectEqualStrings("Hello", model.input_text);
+    try testing.expectEqualStrings("Hello", model.inputText());
 
     main.update(&model, .send_message, &fx);
     const chat = model.activeChat();
@@ -64,7 +64,7 @@ test "send message adds user message" {
     try testing.expectEqualStrings("user", chat._messages[0].role);
     try testing.expectEqualStrings("Hello", chat._messages[0].content);
     try testing.expect(model.streaming);
-    try testing.expectEqualStrings("", model.input_text);
+    try testing.expectEqualStrings("", model.inputText());
     try testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
     const request = fx.pendingFetchAt(0).?;
     try testing.expectEqualStrings("http://127.0.0.1:8080/message/stream", request.url);
@@ -83,13 +83,13 @@ test "input accumulates incremental text events" {
     main.update(&model, .{ .input_changed = .{ .insert_text = "h" } }, &fx);
     main.update(&model, .{ .input_changed = .{ .insert_text = "e" } }, &fx);
     main.update(&model, .{ .input_changed = .{ .insert_text = "llo" } }, &fx);
-    try testing.expectEqualStrings("hello", model.input_text);
+    try testing.expectEqualStrings("hello", model.inputText());
 
     main.update(&model, .{ .input_changed = .delete_backward }, &fx);
-    try testing.expectEqualStrings("hell", model.input_text);
+    try testing.expectEqualStrings("hell", model.inputText());
 
     main.update(&model, .{ .input_changed = .clear }, &fx);
-    try testing.expectEqualStrings("", model.input_text);
+    try testing.expectEqualStrings("", model.inputText());
 }
 
 test "stream_line appends to assistant message" {
@@ -235,6 +235,14 @@ test "chat list: new chat creates empty chat and sets active" {
     model.allocator = arena;
     var fx = noopFx(arena);
     try testing.expectEqual(@as(usize, 1), model.chat_count);
+    // First chat is empty (no messages) — new_chat should NOT create another
+    main.update(&model, .new_chat, &fx);
+    try testing.expectEqual(@as(usize, 1), model.chat_count);
+    // Send a message to make the first chat non-empty
+    model.activeChat().draft_text = "test";
+    main.update(&model, .send_message, &fx);
+    model.streaming = false;
+    // Now new_chat should create a second chat
     main.update(&model, .new_chat, &fx);
     try testing.expectEqual(@as(usize, 2), model.chat_count);
     try testing.expectEqual(@as(usize, 1), model.active_chat_idx);
@@ -249,7 +257,15 @@ test "chat list: switch chat sets active index" {
     var model = main.initialModel();
     model.allocator = arena;
     var fx = noopFx(arena);
+    // Make first chat non-empty, then create second
+    model.activeChat().draft_text = "first";
+    main.update(&model, .send_message, &fx);
+    model.streaming = false;
     main.update(&model, .new_chat, &fx);
+    // Make second chat non-empty, then create third
+    model.activeChat().draft_text = "second";
+    main.update(&model, .send_message, &fx);
+    model.streaming = false;
     main.update(&model, .new_chat, &fx);
     try testing.expectEqual(@as(usize, 2), model.active_chat_idx);
     const first_chat_id = model.chats[0].id;
@@ -278,7 +294,14 @@ test "unread badge: increments for non-active chat on stream_done" {
     model.allocator = arena;
     var fx = noopFx(arena);
 
+    // Make first chat non-empty, create second, make second non-empty, create third
+    model.activeChat().draft_text = "first";
+    main.update(&model, .send_message, &fx);
+    model.streaming = false;
     main.update(&model, .new_chat, &fx);
+    model.activeChat().draft_text = "second";
+    main.update(&model, .send_message, &fx);
+    model.streaming = false;
     main.update(&model, .new_chat, &fx);
     model.active_chat_idx = 1;
 
@@ -300,7 +323,10 @@ test "unread badge: switch chat resets unread count" {
     model.allocator = arena;
     var fx = noopFx(arena);
 
-    main.update(&model, .new_chat, &fx);
+    // Make first chat non-empty, create second
+    model.activeChat().draft_text = "first";
+    main.update(&model, .send_message, &fx);
+    model.streaming = false;
     main.update(&model, .new_chat, &fx);
     model.chats[0].unread_count = 3;
     model.active_chat_idx = 1;
@@ -308,4 +334,51 @@ test "unread badge: switch chat resets unread count" {
     main.update(&model, .{ .switch_chat = model.chats[0].id }, &fx);
     try testing.expectEqual(@as(u32, 0), model.chats[0].unread_count);
     try testing.expectEqual(@as(usize, 0), model.active_chat_idx);
+}
+
+test "smart new chat: stays on empty chat with draft" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    // Type a draft but don't send
+    main.update(&model, .{ .input_changed = .{ .insert_text = "hello" } }, &fx);
+    try testing.expectEqual(@as(usize, 1), model.chat_count);
+
+    // Press new_chat — should stay on current empty chat (has draft, no messages)
+    main.update(&model, .new_chat, &fx);
+    try testing.expectEqual(@as(usize, 1), model.chat_count);
+    try testing.expectEqualStrings("hello", model.inputText());
+}
+
+test "draft preservation: switching chats preserves per-chat draft" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    // Chat 1: type and send a message
+    main.update(&model, .{ .input_changed = .{ .insert_text = "first" } }, &fx);
+    main.update(&model, .send_message, &fx);
+    model.streaming = false;
+
+    // Create chat 2, type a draft
+    main.update(&model, .new_chat, &fx);
+    main.update(&model, .{ .input_changed = .{ .insert_text = "draft2" } }, &fx);
+    try testing.expectEqualStrings("draft2", model.inputText());
+
+    // Switch back to chat 1 — draft should be empty (it was sent)
+    main.update(&model, .{ .switch_chat = model.chats[0].id }, &fx);
+    try testing.expectEqualStrings("", model.inputText());
+
+    // Switch back to chat 2 — draft should be preserved
+    main.update(&model, .{ .switch_chat = model.chats[1].id }, &fx);
+    try testing.expectEqualStrings("draft2", model.inputText());
 }
