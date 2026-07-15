@@ -189,13 +189,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
         },
         .suggestion_inbox => {
-            model.input_text = model.allocator.dupe(u8, "Triage my inbox") catch return;
+            model.input_text = "Triage my inbox";
         },
         .suggestion_summary => {
-            model.input_text = model.allocator.dupe(u8, "Draft a weekly summary") catch return;
+            model.input_text = "Draft a weekly summary";
         },
         .suggestion_contacts => {
-            model.input_text = model.allocator.dupe(u8, "Find contacts in marketing") catch return;
+            model.input_text = "Find contacts in marketing";
         },
         .sidebar_resized => |frac| {
             _ = frac;
@@ -206,7 +206,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const chat = model.activeChat();
             addMessage(chat, model.allocator, "user", text);
             if (chat.msg_count == 1) {
-                chat.title = model.allocator.dupe(u8, text) catch text;
+                chat.title = model.allocator.dupe(u8, text) catch "New chat";
             }
             model.input_text = "";
             model.streaming = true;

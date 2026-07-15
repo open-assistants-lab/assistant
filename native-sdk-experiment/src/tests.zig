@@ -122,6 +122,7 @@ test "interrupt sets pending state" {
     model.allocator = arena;
     var fx = noopFx(arena);
 
+    main.update(&model, .new_chat, &fx);
     main.update(&model, .{ .stream_line = .{ .key = 0, .line = "data: {\"type\":\"interrupt\",\"data\":{\"tool\":\"email_send\",\"call_id\":\"abc123\",\"args\":{}}}" } }, &fx);
     try testing.expect(model.has_pending);
     try testing.expectEqualStrings("email_send", model.pending_tool);
@@ -137,6 +138,7 @@ test "approve clears pending" {
     model.allocator = arena;
     var fx = noopFx(arena);
 
+    main.update(&model, .new_chat, &fx);
     main.update(&model, .{ .stream_line = .{ .key = 0, .line = "data: {\"type\":\"interrupt\",\"data\":{\"tool\":\"email_send\",\"call_id\":\"abc123\",\"args\":{}}}" } }, &fx);
     try testing.expect(model.has_pending);
 
@@ -158,6 +160,7 @@ test "reject clears pending" {
     model.allocator = arena;
     var fx = noopFx(arena);
 
+    main.update(&model, .new_chat, &fx);
     main.update(&model, .{ .stream_line = .{ .key = 0, .line = "data: {\"type\":\"interrupt\",\"data\":{\"tool\":\"email_send\",\"call_id\":\"abc123\",\"args\":{}}}" } }, &fx);
     try testing.expect(model.has_pending);
 
