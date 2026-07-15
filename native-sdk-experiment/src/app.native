@@ -73,7 +73,12 @@
             <column gap="4">
               <text size="sm" foreground="accent">Assistant</text>
               <card background="surface" radius="lg" padding="12" border-color="border">
-                <text wrap="true">{msg.content}</text>
+                <if test="{msg.isEmpty}">
+                  <text foreground="text_muted" size="sm">. . .</text>
+                </if>
+                <else>
+                  <text wrap="true">{msg.content}</text>
+                </else>
               </card>
             </column>
           </else>
@@ -89,9 +94,6 @@
             </row>
           </column>
         </else>
-        <if test="{streaming}">
-          <text foreground="text_muted" size="sm" padding="16">Receiving response...</text>
-        </if>
       </column>
     </scroll>
 

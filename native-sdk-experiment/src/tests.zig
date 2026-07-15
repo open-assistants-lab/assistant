@@ -60,9 +60,12 @@ test "send message adds user message" {
 
     main.update(&model, .send_message, &fx);
     const chat = model.activeChat();
-    try testing.expectEqual(@as(usize, 1), chat.msg_count);
+    // user message + empty assistant typing indicator
+    try testing.expectEqual(@as(usize, 2), chat.msg_count);
     try testing.expectEqualStrings("user", chat._messages[0].role);
     try testing.expectEqualStrings("Hello", chat._messages[0].content);
+    try testing.expectEqualStrings("assistant", chat._messages[1].role);
+    try testing.expectEqualStrings("", chat._messages[1].content);
     try testing.expect(model.streaming);
     try testing.expectEqualStrings("", model.inputText());
     try testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
@@ -105,10 +108,16 @@ test "stream_line appends to assistant message" {
     main.update(&model, .{ .input_changed = .{ .insert_text = "Hi" } }, &fx);
     main.update(&model, .send_message, &fx);
 
-    main.update(&model, .{ .stream_line = .{ .key = 0, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"Hello\"}}" } }, &fx);
+    // After send: user message + empty assistant (typing indicator)
     const chat = model.activeChat();
+    try testing.expectEqual(@as(usize, 2), chat.msg_count);
+    try testing.expectEqualStrings("", chat._messages[1].content);
+
+    // First stream line replaces empty content
+    main.update(&model, .{ .stream_line = .{ .key = 0, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"Hello\"}}" } }, &fx);
     try testing.expectEqualStrings("Hello", chat._messages[1].content);
 
+    // Second stream line appends
     main.update(&model, .{ .stream_line = .{ .key = 0, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\" world\"}}" } }, &fx);
     try testing.expectEqualStrings("Hello world", chat._messages[1].content);
 }

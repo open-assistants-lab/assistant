@@ -48,6 +48,10 @@ pub const ChatMessage = struct {
     pub fn isAssistant(self: *const ChatMessage) bool {
         return std.mem.eql(u8, self.role, "assistant");
     }
+
+    pub fn isEmpty(self: *const ChatMessage) bool {
+        return self.content.len == 0;
+    }
 };
 
 pub const Chat = struct {
@@ -288,6 +292,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             chat.draft_text = "";
             model.streaming = true;
 
+            // Add an empty assistant message immediately — shows typing indicator
+            addMessage(chat, model.allocator, "assistant", "");
+
             const escaped = escapeJsonString(model.allocator, text) catch return;
             const body = std.fmt.allocPrint(
                 model.allocator,
@@ -388,6 +395,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .stream_done => {
             model.streaming = false;
+            // If the last assistant message is still empty (no tokens received), remove it
+            const chat = model.activeChat();
+            if (chat.msg_count > 0) {
+                const last = &chat._messages[chat.msg_count - 1];
+                if (std.mem.eql(u8, last.role, "assistant") and last.content.len == 0) {
+                    chat.msg_count -= 1;
+                    chat.messages = chat._messages[0..chat.msg_count];
+                }
+            }
             var i: usize = 0;
             while (i < model.chat_count) : (i += 1) {
                 if (i != model.active_chat_idx and model.chats[i].msg_count > 0) {
@@ -526,6 +542,11 @@ fn appendToLastMessage(chat: *Chat, allocator: std.mem.Allocator, content: []con
     const last = &chat._messages[chat.msg_count - 1];
     if (!std.mem.eql(u8, last.role, "assistant")) {
         addMessage(chat, allocator, "assistant", content);
+        return;
+    }
+    // If last message is empty (typing indicator), replace with first token
+    if (last.content.len == 0) {
+        last.content = allocator.dupe(u8, content) catch return;
         return;
     }
     const new_len = last.content.len + content.len;
