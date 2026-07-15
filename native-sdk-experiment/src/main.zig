@@ -15,6 +15,7 @@ const stream_key: u64 = 1;
 const cancel_key: u64 = 2;
 const approve_key: u64 = 3;
 const reject_key: u64 = 4;
+const history_key: u64 = 5;
 
 const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
 const shell_views = [_]native_sdk.ShellView{
@@ -83,6 +84,7 @@ pub const Msg = union(enum) {
     suggestion_summary,
     suggestion_contacts,
     sidebar_resized: f32,
+    history_loaded: native_sdk.EffectResponse,
 
     pub const view_unbound = .{
         "stream_line",
@@ -92,6 +94,7 @@ pub const Msg = union(enum) {
         "reject_done",
         "cancel_done",
         "search_input",
+        "history_loaded",
     };
 };
 
@@ -347,6 +350,39 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.streaming = false;
         },
         .approve_done, .reject_done, .cancel_done => {},
+        .history_loaded => |response| {
+            if (response.outcome != .ok) return;
+            const body = response.body;
+            if (body.len == 0) return;
+            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
+            defer parsed.deinit();
+            const root = parsed.value;
+            const messages_arr = root.object.get("messages") orelse return;
+            const arr = switch (messages_arr) {
+                .array => |a| a,
+                else => return,
+            };
+            const chat = model.activeChat();
+            for (arr.items) |item| {
+                const role_val = item.object.get("role") orelse continue;
+                const content_val = item.object.get("content") orelse continue;
+                const role_str = switch (role_val) {
+                    .string => |s| s,
+                    else => continue,
+                };
+                const content_str = switch (content_val) {
+                    .string => |s| s,
+                    else => continue,
+                };
+                addMessage(chat, model.allocator, role_str, content_str);
+            }
+            if (chat.msg_count > 0) {
+                const first = chat._messages[0];
+                if (std.mem.eql(u8, first.role, "user")) {
+                    chat.title = model.allocator.dupe(u8, first.content) catch "New chat";
+                }
+            }
+        },
     }
 }
 
@@ -430,6 +466,17 @@ pub fn initialModel() Model {
     return m;
 }
 
+fn initFx(_: *Model, fx: *Effects) void {
+    fx.fetch(.{
+        .key = history_key,
+        .url = "http://127.0.0.1:8080/conversation?user_id=native_sdk_chat&limit=100",
+        .method = .GET,
+        .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+        .response = .buffered,
+        .on_response = Effects.responseMsg(.history_loaded),
+    });
+}
+
 pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -440,6 +487,7 @@ pub fn main(init: std.process.Init) !void {
         .scene = shell_scene,
         .canvas_label = canvas_label,
         .update_fx = update,
+        .init_fx = initFx,
         .tokens_fn = tokensFn,
         .markup = .{ .source = app_markup, .watch_path = "src/app.native", .io = init.io },
     });
