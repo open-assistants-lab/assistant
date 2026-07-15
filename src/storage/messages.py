@@ -236,14 +236,23 @@ class MessageStore:
 
         sentinel.touch()
 
-    def add_message(self, role: str, content: str, metadata: dict[str, Any] | None = None) -> str:
-        result = self._core.ingest(role, content or "(empty)", metadata=metadata)
+    def add_message(
+        self, role: str, content: str, metadata: dict[str, Any] | None = None, session_id: str | None = None
+    ) -> str:
+        result = self._core.ingest(role, content or "(empty)", session_id=session_id, metadata=metadata)
         return result or ""
 
     def add_message_with_embedding(
-        self, role: str, content: str, embedding: list[float], metadata: dict[str, Any] | None = None
+        self,
+        role: str,
+        content: str,
+        embedding: list[float],
+        metadata: dict[str, Any] | None = None,
+        session_id: str | None = None,
     ) -> str:
-        result = self._core.ingest(role, content or "(empty)", metadata=metadata, embedding=embedding)
+        result = self._core.ingest(
+            role, content or "(empty)", session_id=session_id, metadata=metadata, embedding=embedding
+        )
         return result or ""
 
     @staticmethod

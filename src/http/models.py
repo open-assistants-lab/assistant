@@ -9,6 +9,7 @@ class MessageRequest(BaseModel):
     message: str
     model: str | None = None
     user_id: str | None = None
+    session_id: str | None = None
     verbose: bool = False
     provider_keys: dict[str, str] | None = None
 

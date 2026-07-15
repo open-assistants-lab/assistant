@@ -14,12 +14,15 @@ from src.http.auth import require_auth
 from src.http.models import MessageRequest, MessageResponse
 from src.sdk.runner import (
     _messages_from_conversation,
+    get_sdk_loop,
+    reset_sdk_loop,
     run_sdk_agent,
     run_sdk_agent_stream,
 )
 from src.storage.messages import get_message_store
 
 _pending_approvals: dict[str, dict[str, Any]] = {}
+_pending_interrupts: dict[str, dict[str, Any]] = {}
 
 router = APIRouter(tags=["conversation"])
 logger = get_logger()
@@ -128,10 +131,15 @@ def _persist_tool_messages(conversation: Any, tool_events: list[dict[str, Any]])
 
 
 @router.get("/conversation")
-async def get_conversation(user_id: str = "default_user", limit: int = 100) -> dict[str, Any]:
-    """Get conversation history."""
+async def get_conversation(
+    user_id: str = "default_user", limit: int = 100, session_id: str | None = None
+) -> dict[str, Any]:
+    """Get conversation history, optionally filtered by session_id."""
     conversation = get_message_store(user_id)
-    messages = conversation.get_messages_by_session_id("default", limit)
+    if session_id:
+        messages = conversation.get_messages_by_session_id(session_id, limit)
+    else:
+        messages = conversation.get_messages_by_session_id("default", limit)
 
     return {
         "messages": [
@@ -142,6 +150,31 @@ async def get_conversation(user_id: str = "default_user", limit: int = 100) -> d
                 "metadata": m.metadata,
             }
             for m in messages
+        ]
+    }
+
+
+@router.get("/conversation/sessions")
+async def list_sessions(user_id: str = "default_user") -> dict[str, Any]:
+    """List all chat sessions with titles derived from first user message."""
+    conversation = get_message_store(user_id)
+    all_messages = conversation.get_recent_messages(10000)
+
+    sessions: dict[str, str] = {}
+    for msg in all_messages:
+        if msg.role == "user":
+            # Extract session_id from metadata or use "default"
+            sid = "default"
+            if msg.metadata and "session_id" in msg.metadata:
+                sid = msg.metadata["session_id"]
+            if sid not in sessions:
+                title = msg.content[:60] if len(msg.content) > 60 else msg.content
+                sessions[sid] = title
+
+    return {
+        "sessions": [
+            {"session_id": sid, "title": title}
+            for sid, title in sessions.items()
         ]
     }
 
@@ -175,9 +208,10 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
             return MessageResponse(response=f"{tool_name} approved (execution pending).")
 
         conversation = get_message_store(user_id)
-        conversation.add_message("user", req.message, metadata={})
+        session_id = req.session_id or "default"
+        conversation.add_message("user", req.message, metadata={}, session_id=session_id)
 
-        recent_messages = conversation.get_messages_with_summary(50)
+        recent_messages = conversation.get_messages_by_session_id(session_id, 50)
         sdk_messages = _messages_from_conversation(recent_messages)
 
         logger = get_logger()
@@ -310,7 +344,7 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
         assistant_metadata: dict[str, Any] = {}
         if verbose_data and verbose_data.get("tool_events"):
             assistant_metadata["tool_events"] = verbose_data["tool_events"]
-        conversation.add_message("assistant", response, metadata=assistant_metadata)
+        conversation.add_message("assistant", response, metadata=assistant_metadata, session_id=session_id)
 
         logger.info(
             "agent.response",
@@ -341,11 +375,12 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
     """Send a message and stream response using SSE (SDK-powered)."""
     try:
         user_id = req.user_id or "default_user"
+        session_id = req.session_id or "default"
 
         conversation = get_message_store(user_id)
-        conversation.add_message("user", req.message, metadata={})
+        conversation.add_message("user", req.message, metadata={}, session_id=session_id)
 
-        recent_messages = conversation.get_messages_with_summary(50)
+        recent_messages = conversation.get_messages_by_session_id(session_id, 50)
         sdk_messages = _messages_from_conversation(recent_messages)
 
         logger = get_logger()
@@ -363,7 +398,7 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
             ):
                 canonical = chunk.canonical_type
 
-                if canonical == "text_delta" and chunk.content:
+                if canonical == "text_delta" and chunk.type != "ai_token" and chunk.content:
                     ai_content_parts.append(chunk.content)
                     yield f"data: {json.dumps({'type': 'messages', 'data': {'content': chunk.content}})}\n\n"
 
@@ -387,6 +422,14 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                 elif canonical == "reasoning_start":
                     yield f"data: {json.dumps({'type': 'updates', 'data': {'content': '[Thinking...]'}})}\n\n"
 
+                elif chunk.type == "interrupt":
+                    _pending_interrupts[user_id] = {
+                        "tool": chunk.tool,
+                        "call_id": chunk.call_id,
+                        "args": chunk.args or {},
+                    }
+                    yield f"data: {json.dumps({'type': 'interrupt', 'data': {'tool': chunk.tool, 'call_id': chunk.call_id, 'args': chunk.args}})}\n\n"
+
                 elif chunk.type == "error":
                     yield f"data: {json.dumps({'type': 'error', 'data': {'content': chunk.content}})}\n\n"
 
@@ -406,9 +449,9 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
             }
             for tm in tool_metadata_list:
                 output = result_by_call_id.get(tm.get("tool_call_id", ""), "")
-                conversation.add_message("tool", output, metadata=tm)
+                conversation.add_message("tool", output, metadata=tm, session_id=session_id)
 
-            conversation.add_message("assistant", response, metadata={"stream": True})
+            conversation.add_message("assistant", response, metadata={"stream": True}, session_id=session_id)
             logger.info(
                 "agent.response", {"response": response[:80]}, user_id=user_id, channel="http"
             )
@@ -417,6 +460,49 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class ApproveRequest(BaseModel):
+    user_id: str = "default_user"
+    call_id: str = ""
+
+
+class RejectRequest(BaseModel):
+    user_id: str = "default_user"
+    call_id: str = ""
+    reason: str = ""
+
+
+class CancelRequest(BaseModel):
+    user_id: str = "default_user"
+
+
+@router.post("/message/approve")
+async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> dict[str, Any]:
+    """Approve a pending tool call (HITL)."""
+    pending = _pending_interrupts.pop(req.user_id, None)
+    if not pending:
+        raise HTTPException(status_code=404, detail="No pending tool call to approve")
+    tool_name = pending.get("tool", "unknown")
+    loop = await get_sdk_loop(req.user_id)
+    loop._approved_tool_names.add(tool_name)
+    return {"status": "approved", "tool": tool_name}
+
+
+@router.post("/message/reject")
+async def reject_tool(req: RejectRequest, _: None = Depends(require_auth)) -> dict[str, Any]:
+    """Reject a pending tool call (HITL)."""
+    pending = _pending_interrupts.pop(req.user_id, None)
+    if not pending:
+        raise HTTPException(status_code=404, detail="No pending tool call to reject")
+    return {"status": "rejected", "tool": pending.get("tool", "unknown")}
+
+
+@router.post("/message/cancel")
+async def cancel_message(req: CancelRequest, _: None = Depends(require_auth)) -> dict[str, Any]:
+    """Cancel the current agent execution."""
+    reset_sdk_loop(req.user_id)
+    return {"status": "cancelled"}
 
 
 class ConversationImportRequest(BaseModel):
@@ -442,6 +528,4 @@ async def import_conversation(req: ConversationImportRequest, _: None = Depends(
             meta = msg.get("metadata")
             conversation.add_message(role, content, metadata=meta)
     return {"imported": len(req.messages)}
-
-
 
