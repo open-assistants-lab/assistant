@@ -54,13 +54,15 @@ test "send message adds user message" {
     model.allocator = arena;
     var fx = noopFx(arena);
 
+    main.update(&model, .new_chat, &fx);
     main.update(&model, .{ .input_changed = .{ .insert_text = "Hello" } }, &fx);
     try testing.expectEqualStrings("Hello", model.input_text);
 
     main.update(&model, .send_message, &fx);
-    try testing.expectEqual(@as(usize, 1), model.msg_count);
-    try testing.expectEqualStrings("user", model._messages[0].role);
-    try testing.expectEqualStrings("Hello", model._messages[0].content);
+    const chat = model.activeChat();
+    try testing.expectEqual(@as(usize, 1), chat.msg_count);
+    try testing.expectEqualStrings("user", chat._messages[0].role);
+    try testing.expectEqualStrings("Hello", chat._messages[0].content);
     try testing.expect(model.streaming);
     try testing.expectEqualStrings("", model.input_text);
     try testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
@@ -99,14 +101,16 @@ test "stream_line appends to assistant message" {
     model.allocator = arena;
     var fx = noopFx(arena);
 
+    main.update(&model, .new_chat, &fx);
     main.update(&model, .{ .input_changed = .{ .insert_text = "Hi" } }, &fx);
     main.update(&model, .send_message, &fx);
 
     main.update(&model, .{ .stream_line = .{ .key = 0, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"Hello\"}}" } }, &fx);
-    try testing.expectEqualStrings("Hello", model._messages[1].content);
+    const chat = model.activeChat();
+    try testing.expectEqualStrings("Hello", chat._messages[1].content);
 
     main.update(&model, .{ .stream_line = .{ .key = 0, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\" world\"}}" } }, &fx);
-    try testing.expectEqualStrings("Hello world", model._messages[1].content);
+    try testing.expectEqualStrings("Hello world", chat._messages[1].content);
 }
 
 test "interrupt sets pending state" {
@@ -202,4 +206,61 @@ test "theme: radius tokens are comfortable values" {
     try testing.expectEqual(@as(f32, 12.0), tokens.radius.md);
     try testing.expectEqual(@as(f32, 14.0), tokens.radius.lg);
     try testing.expectEqual(@as(f32, 18.0), tokens.radius.xl);
+}
+
+test "theme: toggle switches dark to light" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    try testing.expectEqual(main.ThemeMode.dark, model.theme_mode);
+    main.update(&model, .toggle_theme, &fx);
+    try testing.expectEqual(main.ThemeMode.light, model.theme_mode);
+    main.update(&model, .toggle_theme, &fx);
+    try testing.expectEqual(main.ThemeMode.dark, model.theme_mode);
+}
+
+test "chat list: new chat creates empty chat and sets active" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    try testing.expectEqual(@as(usize, 0), model.chat_count);
+    main.update(&model, .new_chat, &fx);
+    try testing.expectEqual(@as(usize, 1), model.chat_count);
+    try testing.expectEqual(@as(usize, 0), model.active_chat_idx);
+    try testing.expectEqual(@as(usize, 0), model.chats[0].msg_count);
+}
+
+test "chat list: switch chat sets active index" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    main.update(&model, .new_chat, &fx);
+    main.update(&model, .new_chat, &fx);
+    try testing.expectEqual(@as(usize, 1), model.active_chat_idx);
+    main.update(&model, .{ .switch_chat = 0 }, &fx);
+    try testing.expectEqual(@as(usize, 0), model.active_chat_idx);
+}
+
+test "search: query accumulates text" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    main.update(&model, .{ .search_input = .{ .insert_text = "tri" } }, &fx);
+    try testing.expectEqualStrings("tri", model.search_query);
 }
