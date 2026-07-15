@@ -39,6 +39,14 @@ pub const ChatMessage = struct {
     id: u64,
     role: []const u8,
     content: []const u8,
+
+    pub fn isUser(self: *const ChatMessage) bool {
+        return std.mem.eql(u8, self.role, "user");
+    }
+
+    pub fn isAssistant(self: *const ChatMessage) bool {
+        return std.mem.eql(u8, self.role, "assistant");
+    }
 };
 
 pub const Chat = struct {
@@ -49,6 +57,10 @@ pub const Chat = struct {
     msg_count: usize = 0,
     next_id: u64 = 1,
     unread_count: u32 = 0,
+
+    pub fn hasUnread(self: *const Chat) bool {
+        return self.unread_count > 0;
+    }
 };
 
 pub const Msg = union(enum) {
@@ -64,7 +76,7 @@ pub const Msg = union(enum) {
     reject_done: native_sdk.EffectResponse,
     cancel_done: native_sdk.EffectResponse,
     new_chat,
-    switch_chat: usize,
+    switch_chat: u64,
     toggle_theme,
     search_input: canvas.TextInputEvent,
     suggestion_inbox,
@@ -88,6 +100,7 @@ pub const Model = struct {
     chats: [max_chats]Chat = undefined,
     chat_count: usize = 0,
     active_chat_idx: usize = 0,
+    active_chat_id: u64 = 0,
     next_chat_id: u64 = 1,
     search_query: []const u8 = "",
     input_text: []const u8 = "",
@@ -95,6 +108,7 @@ pub const Model = struct {
     has_pending: bool = false,
     pending_tool: []const u8 = "",
     pending_call_id: []const u8 = "",
+    sidebar_split: f32 = 0.2,
     allocator: std.mem.Allocator = undefined,
 
     pub const view_unbound = .{
@@ -104,6 +118,9 @@ pub const Model = struct {
         "pending_call_id",
         "streaming",
         "allocator",
+        "theme_mode",
+        "active_chat_idx",
+        "chats",
     };
 
     pub fn activeChat(self: *Model) *Chat {
@@ -161,14 +178,21 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.chats[model.chat_count] = .{ .id = model.next_chat_id };
             model.next_chat_id += 1;
             model.active_chat_idx = model.chat_count;
+            model.active_chat_id = model.chats[model.active_chat_idx].id;
             model.chat_count += 1;
             model.input_text = "";
         },
-        .switch_chat => |idx| {
-            if (idx >= model.chat_count) return;
-            model.active_chat_idx = idx;
-            model.chats[idx].unread_count = 0;
-            model.input_text = "";
+        .switch_chat => |chat_id| {
+            var i: usize = 0;
+            while (i < model.chat_count) : (i += 1) {
+                if (model.chats[i].id == chat_id) {
+                    model.active_chat_idx = i;
+                    model.active_chat_id = model.chats[i].id;
+                    model.chats[i].unread_count = 0;
+                    model.input_text = "";
+                    return;
+                }
+            }
         },
         .search_input => |event| {
             switch (event) {
@@ -198,7 +222,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.input_text = "Find contacts in marketing";
         },
         .sidebar_resized => |frac| {
-            _ = frac;
+            model.sidebar_split = frac;
         },
         .send_message => {
             const text = std.mem.trim(u8, model.input_text, " ");

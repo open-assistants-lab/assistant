@@ -1,0 +1,108 @@
+<split value="{sidebar_split}" on-resize="sidebar_resized">
+  <column background="surface" border-color="border" gap="0" min-width="160">
+    <column padding="12" gap="8">
+      <button on-press="new_chat" variant="secondary" icon="plus">New chat</button>
+      <search-field text="{search_query}" placeholder="Search chats..." on-input="search_input" label="Search chats" />
+    </column>
+    <scroll grow="1" padding="8" gap="2">
+      <for each="filteredChats" key="id" as="chat">
+        <if test="{chat.id == active_chat_id}">
+          <row gap="8" padding="8" radius="sm" cross="center" background="surface_pressed" on-press="switch_chat:{chat.id}" role="listitem" label="{chat.title}">
+            <icon name="circle-dot" foreground="accent"/>
+            <text size="sm" grow="1" foreground="text">{chat.title}</text>
+            <if test="{chat.hasUnread}">
+              <badge variant="info" size="sm">{chat.unread_count}</badge>
+            </if>
+          </row>
+        </if>
+        <else>
+          <row gap="8" padding="8" radius="sm" cross="center" on-press="switch_chat:{chat.id}" role="listitem" label="{chat.title}">
+            <icon name="circle-dot" foreground="text_muted"/>
+            <text size="sm" grow="1" foreground="text_muted">{chat.title}</text>
+            <if test="{chat.hasUnread}">
+              <badge variant="info" size="sm">{chat.unread_count}</badge>
+            </if>
+          </row>
+        </else>
+      </for>
+      <else>
+        <text foreground="text_muted" padding="8" size="sm">No chats yet</text>
+      </else>
+    </scroll>
+    <column gap="2" padding="8">
+      <row gap="8" padding="8" radius="sm" cross="center">
+        <icon name="wrench" foreground="text_muted"/>
+        <text size="sm" foreground="text_muted">Tools</text>
+      </row>
+      <row gap="8" padding="8" radius="sm" cross="center">
+        <icon name="file-text" foreground="text_muted"/>
+        <text size="sm" foreground="text_muted">Skills</text>
+      </row>
+      <row gap="8" padding="8" radius="sm" cross="center">
+        <icon name="git-branch" foreground="text_muted"/>
+        <text size="sm" foreground="text_muted">Subagents</text>
+      </row>
+    </column>
+    <row gap="4" padding="8" cross="center">
+      <row gap="8" padding="8" radius="sm" cross="center" grow="1">
+        <icon name="settings" foreground="text_muted"/>
+        <text size="sm" foreground="text_muted">Settings</text>
+      </row>
+      <button on-press="toggle_theme" variant="ghost" size="sm" icon="moon" label="Toggle theme">
+      </button>
+    </row>
+  </column>
+
+  <column background="background" gap="0" min-width="320">
+    <scroll grow="1" padding="16" gap="12">
+      <for each="messages" key="id" as="msg">
+        <if test="{msg.isUser}">
+          <row main="end">
+            <card background="surface_subtle" radius="lg" padding="12" grow="0">
+              <text wrap="true">{msg.content}</text>
+            </card>
+          </row>
+        </if>
+        <else>
+          <column gap="4">
+            <text size="sm" foreground="accent">Assistant</text>
+            <card background="surface" radius="lg" padding="12" border-color="border">
+              <text wrap="true">{msg.content}</text>
+            </card>
+          </column>
+        </else>
+      </for>
+      <else>
+        <column gap="16" padding="32" cross="center" main="center">
+          <text size="heading">How can I help?</text>
+          <text foreground="text_muted">Ask me anything, or try one of these:</text>
+          <row gap="8">
+            <button variant="ghost" on-press="suggestion_inbox">Triage my inbox</button>
+            <button variant="ghost" on-press="suggestion_summary">Draft a weekly summary</button>
+            <button variant="ghost" on-press="suggestion_contacts">Find contacts in marketing</button>
+          </row>
+        </column>
+      </else>
+    </scroll>
+
+    <if test="{streaming}">
+      <text foreground="text_muted" padding="8" size="sm">Receiving response...</text>
+    </if>
+    <if test="{has_pending}">
+      <row background="surface" radius="md" padding="12" gap="12" cross="center">
+        <text grow="1">Approve <span mono foreground="accent">{pending_tool}</span>?</text>
+        <button on-press="approve" foreground="success">Approve</button>
+        <button on-press="reject" variant="ghost" foreground="destructive">Reject</button>
+      </row>
+    </if>
+    <row gap="8" padding="12" cross="center">
+      <input text="{input_text}" placeholder="Type a message..." grow="1" on-input="input_changed" on-submit="send_message" label="Message" />
+      <if test="{streaming}">
+        <button on-press="cancel" variant="ghost">Stop</button>
+      </if>
+      <else>
+        <button on-press="send_message" variant="primary" disabled="{streaming}">Send</button>
+      </else>
+    </row>
+  </column>
+</split>

@@ -182,7 +182,7 @@ test "empty state renders placeholder" {
     model.allocator = arena;
 
     const tree = try buildTree(arena, &model);
-    _ = try expectByText(tree.root, .text, "Send a message to start...");
+    _ = try expectByText(tree.root, .text, "How can I help?");
 }
 
 test "theme: dark tokens have teal accent" {
@@ -252,7 +252,8 @@ test "chat list: switch chat sets active index" {
     main.update(&model, .new_chat, &fx);
     main.update(&model, .new_chat, &fx);
     try testing.expectEqual(@as(usize, 1), model.active_chat_idx);
-    main.update(&model, .{ .switch_chat = 0 }, &fx);
+    const first_chat_id = model.chats[0].id;
+    main.update(&model, .{ .switch_chat = first_chat_id }, &fx);
     try testing.expectEqual(@as(usize, 0), model.active_chat_idx);
 }
 
