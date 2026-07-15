@@ -189,14 +189,14 @@ test_keyboard() {
   [ -z "$TEXTBOX" ] && { fail "no textbox found"; cleanup; return; }
 
   # Test: set_text then press Return key to send
-  native automate widget-action main-canvas "$TEXTBOX" set_text 'Reply exactly: hi' > /dev/null
+  native automate widget-action main-canvas "$TEXTBOX" set_text 'Reply exactly: ok' > /dev/null
   # Focus the textbox first, then send Enter
   native automate focus main-canvas > /dev/null 2>&1
-  native automate widget-action main-canvas "$TEXTBOX" set_text 'Reply exactly: hi' > /dev/null
+  native automate widget-action main-canvas "$TEXTBOX" set_text 'Reply exactly: ok' > /dev/null
   # Use Return key to trigger on-submit
   native automate widget-key main-canvas Return > /dev/null 2>&1
 
-  if native automate assert --timeout-ms 60000 'role=text name="hi"' > /dev/null 2>&1; then
+  if native automate assert --timeout-ms 60000 'role=text name="ok"' > /dev/null 2>&1; then
     pass "Enter key sends message"
   else
     # Fallback: use Send button if Enter didn't work
@@ -204,7 +204,7 @@ test_keyboard() {
     SEND=$(get_id button Send)
     if [ -n "$SEND" ]; then
       native automate widget-action main-canvas "$SEND" press > /dev/null
-      if native automate assert --timeout-ms 60000 'role=text name="hi"' > /dev/null 2>&1; then
+      if native automate assert --timeout-ms 60000 'role=text name="ok"' > /dev/null 2>&1; then
         pass "Enter key sends message (via Send button fallback)"
       else
         fail "Enter key sends message"
