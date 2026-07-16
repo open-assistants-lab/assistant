@@ -94,7 +94,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Executive Assistant'),
+        title: const Text('Assistant'),
         actions: [
           IconButton(
             icon: Icon(statusIcon, color: statusColor, size: 20),

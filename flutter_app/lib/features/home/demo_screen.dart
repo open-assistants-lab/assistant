@@ -83,7 +83,7 @@ class _DemoScreenState extends ConsumerState<DemoScreen> {
                               ),
                               const SizedBox(height: 16),
                               Text(
-                                'Executive Assistant',
+                                'Assistant',
                                 style: AppTypography.sectionTitle
                                     .copyWith(fontSize: 18),
                               ),

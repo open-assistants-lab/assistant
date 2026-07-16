@@ -55,7 +55,7 @@
 | Per-user HybridDB | `messages.py:72, memory.py:28` | One DB per user, workspace as metadata field |
 | Old tools disabled | `native_tools.py:79-85, 138-143` | memory_search_all, memory_count, memory_search_insights, memory_get_history |
 | Memory middleware uses memcore | `middleware_memory.py:252-280, 639-678` | Raw verbatim injection (no old MemoryStore) |
-| CLI removed | `AGENTS.md` | Only `ea http` channel |
+| CLI removed | `AGENTS.md` | Only `assistant http` channel |
 | No prompt echo instruction | `longmemeval_adapter.py:45` | Removed "Answer the question based on the context..." prefix |
 
 ### ✅ DONE: Research & Docs

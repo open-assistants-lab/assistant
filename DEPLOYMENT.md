@@ -1,11 +1,11 @@
-# Executive Assistant — Deployment Guide
+# Assistant — Deployment Guide
 
 ## Solo Mode (Default)
 
 **Use case:** One user, one machine, localhost only. Zero configuration.
 
 ```bash
-uv run ea http
+uv run assistant http
 ```
 
 - Auth: Disabled (localhost-only, no API key needed)
@@ -27,7 +27,7 @@ uv run ea http
 tailscale up
 export EA_API_KEY=$(openssl rand -hex 32)
 echo "Your API key: $EA_API_KEY"  # Save this!
-uv run ea http --host 0.0.0.0
+uv run assistant http --host 0.0.0.0
 ```
 
 3. **On phone (Flutter app):**
@@ -42,7 +42,7 @@ uv run ea http --host 0.0.0.0
 - `EA_API_KEY` protects the connection from unauthorized access
 - Localhost requests (desktop itself) still bypass auth
 
-**Security:** Tailscale's WireGuard encryption + EA's API key auth. No port forwarding, no DNS, no firewall changes.
+**Security:** Tailscale's WireGuard encryption + Assistant's API key auth. No port forwarding, no DNS, no firewall changes.
 
 ---
 
@@ -136,6 +136,6 @@ ALICE_KEY=abc123 BOB_KEY=xyz789 CF_TOKEN=... docker compose up -d
 
 | Mode | Auth | Access | Setup |
 |---|---|---|---|
-| **Solo** | None | localhost only | `uv run ea http` |
+| **Solo** | None | localhost only | `uv run assistant http` |
 | **Solo WAN** | API key + Tailscale | Anywhere, encrypted mesh | Tailscale + API key |
 | **Multi-Tenant** | API key per user | Subdomain + Caddy + Docker | Docker Compose + DNS |

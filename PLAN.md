@@ -214,7 +214,7 @@ All tools migrated from LangChain `@tool` to SDK `@tool` in `src/sdk/tools_core/
 | **Why not JWT** | JWT adds issuance, rotation, expiry, revocation infrastructure. EA is per-user (one container = one user). A static API key per container is sufficient — JWT solves multi-user single-process auth which we don't have. |
 | **Why not OAuth** | OAuth requires an authorization server, redirect flows, and scope management. Overkill for a single-user agent API. |
 | **Storage** | `EA_API_KEY` env var or `api_key` in `config.yaml`. Hashed with SHA-256 for comparison. | Same pattern as DEPLOYMENT.md team mode (`EA_AUTH_JWT_SECRET`). |
-| **Solo bypass** | Requests from 127.0.0.1 or ::1 skip auth. | Zero-config for localhost. No API key needed for `ea http` on your own machine. |
+| **Solo bypass** | Requests from 127.0.0.1 or ::1 skip auth. | Zero-config for localhost. No API key needed for `assistant http` on your own machine. |
 | **Flutter client** | API key stored in `flutter_secure_storage`. Sent as `Authorization: Bearer <key>` header (REST) and `{"type": "auth", "api_key": "<key>"}` first WS message. | Matches DEPLOYMENT.md connection modes. |
 
 ### Implementation

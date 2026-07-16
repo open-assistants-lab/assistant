@@ -1,4 +1,4 @@
-# Bug Findings — Executive Assistant Codebase
+# Bug Findings — Assistant Codebase
 
 **Review date:** 2026-06-14  
 **Scope:** Uncommitted changes in working tree (`git status`) plus a deeper pass over affected modules  

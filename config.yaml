@@ -70,7 +70,7 @@ skills:
 # Filesystem
 filesystem:
   enabled: true
-  # workspace_root: ~/executive-assistant  # Default: user's home. Override for custom path
+  # workspace_root: ~/assistant  # Default: user's home. Override for custom path
 
 # Shell
 shell_tool:

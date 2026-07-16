@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="Executive Assistant"
+APP_NAME="Assistant"
 APP_BUNDLE_ID="com.executiveassistant.flutterApp"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FLUTTER_DIR="$PROJECT_ROOT/flutter_app"
 BUILD_DIR="$FLUTTER_DIR/build/macos/Build/Products/Release"
 DMG_NAME="$APP_NAME.dmg"
 DMG_PATH="$FLUTTER_DIR/build/$DMG_NAME"
-DATA_DIR="$HOME/Executive Assistant"
+DATA_DIR="$HOME/Assistant"
 
 echo "==> Building Python backend with PyInstaller..."
 cd "$PROJECT_ROOT"

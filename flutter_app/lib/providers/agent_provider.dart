@@ -175,7 +175,7 @@ class AgentNotifier extends StateNotifier<ChatState> {
     final welcome = ChatMessage(
       id: 'welcome_${DateTime.now().millisecondsSinceEpoch}',
       role: 'assistant',
-      content: 'Hey there! 👋 I\'m your Executive Assistant.\n\n'
+      content: 'Hey there! 👋 I\'m your Assistant.\n\n'
           'I\'d love to get to know you — what\'s your name, and what brings you here? '
           'Here are a few things I can help with:\n\n'
           '• **Stay on top of email** — read, draft, and send messages\n'

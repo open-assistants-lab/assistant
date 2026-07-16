@@ -224,7 +224,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       _tile('Version', '0.1.0', Symbols.info, tokens: tokens),
                       _tile(
                         'Data Directory',
-                        '~/Executive Assistant',
+                        '~/Assistant',
                         Symbols.folder,
                         tokens: tokens,
                       ),
@@ -280,7 +280,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 ''';
 
     final uri = Uri.parse(
-      'https://github.com/open-assistants-lab/executive-assistant/issues/new'
+      'https://github.com/open-assistants-lab/assistant/issues/new'
       '?labels=bug&template=bug_report.md'
       '&title=${Uri.encodeComponent('[BUG] ')}'
       '&body=${Uri.encodeComponent(body)}',

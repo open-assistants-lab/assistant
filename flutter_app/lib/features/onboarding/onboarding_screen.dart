@@ -271,7 +271,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
         Icon(Symbols.assistant, size: 48, color: tokens.colors.accent),
         const SizedBox(height: 24),
         Text(
-          'Welcome to\nExecutive Assistant',
+          'Welcome to\nAssistant',
           style: tokens.typography.textTheme.headlineMedium?.copyWith(
             color: tokens.colors.textPrimary,
             fontWeight: FontWeight.w600,
@@ -566,7 +566,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
         const SizedBox(height: 32),
         FilledButton(
           onPressed: _finish,
-          child: const Text('Start Using Executive Assistant'),
+          child: const Text('Start Using Assistant'),
         ),
       ],
     );

@@ -69,7 +69,7 @@ void main() {
   group('ChatScreen renders', () {
     testWidgets('shows title in AppBar', (WidgetTester tester) async {
       await tester.pumpWidget(_buildChatScreen(mockWs, mockApi));
-      expect(find.text('Executive Assistant'), findsOneWidget);
+      expect(find.text('Assistant'), findsOneWidget);
     });
 
     testWidgets('shows empty state when no messages', (WidgetTester tester) async {

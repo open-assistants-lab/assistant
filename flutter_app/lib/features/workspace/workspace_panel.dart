@@ -178,7 +178,7 @@ class _WorkspacePanelState extends ConsumerState<WorkspacePanel> {
               Icon(Symbols.school, size: 16, color: tokens.colors.accent),
               const SizedBox(width: 6),
               Text(
-                'Learn Executive Assistant',
+                'Learn Assistant',
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w600,

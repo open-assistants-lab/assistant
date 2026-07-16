@@ -18,7 +18,7 @@ SOLO (localhost):
 
 SOLO WAN (Tailscale):
   Phone → Tailscale → Desktop:8080            # API key auth
-  Desktop runs: ea http --host 0.0.0.0
+  Desktop runs: assistant http --host 0.0.0.0
   Phone connects to: 100.x.x.x:8080 (Tailscale IP)
 
 MULTI-TENANT (subdomain):
@@ -369,7 +369,7 @@ Write step-by-step in README: generate API keys, set DNS wildcard, `docker compo
 
 1. Install Tailscale on both desktop and phone (tailscale.com)
 2. On desktop: tailscale up
-3. Start EA: ea http --host 0.0.0.0
+3. Start EA: assistant http --host 0.0.0.0
 4. On phone Flutter app: connect to <desktop-tailscale-ip>:8080
 5. If EA_API_KEY is set, enter the key in Flutter settings
 ```

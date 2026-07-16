@@ -205,7 +205,7 @@ Your Mac
 
 Works today. Zero config. The codebase is already built for this.
 
-The server is started with `ea http` — host is default-bind `0.0.0.0`, port is configurable via `API_PORT` env var (default `8000`, not `8080`). See `src/config/settings.py` `ApiConfig`.
+The server is started with `assistant http` — host is default-bind `0.0.0.0`, port is configurable via `API_PORT` env var (default `8000`, not `8080`). See `src/config/settings.py` `ApiConfig`.
 
 ## Dockerfile
 

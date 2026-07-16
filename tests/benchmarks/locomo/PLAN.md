@@ -344,7 +344,7 @@ def inspect():
 | **MemoryStore (confidence decay)** | Events from "early" sessions still retrievable; recent events prioritized |
 | **HybridDB** (SQLite + FTS5 + ChromaDB) | Hybrid search performance at scale (thousands of messages) |
 | **memory_search / memory_get_history** | Agent successfully uses memory tools to navigate a large corpus |
-| **Summarization scoring** | Tests the agent's ability to synthesize multi-turn information — a key executive assistant skill |
+| **Summarization scoring** | Tests the agent's ability to synthesize multi-turn information — a key assistant skill |
 
 ---
 
