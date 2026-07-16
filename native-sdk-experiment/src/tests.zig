@@ -10,17 +10,9 @@ const Model = main.Model;
 const Msg = main.Msg;
 const Effects = main.Effects;
 
-const AppMarkup = canvas.MarkupView(Model, Msg);
-
 fn buildTree(arena: std.mem.Allocator, model: *const Model) !AppUi.Tree {
-    var view = try AppMarkup.init(arena, main.app_markup);
     var ui = AppUi.init(arena);
-    const node = view.build(&ui, model) catch |err| {
-        if (err == error.MarkupBuild) {
-            std.debug.print("app.native:{d}:{d}: {s}\n", .{ view.diagnostic.line, view.diagnostic.column, view.diagnostic.message });
-        }
-        return err;
-    };
+    const node = main.buildView(&ui, model);
     return ui.finalize(node);
 }
 

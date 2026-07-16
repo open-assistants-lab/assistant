@@ -579,9 +579,293 @@ fn appendToLastMessage(chat: *Chat, allocator: std.mem.Allocator, content: []con
 }
 
 pub const AppUi = canvas.Ui(Msg);
-pub const app_markup = @embedFile("app.native");
 
 const ChatApp = native_sdk.UiApp(Model, Msg);
+
+// ── View builders (Zig view replacing markup) ──────────────────────────────
+
+pub fn buildView(ui: *AppUi, model: *const Model) AppUi.Node {
+    return ui.split(.{
+        .value = model.sidebar_split,
+        .on_resize = AppUi.valueMsg(.sidebar_resized),
+        .style_tokens = .{ .background = .surface, .border_color = .border },
+    }, .{
+        buildSidebar(ui, model),
+        buildChatPanel(ui, model),
+    });
+}
+
+fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
+    // Top section: New chat button + search
+    var top_nodes: [2]AppUi.Node = undefined;
+    top_nodes[0] = ui.button(.{
+        .on_press = .new_chat,
+        .variant = .secondary,
+        .icon = "plus",
+        .grow = 1,
+    }, "New chat");
+    top_nodes[1] = ui.textField(.{
+        .text = model.search_query,
+        .placeholder = "Search chats...",
+        .on_input = AppUi.inputMsg(.search_input),
+        .semantics = .{ .label = "Search chats" },
+    });
+
+    // Chat list
+    const chats = model.filteredChats();
+    var chat_nodes: [max_chats]AppUi.Node = undefined;
+    var chat_count: usize = 0;
+    for (chats) |*chat| {
+        const is_active = chat.id == model.active_chat_id;
+        chat_nodes[chat_count] = ui.row(.{
+            .gap = 8,
+            .padding = 8,
+            .style_tokens = .{
+                .background = if (is_active) .surface_pressed else null,
+                .radius = .sm,
+            },
+            .cross = .center,
+            .on_press = .{ .switch_chat = chat.id },
+            .semantics = .{ .role = .listitem, .label = chat.title },
+        }, .{
+            ui.icon(.{ .style_tokens = .{
+                .foreground = if (is_active) .accent else .text_muted,
+            } }, "circle-dot"),
+            ui.text(.{
+                .size = .sm,
+                .grow = 1,
+                .style_tokens = .{
+                    .foreground = if (is_active) .text else .text_muted,
+                },
+            }, chat.title),
+        });
+        chat_count += 1;
+    }
+
+    var sidebar_children: [5]AppUi.Node = undefined;
+    var sidebar_count: usize = 0;
+
+    // Top section
+    const top_slice: []const AppUi.Node = top_nodes[0..2];
+    sidebar_children[sidebar_count] = ui.column(.{ .padding = 12, .gap = 8, .style_tokens = .{ .background = .surface } }, top_slice);
+    sidebar_count += 1;
+
+    // Chat list scroll
+    if (chat_count > 0) {
+        const chat_slice: []const AppUi.Node = chat_nodes[0..chat_count];
+        const inner_col = ui.column(.{ .gap = 2, .style_tokens = .{ .background = .surface } }, chat_slice);
+        sidebar_children[sidebar_count] = ui.scroll(.{
+            .grow = 1,
+            .padding = 8,
+            .gap = 2,
+            .style_tokens = .{ .background = .surface },
+        }, inner_col);
+    } else {
+        sidebar_children[sidebar_count] = ui.scroll(.{
+            .grow = 1,
+            .padding = 8,
+            .gap = 2,
+            .style_tokens = .{ .background = .surface },
+        }, ui.row(.{ .gap = 8, .padding = 8, .cross = .center }, .{
+            ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "circle-dot"),
+            ui.text(.{ .size = .sm, .grow = 1, .style_tokens = .{ .foreground = .text_muted } }, "No chats found"),
+        }));
+    }
+    sidebar_count += 1;
+
+    // Bottom nav: Tools, Skills, Subagents
+    var nav_nodes: [3]AppUi.Node = undefined;
+    nav_nodes[0] = ui.row(.{ .gap = 8, .padding = 8, .style_tokens = .{ .radius = .sm }, .cross = .center }, .{
+        ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "wrench"),
+        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Tools"),
+    });
+    nav_nodes[1] = ui.row(.{ .gap = 8, .padding = 8, .style_tokens = .{ .radius = .sm }, .cross = .center }, .{
+        ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "file-text"),
+        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Skills"),
+    });
+    nav_nodes[2] = ui.row(.{ .gap = 8, .padding = 8, .style_tokens = .{ .radius = .sm }, .cross = .center }, .{
+        ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "git-branch"),
+        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Subagents"),
+    });
+    const nav_slice: []const AppUi.Node = nav_nodes[0..3];
+    sidebar_children[sidebar_count] = ui.column(.{ .gap = 2, .padding = 8, .style_tokens = .{ .background = .surface } }, nav_slice);
+    sidebar_count += 1;
+
+    // Settings + theme toggle
+    sidebar_children[sidebar_count] = ui.row(.{ .gap = 4, .padding = 8, .cross = .center, .style_tokens = .{ .background = .surface } }, .{
+        ui.row(.{ .gap = 8, .padding = 8, .style_tokens = .{ .radius = .sm }, .cross = .center, .grow = 1 }, .{
+            ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "settings"),
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Settings"),
+        }),
+        ui.button(.{
+            .on_press = .toggle_theme,
+            .variant = .ghost,
+            .size = .sm,
+            .icon = "moon",
+            .semantics = .{ .label = "Toggle theme" },
+        }, ""),
+    });
+    sidebar_count += 1;
+
+    const sidebar_slice: []const AppUi.Node = sidebar_children[0..sidebar_count];
+    return ui.column(.{
+        .style_tokens = .{ .background = .surface, .border_color = .border },
+        .gap = 0,
+        .min_width = 160,
+    }, sidebar_slice);
+}
+
+fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
+    const chat = &model.chats[model.active_chat_idx];
+    const count = chat.msg_count;
+
+    var children: [3]AppUi.Node = undefined;
+    var child_count: usize = 0;
+
+    // Message list or empty state
+    if (count == 0) {
+        children[child_count] = ui.column(.{
+            .grow = 1,
+            .padding = 32,
+            .gap = 16,
+            .cross = .center,
+            .main = .center,
+            .style_tokens = .{ .background = .background },
+        }, .{
+            ui.text(.{ .size = .heading }, "How can I help?"),
+            ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Ask me anything, or try one of these:"),
+            ui.row(.{ .gap = 8 }, .{
+                ui.button(.{ .on_press = .suggestion_inbox, .variant = .ghost }, "Triage my inbox"),
+                ui.button(.{ .on_press = .suggestion_summary, .variant = .ghost }, "Draft a weekly summary"),
+                ui.button(.{ .on_press = .suggestion_contacts, .variant = .ghost }, "Find contacts in marketing"),
+            }),
+        });
+    } else {
+        // Virtual list with trailing anchor — auto-scrolls to bottom
+        const options = AppUi.VirtualListOptions{
+            .id = "chat-messages",
+            .item_count = count,
+            .item_extent = 80,
+            .gap = 12,
+            .anchor = .trailing,
+            .grow = 1,
+            .padding = 16,
+            .style_tokens = .{ .background = .background },
+        };
+        const window = ui.virtualWindow(options);
+
+        // Build nodes for visible range only
+        const visible_count = window.end_index - window.start_index;
+        var msg_nodes: [max_messages]AppUi.Node = undefined;
+        var node_count: usize = 0;
+        var idx = window.start_index;
+        while (idx < window.end_index and idx < count) : (idx += 1) {
+            const msg = &chat._messages[idx];
+            msg_nodes[node_count] = buildMessageBubble(ui, msg);
+            node_count += 1;
+        }
+        _ = visible_count;
+
+        children[child_count] = ui.virtualList(options, window, msg_nodes[0..node_count]);
+    }
+    child_count += 1;
+
+    // HITL bar (if pending)
+    if (model.has_pending) {
+        children[child_count] = ui.row(.{
+            .gap = 12,
+            .padding = 12,
+            .cross = .center,
+            .style_tokens = .{ .background = .surface, .radius = .md },
+        }, .{
+            ui.text(.{ .grow = 1 }, "Approve"),
+            ui.button(.{ .on_press = .approve, .style_tokens = .{ .foreground = .success } }, "Approve"),
+            ui.button(.{ .on_press = .reject, .variant = .ghost, .style_tokens = .{ .foreground = .destructive } }, "Reject"),
+        });
+        child_count += 1;
+    }
+
+    // Composer
+    if (model.streaming) {
+        children[child_count] = ui.row(.{
+            .gap = 8,
+            .padding = 12,
+            .cross = .center,
+            .style_tokens = .{ .background = .background },
+        }, .{
+            ui.textField(.{
+                .text = model.inputText(),
+                .placeholder = "Type a message...",
+                .grow = 1,
+                .on_input = AppUi.inputMsg(.input_changed),
+                .on_submit = .send_message,
+                .semantics = .{ .label = "Message" },
+            }),
+            ui.button(.{ .on_press = .cancel, .variant = .ghost }, "Stop"),
+        });
+    } else {
+        children[child_count] = ui.row(.{
+            .gap = 8,
+            .padding = 12,
+            .cross = .center,
+            .style_tokens = .{ .background = .background },
+        }, .{
+            ui.textField(.{
+                .text = model.inputText(),
+                .placeholder = "Type a message...",
+                .grow = 1,
+                .on_input = AppUi.inputMsg(.input_changed),
+                .on_submit = .send_message,
+                .semantics = .{ .label = "Message" },
+            }),
+            ui.button(.{ .on_press = .send_message, .variant = .primary }, "Send"),
+        });
+    }
+    child_count += 1;
+
+    const children_slice: []const AppUi.Node = children[0..child_count];
+    return ui.column(.{
+        .style_tokens = .{ .background = .background },
+        .gap = 0,
+        .min_width = 320,
+    }, children_slice);
+}
+
+fn buildMessageBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
+    if (msg.isUser()) {
+        // User message: right-aligned, no role label
+        return ui.row(.{
+            .main = .end,
+            .cross = .start,
+        }, .{
+            ui.el(.card, .{
+                .padding = 12,
+                .style_tokens = .{ .background = .surface_subtle, .radius = .lg },
+            }, .{
+                ui.text(.{ .wrap = true }, msg.content),
+            }),
+        });
+    } else {
+        // Assistant message: left-aligned with "Assistant" label
+        if (msg.isEmpty()) {
+            // Typing indicator
+            return ui.column(.{ .gap = 4 }, .{
+                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .accent } }, "Assistant"),
+                ui.text(.{ .size = .sm, .padding = 8, .style_tokens = .{ .foreground = .text_muted } }, "typing..."),
+            });
+        } else {
+            return ui.column(.{ .gap = 4 }, .{
+                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .accent } }, "Assistant"),
+                ui.el(.card, .{
+                    .padding = 12,
+                    .style_tokens = .{ .background = .surface, .radius = .lg, .border_color = .border },
+                }, .{
+                    ui.text(.{ .wrap = true }, msg.content),
+                }),
+            });
+        }
+    }
+}
 
 pub fn initialModel() Model {
     var m: Model = .{};
@@ -623,7 +907,7 @@ pub fn main(init: std.process.Init) !void {
         .update_fx = update,
         .init_fx = initFx,
         .tokens_fn = tokensFn,
-        .markup = .{ .source = app_markup, .watch_path = "src/app.native", .io = init.io },
+        .view = buildView,
     });
     app_state.model = initialModel();
     app_state.model.allocator = allocator;
