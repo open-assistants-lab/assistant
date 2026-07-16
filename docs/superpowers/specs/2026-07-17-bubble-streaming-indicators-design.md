@@ -31,27 +31,36 @@ The sidebar has no indicator for which chats are actively streaming or have unre
 ```zig
 pub const ChatMessage = struct {
     id: u64,
-    role: []const u8,        // "user" | "assistant" | "tool" | "reasoning"
+    role: []const u8,        // "user" | "assistant" | "tool" | "reasoning" | "system"
     content: []const u8,
     // Tool-specific fields (empty for non-tool roles)
     tool_name: []const u8 = "",
     tool_status: []const u8 = "",   // "running" | "done" | "error"
     tool_result: []const u8 = "",   // preview text, expandable
+    // Reasoning-specific field
+    collapsed: bool = false,       // reasoning bubbles collapse post-stream
 };
+```
+
+### `Chat` struct additions
+
+```zig
+open_bubble_type: []const u8 = "",  // "", "reasoning", "assistant", "tool" — which bubble is receiving deltas
+status_text: []const u8 = "",      // latest tool/status text for the status bar
 ```
 
 ### SSE event → bubble mapping
 
 | SSE event | Bubble behavior |
 |---|---|
-| `reasoning` (new `type: "reasoning"`) | New `reasoning` bubble if none open; append deltas to current open reasoning bubble |
-| `text` / `messages` (non-reasoning) | Close any open reasoning bubble. New `assistant` bubble if none open; append deltas to current open assistant bubble |
-| `tool_input_start` (with args) | Close any open reasoning bubble. New `tool` bubble (status: running, tool_name set) |
-| `tool_result` | Update the most recent `tool` bubble with status "done" + result preview (in place, no new bubble, no position change) |
+| `reasoning` (new `type: "reasoning"`) | If `open_bubble_type != "reasoning"`, close previous and new `reasoning` bubble. Append deltas to current open reasoning bubble. Set `open_bubble_type = "reasoning"`. |
+| `messages` (non-reasoning) | Close any open reasoning bubble. If `open_bubble_type != "assistant"`, new `assistant` bubble. Append deltas. Set `open_bubble_type = "assistant"`. |
+| `tool_start` (with args) | Close any open reasoning bubble. New `tool` bubble (status: running, tool_name set). Set `open_bubble_type = "tool"`. Set `chat.status_text = tool_name + args summary`. |
+| `tool_result` | Find most recent `tool` bubble with `tool_status == "running"`, update `tool_status = "done"` and `tool_result` in place (no new bubble, no position change). Do NOT change `open_bubble_type` — a new `text_delta` or `reasoning` will open the next bubble. |
 | `interrupt` | HITL approval bar (unchanged) |
-| `done` | Finalize all open bubbles, clear ephemeral reasoning state |
-| `error` | Show as error text in the current open bubble or a new system bubble |
-| `cancelled` | Finalize, clean up |
+| `done` | Finalize all open bubbles, set `open_bubble_type = ""`, clear `status_text` |
+| `error` | If `open_bubble_type` is set, append error to current bubble. Else new `system` bubble with error text. |
+| `cancelled` | Finalize, set `open_bubble_type = ""`, clear `status_text` |
 
 **"Open bubble" rule:** A bubble is "open" (receiving deltas) until a different event type arrives. When a new event type arrives, the previous bubble is closed (marked final) and a new one is created if needed.
 
@@ -110,8 +119,8 @@ A thin bar appears above the composer when `active_chat.streaming == true`:
 ```
 
 - Pulsing accent dot
-- Latest tool name + status text (from the most recent `tool_input_start` or `updates` event)
-- Disappears when streaming finishes
+- Text from `chat.status_text` (updated on `tool_start` events)
+- Disappears when streaming finishes (`streaming == false`)
 
 ### Backend changes
 
@@ -151,13 +160,13 @@ The `stream_line` handler in `main.zig` currently has three branches: `messages`
 
 | Event type | Handler logic |
 |---|---|
-| `reasoning` | If no open reasoning bubble, `addMessage(chat, "reasoning", content)`. Else append to last reasoning bubble. |
-| `messages` | Close open reasoning bubble. If no open assistant bubble, `addMessage(chat, "assistant", content)`. Else append. |
-| `tool_start` | Close open reasoning bubble. `addMessage(chat, "tool", "")` with `tool_name` and `tool_status = "running"`. |
-| `tool_result` | Find most recent tool bubble with `tool_status == "running"`, update `tool_status = "done"` and `tool_result` in place. |
+| `reasoning` | If `open_bubble_type != "reasoning"`, new `reasoning` bubble. Else append to current reasoning bubble. Set `open_bubble_type = "reasoning"`. |
+| `messages` | Close open reasoning bubble. If `open_bubble_type != "assistant"`, new `assistant` bubble. Else append. Set `open_bubble_type = "assistant"`. |
+| `tool_start` | Close open reasoning bubble. `addMessage(chat, "tool", "")` with `tool_name` and `tool_status = "running"`. Set `open_bubble_type = "tool"`. Set `chat.status_text`. |
+| `tool_result` | Find most recent tool bubble with `tool_status == "running"`, update `tool_status = "done"` and `tool_result` in place. Do NOT change `open_bubble_type`. |
 | `interrupt` | Set `chat.has_pending` (unchanged). |
-| `done` | Finalize all open bubbles. |
-| `error` | Show error in current bubble or new system bubble. |
+| `done` | Finalize all open bubbles, set `open_bubble_type = ""`, clear `status_text`. |
+| `error` | If `open_bubble_type` is set, append error to current bubble. Else new `system` bubble. |
 
 **"Open bubble" tracking** — the chat tracks which bubble type is currently open via a field `open_bubble_type: []const u8` (empty = none open). When a different event type arrives, set the previous bubble's content as final and open a new one.
 
@@ -168,6 +177,7 @@ fn finalizeStream(chat: *Chat) void {
     chat.streaming = false;
     chat.fetch_key = 0;
     chat.open_bubble_type = "";
+    chat.status_text = "";
     // Remove empty assistant bubble if created but never received content
     if (chat.msg_count > 0) {
         const last = &chat._messages[chat.msg_count - 1];
@@ -176,8 +186,13 @@ fn finalizeStream(chat: *Chat) void {
             chat.messages = chat._messages[0..chat.msg_count];
         }
     }
-    // Collapse reasoning bubbles (mark as collapsed for rendering)
-    // (reasoning bubbles are kept in the UI but collapsed post-stream)
+    // Collapse all reasoning bubbles (set collapsed = true for rendering)
+    var i: usize = 0;
+    while (i < chat.msg_count) : (i += 1) {
+        if (std.mem.eql(u8, chat._messages[i].role, "reasoning")) {
+            chat._messages[i].collapsed = true;
+        }
+    }
 }
 ```
 
@@ -199,10 +214,17 @@ Tool bubbles:
 ### Files changed
 
 **Backend:**
-- `src/http/routers/conversation.py` — SSE event restructuring (reasoning, tool_start, tool_result events)
+- `src/http/routers/conversation.py` — SSE event restructuring: emit `type: "reasoning"`, `type: "tool_start"`, `type: "tool_result"` instead of the current `type: "messages"` (with `[Reasoning]` prefix) and `type: "updates"`. Apply to both `message_stream` and `approve` endpoints.
 
 **Native app:**
-- `native-sdk-experiment/src/main.zig` — `ChatMessage` struct, `stream_line` handler, `buildMessageBubble`, sidebar rendering, status bar, `finalizeStream`
+- `native-sdk-experiment/src/main.zig`:
+  - `ChatMessage` struct — add `tool_name`, `tool_status`, `tool_result`, `collapsed` fields
+  - `Chat` struct — add `open_bubble_type`, `status_text` fields (add to `view_unbound` if needed)
+  - `stream_line` handler — new event branches for `reasoning`, `tool_start`, `tool_result`
+  - `buildMessageBubble` — render `reasoning` (italic card with "Thinking" header, collapsed/expanded) and `tool` (compact card with icon, name, status) bubble types
+  - `buildSidebar` — replace `circle-dot` icon with streaming/unread dot indicator
+  - Status bar rendering — new bar above composer when `streaming == true`
+  - `finalizeStream` — collapse reasoning bubbles, clear `open_bubble_type` and `status_text`
 - `native-sdk-experiment/src/theme.zig` — (no changes, existing tokens sufficient)
 - `native-sdk-experiment/src/tests.zig` — update tests for new bubble types and event handling
 
