@@ -59,7 +59,7 @@
   </column>
 
   <column background="background" gap="0" min-width="320">
-    <scroll grow="1" padding="16" gap="12" background="background">
+    <scroll grow="1" padding="16" gap="12" background="background" on-reach-end="reached_bottom">
       <column gap="12" background="background">
         <for each="messages" key="id" as="msg">
           <if test="{msg.isUser}">
@@ -74,7 +74,7 @@
               <text size="sm" foreground="accent">Assistant</text>
               <card background="surface" radius="lg" padding="12" border-color="border">
                 <if test="{msg.isEmpty}">
-                  <text foreground="text_muted" size="sm">. . .</text>
+                  <text foreground="text_muted" size="sm">typing…</text>
                 </if>
                 <else>
                   <text wrap="true">{msg.content}</text>

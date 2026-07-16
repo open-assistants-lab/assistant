@@ -107,6 +107,7 @@ pub const Msg = union(enum) {
     sidebar_resized: f32,
     history_loaded: native_sdk.EffectResponse,
     chat_history_loaded: native_sdk.EffectResponse,
+    reached_bottom,
 
     pub const view_unbound = .{
         "stream_line",
@@ -118,6 +119,7 @@ pub const Msg = union(enum) {
         "search_input",
         "history_loaded",
         "chat_history_loaded",
+        "reached_bottom",
     };
 };
 
@@ -416,6 +418,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.streaming = false;
         },
         .approve_done, .reject_done, .cancel_done => {},
+        .reached_bottom => {},
         .history_loaded => |response| {
             if (response.outcome != .ok) return;
             const body = response.body;
