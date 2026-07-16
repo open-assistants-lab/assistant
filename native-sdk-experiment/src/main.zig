@@ -394,8 +394,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 const content = data.object.get("content") orelse return;
                 appendToLastMessage(chat, model.allocator, content.string);
             } else if (std.mem.eql(u8, event_type.string, "updates")) {
-                const content = data.object.get("content") orelse return;
-                appendToLastMessage(chat, model.allocator, content.string);
+                // Tool usage updates — don't append to assistant message
             } else if (std.mem.eql(u8, event_type.string, "interrupt")) {
                 const tool = data.object.get("tool") orelse return;
                 const call_id = data.object.get("call_id") orelse return;
