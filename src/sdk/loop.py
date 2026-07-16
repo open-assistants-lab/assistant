@@ -294,7 +294,20 @@ class AgentLoop:
         reconstruct = self._tool_index.get_reconstruct(tc.name)
         tool_type = self._tool_index.get_tool_type(tc.name) or "unknown"
 
-        if tool_type == "custom":
+        if tool_type == "native":
+            # Native tools are in the global registry — look them up by name.
+            from src.sdk.native_tools import get_native_tools as _get_native_tools
+
+            for nt in _get_native_tools():
+                if nt.name == tc.name:
+                    td = nt
+                    break
+            else:
+                return ToolResult(
+                    content=f"Native tool '{tc.name}' not found in the global registry.",
+                    is_error=True,
+                )
+        elif tool_type == "custom":
             from src.sdk.tool_index import _rebuild_custom_function
             td = _rebuild_custom_function(td, reconstruct)
         elif tool_type == "mcp":
@@ -491,6 +504,10 @@ class AgentLoop:
         self, tc: ToolCall, state: AgentState
     ) -> AsyncIterator[StreamChunk]:
         """Execute a single tool call with streaming events."""
+        # Emit tool_input_start so the frontend can create a tool bubble before the result arrives
+        yield StreamChunk.tool_input_start(
+            tool=tc.name, call_id=tc.id, args=tc.arguments
+        )
         try:
             await self._check_tool_guardrails(tc, "input", tc.arguments)
         except GuardrailTripwire as e:
@@ -554,6 +571,11 @@ class AgentLoop:
         Uses asyncio.gather for concurrent execution. Events are yielded
         after all tools complete to maintain message ordering in state.
         """
+        # Emit tool_input_start for each tool so the frontend can create tool bubbles
+        for tc in tool_calls:
+            yield StreamChunk.tool_input_start(
+                tool=tc.name, call_id=tc.id, args=tc.arguments
+            )
 
         async def _run_one(tc: ToolCall) -> tuple[ToolCall, str]:
             try:
@@ -1204,6 +1226,14 @@ class AgentLoop:
             last = state.messages[-1]
             if last.role == "assistant":
                 final_content = last.content if isinstance(last.content, str) else ""
+            elif last.role == "tool":
+                # Loop exhausted with a tool result as the last message — surface a visible
+                # notice so the user doesn't see a blank response.
+                final_content = (
+                    "I wasn't able to complete this task. "
+                    "The last tool call did not produce a usable result. "
+                    "Please try rephrasing your request."
+                )
 
         yield StreamChunk.done(content=final_content, tool_calls=all_tool_calls)
 
@@ -1247,16 +1277,9 @@ class AgentLoop:
                     "name": chunk.tool or "",
                     "arguments": "",
                 }
-            yield StreamChunk.tool_input_start(
-                tool=chunk.tool or "",
-                call_id=chunk.call_id or "",
-                args=chunk_args,
-            )
-            yield StreamChunk.tool_start(
-                tool=chunk.tool or "",
-                call_id=chunk.call_id or "",
-                args=chunk_args,
-            )
+            # Note: tool_input_start/tool_start events are emitted by
+            # _execute_single_tool_streaming / _execute_tool_batch_streaming
+            # to avoid duplicates. This branch only tracks state.
 
         elif canonical == "tool_input_delta":
             if chunk.content and chunk.call_id:

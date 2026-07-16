@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from src.app_logging import get_logger, timer
 from src.http.auth import require_auth
 from src.http.models import MessageRequest, MessageResponse
+from src.sdk.messages import Message
 from src.sdk.runner import (
     _messages_from_conversation,
     get_sdk_loop,
@@ -29,6 +30,16 @@ _active_streams: dict[str, asyncio.Event] = {}
 
 router = APIRouter(tags=["conversation"])
 logger = get_logger()
+
+
+def _stream_key(user_id: str, session_id: str | None) -> str:
+    """Composite key for per-session stream tracking (enables concurrent sessions per user)."""
+    return f"{user_id}:{session_id or 'default'}"
+
+
+def sse(event_type: str, data: dict[str, Any]) -> str:
+    """Format an SSE event string."""
+    return f"data: {json.dumps({'type': event_type, 'data': data})}\n\n"
 
 # ── Canvas HTML fence block parser ──────────────────────────────────────────
 
@@ -379,14 +390,15 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
     try:
         user_id = req.user_id or "default_user"
         session_id = req.session_id or "default"
+        skey = _stream_key(user_id, session_id)
 
         conversation = get_message_store(user_id)
         conversation.add_message("user", req.message, metadata={}, session_id=session_id)
 
-        # Set up cancellation for this user's stream
-        _cancel_flags[user_id] = False
+        # Set up cancellation for this session's stream
+        _cancel_flags[skey] = False
         cancel_event = asyncio.Event()
-        _active_streams[user_id] = cancel_event
+        _active_streams[skey] = cancel_event
 
         recent_messages = conversation.get_messages_by_session_id(session_id, 50)
         sdk_messages = _messages_from_conversation(recent_messages)
@@ -404,22 +416,27 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                 model=req.model,
                 provider_keys=req.provider_keys,
                 cancel_event=cancel_event,
+                session_id=session_id,
             ):
                 # Check cancel flag between chunks (fast path)
-                if _cancel_flags.get(user_id, False) or cancel_event.is_set():
-                    yield f"data: {json.dumps({'type': 'cancelled', 'data': {'content': 'Cancelled'}})}\n\n"
+                if _cancel_flags.get(skey, False) or cancel_event.is_set():
+                    yield sse("cancelled", {"content": "Cancelled"})
                     break
                 canonical = chunk.canonical_type
 
                 if canonical == "text_delta" and chunk.type != "ai_token" and chunk.content:
                     ai_content_parts.append(chunk.content)
-                    yield f"data: {json.dumps({'type': 'messages', 'data': {'content': chunk.content}})}\n\n"
+                    yield sse("messages", {"content": chunk.content})
 
                 elif canonical == "tool_input_start" and chunk.tool:
                     tool_metadata_list.append(
                         {"tool_name": chunk.tool, "tool_call_id": chunk.call_id or ""}
                     )
-                    yield f"data: {json.dumps({'type': 'updates', 'data': {'content': f'Using tool: {chunk.tool}'}})}\n\n"
+                    yield sse("tool_start", {
+                        "tool": chunk.tool,
+                        "call_id": chunk.call_id or "",
+                        "args": chunk.args or {},
+                    })
 
                 elif canonical == "tool_result" and chunk.tool:
                     output = (chunk.result_preview or "")[:500]
@@ -427,24 +444,38 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                         tool_results.append(
                             {"tool_call_id": chunk.call_id or "", "output": output}
                         )
-                        yield f"data: {json.dumps({'type': 'updates', 'data': {'content': output}})}\n\n"
+                        yield sse("tool_result", {
+                            "tool": chunk.tool,
+                            "call_id": chunk.call_id or "",
+                            "result": output,
+                        })
 
                 elif canonical == "reasoning_delta" and chunk.content:
-                    yield f"data: {json.dumps({'type': 'messages', 'data': {'content': f'[Reasoning] {chunk.content}'}})}\n\n"
+                    yield sse("reasoning", {"content": chunk.content})
 
                 elif canonical == "reasoning_start":
-                    yield f"data: {json.dumps({'type': 'updates', 'data': {'content': '[Thinking...]'}})}\n\n"
+                    pass  # reasoning_start just signals a new reasoning block; the native app creates a bubble on first reasoning delta
 
                 elif chunk.type == "interrupt":
-                    _pending_interrupts[user_id] = {
+                    _pending_interrupts[skey] = {
                         "tool": chunk.tool,
                         "call_id": chunk.call_id,
                         "args": chunk.args or {},
                     }
-                    yield f"data: {json.dumps({'type': 'interrupt', 'data': {'tool': chunk.tool, 'call_id': chunk.call_id, 'args': chunk.args}})}\n\n"
+                    yield sse("interrupt", {
+                        "tool": chunk.tool,
+                        "call_id": chunk.call_id,
+                        "args": chunk.args,
+                    })
 
                 elif chunk.type == "error":
-                    yield f"data: {json.dumps({'type': 'error', 'data': {'content': chunk.content}})}\n\n"
+                    yield sse("error", {"content": chunk.content})
+
+                elif chunk.type == "done" and chunk.content:
+                    # Only emit done content as messages if no streaming text was received
+                    if not ai_content_parts:
+                        ai_content_parts.append(chunk.content)
+                        yield sse("messages", {"content": chunk.content})
 
             response = "".join(ai_content_parts) if ai_content_parts else ""
             if not response and tool_results:
@@ -454,7 +485,7 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
 
             canvas_blocks = _extract_surfaces(response)
             for surface in canvas_blocks:
-                yield f"data: {json.dumps({'type': 'canvas_update', 'data': surface})}\n\n"
+                yield sse("canvas_update", surface)
             response = _strip_canvas_fences(response)
 
             result_by_call_id = {
@@ -470,20 +501,24 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
             )
 
         # Clean up cancel tracking
-        _active_streams.pop(user_id, None)
-        _cancel_flags.pop(user_id, None)
+        _active_streams.pop(skey, None)
+        _cancel_flags.pop(skey, None)
 
         return StreamingResponse(generate(), media_type="text/event-stream")
 
     except Exception as e:
-        _active_streams.pop(req.user_id or "default_user", None)
-        _cancel_flags.pop(req.user_id or "default_user", None)
+        skey = _stream_key(req.user_id or "default_user", req.session_id)
+        _active_streams.pop(skey, None)
+        _cancel_flags.pop(skey, None)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 class ApproveRequest(BaseModel):
     user_id: str = "default_user"
     call_id: str = ""
+    session_id: str | None = None
+    model: str | None = None
+    provider_keys: dict[str, str] | None = None
 
 
 class RejectRequest(BaseModel):
@@ -494,24 +529,122 @@ class RejectRequest(BaseModel):
 
 class CancelRequest(BaseModel):
     user_id: str = "default_user"
+    session_id: str | None = None
 
 
 @router.post("/message/approve")
-async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> dict[str, Any]:
-    """Approve a pending tool call (HITL)."""
-    pending = _pending_interrupts.pop(req.user_id, None)
+async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> StreamingResponse:
+    """Approve a pending tool call (HITL) and resume the agent as an SSE stream.
+
+    Mirrors the WebSocket retry loop: pops the pending interrupt, marks the tool
+    as approved on the cached loop, then re-runs the agent with an approval
+    instruction appended. The response is a text/event-stream identical in shape
+    to POST /message/stream so existing SSE clients can consume it unchanged.
+    """
+    session_id = req.session_id or "default"
+    skey = _stream_key(req.user_id, session_id)
+    pending = _pending_interrupts.pop(skey, None)
     if not pending:
         raise HTTPException(status_code=404, detail="No pending tool call to approve")
     tool_name = pending.get("tool", "unknown")
-    loop = await get_sdk_loop(req.user_id)
+
+    loop = await get_sdk_loop(req.user_id, model=req.model, provider_keys=req.provider_keys, session_id=session_id)
     loop._approved_tool_names.add(tool_name)
-    return {"status": "approved", "tool": tool_name}
+
+    conversation = get_message_store(req.user_id)
+    cancel_event = asyncio.Event()
+    _cancel_flags[skey] = False
+    _active_streams[skey] = cancel_event
+
+    async def generate() -> AsyncGenerator[str, None]:
+        ai_content_parts: list[str] = []
+        try:
+            recent = conversation.get_messages_by_session_id(session_id, 50)
+            retry_msgs = _messages_from_conversation(recent)
+            retry_msgs.append(Message.user(f"approve: please proceed with {tool_name}"))
+
+            async for chunk in run_sdk_agent_stream(
+                user_id=req.user_id,
+                messages=retry_msgs,
+                model=req.model,
+                provider_keys=req.provider_keys,
+                cancel_event=cancel_event,
+                session_id=session_id,
+            ):
+                if _cancel_flags.get(skey, False) or cancel_event.is_set():
+                    yield sse("cancelled", {"content": "Cancelled"})
+                    break
+                canonical = chunk.canonical_type
+
+                if canonical == "text_delta" and chunk.type != "ai_token" and chunk.content:
+                    ai_content_parts.append(chunk.content)
+                    yield sse("messages", {"content": chunk.content})
+
+                elif canonical == "tool_input_start" and chunk.tool:
+                    yield sse("tool_start", {
+                        "tool": chunk.tool,
+                        "call_id": chunk.call_id or "",
+                        "args": chunk.args or {},
+                    })
+
+                elif canonical == "tool_result" and chunk.tool:
+                    output = (chunk.result_preview or "")[:500]
+                    if output:
+                        yield sse("tool_result", {
+                            "tool": chunk.tool,
+                            "call_id": chunk.call_id or "",
+                            "result": output,
+                        })
+
+                elif canonical == "reasoning_delta" and chunk.content:
+                    yield sse("reasoning", {"content": chunk.content})
+
+                elif canonical == "reasoning_start":
+                    pass
+
+                elif chunk.type == "interrupt":
+                    _pending_interrupts[skey] = {
+                        "tool": chunk.tool,
+                        "call_id": chunk.call_id,
+                        "args": chunk.args or {},
+                    }
+                    yield sse("interrupt", {
+                        "tool": chunk.tool,
+                        "call_id": chunk.call_id,
+                        "args": chunk.args,
+                    })
+
+                elif chunk.type == "error":
+                    yield sse("error", {"content": chunk.content})
+
+                elif chunk.type == "done" and chunk.content:
+                    if not ai_content_parts:
+                        ai_content_parts.append(chunk.content)
+                        yield sse("messages", {"content": chunk.content})
+
+            response = "".join(ai_content_parts) if ai_content_parts else ""
+            if response:
+                conversation.add_message(
+                    "assistant", response, metadata={"stream": True}, session_id=session_id
+                )
+        except Exception as e:
+            logger.error("approve_stream_error", {"error": str(e)}, user_id=req.user_id, channel="http")
+            yield sse("error", {"content": str(e)})
+        finally:
+            _cancel_flags.pop(skey, None)
+            _active_streams.pop(skey, None)
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 @router.post("/message/reject")
 async def reject_tool(req: RejectRequest, _: None = Depends(require_auth)) -> dict[str, Any]:
     """Reject a pending tool call (HITL)."""
-    pending = _pending_interrupts.pop(req.user_id, None)
+    skey = _stream_key(req.user_id, req.call_id or None)
+    pending = _pending_interrupts.pop(skey, None)
+    if not pending:
+        # Fallback: try user_id-only key for backward compat
+        pending = _pending_interrupts.pop(req.user_id, None)
     if not pending:
         raise HTTPException(status_code=404, detail="No pending tool call to reject")
     return {"status": "rejected", "tool": pending.get("tool", "unknown")}
@@ -519,13 +652,14 @@ async def reject_tool(req: RejectRequest, _: None = Depends(require_auth)) -> di
 
 @router.post("/message/cancel")
 async def cancel_message(req: CancelRequest, _: None = Depends(require_auth)) -> dict[str, Any]:
-    """Cancel the current agent execution."""
-    _cancel_flags[req.user_id] = True
+    """Cancel the current agent execution for a session."""
+    skey = _stream_key(req.user_id, req.session_id)
+    _cancel_flags[skey] = True
     # Signal the active stream to break
-    event = _active_streams.get(req.user_id)
+    event = _active_streams.get(skey)
     if event:
         event.set()
-    reset_sdk_loop(req.user_id)
+    reset_sdk_loop(req.user_id, session_id=req.session_id)
     return {"status": "cancelled"}
 
 

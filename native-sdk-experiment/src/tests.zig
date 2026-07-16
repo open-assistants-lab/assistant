@@ -37,7 +37,14 @@ fn noopFx(allocator: std.mem.Allocator) Effects {
     return fx;
 }
 
-test "send message adds user message" {
+fn sendAndStartStream(model: *Model, fx: *Effects, text: []const u8) u64 {
+    main.update(model, .new_chat, fx);
+    main.update(model, .{ .input_changed = .{ .insert_text = text } }, fx);
+    main.update(model, .send_message, fx);
+    return model.activeChat().fetch_key;
+}
+
+test "send message adds user message and starts streaming" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -48,17 +55,14 @@ test "send message adds user message" {
 
     main.update(&model, .new_chat, &fx);
     main.update(&model, .{ .input_changed = .{ .insert_text = "Hello" } }, &fx);
-    try testing.expectEqualStrings("Hello", model.inputText());
-
     main.update(&model, .send_message, &fx);
     const chat = model.activeChat();
-    // user message + empty assistant typing indicator
-    try testing.expectEqual(@as(usize, 2), chat.msg_count);
+    // Only user message — no empty assistant typing indicator anymore
+    try testing.expectEqual(@as(usize, 1), chat.msg_count);
     try testing.expectEqualStrings("user", chat._messages[0].role);
     try testing.expectEqualStrings("Hello", chat._messages[0].content);
-    try testing.expectEqualStrings("assistant", chat._messages[1].role);
-    try testing.expectEqualStrings("", chat._messages[1].content);
-    try testing.expect(model.streaming);
+    try testing.expect(chat.streaming);
+    try testing.expectEqualStrings("Thinking...", chat.status_text);
     try testing.expectEqualStrings("", model.inputText());
     try testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
     const request = fx.pendingFetchAt(0).?;
@@ -87,7 +91,7 @@ test "input accumulates incremental text events" {
     try testing.expectEqualStrings("", model.inputText());
 }
 
-test "stream_line appends to assistant message" {
+test "messages event creates assistant bubble" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -95,23 +99,158 @@ test "stream_line appends to assistant message" {
     var model = main.initialModel();
     model.allocator = arena;
     var fx = noopFx(arena);
-
-    main.update(&model, .new_chat, &fx);
-    main.update(&model, .{ .input_changed = .{ .insert_text = "Hi" } }, &fx);
-    main.update(&model, .send_message, &fx);
-
-    // After send: user message + empty assistant (typing indicator)
+    const fk = sendAndStartStream(&model, &fx, "Hi");
     const chat = model.activeChat();
-    try testing.expectEqual(@as(usize, 2), chat.msg_count);
-    try testing.expectEqualStrings("", chat._messages[1].content);
 
-    // First stream line replaces empty content
-    main.update(&model, .{ .stream_line = .{ .key = 0, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"Hello\"}}" } }, &fx);
+    // First messages event creates assistant bubble
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"Hello\"}}" } }, &fx);
+    try testing.expectEqual(@as(usize, 2), chat.msg_count); // user + assistant
+    try testing.expectEqualStrings("assistant", chat._messages[1].role);
     try testing.expectEqualStrings("Hello", chat._messages[1].content);
 
-    // Second stream line appends
-    main.update(&model, .{ .stream_line = .{ .key = 0, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\" world\"}}" } }, &fx);
+    // Second messages event appends
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\" world\"}}" } }, &fx);
     try testing.expectEqualStrings("Hello world", chat._messages[1].content);
+}
+
+test "reasoning event creates reasoning bubble" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "test");
+    const chat = model.activeChat();
+
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"reasoning\",\"data\":{\"content\":\"I need to think...\"}}" } }, &fx);
+    try testing.expectEqual(@as(usize, 2), chat.msg_count); // user + reasoning
+    try testing.expectEqualStrings("reasoning", chat._messages[1].role);
+    try testing.expectEqualStrings("I need to think...", chat._messages[1].content);
+
+    // Second reasoning delta appends
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"reasoning\",\"data\":{\"content\":\" about this.\"}}" } }, &fx);
+    try testing.expectEqualStrings("I need to think... about this.", chat._messages[1].content);
+}
+
+test "tool_start creates tool bubble with running status" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "test");
+    const chat = model.activeChat();
+
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_start\",\"data\":{\"tool\":\"time_get\",\"call_id\":\"call_1\",\"args\":{}}}" } }, &fx);
+    try testing.expectEqual(@as(usize, 2), chat.msg_count); // user + tool
+    try testing.expectEqualStrings("tool", chat._messages[1].role);
+    try testing.expectEqualStrings("time_get", chat._messages[1].tool_name);
+    try testing.expectEqualStrings("running", chat._messages[1].tool_status);
+}
+
+test "tool_result updates tool bubble in place" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "test");
+    const chat = model.activeChat();
+
+    // tool_start
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_start\",\"data\":{\"tool\":\"time_get\",\"call_id\":\"call_1\",\"args\":{}}}" } }, &fx);
+    try testing.expectEqual(@as(usize, 2), chat.msg_count);
+
+    // tool_result updates in place — no new bubble
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_result\",\"data\":{\"tool\":\"time_get\",\"call_id\":\"call_1\",\"result\":\"Current time: 12:00 UTC\"}}" } }, &fx);
+    try testing.expectEqual(@as(usize, 2), chat.msg_count); // still 2, no new bubble
+    try testing.expectEqualStrings("done", chat._messages[1].tool_status);
+    try testing.expectEqualStrings("Current time: 12:00 UTC", chat._messages[1].tool_result);
+}
+
+test "multiple reasoning segments create separate bubbles" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "test");
+    const chat = model.activeChat();
+
+    // First reasoning
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"reasoning\",\"data\":{\"content\":\"thinking 1\"}}" } }, &fx);
+    try testing.expectEqual(@as(usize, 2), chat.msg_count);
+
+    // Tool call (closes reasoning bubble)
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_start\",\"data\":{\"tool\":\"time_get\",\"call_id\":\"call_1\",\"args\":{}}}" } }, &fx);
+    try testing.expectEqual(@as(usize, 3), chat.msg_count);
+
+    // tool_result
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_result\",\"data\":{\"tool\":\"time_get\",\"call_id\":\"call_1\",\"result\":\"12:00\"}}" } }, &fx);
+    try testing.expectEqual(@as(usize, 3), chat.msg_count);
+
+    // Second reasoning — new bubble
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"reasoning\",\"data\":{\"content\":\"thinking 2\"}}" } }, &fx);
+    try testing.expectEqual(@as(usize, 4), chat.msg_count);
+    try testing.expectEqualStrings("reasoning", chat._messages[3].role);
+    try testing.expectEqualStrings("thinking 2", chat._messages[3].content);
+}
+
+test "done finalizes and collapses reasoning bubbles" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "test");
+    const chat = model.activeChat();
+
+    // reasoning
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"reasoning\",\"data\":{\"content\":\"thinking...\"}}" } }, &fx);
+    // assistant
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"Answer\"}}" } }, &fx);
+
+    try testing.expect(!chat._messages[1].collapsed); // reasoning not collapsed during stream
+
+    main.update(&model, .{ .stream_done = .{ .key = fk } }, &fx);
+    try testing.expect(!chat.streaming);
+    try testing.expectEqualStrings("", chat.open_bubble_type);
+    try testing.expectEqualStrings("", chat.status_text);
+    try testing.expect(chat._messages[1].collapsed); // reasoning collapsed after done
+}
+
+test "toggle_bubble flips collapsed state" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "test");
+    const chat = model.activeChat();
+
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"reasoning\",\"data\":{\"content\":\"thinking...\"}}" } }, &fx);
+    main.update(&model, .{ .stream_done = .{ .key = fk } }, &fx);
+    try testing.expect(chat._messages[1].collapsed);
+
+    // Toggle: expand
+    main.update(&model, .{ .toggle_bubble = chat._messages[1].id }, &fx);
+    try testing.expect(!chat._messages[1].collapsed);
+
+    // Toggle: collapse again
+    main.update(&model, .{ .toggle_bubble = chat._messages[1].id }, &fx);
+    try testing.expect(chat._messages[1].collapsed);
 }
 
 test "interrupt sets pending state" {
@@ -122,12 +261,12 @@ test "interrupt sets pending state" {
     var model = main.initialModel();
     model.allocator = arena;
     var fx = noopFx(arena);
-
-    main.update(&model, .new_chat, &fx);
-    main.update(&model, .{ .stream_line = .{ .key = 0, .line = "data: {\"type\":\"interrupt\",\"data\":{\"tool\":\"email_send\",\"call_id\":\"abc123\",\"args\":{}}}" } }, &fx);
-    try testing.expect(model.has_pending);
-    try testing.expectEqualStrings("email_send", model.pending_tool);
-    try testing.expectEqualStrings("abc123", model.pending_call_id);
+    const fk = sendAndStartStream(&model, &fx, "test");
+    const chat = model.activeChat();
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"interrupt\",\"data\":{\"tool\":\"email_send\",\"call_id\":\"abc123\",\"args\":{}}}" } }, &fx);
+    try testing.expect(chat.has_pending);
+    try testing.expectEqualStrings("email_send", chat.pending_tool);
+    try testing.expectEqualStrings("abc123", chat.pending_call_id);
 }
 
 test "approve clears pending" {
@@ -138,16 +277,16 @@ test "approve clears pending" {
     var model = main.initialModel();
     model.allocator = arena;
     var fx = noopFx(arena);
-
-    main.update(&model, .new_chat, &fx);
-    main.update(&model, .{ .stream_line = .{ .key = 0, .line = "data: {\"type\":\"interrupt\",\"data\":{\"tool\":\"email_send\",\"call_id\":\"abc123\",\"args\":{}}}" } }, &fx);
-    try testing.expect(model.has_pending);
+    const fk = sendAndStartStream(&model, &fx, "test");
+    const chat = model.activeChat();
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"interrupt\",\"data\":{\"tool\":\"email_send\",\"call_id\":\"abc123\",\"args\":{}}}" } }, &fx);
+    try testing.expect(chat.has_pending);
 
     main.update(&model, .approve, &fx);
-    try testing.expect(!model.has_pending);
-    try testing.expect(model.streaming);
-    try testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
-    const request = fx.pendingFetchAt(0).?;
+    try testing.expect(!chat.has_pending);
+    try testing.expect(chat.streaming);
+    try testing.expectEqual(@as(usize, 2), fx.pendingFetchCount());
+    const request = fx.pendingFetchAt(1).?;
     try testing.expectEqualStrings("http://127.0.0.1:8080/message/approve", request.url);
     try testing.expect(std.mem.indexOf(u8, request.body, "abc123") != null);
 }
@@ -160,16 +299,16 @@ test "reject clears pending" {
     var model = main.initialModel();
     model.allocator = arena;
     var fx = noopFx(arena);
-
-    main.update(&model, .new_chat, &fx);
-    main.update(&model, .{ .stream_line = .{ .key = 0, .line = "data: {\"type\":\"interrupt\",\"data\":{\"tool\":\"email_send\",\"call_id\":\"abc123\",\"args\":{}}}" } }, &fx);
-    try testing.expect(model.has_pending);
+    const fk = sendAndStartStream(&model, &fx, "test");
+    const chat = model.activeChat();
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"interrupt\",\"data\":{\"tool\":\"email_send\",\"call_id\":\"abc123\",\"args\":{}}}" } }, &fx);
+    try testing.expect(chat.has_pending);
 
     main.update(&model, .reject, &fx);
-    try testing.expect(!model.has_pending);
-    try testing.expectEqualStrings("", model.pending_tool);
-    try testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
-    const request = fx.pendingFetchAt(0).?;
+    try testing.expect(!chat.has_pending);
+    try testing.expectEqualStrings("", chat.pending_tool);
+    try testing.expectEqual(@as(usize, 2), fx.pendingFetchCount());
+    const request = fx.pendingFetchAt(1).?;
     try testing.expectEqualStrings("http://127.0.0.1:8080/message/reject", request.url);
     try testing.expect(std.mem.indexOf(u8, request.body, "abc123") != null);
 }
@@ -189,7 +328,6 @@ test "empty state renders placeholder" {
 test "theme: dark tokens have teal accent" {
     const theme = @import("theme.zig");
     const tokens = theme.darkTokens();
-    // Color channels are f32 normalized to [0,1] (rgb8 divides by 255).
     try testing.expectApproxEqAbs(@as(f32, 20) / 255.0, tokens.colors.accent.r, 1e-5);
     try testing.expectApproxEqAbs(@as(f32, 184) / 255.0, tokens.colors.accent.g, 1e-5);
     try testing.expectApproxEqAbs(@as(f32, 166) / 255.0, tokens.colors.accent.b, 1e-5);
@@ -236,14 +374,11 @@ test "chat list: new chat creates empty chat and sets active" {
     model.allocator = arena;
     var fx = noopFx(arena);
     try testing.expectEqual(@as(usize, 1), model.chat_count);
-    // First chat is empty (no messages) — new_chat should NOT create another
     main.update(&model, .new_chat, &fx);
     try testing.expectEqual(@as(usize, 1), model.chat_count);
-    // Send a message to make the first chat non-empty
     model.activeChat().draft_text = "test";
     main.update(&model, .send_message, &fx);
-    model.streaming = false;
-    // Now new_chat should create a second chat
+    model.activeChat().streaming = false;
     main.update(&model, .new_chat, &fx);
     try testing.expectEqual(@as(usize, 2), model.chat_count);
     try testing.expectEqual(@as(usize, 1), model.active_chat_idx);
@@ -258,15 +393,13 @@ test "chat list: switch chat sets active index" {
     var model = main.initialModel();
     model.allocator = arena;
     var fx = noopFx(arena);
-    // Make first chat non-empty, then create second
     model.activeChat().draft_text = "first";
     main.update(&model, .send_message, &fx);
-    model.streaming = false;
+    model.activeChat().streaming = false;
     main.update(&model, .new_chat, &fx);
-    // Make second chat non-empty, then create third
     model.activeChat().draft_text = "second";
     main.update(&model, .send_message, &fx);
-    model.streaming = false;
+    model.activeChat().streaming = false;
     main.update(&model, .new_chat, &fx);
     try testing.expectEqual(@as(usize, 2), model.active_chat_idx);
     const first_chat_id = model.chats[0].id;
@@ -295,14 +428,13 @@ test "unread badge: increments for non-active chat on stream_done" {
     model.allocator = arena;
     var fx = noopFx(arena);
 
-    // Make first chat non-empty, create second, make second non-empty, create third
     model.activeChat().draft_text = "first";
     main.update(&model, .send_message, &fx);
-    model.streaming = false;
+    model.activeChat().streaming = false;
     main.update(&model, .new_chat, &fx);
     model.activeChat().draft_text = "second";
     main.update(&model, .send_message, &fx);
-    model.streaming = false;
+    model.activeChat().streaming = false;
     main.update(&model, .new_chat, &fx);
     model.active_chat_idx = 1;
 
@@ -310,7 +442,9 @@ test "unread badge: increments for non-active chat on stream_done" {
     model.chats[1].title = "Second chat";
     main.addMessage(&model.chats[0], arena, "user", "hi");
 
-    main.update(&model, .{ .stream_done = .{ .key = 0 } }, &fx);
+    model.chats[1].streaming = true;
+    model.chats[1].fetch_key = 42;
+    main.update(&model, .{ .stream_done = .{ .key = 42 } }, &fx);
     try testing.expectEqual(@as(u32, 1), model.chats[0].unread_count);
     try testing.expectEqual(@as(u32, 0), model.chats[1].unread_count);
 }
@@ -324,10 +458,9 @@ test "unread badge: switch chat resets unread count" {
     model.allocator = arena;
     var fx = noopFx(arena);
 
-    // Make first chat non-empty, create second
     model.activeChat().draft_text = "first";
     main.update(&model, .send_message, &fx);
-    model.streaming = false;
+    model.activeChat().streaming = false;
     main.update(&model, .new_chat, &fx);
     model.chats[0].unread_count = 3;
     model.active_chat_idx = 1;
@@ -346,11 +479,9 @@ test "smart new chat: stays on empty chat with draft" {
     model.allocator = arena;
     var fx = noopFx(arena);
 
-    // Type a draft but don't send
     main.update(&model, .{ .input_changed = .{ .insert_text = "hello" } }, &fx);
     try testing.expectEqual(@as(usize, 1), model.chat_count);
 
-    // Press new_chat — should stay on current empty chat (has draft, no messages)
     main.update(&model, .new_chat, &fx);
     try testing.expectEqual(@as(usize, 1), model.chat_count);
     try testing.expectEqualStrings("hello", model.inputText());
@@ -365,21 +496,17 @@ test "draft preservation: switching chats preserves per-chat draft" {
     model.allocator = arena;
     var fx = noopFx(arena);
 
-    // Chat 1: type and send a message
     main.update(&model, .{ .input_changed = .{ .insert_text = "first" } }, &fx);
     main.update(&model, .send_message, &fx);
-    model.streaming = false;
+    model.activeChat().streaming = false;
 
-    // Create chat 2, type a draft
     main.update(&model, .new_chat, &fx);
     main.update(&model, .{ .input_changed = .{ .insert_text = "draft2" } }, &fx);
     try testing.expectEqualStrings("draft2", model.inputText());
 
-    // Switch back to chat 1 — draft should be empty (it was sent)
     main.update(&model, .{ .switch_chat = model.chats[0].id }, &fx);
     try testing.expectEqualStrings("", model.inputText());
 
-    // Switch back to chat 2 — draft should be preserved
     main.update(&model, .{ .switch_chat = model.chats[1].id }, &fx);
     try testing.expectEqualStrings("draft2", model.inputText());
 }

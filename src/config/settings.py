@@ -270,10 +270,24 @@ class AppConfig(_BaseSettings):
         if not data:
             return cls()
 
+        # Bare AGENT (set by opencode/agent runtimes) collides with the nested agent config field.
+        _drop_colliding_env()
         return cls(**data)
 
 
 _config: AppConfig | None = None
+
+# Env vars that collide with nested AppConfig fields when set bare by external runtimes.
+# opencode injects AGENT=1; pydantic would try to coerce it into AgentConfig and crash.
+_COLLIDING_ENV = {"AGENT"}
+
+
+def _drop_colliding_env() -> None:
+    """Remove bare env vars that would clobber nested config fields."""
+    import os
+
+    for key in _COLLIDING_ENV:
+        os.environ.pop(key, None)
 
 
 def get_settings() -> AppConfig:

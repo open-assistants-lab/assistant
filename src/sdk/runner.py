@@ -58,8 +58,11 @@ def _loop_cache_key(
     workspace_id: str,
     model: str | None,
     provider_keys: dict[str, str] | None = None,
+    session_id: str | None = None,
 ) -> str:
     key = f"{user_id}:{workspace_id}:{model or 'default'}"
+    if session_id:
+        key = f"{key}:session:{session_id}"
     if provider_keys:
         encoded = json.dumps(provider_keys, sort_keys=True, separators=(",", ":"))
         key_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
@@ -484,15 +487,20 @@ async def create_sdk_loop(user_id: str, workspace_id: str = "personal", model: s
     return loop
 
 
-async def get_sdk_loop(user_id: str, workspace_id: str = "personal", model: str | None = None, provider_keys: dict[str, str] | None = None) -> AgentLoop:
-    """Get or create an AgentLoop for a user+workspace+model (cached)."""
-    cache_key = _loop_cache_key(user_id, workspace_id, model, provider_keys)
+async def get_sdk_loop(user_id: str, workspace_id: str = "personal", model: str | None = None, provider_keys: dict[str, str] | None = None, session_id: str | None = None) -> AgentLoop:
+    """Get or create an AgentLoop for a user+workspace+model+session (cached).
+
+    session_id isolates concurrent chat sessions per user — each session gets
+    its own AgentLoop instance so that self.state and self.cancel_event are not
+    clobbered across concurrent run_stream calls.
+    """
+    cache_key = _loop_cache_key(user_id, workspace_id, model, provider_keys, session_id)
     async with _loop_lock:
         if cache_key not in _loop_cache:
             _loop_cache[cache_key] = await create_sdk_loop(
                 user_id, workspace_id, model=model, provider_keys=provider_keys
             )
-            logger.info("sdk_runner.loop_created", {"user_id": user_id, "workspace_id": workspace_id, "model": model}, user_id=user_id)
+            logger.info("sdk_runner.loop_created", {"user_id": user_id, "workspace_id": workspace_id, "model": model, "session_id": session_id}, user_id=user_id)
         return _loop_cache[cache_key]
 
 
@@ -527,22 +535,34 @@ def _connector_dicts_to_defs(dicts: list[dict[str, Any]]) -> list[ToolDefinition
 
 
 def _messages_from_conversation(messages: list[Any]) -> list[Message]:
-    """Convert conversation store messages to SDK Messages."""
+    """Convert conversation store messages to SDK Messages.
+
+    Tool messages without a preceding assistant tool_calls are skipped —
+    the OpenAI/DeepSeek API requires that tool role messages follow an
+    assistant message with tool_calls, and orphan tool results cause 400 errors.
+    """
     sdk_messages: list[Message] = []
     pending_reasoning: str | None = None
+    last_assistant_had_tool_calls = False
     for m in messages:
         role = getattr(m, "role", "user")
         content = getattr(m, "content", "")
         if role == "user":
             sdk_messages.append(Message.user(content))
             pending_reasoning = None
+            last_assistant_had_tool_calls = False
         elif role == "summary":
             sdk_messages.append(Message.user(f"[SUMMARY OF PREVIOUS CONVERSATION]\n{content}"))
             pending_reasoning = None
+            last_assistant_had_tool_calls = False
         elif role == "system":
             sdk_messages.append(Message.system(content))
             pending_reasoning = None
+            last_assistant_had_tool_calls = False
         elif role == "tool":
+            if not last_assistant_had_tool_calls:
+                # Skip orphan tool result — no preceding tool_calls to attach to
+                continue
             meta = getattr(m, "metadata", {}) or {}
             tool_name = meta.get("tool_name") or meta.get("tool") or "unknown"
             tool_call_id = meta.get("tool_call_id") or meta.get("call_id") or ""
@@ -555,6 +575,7 @@ def _messages_from_conversation(messages: list[Any]) -> list[Message]:
                 Message.assistant(content, reasoning=pending_reasoning)
             )
             pending_reasoning = None
+            last_assistant_had_tool_calls = False
     return sdk_messages
 
 
@@ -564,6 +585,7 @@ async def run_sdk_agent(
     workspace_id: str = "personal",
     model: str | None = None,
     provider_keys: dict[str, str] | None = None,
+    session_id: str | None = None,
 ) -> list[Message]:
     """Run the SDK agent loop to completion.
 
@@ -573,11 +595,12 @@ async def run_sdk_agent(
         workspace_id: Current workspace ID.
         model: Optional model override.
         provider_keys: Optional per-provider API keys from frontend.
+        session_id: Optional session ID for per-session loop isolation.
 
     Returns:
         Final message list from the agent.
     """
-    loop = await get_sdk_loop(user_id, workspace_id, model=model, provider_keys=provider_keys)
+    loop = await get_sdk_loop(user_id, workspace_id, model=model, provider_keys=provider_keys, session_id=session_id)
     register_user_loop(user_id, loop)
     try:
         result = await loop.run(messages)
@@ -593,8 +616,9 @@ async def run_sdk_agent_stream(
     model: str | None = None,
     provider_keys: dict[str, str] | None = None,
     cancel_event: asyncio.Event | None = None,
+    session_id: str | None = None,
 ) -> Any:
-    loop = await get_sdk_loop(user_id, workspace_id, model=model, provider_keys=provider_keys)
+    loop = await get_sdk_loop(user_id, workspace_id, model=model, provider_keys=provider_keys, session_id=session_id)
     loop.cancel_event = cancel_event
     register_user_loop(user_id, loop)
 
@@ -608,13 +632,25 @@ async def run_sdk_agent_stream(
         unregister_user_loop(user_id)
 
 
-def reset_sdk_loop(user_id: str = "default_user", workspace_id: str = "personal") -> None:
-    """Reset the SDK agent loop for a user+workspace."""
-    cache_prefix = f"{user_id}:{workspace_id}:"
-    for cache_key in list(_loop_cache):
-        if cache_key.startswith(cache_prefix):
-            del _loop_cache[cache_key]
-    logger.info("sdk_runner.loop_reset", {"user_id": user_id, "workspace_id": workspace_id}, user_id=user_id)
+def reset_sdk_loop(
+    user_id: str = "default_user",
+    workspace_id: str = "personal",
+    session_id: str | None = None,
+) -> None:
+    """Reset the SDK agent loop for a user+workspace (and optionally a specific session).
+
+    When session_id is given, only that session's cached loop is removed — other
+    concurrently running sessions for the same user are left untouched.
+    """
+    if session_id:
+        cache_key = _loop_cache_key(user_id, workspace_id, model=None, session_id=session_id)
+        _loop_cache.pop(cache_key, None)
+    else:
+        cache_prefix = f"{user_id}:{workspace_id}:"
+        for cache_key in list(_loop_cache):
+            if cache_key.startswith(cache_prefix):
+                del _loop_cache[cache_key]
+    logger.info("sdk_runner.loop_reset", {"user_id": user_id, "workspace_id": workspace_id, "session_id": session_id}, user_id=user_id)
 
 
 def reset_user_sdk_loops(user_id: str) -> None:
