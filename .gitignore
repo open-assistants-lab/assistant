@@ -58,15 +58,8 @@ docs/benchmarks/*.py
 ~/.cache/
 LongMemEval/
 
-# Flutter
-flutter_app/build/
-flutter_app/.dart_tool/
-flutter_app/.packages
-flutter_app/.pub-cache/
-flutter_app/.pub/
-flutter_app/doc/api/
-flutter_app/ios/Pods/
-flutter_app/ios/.symlinks/
+# Flutter (removed — kept for reference)
+flutter_app/
 data/evaluations/
 .DS_Store
 .firecrawl/
