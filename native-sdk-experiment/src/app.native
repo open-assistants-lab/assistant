@@ -60,39 +60,41 @@
 
   <column background="background" gap="0" min-width="320">
     <scroll grow="1" padding="16" gap="12" background="background" on-reach-end="reached_bottom">
-      <for each="messages" key="id" as="msg">
-        <if test="{msg.isUser}">
-          <row main="end" cross="start" grow="0">
-            <card background="surface_subtle" radius="lg" padding="12" grow="0">
-              <text wrap="true">{msg.content}</text>
-            </card>
-          </row>
-        </if>
-        <else>
-          <column gap="4" grow="0">
-            <text size="sm" foreground="accent">Assistant</text>
-            <if test="{msg.isEmpty}">
-              <text foreground="text_muted" size="sm" padding="8">typing…</text>
-            </if>
-            <else>
-              <card background="surface" radius="lg" padding="12" border-color="border" grow="0">
+      <column gap="12" background="background">
+        <for each="messages" key="id" as="msg">
+          <if test="{msg.isUser}">
+            <row main="end" cross="start" grow="0">
+              <card background="surface_subtle" radius="lg" padding="12" grow="0">
                 <text wrap="true">{msg.content}</text>
               </card>
-            </else>
+            </row>
+          </if>
+          <else>
+            <column gap="4" grow="0">
+              <text size="sm" foreground="accent">Assistant</text>
+              <if test="{msg.isEmpty}">
+                <text foreground="text_muted" size="sm" padding="8">typing…</text>
+              </if>
+              <else>
+                <card background="surface" radius="lg" padding="12" border-color="border" grow="0">
+                  <text wrap="true">{msg.content}</text>
+                </card>
+              </else>
+            </column>
+          </else>
+        </for>
+        <else>
+          <column gap="16" padding="32" cross="center" main="center">
+            <text size="heading">How can I help?</text>
+            <text foreground="text_muted">Ask me anything, or try one of these:</text>
+            <row gap="8">
+              <button variant="ghost" on-press="suggestion_inbox">Triage my inbox</button>
+              <button variant="ghost" on-press="suggestion_summary">Draft a weekly summary</button>
+              <button variant="ghost" on-press="suggestion_contacts">Find contacts in marketing</button>
+            </row>
           </column>
         </else>
-      </for>
-      <else>
-        <column gap="16" padding="32" cross="center" main="center">
-          <text size="heading">How can I help?</text>
-          <text foreground="text_muted">Ask me anything, or try one of these:</text>
-          <row gap="8">
-            <button variant="ghost" on-press="suggestion_inbox">Triage my inbox</button>
-            <button variant="ghost" on-press="suggestion_summary">Draft a weekly summary</button>
-            <button variant="ghost" on-press="suggestion_contacts">Find contacts in marketing</button>
-          </row>
-        </column>
-      </else>
+      </column>
     </scroll>
 
     <if test="{has_pending}">
