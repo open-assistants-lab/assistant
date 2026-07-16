@@ -755,7 +755,6 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         const window = ui.virtualWindow(options);
 
         // Build nodes for visible range only
-        const visible_count = window.end_index - window.start_index;
         var msg_nodes: [max_messages]AppUi.Node = undefined;
         var node_count: usize = 0;
         var idx = window.start_index;
@@ -764,7 +763,6 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
             msg_nodes[node_count] = buildMessageBubble(ui, msg);
             node_count += 1;
         }
-        _ = visible_count;
 
         children[child_count] = ui.virtualList(options, window, msg_nodes[0..node_count]);
     }
@@ -772,13 +770,14 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
 
     // HITL bar (if pending)
     if (model.has_pending) {
+        const approve_text = std.fmt.allocPrint(ui.arena, "Approve: {s}?", .{model.pending_tool}) catch "Approve?";
         children[child_count] = ui.row(.{
             .gap = 12,
             .padding = 12,
             .cross = .center,
             .style_tokens = .{ .background = .surface, .radius = .md },
         }, .{
-            ui.text(.{ .grow = 1 }, "Approve"),
+            ui.text(.{ .grow = 1 }, approve_text),
             ui.button(.{ .on_press = .approve, .style_tokens = .{ .foreground = .success } }, "Approve"),
             ui.button(.{ .on_press = .reject, .variant = .ghost, .style_tokens = .{ .foreground = .destructive } }, "Reject"),
         });
