@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from collections.abc import AsyncGenerator
@@ -24,6 +25,7 @@ from src.storage.messages import get_message_store
 _pending_approvals: dict[str, dict[str, Any]] = {}
 _pending_interrupts: dict[str, dict[str, Any]] = {}
 _cancel_flags: dict[str, bool] = {}
+_active_streams: dict[str, asyncio.Event] = {}
 
 router = APIRouter(tags=["conversation"])
 logger = get_logger()
@@ -381,8 +383,10 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
         conversation = get_message_store(user_id)
         conversation.add_message("user", req.message, metadata={}, session_id=session_id)
 
-        # Set up cancel flag for this user's stream
+        # Set up cancellation for this user's stream
         _cancel_flags[user_id] = False
+        cancel_event = asyncio.Event()
+        _active_streams[user_id] = cancel_event
 
         recent_messages = conversation.get_messages_by_session_id(session_id, 50)
         sdk_messages = _messages_from_conversation(recent_messages)
@@ -400,8 +404,8 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                 model=req.model,
                 provider_keys=req.provider_keys,
             ):
-                # Check cancel flag between chunks
-                if _cancel_flags.get(user_id, False):
+                # Check cancel flag between chunks (fast path)
+                if _cancel_flags.get(user_id, False) or cancel_event.is_set():
                     yield f"data: {json.dumps({'type': 'cancelled', 'data': {'content': 'Cancelled'}})}\n\n"
                     break
                 canonical = chunk.canonical_type
@@ -464,9 +468,15 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                 "agent.response", {"response": response[:80]}, user_id=user_id, channel="http"
             )
 
+        # Clean up cancel tracking
+        _active_streams.pop(user_id, None)
+        _cancel_flags.pop(user_id, None)
+
         return StreamingResponse(generate(), media_type="text/event-stream")
 
     except Exception as e:
+        _active_streams.pop(req.user_id or "default_user", None)
+        _cancel_flags.pop(req.user_id or "default_user", None)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -510,6 +520,10 @@ async def reject_tool(req: RejectRequest, _: None = Depends(require_auth)) -> di
 async def cancel_message(req: CancelRequest, _: None = Depends(require_auth)) -> dict[str, Any]:
     """Cancel the current agent execution."""
     _cancel_flags[req.user_id] = True
+    # Signal the active stream to break
+    event = _active_streams.get(req.user_id)
+    if event:
+        event.set()
     reset_sdk_loop(req.user_id)
     return {"status": "cancelled"}
 
