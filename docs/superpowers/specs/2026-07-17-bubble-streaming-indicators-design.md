@@ -21,7 +21,7 @@ The sidebar has no indicator for which chats are actively streaming or have unre
 
 **Persisted to conversation history (backend):** `user`, `assistant`, `tool` only.
 
-**UI-only bubble types (native app `ChatMessage.role`):** `user`, `assistant`, `tool`, `reasoning`
+**UI-only bubble types (native app `ChatMessage.role`):** `user`, `assistant`, `tool`, `reasoning`, `system`
 
 - `reasoning` is ephemeral — shown during/after streaming, never persisted, never loaded on reload, never sent to the LLM.
 - `tool` bubbles are persisted (the backend already stores tool results as `tool` role messages).
@@ -53,7 +53,7 @@ status_text: []const u8 = "",      // latest tool/status text for the status bar
 
 | SSE event | Bubble behavior |
 |---|---|
-| `reasoning` (new `type: "reasoning"`) | If `open_bubble_type != "reasoning"`, close previous and new `reasoning` bubble. Append deltas to current open reasoning bubble. Set `open_bubble_type = "reasoning"`. |
+| `reasoning` (new `type: "reasoning"`) | If `open_bubble_type != "reasoning"`, previous bubble stays in list (no explicit close action). New `reasoning` bubble created. Append deltas to current reasoning bubble. Set `open_bubble_type = "reasoning"`. |
 | `messages` (non-reasoning) | Close any open reasoning bubble. If `open_bubble_type != "assistant"`, new `assistant` bubble. Append deltas. Set `open_bubble_type = "assistant"`. |
 | `tool_start` (with args) | Close any open reasoning bubble. New `tool` bubble (status: running, tool_name set). Set `open_bubble_type = "tool"`. Set `chat.status_text = tool_name + args summary`. |
 | `tool_result` | Find most recent `tool` bubble with `tool_status == "running"`, update `tool_status = "done"` and `tool_result` in place (no new bubble, no position change). Do NOT change `open_bubble_type` — a new `text_delta` or `reasoning` will open the next bubble. |
@@ -62,18 +62,34 @@ status_text: []const u8 = "",      // latest tool/status text for the status bar
 | `error` | If `open_bubble_type` is set, append error to current bubble. Else new `system` bubble with error text. |
 | `cancelled` | Finalize, set `open_bubble_type = ""`, clear `status_text` |
 
-**"Open bubble" rule:** A bubble is "open" (receiving deltas) until a different event type arrives. When a new event type arrives, the previous bubble is closed (marked final) and a new one is created if needed.
+**"Open bubble" rule:** A bubble is "open" (receiving deltas) until a different event type arrives. "Closing" a reasoning bubble means setting `open_bubble_type` to the new type — the reasoning bubble stays in the list but becomes non-appendable. When a reasoning bubble is closed (not by `done`), it remains expanded until `finalizeStream` collapses it. When a new event type arrives, a new bubble is created if needed.
+
+### Expand/collapse interaction
+
+Reasoning and tool bubbles are expandable. A new `Msg` variant handles toggling:
+
+```zig
+pub const Msg = union(enum) {
+    // ...existing variants...
+    toggle_bubble: u64,  // message id to toggle collapsed/expanded
+};
+```
+
+- `buildMessageBubble` renders a clickable header for reasoning/tool bubbles that dispatches `toggle_bubble(msg.id)`.
+- `update` for `toggle_bubble` flips `collapsed` on the matching `ChatMessage`.
+- Reasoning: collapsed shows first line only; expanded shows full text.
+- Tool: collapsed shows one-line result preview; expanded shows full result text.
 
 Example turn timeline:
 ```
 [user bubble]
-[reasoning bubble]       ← reasoning_start + deltas
-[tool bubble: running]   ← tool_input_start
+[reasoning bubble]       ← reasoning event + deltas
+[tool bubble: running]   ← tool_start event
 [tool bubble: done]      ← tool_result (same bubble, updated in place)
-[reasoning bubble]       ← new reasoning_start + deltas
-[tool bubble: running]   ← new tool_input_start
+[reasoning bubble]       ← new reasoning event + deltas
+[tool bubble: running]   ← new tool_start event
 [tool bubble: done]      ← tool_result
-[assistant bubble]       ← text_delta + deltas
+[assistant bubble]       ← messages event + deltas
 ```
 
 ### On reload from history
@@ -200,7 +216,7 @@ fn finalizeStream(chat: *Chat) void {
 
 Reasoning bubbles use existing tokens — no new tokens needed:
 - Background: `surface` (same as assistant, but with italic text)
-- Border: `border` with accent left border (4px accent on left edge)
+- Border: `accent` (full border, not per-side — the Native SDK's `border_color` token applies to all sides)
 - Text: `text_muted`, italic
 - Header: `accent`, small size
 
@@ -211,6 +227,8 @@ Tool bubbles:
 - Status: `text_muted`, small
 - Result: `text_muted`, small, truncated
 
+Tool icons use the Native SDK's built-in `ui.icon` with standard icon names (e.g. `"search"`, `"file"`, `"mail"`, `"clock"`, `"terminal"`, `"wrench`). These are SVG stroke-icon names from the built-in registry — no custom assets needed.
+
 ### Files changed
 
 **Backend:**
@@ -219,7 +237,7 @@ Tool bubbles:
 **Native app:**
 - `native-sdk-experiment/src/main.zig`:
   - `ChatMessage` struct — add `tool_name`, `tool_status`, `tool_result`, `collapsed` fields
-  - `Chat` struct — add `open_bubble_type`, `status_text` fields (add to `view_unbound` if needed)
+  - `Chat` struct — add `open_bubble_type`, `status_text` fields (these are runtime-only, not view-bound — do NOT add to `view_unbound`)
   - `stream_line` handler — new event branches for `reasoning`, `tool_start`, `tool_result`
   - `buildMessageBubble` — render `reasoning` (italic card with "Thinking" header, collapsed/expanded) and `tool` (compact card with icon, name, status) bubble types
   - `buildSidebar` — replace `circle-dot` icon with streaming/unread dot indicator
@@ -236,6 +254,7 @@ Tool bubbles:
    - `tool_result` event updates tool bubble in place
    - Multiple reasoning segments create separate bubbles
    - `done` finalizes all open bubbles
+   - `toggle_bubble` flips `collapsed` on matching message
    - Sidebar indicator state: idle (no dot), streaming (pulsing), unread (solid)
 
 2. **E2E test** (`native automate`):
