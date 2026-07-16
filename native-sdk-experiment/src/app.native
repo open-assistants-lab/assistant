@@ -72,14 +72,14 @@
           <else>
             <column gap="4">
               <text size="sm" foreground="accent">Assistant</text>
-              <card background="surface" radius="lg" padding="12" border-color="border">
-                <if test="{msg.isEmpty}">
-                  <text foreground="text_muted" size="sm">typing…</text>
-                </if>
-                <else>
+              <if test="{msg.isEmpty}">
+                <text foreground="text_muted" size="sm" padding="8">typing…</text>
+              </if>
+              <else>
+                <card background="surface" radius="lg" padding="12" border-color="border">
                   <text wrap="true">{msg.content}</text>
-                </else>
-              </card>
+                </card>
+              </else>
             </column>
           </else>
         </for>
