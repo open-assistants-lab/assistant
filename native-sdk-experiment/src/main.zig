@@ -132,6 +132,7 @@ pub const Model = struct {
     next_chat_id: u64 = 1,
     search_query: []const u8 = "",
     streaming: bool = false,
+    streaming_chat_idx: usize = 0,
     has_pending: bool = false,
     pending_tool: []const u8 = "",
     pending_call_id: []const u8 = "",
@@ -144,6 +145,7 @@ pub const Model = struct {
         "search_query",
         "pending_call_id",
         "streaming",
+        "streaming_chat_idx",
         "allocator",
         "theme_mode",
         "active_chat_idx",
@@ -293,6 +295,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
             chat.draft_text = "";
             model.streaming = true;
+            model.streaming_chat_idx = model.active_chat_idx;
 
             // Add an empty assistant message immediately — shows typing indicator
             addMessage(chat, model.allocator, "assistant", "");
@@ -320,7 +323,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .cancel => {
             model.streaming = false;
             // Remove empty typing indicator if present
-            const chat = model.activeChat();
+            const chat = &model.chats[model.streaming_chat_idx];
             if (chat.msg_count > 0) {
                 const last = &chat._messages[chat.msg_count - 1];
                 if (std.mem.eql(u8, last.role, "assistant") and last.content.len == 0) {
@@ -389,12 +392,32 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const root = parsed.value;
             const event_type = root.object.get("type") orelse return;
             const data = root.object.get("data") orelse return;
-            const chat = model.activeChat();
+            const chat = &model.chats[model.streaming_chat_idx];
             if (std.mem.eql(u8, event_type.string, "messages")) {
                 const content = data.object.get("content") orelse return;
+                // Remove any tool status message before appending real content
+                if (chat.msg_count > 0) {
+                    const last = &chat._messages[chat.msg_count - 1];
+                    if (std.mem.eql(u8, last.role, "system") and last.content.len > 0) {
+                        chat.msg_count -= 1;
+                        chat.messages = chat._messages[0..chat.msg_count];
+                    }
+                }
                 appendToLastMessage(chat, model.allocator, content.string);
             } else if (std.mem.eql(u8, event_type.string, "updates")) {
-                // Tool usage updates — don't append to assistant message
+                // Tool usage updates — show as a temporary system status message
+                const content = data.object.get("content") orelse return;
+                if (chat.msg_count > 0) {
+                    const last = &chat._messages[chat.msg_count - 1];
+                    if (std.mem.eql(u8, last.role, "assistant") and last.content.len == 0) {
+                        // Replace empty assistant with a temporary system status
+                        last.role = "system";
+                        last.content = model.allocator.dupe(u8, content.string) catch return;
+                    } else if (std.mem.eql(u8, last.role, "system")) {
+                        // Update existing system status
+                        last.content = model.allocator.dupe(u8, content.string) catch return;
+                    }
+                }
             } else if (std.mem.eql(u8, event_type.string, "interrupt")) {
                 const tool = data.object.get("tool") orelse return;
                 const call_id = data.object.get("call_id") orelse return;
@@ -403,25 +426,38 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.pending_call_id = model.allocator.dupe(u8, call_id.string) catch return;
             } else if (std.mem.eql(u8, event_type.string, "cancelled")) {
                 model.streaming = false;
-                // Remove empty typing indicator
-                if (chat.msg_count > 0) {
-                    const last = &chat._messages[chat.msg_count - 1];
-                    if (std.mem.eql(u8, last.role, "assistant") and last.content.len == 0) {
-                        chat.msg_count -= 1;
-                        chat.messages = chat._messages[0..chat.msg_count];
+                const cancel_chat = &model.chats[model.streaming_chat_idx];
+                // Remove empty typing indicator or system status
+                if (cancel_chat.msg_count > 0) {
+                    const last = &cancel_chat._messages[cancel_chat.msg_count - 1];
+                    if ((std.mem.eql(u8, last.role, "assistant") and last.content.len == 0) or
+                        std.mem.eql(u8, last.role, "system"))
+                    {
+                        cancel_chat.msg_count -= 1;
+                        cancel_chat.messages = cancel_chat._messages[0..cancel_chat.msg_count];
                     }
                 }
             }
         },
         .stream_done => {
             model.streaming = false;
-            // If the last assistant message is still empty (no tokens received), remove it
-            const chat = model.activeChat();
+            const chat = &model.chats[model.streaming_chat_idx];
+            // Remove empty assistant typing indicator
             if (chat.msg_count > 0) {
                 const last = &chat._messages[chat.msg_count - 1];
                 if (std.mem.eql(u8, last.role, "assistant") and last.content.len == 0) {
                     chat.msg_count -= 1;
                     chat.messages = chat._messages[0..chat.msg_count];
+                }
+            }
+            // Remove leftover system status messages
+            while (chat.msg_count > 0) {
+                const last = &chat._messages[chat.msg_count - 1];
+                if (std.mem.eql(u8, last.role, "system")) {
+                    chat.msg_count -= 1;
+                    chat.messages = chat._messages[0..chat.msg_count];
+                } else {
+                    break;
                 }
             }
             var i: usize = 0;
@@ -432,7 +468,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
         },
         .stream_error => |err| {
-            addMessage(model.activeChat(), model.allocator, "system", err);
+            addMessage(&model.chats[model.streaming_chat_idx], model.allocator, "system", err);
             model.streaming = false;
         },
         .approve_done, .reject_done, .cancel_done => {},
@@ -843,6 +879,12 @@ fn buildMessageBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
                 ui.text(.{ .wrap = true }, msg.content),
             }),
         });
+    } else if (std.mem.eql(u8, msg.role, "system")) {
+        // System/tool status: muted, no card, no role label
+        return ui.text(.{
+            .size = .sm,
+            .style_tokens = .{ .foreground = .text_muted },
+        }, msg.content);
     } else {
         // Assistant message: left-aligned with "Assistant" label
         if (msg.isEmpty()) {
