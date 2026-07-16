@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Consolidate all user data under `~/Executive Assistant/`, replace `data/users/{id}/`, and lay groundwork for autoresearch git versioning.
+**Goal:** Consolidate all user data under `~/Assistant/`, replace `data/users/{id}/`, and lay groundwork for autoresearch git versioning.
 
 **Architecture:** `DataPaths` gains a configurable `root` property. User-scoped path methods (email, contacts, todos, conversation, memory, skills, subagents, etc.) redirect to `root / DirName/`. Workspace subdirectories rename lowercase → uppercase. Old methods become deprecated wrappers. A one-shot migration script moves `data/users/{id}/` to the new layout.
 
@@ -31,7 +31,7 @@ Find the config class that holds path-related settings. Add:
 ```python
 # Alongside data_path or in a relevant config class
 ea_root: str = ""
-"""Root for user data directory. Empty string means Path.home() / "Executive Assistant"."""
+"""Root for user data directory. Empty string means Path.home() / "Assistant"."""
 ```
 
 Commit the specific file and line after reading.
@@ -75,7 +75,7 @@ from src.storage.paths import DataPaths
 
 def test_root_defaults_to_home_ea():
     dp = DataPaths(user_id="tester", data_path="/tmp/ea-test-data")
-    # When ea_root is not set, default to ~/Executive Assistant/
+    # When ea_root is not set, default to ~/Assistant/
     # During tests, inject ea_root to avoid touching real home dir
     dp2 = DataPaths(user_id="tester", ea_root="/tmp/ea-test-root")
     assert str(dp2.root) == "/tmp/ea-test-root"
@@ -235,7 +235,7 @@ Expected: All fail with ImportError or AttributeError (new methods don't exist y
 Read the full `src/storage/paths.py` first, then rewrite it to:
 
 1. **Constructor**: Add `ea_root` and `ea_team_root` params. Keep `data_path` for project-level data.
-2. **`root` property**: resolves `ea_root` → `settings.ea_root` → `Path.home() / "Executive Assistant"`.
+2. **`root` property**: resolves `ea_root` → `settings.ea_root` → `Path.home() / "Assistant"`.
 3. **`team_root` property**: for solo mode, always return None. (Stage 1 — no teams.)
 4. **All user-scoped methods** from the spec table (see `docs/superpowers/path-restructuring-spec.md` §3).
 5. **Workspace-scoped methods**: uppercase subdirectories (Skills, Subagents, Files, Memory).
@@ -245,7 +245,7 @@ Read the full `src/storage/paths.py` first, then rewrite it to:
 9. **`data/` project-level methods**: keep unchanged (model_cache_path, templates, logs_dir, traces_path, jobs_db_path).
 10. **Keep `get_paths()` cache** unchanged (cached on `(user_id, team_id)`).
 
-The old `_user_base()` path (`data/users/{id}/`) is removed entirely. The old `_workspaces_base()` (`~/Executive Assistant/Workspaces/`) is replaced by `root / "Workspaces"`.
+The old `_user_base()` path (`data/users/{id}/`) is removed entirely. The old `_workspaces_base()` (`~/Assistant/Workspaces/`) is replaced by `root / "Workspaces"`.
 
 Key change: `work_queue_db()` moves from `{subagents_dir()}/work_queue.db` to `{user_subagents_dir()}/work_queue.db` — same pattern, just under `~/EA/Subagents/` instead of `data/users/{id}/subagents/`.
 
@@ -283,13 +283,13 @@ Read `src/sdk/tools_core/memory.py` around line 155-175.
 
 - [ ] **Step 2: Fix workspace_models.py**
 
-Replace `Path.home() / "Executive Assistant" / "Workspaces"` with `DataPaths(...).root / "Workspaces"`:
+Replace `Path.home() / "Assistant" / "Workspaces"` with `DataPaths(...).root / "Workspaces"`:
 
 ```python
 # Before
 @staticmethod
 def _default_workspaces_dir() -> Path:
-    return Path.home() / "Executive Assistant" / "Workspaces"
+    return Path.home() / "Assistant" / "Workspaces"
 
 # After
 @staticmethod
@@ -332,9 +332,9 @@ git commit -m "refactor: consolidate 3 hardcoded Workspaces/ paths into DataPath
 Write `src/prompt_seed/AGENTS.md`:
 
 ```markdown
-# Executive Assistant — User Instructions
+# Assistant — User Instructions
 
-You are a helpful executive assistant. You have access to tools for email,
+You are a helpful assistant. You have access to tools for email,
 contacts, todos, file management, web search, browser automation, and more.
 
 ## Core Rules
@@ -594,7 +594,7 @@ Create `scripts/migrate-paths.py`:
 
 ```python
 #!/usr/bin/env python3
-"""One-shot migration: move data/users/{id}/ → ~/Executive Assistant/.
+"""One-shot migration: move data/users/{id}/ → ~/Assistant/.
 
 Usage:
     python scripts/migrate-paths.py [--dry-run]
@@ -612,7 +612,7 @@ import shutil
 import sys
 from pathlib import Path
 
-EA_ROOT = Path.home() / "Executive Assistant"
+EA_ROOT = Path.home() / "Assistant"
 DATA_PATH = Path("data")
 MIGRATED_MARKER = Path.home() / ".ea_migrated"
 
@@ -729,7 +729,7 @@ def main():
         )
         print("WARNING: Stop the backend before migration! (use --dry-run to preview)")
 
-    print(f"{'[DRY-RUN] ' if args.dry_run else ''}Migrating data/ → ~/Executive Assistant/")
+    print(f"{'[DRY-RUN] ' if args.dry_run else ''}Migrating data/ → ~/Assistant/")
     print()
 
     # Migrate each user directory
@@ -777,7 +777,7 @@ git commit -m "feat(migration): add one-shot path migration script"
 
 **Files:**
 - Create: `~/.ea_init_git` marker (optional)
-- Run: git init at `~/Executive Assistant/`
+- Run: git init at `~/Assistant/`
 
 - [ ] **Step 1: Add gitignore + init logic to DataPaths**
 
@@ -829,7 +829,7 @@ The `root` property must cache its value and gate `_ensure_git()` to prevent cir
 def root(self) -> Path:
     if not hasattr(self, '_ea_root_value'):
         raw = os.environ.get("EA_ROOT") or getattr(settings, "ea_root", None)
-        self._ea_root_value = Path(raw) if raw else Path.home() / "Executive Assistant"
+        self._ea_root_value = Path(raw) if raw else Path.home() / "Assistant"
         self._ea_root_value.mkdir(parents=True, exist_ok=True)
         self._git_ensured = False
     if not self._git_ensured:
@@ -849,7 +849,7 @@ Expected: `OK`. Then `/tmp/ea-test-init/.git` exists.
 
 ```bash
 git add src/storage/paths.py
-git commit -m "feat(git): auto-init git repo at ~/Executive Assistant/ with .gitignore"
+git commit -m "feat(git): auto-init git repo at ~/Assistant/ with .gitignore"
 ```
 
 ---

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build performance benchmarks for HybridDB across search, graph, analytics, concurrent access, and storage — running identically in both the in-repo (`executive-assistant`) and standalone OSS (`HybridDB`) repos.
+**Goal:** Build performance benchmarks for HybridDB across search, graph, analytics, concurrent access, and storage — running identically in both the in-repo (`assistant`) and standalone OSS (`HybridDB`) repos.
 
 **Architecture:** pytest-benchmark integration with smoke/full scale modes, pre-computed or live embeddings, JSON snapshot archiving with `compare_results.py` diff tool. Benchmark test files are identical between repos; only `conftest.py` differs (import path).
 
@@ -13,7 +13,7 @@
 ## File Structure
 
 ```
-executive-assistant (in-repo):
+assistant (in-repo):
 ├── pyproject.toml                         # MODIFY: add [benchmark] deps
 ├── tests/
 │   └── hybriddb/
@@ -61,7 +61,7 @@ HybridDB (standalone OSS):
 
 - [ ] **Step 1: Add `[benchmark]` optional-deps to in-repo pyproject.toml**
 
-Edit `executive-assistant/pyproject.toml`. Add after the `[project.optional-dependencies]` section:
+Edit `assistant/pyproject.toml`. Add after the `[project.optional-dependencies]` section:
 
 ```toml
 benchmark = [
@@ -97,8 +97,8 @@ benchmark = [
 - [ ] **Step 3: Create directory structures and __init__.py files**
 
 ```bash
-mkdir -p /Users/eddy/Developer/Langgraph/executive-assistant/tests/hybriddb/benchmarks
-touch /Users/eddy/Developer/Langgraph/executive-assistant/tests/hybriddb/benchmarks/__init__.py
+mkdir -p /Users/eddy/Developer/Langgraph/assistant/tests/hybriddb/benchmarks
+touch /Users/eddy/Developer/Langgraph/assistant/tests/hybriddb/benchmarks/__init__.py
 mkdir -p /Users/eddy/Developer/Python/HybridDB/tests/benchmarks
 touch /Users/eddy/Developer/Python/HybridDB/tests/benchmarks/__init__.py
 mkdir -p /Users/eddy/Developer/Python/HybridDB/scripts
@@ -107,7 +107,7 @@ mkdir -p /Users/eddy/Developer/Python/HybridDB/scripts
 - [ ] **Step 4: Verify directory structure**
 
 ```bash
-ls -la /Users/eddy/Developer/Langgraph/executive-assistant/tests/hybriddb/benchmarks/
+ls -la /Users/eddy/Developer/Langgraph/assistant/tests/hybriddb/benchmarks/
 ls -la /Users/eddy/Developer/Python/HybridDB/tests/benchmarks/
 ```
 
@@ -135,7 +135,7 @@ This file provides all shared utilities: text generation, scale configuration, e
 
 - [ ] **Step 1: Write helpers.py**
 
-Create `/Users/eddy/Developer/Langgraph/executive-assistant/tests/hybriddb/benchmarks/helpers.py`:
+Create `/Users/eddy/Developer/Langgraph/assistant/tests/hybriddb/benchmarks/helpers.py`:
 
 ```python
 """Shared helpers for HybridDB benchmarks: data generation, embedding cache, scale."""
@@ -309,7 +309,7 @@ def compute_recall(
 - [ ] **Step 2: Copy to standalone repo**
 
 ```bash
-cp /Users/eddy/Developer/Langgraph/executive-assistant/tests/hybriddb/benchmarks/helpers.py \
+cp /Users/eddy/Developer/Langgraph/assistant/tests/hybriddb/benchmarks/helpers.py \
    /Users/eddy/Developer/Python/HybridDB/tests/benchmarks/helpers.py
 ```
 
@@ -330,7 +330,7 @@ Expected: both print "ok".
 
 - [ ] **Step 1: Write in-repo conftest**
 
-Create `/Users/eddy/Developer/Langgraph/executive-assistant/tests/hybriddb/benchmarks/conftest.py`:
+Create `/Users/eddy/Developer/Langgraph/assistant/tests/hybriddb/benchmarks/conftest.py`:
 
 ```python
 """conftest for HybridDB benchmarks — in-repo variant."""
@@ -475,7 +475,7 @@ Expected: both print "ok".
 
 - [ ] **Step 1: Write test_search.py**
 
-Create `/Users/eddy/Developer/Langgraph/executive-assistant/tests/hybriddb/benchmarks/test_search.py`:
+Create `/Users/eddy/Developer/Langgraph/assistant/tests/hybriddb/benchmarks/test_search.py`:
 
 ```python
 """Search benchmarks: keyword, vector, hybrid on TEXT and LONGTEXT columns."""
@@ -590,7 +590,7 @@ def test_hybrid_search_longtext(benchmark, db, scale):
 - [ ] **Step 2: Copy to standalone**
 
 ```bash
-cp /Users/eddy/Developer/Langgraph/executive-assistant/tests/hybriddb/benchmarks/test_search.py \
+cp /Users/eddy/Developer/Langgraph/assistant/tests/hybriddb/benchmarks/test_search.py \
    /Users/eddy/Developer/Python/HybridDB/tests/benchmarks/test_search.py
 ```
 
@@ -609,7 +609,7 @@ Expected: lists all 6 test functions.
 
 - [ ] **Step 1: Write test_graph.py**
 
-Create `/Users/eddy/Developer/Langgraph/executive-assistant/tests/hybriddb/benchmarks/test_graph.py`:
+Create `/Users/eddy/Developer/Langgraph/assistant/tests/hybriddb/benchmarks/test_graph.py`:
 
 ```python
 """Graph benchmarks: node/edge CRUD, traversal, algorithms."""
@@ -723,7 +723,7 @@ def test_decay_edges(benchmark, graph_db, scale):
 - [ ] **Step 2: Copy to standalone**
 
 ```bash
-cp /Users/eddy/Developer/Langgraph/executive-assistant/tests/hybriddb/benchmarks/test_graph.py \
+cp /Users/eddy/Developer/Langgraph/assistant/tests/hybriddb/benchmarks/test_graph.py \
    /Users/eddy/Developer/Python/HybridDB/tests/benchmarks/test_graph.py
 ```
 
@@ -742,7 +742,7 @@ Expected: lists all 6 test functions.
 
 - [ ] **Step 1: Write test_analytics.py**
 
-Create `/Users/eddy/Developer/Langgraph/executive-assistant/tests/hybriddb/benchmarks/test_analytics.py`:
+Create `/Users/eddy/Developer/Langgraph/assistant/tests/hybriddb/benchmarks/test_analytics.py`:
 
 ```python
 """DuckDB analytics benchmarks: aggregation, group-by, join, overhead."""
@@ -824,7 +824,7 @@ def test_analytics_overhead(benchmark, analytics_db, scale):
 - [ ] **Step 2: Copy to standalone**
 
 ```bash
-cp /Users/eddy/Developer/Langgraph/executive-assistant/tests/hybriddb/benchmarks/test_analytics.py \
+cp /Users/eddy/Developer/Langgraph/assistant/tests/hybriddb/benchmarks/test_analytics.py \
    /Users/eddy/Developer/Python/HybridDB/tests/benchmarks/test_analytics.py
 ```
 
@@ -843,7 +843,7 @@ Expected: lists all 4 test functions.
 
 - [ ] **Step 1: Write test_concurrent.py**
 
-Create `/Users/eddy/Developer/Langgraph/executive-assistant/tests/hybriddb/benchmarks/test_concurrent.py`:
+Create `/Users/eddy/Developer/Langgraph/assistant/tests/hybriddb/benchmarks/test_concurrent.py`:
 
 ```python
 """Concurrent access benchmarks: read, write, mixed contention."""
@@ -966,7 +966,7 @@ def test_read_write_mixed(benchmark, concurrent_db, scale):
 - [ ] **Step 2: Copy to standalone**
 
 ```bash
-cp /Users/eddy/Developer/Langgraph/executive-assistant/tests/hybriddb/benchmarks/test_concurrent.py \
+cp /Users/eddy/Developer/Langgraph/assistant/tests/hybriddb/benchmarks/test_concurrent.py \
    /Users/eddy/Developer/Python/HybridDB/tests/benchmarks/test_concurrent.py
 ```
 
@@ -985,7 +985,7 @@ Expected: lists all 3 test functions.
 
 - [ ] **Step 1: Write test_storage.py**
 
-Create `/Users/eddy/Developer/Langgraph/executive-assistant/tests/hybriddb/benchmarks/test_storage.py`:
+Create `/Users/eddy/Developer/Langgraph/assistant/tests/hybriddb/benchmarks/test_storage.py`:
 
 ```python
 """Storage benchmarks: disk usage, ChromaDB segment growth."""
@@ -1078,7 +1078,7 @@ def test_chroma_bloat_check(benchmark, db, scale):
 - [ ] **Step 2: Copy to standalone**
 
 ```bash
-cp /Users/eddy/Developer/Langgraph/executive-assistant/tests/hybriddb/benchmarks/test_storage.py \
+cp /Users/eddy/Developer/Langgraph/assistant/tests/hybriddb/benchmarks/test_storage.py \
    /Users/eddy/Developer/Python/HybridDB/tests/benchmarks/test_storage.py
 ```
 
@@ -1097,7 +1097,7 @@ Expected: lists all 4 test functions.
 
 - [ ] **Step 1: Write compare_results.py**
 
-Create `/Users/eddy/Developer/Langgraph/executive-assistant/scripts/compare_results.py`:
+Create `/Users/eddy/Developer/Langgraph/assistant/scripts/compare_results.py`:
 
 ```python
 #!/usr/bin/env python3
@@ -1239,7 +1239,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: Copy to standalone**
 
 ```bash
-cp /Users/eddy/Developer/Langgraph/executive-assistant/scripts/compare_results.py \
+cp /Users/eddy/Developer/Langgraph/assistant/scripts/compare_results.py \
    /Users/eddy/Developer/Python/HybridDB/scripts/compare_results.py
 ```
 
@@ -1258,7 +1258,7 @@ Expected: prints usage.
 
 - [ ] **Step 1: Write run_benchmarks.sh**
 
-Create `/Users/eddy/Developer/Langgraph/executive-assistant/scripts/run_benchmarks.sh`:
+Create `/Users/eddy/Developer/Langgraph/assistant/scripts/run_benchmarks.sh`:
 
 ```bash
 #!/usr/bin/env bash
@@ -1305,7 +1305,7 @@ echo "Benchmark complete. Results saved to $RESULTS_DIR/"
 Make executable:
 
 ```bash
-chmod +x /Users/eddy/Developer/Langgraph/executive-assistant/scripts/run_benchmarks.sh
+chmod +x /Users/eddy/Developer/Langgraph/assistant/scripts/run_benchmarks.sh
 ```
 
 - [ ] **Step 2: Copy to standalone (with path adjustment)**
@@ -1364,7 +1364,7 @@ chmod +x /Users/eddy/Developer/Python/HybridDB/scripts/run_benchmarks.sh
 
 - [ ] **Step 3: Add results/ to .gitignore in both repos**
 
-Add to `executive-assistant/.gitignore` and `HybridDB/.gitignore`:
+Add to `assistant/.gitignore` and `HybridDB/.gitignore`:
 
 ```
 # Benchmark results
@@ -1378,7 +1378,7 @@ results/
 - [ ] **Step 1: Run smoke benchmarks in in-repo**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 uv run pytest tests/hybriddb/benchmarks/ \
     --benchmark-only -x --benchmark-json=results/smoke-test.json --timeout=120
 ```
@@ -1398,7 +1398,7 @@ Expected: all pass identically.
 - [ ] **Step 3: Test compare_results.py**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 uv run python scripts/compare_results.py results/smoke-test.json results/smoke-test.json
 ```
 
@@ -1407,7 +1407,7 @@ Expected: shows a comparison table with 0% change across all tests.
 - [ ] **Step 4: Commit all changes in both repos**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add tests/hybriddb/benchmarks/ scripts/compare_results.py scripts/run_benchmarks.sh pyproject.toml .gitignore results/
 git commit -m "feat: HybridDB benchmark suite (pytest-benchmark, 6 test modules, comparison tool)"
 ```

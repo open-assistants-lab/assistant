@@ -520,7 +520,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 const SizedBox(height: 24),
                 _sectionHeader('About', tokens),
                 _tile('Version', '0.1.0', Symbols.info, readOnly: true, tokens: tokens),
-                _tile('Data Directory', '~/Executive Assistant', Symbols.folder, readOnly: true, tokens: tokens),
+                _tile('Data Directory', '~/Assistant', Symbols.folder, readOnly: true, tokens: tokens),
 
                 const SizedBox(height: 24),
                 Center(

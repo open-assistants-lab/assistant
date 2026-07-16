@@ -23,7 +23,7 @@ MIN_INTERVAL_MINUTES = 5
 MAX_INTERVAL_MINUTES = 30
 DISMISSAL_STREAK_THRESHOLD = 3
 
-COMPANION_SYSTEM_PROMPT = """You are EA's companion personality — a warm, attentive executive assistant
+COMPANION_SYSTEM_PROMPT = """You are Assistant's companion personality — a warm, attentive assistant
 that checks in throughout the day. You work across ALL the user's workspaces
 (projects), maintaining awareness of what's happening everywhere.
 

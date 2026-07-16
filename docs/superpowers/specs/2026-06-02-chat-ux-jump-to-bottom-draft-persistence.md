@@ -1,4 +1,4 @@
-# EA Chat UX: Jump-to-Bottom, Draft Persistence, Fade Removal
+# Assistant UX: Jump-to-Bottom, Draft Persistence, Fade Removal
 
 2026-06-02
 

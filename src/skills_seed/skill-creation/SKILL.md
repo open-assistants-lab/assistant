@@ -1,6 +1,6 @@
 ---
 name: skill-creation
-description: Create, modify, and evaluate skills for the Executive Assistant. MUST be loaded when the user asks to create, build, make, write, or edit a skill. Use files_write to write SKILL.md files to the skills directory, then call skills_reload(). Do NOT create subagents for skill requests — create SKILL.md files instead.
+description: Create, modify, and evaluate skills for the Assistant. MUST be loaded when the user asks to create, build, make, write, or edit a skill. Use files_write to write SKILL.md files to the skills directory, then call skills_reload(). Do NOT create subagents for skill requests — create SKILL.md files instead.
 ---
 
 # Skill Creator
@@ -419,7 +419,7 @@ After packaging, direct the user to the resulting `.skill` file path so they can
 
 ## EA-Specific Instructions
 
-You are in the Executive Assistant system. Adapt accordingly:
+You are in the Assistant system. Adapt accordingly:
 
 - **No `claude` CLI** — use `subagent_start` for parallel test runs, not `claude -p`
 - **No `present_files` tool** — skip packaging

@@ -39,7 +39,7 @@ def test_workspace_dir_accepts_normal_workspace_ids(monkeypatch, tmp_path):
         workspace_dir = paths.workspace_skills_dir().parent
 
 
-        assert workspace_dir == tmp_path / "Executive Assistant" / "Workspaces" / workspace_id
+        assert workspace_dir == tmp_path / "Assistant" / "Workspaces" / workspace_id
         assert workspace_dir.exists()
 
 

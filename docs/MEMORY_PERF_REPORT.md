@@ -405,7 +405,7 @@ If the goal is **remove over optimize**, here's the priority order:
 uv run python tests/perf/test_memory_pipeline.py --component --runs 10
 
 # WebSocket end-to-end (requires server)
-uv run ea http &
+uv run assistant http &
 uv run python tests/perf/test_memory_pipeline.py --ws --runs 5
 ```
 

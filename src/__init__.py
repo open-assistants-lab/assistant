@@ -1,4 +1,4 @@
-"""Executive Assistant - Custom SDK agent framework."""
+"""Assistant - Custom SDK agent framework."""
 
 from src.config import get_settings, reload_settings
 from src.sdk.providers.factory import create_model_from_config

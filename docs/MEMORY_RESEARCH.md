@@ -1,6 +1,6 @@
 # Memory System Reference Research
 
-Deep analysis of four memory system references, compiled for comparison with our Executive Assistant memory design.
+Deep analysis of four memory system references, compiled for comparison with our Assistant memory design.
 
 ---
 

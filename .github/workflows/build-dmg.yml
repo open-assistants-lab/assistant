@@ -11,9 +11,9 @@ jobs:
     runs-on: macos-latest
 
     env:
-      APP_NAME: Executive Assistant
+      APP_NAME: Assistant
       BUNDLE_ID: com.executiveassistant.flutterApp
-      SPARKLE_FEED_URL: ${{ vars.SPARKLE_FEED_URL || 'https://raw.githubusercontent.com/open-assistants-lab/executive-assistant/main/flutter_app/appcast.xml' }}
+      SPARKLE_FEED_URL: ${{ vars.SPARKLE_FEED_URL || 'https://raw.githubusercontent.com/open-assistants-lab/assistant/main/flutter_app/appcast.xml' }}
       SPARKLE_ED_KEY: ${{ secrets.SPARKLE_ED_KEY }}
       SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
       APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
@@ -184,7 +184,7 @@ jobs:
         with:
           name: ${{ github.ref_name }}
           body: |
-            Executive Assistant ${{ github.ref_name }}
+            Assistant ${{ github.ref_name }}
 
             Download the DMG below, drag to Applications.
           files: ${{ env.dmg }}

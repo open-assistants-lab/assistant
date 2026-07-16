@@ -172,10 +172,10 @@ def nango_to_connectkit(provider_name: str, data: dict) -> dict | None:
 
 def main():
     providers = yaml.safe_load(open(
-        "/Users/eddy/Developer/Langgraph/executive-assistant/docs/reference/nango_providers.yaml"
+        "/Users/eddy/Developer/Langgraph/assistant/docs/reference/nango_providers.yaml"
     ))
     output_dir = Path(
-        "/Users/eddy/Developer/Langgraph/executive-assistant/packages/connectkit/connectors"
+        "/Users/eddy/Developer/Langgraph/assistant/packages/connectkit/connectors"
     )
     existing = {f.stem for f in output_dir.glob("*.yaml")}
 

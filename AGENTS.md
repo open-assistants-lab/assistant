@@ -1,4 +1,4 @@
-# Executive Assistant - Agent Guidelines
+# Assistant - Agent Guidelines
 
 This document provides guidelines for agents working on this codebase.
 
@@ -18,7 +18,7 @@ uv sync --extra dev  # runtime + development tools
 
 ### Running the Application
 ```bash
-uv run ea http      # Start HTTP server (with SSE streaming)
+uv run assistant http      # Start HTTP server (with SSE streaming)
 ```
 
 ### Linting and Type Checking
@@ -152,7 +152,7 @@ from pydantic import BaseModel, Field
 
 class AgentConfig(BaseModel):
     """Agent configuration."""
-    name: str = Field(default="Executive Assistant")
+    name: str = Field(default="Assistant")
     model: str = Field(default="ollama:minimax-m2.5")
     
     class Config:
@@ -374,7 +374,7 @@ The logger automatically redacts fields containing: `api_key`, `password`, `secr
 ## 6. Project Structure
 
 ```
-executive-assistant/
+assistant/
 ├── src/
 │   ├── __init__.py
 │   ├── __main__.py              # CLI entry point

@@ -91,7 +91,7 @@ Rests above a dimmer overlay. Dragging transitions smoothly — friction-based, 
 
 **Accessibility:** No more than 3 color changes per second (prevent flashing). All video with captions + transcripts. Respect `prefers-reduced-motion`.
 
-## 10. Implementing in EA's Flutter App
+## 10. Implementing in Assistant's Flutter App
 
 **Phase 1 (quick wins, ~100 lines):**
 - Replace GoRouter default transitions with 4 named builders (upward, sideways, modal, sheet)

@@ -10,7 +10,7 @@ Sends 100 memory-related interactions through the WS endpoint and validates:
 
 Usage:
     # Start server first
-    uv run ea http &
+    uv run assistant http &
     # Run test
     uv run python tests/benchmarks/test_ws_memory_100.py
 """

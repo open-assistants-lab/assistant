@@ -267,7 +267,7 @@ git commit -m "feat: persist conversation summaries to MessageStore"
 - [ ] **Step 1: Start the server**
 
 ```bash
-uv run ea http
+uv run assistant http
 ```
 
 - [ ] **Step 2: Send enough messages to trigger summarization (>50K tokens)**

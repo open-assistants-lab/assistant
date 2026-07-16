@@ -228,7 +228,7 @@ async def run_ws_benchmark(num_runs: int) -> dict:
                 return (time.perf_counter() - start) * 1000
 
     print(f"Connecting to {ws_url}")
-    print("Make sure 'uv run ea http' is running on port 8080")
+    print("Make sure 'uv run assistant http' is running on port 8080")
 
     try:
         import websockets

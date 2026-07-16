@@ -1,7 +1,7 @@
-.PHONY: help db-up db-down db-logs ea cli http test
+.PHONY: help db-up db-down db-logs assistant cli http test
 
 help:
-	@echo "Executive Assistant - Make Commands"
+	@echo "Assistant - Make Commands"
 	@echo ""
 	@echo "Database:"
 	@echo "  make db-up       - Start PostgreSQL"
@@ -9,8 +9,8 @@ help:
 	@echo "  make db-logs     - View PostgreSQL logs"
 	@echo ""
 	@echo "Run Commands:"
-	@echo "  make ea cli      - Start CLI"
-	@echo "  make ea http    - Start HTTP server"
+	@echo "  make assistant cli      - Start CLI"
+	@echo "  make assistant http    - Start HTTP server"
 	@echo ""
 	@echo "Test:"
 	@echo "  make test        - Run tests"
@@ -24,11 +24,11 @@ db-down:
 db-logs:
 	cd docker && docker compose logs -f postgres
 
-ea cli:
-	uv run ea cli
+assistant cli:
+	uv run assistant cli
 
-ea http:
-	uv run ea http
+assistant http:
+	uv run assistant http
 
 test:
 	uv run pytest

@@ -1,6 +1,6 @@
 ---
 name: subagent-creation
-description: Create, modify, and test subagents for the Executive Assistant. MUST be loaded when the user asks to create, build, make, write, or edit a subagent. Use files_write to write PROFILE.md files to the subagents directory. Do NOT create skills for subagent requests — create AgentProfile subagents instead.
+description: Create, modify, and test subagents for the Assistant. MUST be loaded when the user asks to create, build, make, write, or edit a subagent. Use files_write to write PROFILE.md files to the subagents directory. Do NOT create skills for subagent requests — create AgentProfile subagents instead.
 ---
 
 # Subagent Creator
@@ -173,7 +173,7 @@ For production subagents, test multiple prompts and compare. Aggregate results i
 
 ## EA-Specific Instructions
 
-You are in the Executive Assistant system. Adapt accordingly:
+You are in the Assistant system. Adapt accordingly:
 
 - **No `claude` CLI** — use `subagent_delegate` or `subagent_start` for testing
 - **Subagents directory** — shown in your system prompt

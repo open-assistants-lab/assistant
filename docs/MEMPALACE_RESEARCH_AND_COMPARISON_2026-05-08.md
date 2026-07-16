@@ -51,7 +51,7 @@ Query-time wing/room scoping acts as metadata filtering — narrow search to the
 
 ---
 
-## 2. EA's LongMemEval Benchmark Infrastructure
+## 2. Assistant's LongMemEval Benchmark Infrastructure
 
 ### Two Evaluation Systems
 
@@ -91,7 +91,7 @@ Both EA and MemPalace use `sentence-transformers/all-MiniLM-L6-v2` (384 dimensio
 
 ## 3. Index Granularity: Per-Message vs Per-Session
 
-### EA's Production Design: Per-Message Indexing
+### Assistant's Production Design: Per-Message Indexing
 
 Every individual message turn is a separate ChromaDB document. This is **not** a benchmark quirk — it's the production design:
 
@@ -124,7 +124,7 @@ MemPalace embeds **entire sessions** as single documents. A session with 12 turn
 
 ### Impact on R@5
 
-**EA's per-message indexing causes a structural problem for R@5 calculation:**
+**Assistant's per-message indexing causes a structural problem for R@5 calculation:**
 
 If session "session_42" has 20 turns, the hybrid search top-10 could return 8 messages from `session_42` and only 2 other sessions. The `set()` around `retrieved_ids` at `eval.py:169` deduplicates by session, but the top-10 slots were already consumed — other sessions never got a chance to be retrieved.
 
@@ -171,11 +171,11 @@ The `search_hybrid()` at `messages.py:174` has no session-level aggregation — 
 
 ---
 
-## 5. Critical Gaps Likely Lowering EA's Score
+## 5. Critical Gaps Likely Lowering Assistant's Score
 
 ### G1: Temporal Blindness
 
-EA's `recency_weight=0.3` blends recency linearly into the search score. It doesn't know the question's temporal context. "What did I do last month?" gets the same search as "What did I do yesterday?". MemPalace boosts sessions near the question's reference date.
+Assistant's `recency_weight=0.3` blends recency linearly into the search score. It doesn't know the question's temporal context. "What did I do last month?" gets the same search as "What did I do yesterday?". MemPalace boosts sessions near the question's reference date.
 
 **Fix**: Extract temporal cues from the question (dates, "last week", "yesterday") and use them to weight session timestamps in retrieval.
 
@@ -238,10 +238,10 @@ The 96.6% raw MemPalace number is the target. EA can match it by fixing the stru
 
 ## 8. Why This Matters for EA
 
-EA's current memory pipeline does LLM fact extraction → `upsert_fact_memory`. MemPalace's research shows this is the wrong direction — you lose raw conversational context in exchange for lossy extracts that miss relationships, alternatives considered, and tradeoffs discussed.
+Assistant's current memory pipeline does LLM fact extraction → `upsert_fact_memory`. MemPalace's research shows this is the wrong direction — you lose raw conversational context in exchange for lossy extracts that miss relationships, alternatives considered, and tradeoffs discussed.
 
 The most actionable finding: **96.6% R@5 is achievable with nothing but raw message storage + ChromaDB + all-MiniLM-L6-v2**. EA already has all three. The gap is that EA routes through lossy LLM extraction instead of searching raw messages directly for memory queries.
 
-EA's `memory_search` tool already does raw message search — the fact extraction middleware is actively discarding information (via the dedup bug, scalar-only extraction, and missing historical extraction). The `mempalace` extraction mode in `evaluate_qa_direct()` (line 534) is already wired up and just needs the `LME_EXTRACTION_MODE=mempalace` env var to test verbatim-only retrieval.
+Assistant's `memory_search` tool already does raw message search — the fact extraction middleware is actively discarding information (via the dedup bug, scalar-only extraction, and missing historical extraction). The `mempalace` extraction mode in `evaluate_qa_direct()` (line 534) is already wired up and just needs the `LME_EXTRACTION_MODE=mempalace` env var to test verbatim-only retrieval.
 
 **The path to 96%+ is shorter than it looks** — the infrastructure exists, it just needs 3-4 focused fixes and the benchmark to actually be run.

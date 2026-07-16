@@ -1,4 +1,4 @@
-# Executive Assistant — Intro Website Design
+# Assistant — Intro Website Design
 
 **Date:** 2026-05-25
 **Status:** Approved design
@@ -38,13 +38,13 @@ Inherits from Flutter app design tokens (`EA`):
 Two dots — one solid emerald, one ring — connected by a line. The larger solid dot reaches toward the smaller ring dot. Metaphor: connection, relationship, an assistant that pays attention.
 
 ### Wordmark
-"Executive Assistant" in Inter 600, `#E6E6E6`, -0.012em letter-spacing.
+"Assistant" in Inter 600, `#E6E6E6`, -0.012em letter-spacing.
 
 ---
 
 ## 3. Hero Section
 
-**Headline:** "Your executive assistant. One that gets you."
+**Headline:** "Your assistant. One that gets you."
 **Tagline:** "Learns your preferences, your workflow, what matters to you. Gets smarter every conversation — while your data stays on your machine."
 **Tag:** "Open Source · Self-Hosted"
 **CTAs:** "Download for macOS" (primary emerald) + "View on GitHub" (outline)
@@ -111,7 +111,7 @@ Card styling: `#0E0F11` background, `#1F1F22` border, 8px radius, 20px padding. 
 ## 8. Footer
 
 4-column grid:
-- **Brand:** Connected logo + "Executive Assistant" + tagline
+- **Brand:** Connected logo + "Assistant" + tagline
 - **Product:** Features, Docs, GitHub
 - **Community:** Discord, Twitter, Contributing
 - **Legal:** License (MIT), Privacy
@@ -150,7 +150,7 @@ Favicon version: Same SVG scaled to 16×16, viewBox cropped to 14×14 centered.
 
 ## 11. Full Landing Page Scroll Order
 
-1. **Nav bar:** Connected mark + "Executive Assistant" | Features Docs GitHub [Get Started]
+1. **Nav bar:** Connected mark + "Assistant" | Features Docs GitHub [Get Started]
 2. **Hero:** Tag → Headline → Sub → Buttons → Screenshot
 3. **Features (2×2 grid):** Section label → Headline → Sub → 4 cards
 4. **Differentiation (4 pillars):** Section label → Headline → Sub → 4 pillar cards

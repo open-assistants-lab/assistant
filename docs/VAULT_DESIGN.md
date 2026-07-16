@@ -1,6 +1,6 @@
 # Agent-First Vault — Design Document
 
-> The design thinking, research, and final architecture for the Executive Assistant's credential vault.
+> The design thinking, research, and final architecture for the Assistant's credential vault.
 
 ---
 
@@ -21,7 +21,7 @@
 
 ## 1. Problem Statement
 
-The Executive Assistant agent runs autonomously — it calls `email_connect` at 3am, queries databases, and accesses APIs. It needs credentials to do this, but:
+The Assistant agent runs autonomously — it calls `email_connect` at 3am, queries databases, and accesses APIs. It needs credentials to do this, but:
 
 - **No existing vault has per-service/per-category approval for agent auto-injection.** This is the gap.
 - Current email tools store passwords in **plaintext in SQLite** (`email_db.py`).
@@ -412,10 +412,10 @@ async def unlock_vault(user_id: str) -> Vault:
 import keyring
 
 # Store master key in OS keychain
-keyring.set_password("executive-assistant", f"vault-{user_id}", master_key_hex)
+keyring.set_password("assistant", f"vault-{user_id}", master_key_hex)
 
 # Retrieve master key from OS keychain
-master_key_hex = keyring.get_password("executive-assistant", f"vault-{user_id}")
+master_key_hex = keyring.get_password("assistant", f"vault-{user_id}")
 ```
 
 ---

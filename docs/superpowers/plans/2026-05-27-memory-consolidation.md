@@ -4,7 +4,7 @@
 
 **Goal:** Consolidate the 3-layer memory system (MessageStore, ObservationStore, MemoryStore) into a single 2-tier pipeline (Observer → Reflector) with two tables (observations + reflections), rename message-read tools, and retire ~4,100 lines of dead code.
 
-**Architecture:** Two background agents (Observer at ~8K tokens, Reflector at 24h intervals) write to a unified `MemoryStore` at `~/Executive Assistant/Memory/global/`. Tools split into `message_*` (reads `MessageStore`) and `memory_*` (reads `MemoryStore`). No auto-injection — agent calls tools explicitly. No compression — HybridDB FTS5 relevance ranking replaces summarization.
+**Architecture:** Two background agents (Observer at ~8K tokens, Reflector at 24h intervals) write to a unified `MemoryStore` at `~/Assistant/Memory/global/`. Tools split into `message_*` (reads `MessageStore`) and `memory_*` (reads `MemoryStore`). No auto-injection — agent calls tools explicitly. No compression — HybridDB FTS5 relevance ranking replaces summarization.
 
 **Tech Stack:** Python 3.11+, HybridDB (SQLite + FTS5 + ChromaDB), Pydantic, asyncio
 

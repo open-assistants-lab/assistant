@@ -962,10 +962,10 @@ git commit -m "feat: Skills and Subagents sidebar panels with scope switcher"
 
 ### Task 8: Full integration test (manual)
 
-- [ ] **Step 1: Start EA backend and Flutter app**
+- [ ] **Step 1: Start Assistant backend and Flutter app**
 
 ```bash
-uv run ea http &
+uv run assistant http &
 cd flutter_app && flutter run -d macos
 ```
 

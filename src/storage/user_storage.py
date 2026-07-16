@@ -1,4 +1,4 @@
-"""User storage for Executive Assistant."""
+"""User storage for Assistant."""
 
 from pathlib import Path
 

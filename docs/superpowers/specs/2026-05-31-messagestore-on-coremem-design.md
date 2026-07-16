@@ -10,7 +10,7 @@
 
 The EA codebase grew two independent storage layers for conversation messages.
 
-**MessageStore** (`src/storage/messages.py`, ~355 lines) is the original EA storage, wrapping EA's custom `HybridDB` (forked from the OSS `hybriddb` package with added embedding model validation, DuckDB sync, and edge rules). It provides CRUD: `add_message`, `get_recent_messages`, `get_messages_by_session_id`, `get_messages_with_summary`, `delete_messages_for_workspace`, and three search methods (`search_keyword`, `search_vector`, `search_hybrid`). It owns the `id INTEGER PRIMARY KEY AUTOINCREMENT` schema.
+**MessageStore** (`src/storage/messages.py`, ~355 lines) is the original EA storage, wrapping Assistant's custom `HybridDB` (forked from the OSS `hybriddb` package with added embedding model validation, DuckDB sync, and edge rules). It provides CRUD: `add_message`, `get_recent_messages`, `get_messages_by_session_id`, `get_messages_with_summary`, `delete_messages_for_workspace`, and three search methods (`search_keyword`, `search_vector`, `search_hybrid`). It owns the `id INTEGER PRIMARY KEY AUTOINCREMENT` schema.
 
 **CoreMem** (`CoreMem/coremem/`, ~800 lines total) is a retrieval-focused OSS library wrapping the OSS `hybriddb.HybridDB`. It provides `search_enhanced` (multi-query expansion + cross-encoder reranking + heuristics), `search`, `export`, `import_batch`. It is self-contained with no EA dependencies, and originally used `id TEXT PRIMARY KEY`.
 
@@ -22,7 +22,7 @@ During the metadata/filters implementation (May 2026) we discovered three classe
 
 1. **Schema mismatch** — MessageStore creates `id INTEGER PRIMARY KEY AUTOINCREMENT`. CoreMem's `_ensure_tables()` declared `id TEXT PRIMARY KEY`. With `IF NOT EXISTS`, when MessageStore creates first, CoreMem's table creation silently no-ops. But `ingest_batch()` with string UUIDs fails against the INTEGER column.
 
-2. **Embedding model stamping** — OSS HybridDB stamps `_schema.embedding_model = "chroma:all-MiniLM-L6-v2"` on `create_table()`. EA's HybridDB checks `_schema.embedding_model` on connect and raises `EmbeddingModelError` if it doesn't match its own default `"unknown"`. Each system overwrites the other's stamp via `INSERT OR REPLACE`.
+2. **Embedding model stamping** — OSS HybridDB stamps `_schema.embedding_model = "chroma:all-MiniLM-L6-v2"` on `create_table()`. Assistant's HybridDB checks `_schema.embedding_model` on connect and raises `EmbeddingModelError` if it doesn't match its own default `"unknown"`. Each system overwrites the other's stamp via `INSERT OR REPLACE`.
 
 3. **Duplicate logic** — Both implement `json_extract` metadata queries independently (MessageStore in `get_messages_by_session_id`, `get_recent_messages_for_workspace`, `delete_messages_for_workspace`; CoreMem in `_matches_filters()` and `list()`).
 
@@ -364,7 +364,7 @@ def _in_date_range(ts: datetime | None,
 
 2. **Date-range performance** — `get_messages` fetches up to 10K and post-filters in Python. For companion scheduler (the only caller), this is a once-daily query. Acceptable. If needed later, add `date_range` param to `export()`.
 
-3. **`id` type in HTTP** — EA's HTTP API returns `Message.id` as `int`. CoreMem returns `str`. Adapter converts via `int(m.id)`. Safe cast since IDs are auto-increment integers from HybridDB.
+3. **`id` type in HTTP** — Assistant's HTTP API returns `Message.id` as `int`. CoreMem returns `str`. Adapter converts via `int(m.id)`. Safe cast since IDs are auto-increment integers from HybridDB.
 
 4. **`add_message_with_embedding`** — Only used in tests/benchmarks, never in production. Keep for backward compat but the production path (`add_message`) never uses custom embeddings.
 

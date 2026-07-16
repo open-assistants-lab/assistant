@@ -8,7 +8,7 @@ cd "$WORKDIR"
 
 echo "=== Starting backend ==="
 lsof -ti:8080 | xargs kill -9 2>/dev/null || true
-uv run ea http > /tmp/ea_frontend_test.log 2>&1 &
+uv run assistant http > /tmp/assistant_frontend_test.log 2>&1 &
 BACKEND=$!
 trap "kill $BACKEND $APP 2>/dev/null; wait $BACKEND $APP 2>/dev/null; true" EXIT
 sleep 10

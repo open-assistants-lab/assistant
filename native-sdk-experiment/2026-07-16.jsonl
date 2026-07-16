@@ -1,0 +1,95 @@
+{"timestamp": "2026-07-16T00:36:41.899141+10:00", "user_id": "system", "event": "subagent.scheduler.started", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T00:36:56.939353+10:00", "user_id": "default_user", "event": "mcp.starting_server", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "command": "uvx"}}
+{"timestamp": "2026-07-16T00:36:58.647521+10:00", "user_id": "default_user", "event": "mcp.server_started", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "tools": 3}}
+{"timestamp": "2026-07-16T00:36:58.647902+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.mcp_tools", "level": "info", "channel": "cli", "data": {"count": 3}}
+{"timestamp": "2026-07-16T00:36:59.651766+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.tools_loaded", "level": "info", "channel": "cli", "data": {"count": 85}}
+{"timestamp": "2026-07-16T00:37:00.187912+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.create_timing", "level": "info", "channel": "cli", "data": {"provider": "0.753s", "tools": "0.001s", "mcp": "2.715s", "middleware": "0.069s", "agentloop": "0.467s", "total": "4.005s"}}
+{"timestamp": "2026-07-16T00:37:00.188143+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.loop_created", "level": "info", "channel": "cli", "data": {"user_id": "native_sdk_chat", "workspace_id": "personal", "model": "deepseek:deepseek-v4-flash"}}
+{"timestamp": "2026-07-16T00:37:01.820498+10:00", "user_id": "native_sdk_chat", "event": "agent.response", "level": "info", "channel": "http", "data": {"response": "hi"}}
+{"timestamp": "2026-07-16T00:37:01.922378+10:00", "user_id": "system", "event": "companion.stopped", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T00:58:19.543322+10:00", "user_id": "system", "event": "subagent.scheduler.started", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T00:58:35.262427+10:00", "user_id": "default_user", "event": "mcp.starting_server", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "command": "uvx"}}
+{"timestamp": "2026-07-16T00:58:36.940150+10:00", "user_id": "default_user", "event": "mcp.server_started", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "tools": 3}}
+{"timestamp": "2026-07-16T00:58:36.940498+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.mcp_tools", "level": "info", "channel": "cli", "data": {"count": 3}}
+{"timestamp": "2026-07-16T00:58:37.928155+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.tools_loaded", "level": "info", "channel": "cli", "data": {"count": 85}}
+{"timestamp": "2026-07-16T00:58:38.458676+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.create_timing", "level": "info", "channel": "cli", "data": {"provider": "1.123s", "tools": "0.001s", "mcp": "2.669s", "middleware": "0.069s", "agentloop": "0.462s", "total": "4.323s"}}
+{"timestamp": "2026-07-16T00:58:38.458851+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.loop_created", "level": "info", "channel": "cli", "data": {"user_id": "native_sdk_chat", "workspace_id": "personal", "model": "deepseek:deepseek-v4-flash"}}
+{"timestamp": "2026-07-16T00:58:40.231350+10:00", "user_id": "native_sdk_chat", "event": "agent.response", "level": "info", "channel": "http", "data": {"response": "ok"}}
+{"timestamp": "2026-07-16T00:58:47.199214+10:00", "user_id": "system", "event": "companion.stopped", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T00:59:59.776673+10:00", "user_id": "system", "event": "subagent.scheduler.started", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:00:14.124609+10:00", "user_id": "default_user", "event": "mcp.starting_server", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "command": "uvx"}}
+{"timestamp": "2026-07-16T01:00:15.243091+10:00", "user_id": "default_user", "event": "mcp.server_started", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "tools": 3}}
+{"timestamp": "2026-07-16T01:00:15.243380+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.mcp_tools", "level": "info", "channel": "cli", "data": {"count": 3}}
+{"timestamp": "2026-07-16T01:00:16.216077+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.tools_loaded", "level": "info", "channel": "cli", "data": {"count": 85}}
+{"timestamp": "2026-07-16T01:00:16.742635+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.create_timing", "level": "info", "channel": "cli", "data": {"provider": "0.059s", "tools": "0.001s", "mcp": "2.095s", "middleware": "0.067s", "agentloop": "0.459s", "total": "2.682s"}}
+{"timestamp": "2026-07-16T01:00:16.742849+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.loop_created", "level": "info", "channel": "cli", "data": {"user_id": "native_sdk_chat", "workspace_id": "personal", "model": "deepseek:deepseek-v4-flash"}}
+{"timestamp": "2026-07-16T01:00:18.363195+10:00", "user_id": "native_sdk_chat", "event": "agent.response", "level": "info", "channel": "http", "data": {"response": "ok"}}
+{"timestamp": "2026-07-16T01:00:18.669213+10:00", "user_id": "system", "event": "companion.stopped", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:00:35.081166+10:00", "user_id": "system", "event": "subagent.scheduler.started", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:00:49.405369+10:00", "user_id": "default_user", "event": "mcp.starting_server", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "command": "uvx"}}
+{"timestamp": "2026-07-16T01:00:50.549209+10:00", "user_id": "default_user", "event": "mcp.server_started", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "tools": 3}}
+{"timestamp": "2026-07-16T01:00:50.549506+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.mcp_tools", "level": "info", "channel": "cli", "data": {"count": 3}}
+{"timestamp": "2026-07-16T01:00:51.542171+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.tools_loaded", "level": "info", "channel": "cli", "data": {"count": 85}}
+{"timestamp": "2026-07-16T01:00:52.083241+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.create_timing", "level": "info", "channel": "cli", "data": {"provider": "0.061s", "tools": "0.001s", "mcp": "2.140s", "middleware": "0.071s", "agentloop": "0.470s", "total": "2.743s"}}
+{"timestamp": "2026-07-16T01:00:52.083472+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.loop_created", "level": "info", "channel": "cli", "data": {"user_id": "native_sdk_chat", "workspace_id": "personal", "model": "deepseek:deepseek-v4-flash"}}
+{"timestamp": "2026-07-16T01:00:53.589246+10:00", "user_id": "native_sdk_chat", "event": "agent.response", "level": "info", "channel": "http", "data": {"response": "ok"}}
+{"timestamp": "2026-07-16T01:00:53.892498+10:00", "user_id": "system", "event": "companion.stopped", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:01:11.717722+10:00", "user_id": "system", "event": "subagent.scheduler.started", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:01:25.992511+10:00", "user_id": "default_user", "event": "mcp.starting_server", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "command": "uvx"}}
+{"timestamp": "2026-07-16T01:01:27.036049+10:00", "user_id": "default_user", "event": "mcp.server_started", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "tools": 3}}
+{"timestamp": "2026-07-16T01:01:27.036451+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.mcp_tools", "level": "info", "channel": "cli", "data": {"count": 3}}
+{"timestamp": "2026-07-16T01:01:28.028389+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.tools_loaded", "level": "info", "channel": "cli", "data": {"count": 85}}
+{"timestamp": "2026-07-16T01:01:28.560981+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.create_timing", "level": "info", "channel": "cli", "data": {"provider": "0.052s", "tools": "0.001s", "mcp": "2.038s", "middleware": "0.073s", "agentloop": "0.460s", "total": "2.623s"}}
+{"timestamp": "2026-07-16T01:01:28.561275+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.loop_created", "level": "info", "channel": "cli", "data": {"user_id": "native_sdk_chat", "workspace_id": "personal", "model": "deepseek:deepseek-v4-flash"}}
+{"timestamp": "2026-07-16T01:01:29.994862+10:00", "user_id": "native_sdk_chat", "event": "agent.response", "level": "info", "channel": "http", "data": {"response": "ok"}}
+{"timestamp": "2026-07-16T01:01:30.297862+10:00", "user_id": "system", "event": "companion.stopped", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:01:32.167891+10:00", "user_id": "system", "event": "subagent.scheduler.started", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:01:47.203869+10:00", "user_id": "system", "event": "companion.stopped", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:01:48.804469+10:00", "user_id": "system", "event": "subagent.scheduler.started", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:03:05.398185+10:00", "user_id": "system", "event": "companion.stopped", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:03:06.997920+10:00", "user_id": "system", "event": "subagent.scheduler.started", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:03:20.821394+10:00", "user_id": "system", "event": "companion.stopped", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:03:42.758568+10:00", "user_id": "system", "event": "subagent.scheduler.started", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:03:57.937929+10:00", "user_id": "default_user", "event": "mcp.starting_server", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "command": "uvx"}}
+{"timestamp": "2026-07-16T01:03:59.077207+10:00", "user_id": "default_user", "event": "mcp.server_started", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "tools": 3}}
+{"timestamp": "2026-07-16T01:03:59.077483+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.mcp_tools", "level": "info", "channel": "cli", "data": {"count": 3}}
+{"timestamp": "2026-07-16T01:04:00.055832+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.tools_loaded", "level": "info", "channel": "cli", "data": {"count": 85}}
+{"timestamp": "2026-07-16T01:04:00.587583+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.create_timing", "level": "info", "channel": "cli", "data": {"provider": "0.757s", "tools": "0.001s", "mcp": "2.120s", "middleware": "0.070s", "agentloop": "0.462s", "total": "3.410s"}}
+{"timestamp": "2026-07-16T01:04:00.587805+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.loop_created", "level": "info", "channel": "cli", "data": {"user_id": "native_sdk_chat", "workspace_id": "personal", "model": "deepseek:deepseek-v4-flash"}}
+{"timestamp": "2026-07-16T01:04:02.576314+10:00", "user_id": "native_sdk_chat", "event": "agent.response", "level": "info", "channel": "http", "data": {"response": "ok"}}
+{"timestamp": "2026-07-16T01:04:02.883838+10:00", "user_id": "system", "event": "companion.stopped", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:04:04.708436+10:00", "user_id": "system", "event": "subagent.scheduler.started", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:04:19.759546+10:00", "user_id": "system", "event": "companion.stopped", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:04:21.370189+10:00", "user_id": "system", "event": "subagent.scheduler.started", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:05:39.761154+10:00", "user_id": "default_user", "event": "mcp.starting_server", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "command": "uvx"}}
+{"timestamp": "2026-07-16T01:05:40.908048+10:00", "user_id": "default_user", "event": "mcp.server_started", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "tools": 3}}
+{"timestamp": "2026-07-16T01:05:40.908463+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.mcp_tools", "level": "info", "channel": "cli", "data": {"count": 3}}
+{"timestamp": "2026-07-16T01:05:41.902651+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.tools_loaded", "level": "info", "channel": "cli", "data": {"count": 85}}
+{"timestamp": "2026-07-16T01:05:42.437402+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.create_timing", "level": "info", "channel": "cli", "data": {"provider": "0.063s", "tools": "0.001s", "mcp": "2.144s", "middleware": "0.071s", "agentloop": "0.464s", "total": "2.743s"}}
+{"timestamp": "2026-07-16T01:05:42.437574+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.loop_created", "level": "info", "channel": "cli", "data": {"user_id": "native_sdk_chat", "workspace_id": "personal", "model": "deepseek:deepseek-v4-flash"}}
+{"timestamp": "2026-07-16T01:05:43.813476+10:00", "user_id": "native_sdk_chat", "event": "agent.response", "level": "info", "channel": "http", "data": {"response": "hi\n\nhi"}}
+{"timestamp": "2026-07-16T01:05:44.120805+10:00", "user_id": "system", "event": "companion.stopped", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:05:46.005318+10:00", "user_id": "system", "event": "subagent.scheduler.started", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:05:59.536744+10:00", "user_id": "system", "event": "companion.stopped", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:38:56.232421+10:00", "user_id": "system", "event": "subagent.scheduler.started", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:39:16.554171+10:00", "user_id": "default_user", "event": "mcp.starting_server", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "command": "uvx"}}
+{"timestamp": "2026-07-16T01:39:18.651707+10:00", "user_id": "default_user", "event": "mcp.server_started", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "tools": 3}}
+{"timestamp": "2026-07-16T01:39:18.652058+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.mcp_tools", "level": "info", "channel": "cli", "data": {"count": 3}}
+{"timestamp": "2026-07-16T01:39:19.637638+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.tools_loaded", "level": "info", "channel": "cli", "data": {"count": 85}}
+{"timestamp": "2026-07-16T01:39:20.183697+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.create_timing", "level": "info", "channel": "cli", "data": {"provider": "0.945s", "tools": "0.001s", "mcp": "3.086s", "middleware": "0.076s", "agentloop": "0.470s", "total": "4.579s"}}
+{"timestamp": "2026-07-16T01:39:20.183897+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.loop_created", "level": "info", "channel": "cli", "data": {"user_id": "native_sdk_chat", "workspace_id": "personal", "model": "deepseek:deepseek-v4-flash"}}
+{"timestamp": "2026-07-16T01:39:22.064730+10:00", "user_id": "native_sdk_chat", "event": "agent.response", "level": "info", "channel": "http", "data": {"response": "ok"}}
+{"timestamp": "2026-07-16T01:39:22.270936+10:00", "user_id": "system", "event": "companion.stopped", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:39:24.276879+10:00", "user_id": "system", "event": "subagent.scheduler.started", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:39:39.163122+10:00", "user_id": "system", "event": "companion.stopped", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:39:40.776778+10:00", "user_id": "system", "event": "subagent.scheduler.started", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:40:57.641678+10:00", "user_id": "default_user", "event": "mcp.starting_server", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "command": "uvx"}}
+{"timestamp": "2026-07-16T01:40:58.836545+10:00", "user_id": "default_user", "event": "mcp.server_started", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "tools": 3}}
+{"timestamp": "2026-07-16T01:40:58.836951+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.mcp_tools", "level": "info", "channel": "cli", "data": {"count": 3}}
+{"timestamp": "2026-07-16T01:40:59.842973+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.tools_loaded", "level": "info", "channel": "cli", "data": {"count": 85}}
+{"timestamp": "2026-07-16T01:41:00.390970+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.create_timing", "level": "info", "channel": "cli", "data": {"provider": "0.063s", "tools": "0.001s", "mcp": "2.204s", "middleware": "0.080s", "agentloop": "0.468s", "total": "2.816s"}}
+{"timestamp": "2026-07-16T01:41:00.391175+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.loop_created", "level": "info", "channel": "cli", "data": {"user_id": "native_sdk_chat", "workspace_id": "personal", "model": "deepseek:deepseek-v4-flash"}}
+{"timestamp": "2026-07-16T01:41:02.059290+10:00", "user_id": "native_sdk_chat", "event": "agent.response", "level": "info", "channel": "http", "data": {"response": "ok"}}
+{"timestamp": "2026-07-16T01:41:59.790964+10:00", "user_id": "system", "event": "companion.stopped", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:42:01.692655+10:00", "user_id": "system", "event": "subagent.scheduler.started", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-16T01:42:15.241203+10:00", "user_id": "system", "event": "companion.stopped", "level": "info", "channel": "cli", "data": {}}

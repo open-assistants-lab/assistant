@@ -9,7 +9,7 @@ from src.storage.paths import _paths_cache
 from tests.integration.fake_provider import FakeProvider
 
 TEST_PROMPT = (
-    "You are Executive Assistant, a helpful AI assistant. "
+    "You are Assistant, a helpful AI assistant. "
     "You have access to various tools. Use them when appropriate."
 )
 

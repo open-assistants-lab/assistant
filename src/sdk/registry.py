@@ -190,7 +190,7 @@ def _save_to_cache(data: dict[str, Any]) -> None:
 def _fetch_api() -> dict[str, Any] | None:
     url = _get_api_url()
     try:
-        request = Request(url, headers={"User-Agent": "executive-assistant/1.0"})
+        request = Request(url, headers={"User-Agent": "assistant/1.0"})
         with urlopen(request, timeout=10) as resp:
             data: dict[str, Any] = cast(dict[str, Any], json.loads(resp.read()))
         data["_fetched_at"] = time.time()

@@ -5,7 +5,7 @@ Two deployment modes:
   data/ contains project-level data (cache, templates, logs, traces, jobs).
 - team: Multiple users on one server. Each user gets per-user data under ea_root.
 
-User data lives under ea_root (defaults to ~/Executive Assistant/).
+User data lives under ea_root (defaults to ~/Assistant/).
 Project data lives under data/ (cache, templates, logs, traces, jobs).
 """
 
@@ -50,7 +50,7 @@ Conversation/
 class DataPaths:
     """Resolves data paths based on deployment mode and user identity.
 
-    User data lives under ea_root (defaults to ~/Executive Assistant/).
+    User data lives under ea_root (defaults to ~/Assistant/).
     Project data lives under data/ (cache, templates, logs, traces, jobs).
 
     In solo mode: user_id defaults to "default_user", team_id is None.
@@ -84,7 +84,7 @@ class DataPaths:
             if configured:
                 self._ea_root = Path(configured)
             else:
-                self._ea_root = Path.home() / "Executive Assistant"
+                self._ea_root = Path.home() / "Assistant"
 
         self._ea_root.mkdir(parents=True, exist_ok=True)
         self._git_ensured = False

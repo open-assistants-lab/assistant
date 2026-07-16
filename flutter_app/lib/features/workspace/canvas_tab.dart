@@ -8,6 +8,7 @@ import '../../theme/app_theme.dart';
 import '../../providers/agent_provider.dart';
 import '../../providers/workspace_provider.dart';
 
+
 // ── Data Model ───────────────────────────────────────────────
 
 class CanvasSurface {
@@ -196,6 +197,53 @@ class _CanvasTabState extends ConsumerState<CanvasTab> {
             canvasBridge.postMessage(JSON.stringify(data));
           }
         </script>
+        <script>
+        (function() {
+          function track(type, data) {
+            try {
+              uiBridge.postMessage(JSON.stringify({type: type, ...data}));
+            } catch(e) {}
+          }
+          document.addEventListener('click', function(e) {
+            var el = e.target;
+            track('click', {
+              target: el.id || (el.textContent ? el.textContent.trim().slice(0, 50) : '') || el.tagName,
+              tag: el.tagName.toLowerCase()
+            });
+          }, true);
+          document.addEventListener('mouseup', function() {
+            var sel = window.getSelection();
+            if (sel && sel.toString().trim()) {
+              track('select', {text: sel.toString().trim().slice(0, 200)});
+            }
+          });
+          document.addEventListener('focus', function(e) {
+            var el = e.target;
+            if (el.tagName.match(/^(INPUT|TEXTAREA|SELECT)\$/i)) {
+              track('focus', {target: el.id || el.name || el.placeholder || 'field'});
+            }
+          }, true);
+          document.addEventListener('blur', function(e) {
+            var el = e.target;
+            if (el.tagName.match(/^(INPUT|TEXTAREA|SELECT)\$/i)) {
+              track('blur', {target: el.id || el.name || 'field', value: (el.value || '').slice(0, 100)});
+            }
+          }, true);
+          var scrollTimer;
+          document.addEventListener('scroll', function() {
+            clearTimeout(scrollTimer);
+            scrollTimer = setTimeout(function() {
+              track('scroll', {scrollTop: window.scrollY, scrollHeight: document.body.scrollHeight});
+            }, 300);
+          }, true);
+          document.addEventListener('dragstart', function(e) {
+            track('drag_start', {target: e.target.id || (e.target.textContent ? e.target.textContent.trim().slice(0, 50) : '')});
+          }, true);
+          document.addEventListener('drop', function(e) {
+            track('drop', {target: e.target.id || (e.target.textContent ? e.target.textContent.trim().slice(0, 50) : '')});
+          }, true);
+        })();
+        </script>
       </body>
       </html>
     ''';
@@ -227,6 +275,17 @@ class _CanvasTabState extends ConsumerState<CanvasTab> {
       h2 { margin-top: 0; }
     </style>
   ''';
+
+  void _onInteractionEvent(String message) {
+    try {
+      final data = jsonDecode(message) as Map<String, dynamic>;
+      ref.read(apiClientProvider).post('/ui/track', {
+        'user_id': ref.read(userIdProvider),
+        'tab': 'canvas',
+        'event': data,
+      });
+    } catch (_) {}
+  }
 
   void _onCanvasAction(String message) {
     try {
@@ -322,6 +381,10 @@ class _CanvasTabState extends ConsumerState<CanvasTab> {
       ..addJavaScriptChannel(
         'canvasBridge',
         onMessageReceived: (msg) => _onCanvasAction(msg.message),
+      )
+      ..addJavaScriptChannel(
+        'uiBridge',
+        onMessageReceived: (msg) => _onInteractionEvent(msg.message),
       )
       ..loadHtmlString(_htmlFor(surface));
     _controllers[cacheKey] = controller;

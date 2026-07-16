@@ -6,7 +6,7 @@ Source: [agentskills.io/specification](https://agentskills.io/specification)
 
 ### Compliance Matrix
 
-| Spec requirement | EA's implementation | Status |
+| Spec requirement | Assistant's implementation | Status |
 |-----------------|---------------------|--------|
 | `SKILL.md` with YAML frontmatter | `parse_skill_file()` in `src/skills/models.py:37` | ✅ |
 | `name` (1-64 chars, lowercase+hyphens) | `_is_valid_skill_name()` line 104-116 | ✅ |
@@ -21,7 +21,7 @@ Source: [agentskills.io/specification](https://agentskills.io/specification)
 
 ### Bug: `allowed-tools` Hyphen Not Recognized
 
-The agent skills spec uses `allowed-tools` (hyphenated) in YAML frontmatter. EA's `parse_skill_file()` reads `metadata.get("allowed_tools")` at line 97 — with an underscore. YAML preserves hyphens, so `allowed-tools` in the file becomes key `allowed-tools` in the parsed dict, not `allowed_tools`. EA's lookup always returns None.
+The agent skills spec uses `allowed-tools` (hyphenated) in YAML frontmatter. Assistant's `parse_skill_file()` reads `metadata.get("allowed_tools")` at line 97 — with an underscore. YAML preserves hyphens, so `allowed-tools` in the file becomes key `allowed-tools` in the parsed dict, not `allowed_tools`. Assistant's lookup always returns None.
 
 **Fix:** Change line 97 from `metadata.get("allowed_tools")` to `metadata.get("allowed-tools")`.
 
@@ -40,7 +40,7 @@ The agent skills spec uses `allowed-tools` (hyphenated) in YAML frontmatter. EA'
 
 Source: [Deep Agents async subagents](https://docs.langchain.com/oss/python/deepagents/async-subagents)
 
-### Current State: EA's SubagentCoordinator
+### Current State: Assistant's SubagentCoordinator
 
 | Aspect | EA (current) | Deep Agents (async) |
 |--------|-------------|---------------------|
@@ -58,7 +58,7 @@ Source: [Deep Agents async subagents](https://docs.langchain.com/oss/python/deep
 
 ### Priority 1: Dedicated Task State Channel
 
-EA's task state lives in `work_queue.db` (SQLite per-user) AND in tool messages in conversation history. When `SummarizationMiddleware` compacts the history, task IDs in old messages are lost — the parent can't reference or check tasks it launched earlier in a long session.
+Assistant's task state lives in `work_queue.db` (SQLite per-user) AND in tool messages in conversation history. When `SummarizationMiddleware` compacts the history, task IDs in old messages are lost — the parent can't reference or check tasks it launched earlier in a long session.
 
 Deep Agents stores task metadata in a dedicated `async_tasks` state channel on the supervisor's graph, separate from messages. This survives any number of summarization rounds.
 
@@ -68,7 +68,7 @@ Deep Agents stores task metadata in a dedicated `async_tasks` state channel on t
 
 ### Priority 2: Non-Blocking Invoke
 
-EA's legacy start path blocked — the parent agent stopped talking to the user while the subagent ran. For tasks that take 30+ seconds (research, coding, data analysis), this creates a dead-air experience.
+Assistant's legacy start path blocked — the parent agent stopped talking to the user while the subagent ran. For tasks that take 30+ seconds (research, coding, data analysis), this creates a dead-air experience.
 
 Deep Agents' `start_async_task` returns a task ID immediately. The parent can say "I've started researching that — it'll take a few minutes. Anything else while we wait?" and continue the conversation.
 
@@ -92,7 +92,7 @@ The rename is cosmetic but important: "progress" implies passive observation; "c
 
 ### Priority 4: Polling Guardrails (P3)
 
-Deep Agents' middleware injects system prompt rules to prevent the supervisor from polling in a tight loop after launch ("Never call check_async_task immediately after launch"). EA's InstructionMiddleware already does course-correction injection — the same mechanism can inject polling guardrails.
+Deep Agents' middleware injects system prompt rules to prevent the supervisor from polling in a tight loop after launch ("Never call check_async_task immediately after launch"). Assistant's InstructionMiddleware already does course-correction injection — the same mechanism can inject polling guardrails.
 
 **How to adopt:** Add to the subagent system prompt:
 ```

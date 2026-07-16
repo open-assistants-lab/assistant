@@ -2,7 +2,7 @@
 
 ## Summary
 
-Redesign the EA's skills system to support user-scoped and workspace-scoped skills with a management UI in Flutter and the web dashboard. Align with the [Agent Skills specification](https://agentskills.io/specification) (progressive disclosure, `SKILL.md` format). Remove the unused "system" tier — system skills seed into user skills on first run and become fully editable.
+Redesign the Assistant's skills system to support user-scoped and workspace-scoped skills with a management UI in Flutter and the web dashboard. Align with the [Agent Skills specification](https://agentskills.io/specification) (progressive disclosure, `SKILL.md` format). Remove the unused "system" tier — system skills seed into user skills on first run and become fully editable.
 
 ---
 
@@ -14,12 +14,12 @@ Skills follow the agentskills.io format: each skill is a directory containing `S
 
 | Scope | Solo desktop path | Multi-user/server path | Priority |
 |-------|-------------------|------------------------|----------|
-| **User** | `~/Executive Assistant/Skills/` | `data/users/{user_id}/skills/` | Lower |
-| **Workspace** | `~/Executive Assistant/Workspaces/{id}/skills/` | `data/users/{user_id}/workspaces/{id}/skills/` | Higher |
+| **User** | `~/Assistant/Skills/` | `data/users/{user_id}/skills/` | Lower |
+| **Workspace** | `~/Assistant/Workspaces/{id}/skills/` | `data/users/{user_id}/workspaces/{id}/skills/` | Higher |
 
 Resolution: workspace > user by name. A workspace skill named `code-review` replaces the user-level skill of the same name.
 
-Path resolution must go through `DataPaths` so solo users get normal files under `~/Executive Assistant/...`, while multi-user/container deployments keep every user's skills isolated under `data/users/{user_id}/...`.
+Path resolution must go through `DataPaths` so solo users get normal files under `~/Assistant/...`, while multi-user/container deployments keep every user's skills isolated under `data/users/{user_id}/...`.
 
 There is no "system" scope. On first run, bundled seed skills from `src/skills_seed/` are copied into the user skills directory and become normal user skills — editable, deletable, no special treatment. The initial seed set contains only `skill-creator`.
 

@@ -1,4 +1,4 @@
-"""Settings module for Executive Assistant."""
+"""Settings module for Assistant."""
 
 from pathlib import Path
 
@@ -24,7 +24,7 @@ class DeploymentConfig(_BaseSettings):
     data_path: str = Field(default="data")
     ea_root: str = Field(
         default="",
-        description="Root for user data directory. Empty string means Path.home() / 'Executive Assistant'.",
+        description="Root for user data directory. Empty string means Path.home() / 'Assistant'.",
     )
 
     model_config = SettingsConfigDict(env_prefix="DEPLOYMENT_")
@@ -33,9 +33,9 @@ class DeploymentConfig(_BaseSettings):
 class AgentConfig(_BaseSettings):
     """Agent configuration."""
 
-    name: str = Field(default="Executive Assistant")
+    name: str = Field(default="Assistant")
     model: str = Field(default="ollama:minimax-m2.5")
-    system_prompt: str = Field(default="You are a helpful executive assistant.")
+    system_prompt: str = Field(default="You are a helpful assistant.")
     pool_size: int = Field(default=3)
 
     model_config = SettingsConfigDict(env_prefix="AGENT_")

@@ -12,7 +12,7 @@
 
 ### The EA Platform
 
-Executive Assistant (EA) is a production AI agent platform — custom SDK, ~6,500 lines, 470+ tests. It runs on three tiers:
+Assistant (EA) is a production AI agent platform — custom SDK, ~6,500 lines, 470+ tests. It runs on three tiers:
 
 | Tier | Users | Infrastructure |
 |------|-------|---------------|
@@ -258,7 +258,7 @@ class ConnectorRuntime:
 └──────────────────────────────────────────────────────────┘
          ↓                          ↓
 ┌────────────────┐    ┌────────────────────────┐
-│   EA SDK       │    │  Any Agent Framework   │
+│   Assistant SDK       │    │  Any Agent Framework   │
 │  (AgentLoop)   │    │  (LangChain, CrewAI,   │
 │                │    │   AutoGen, etc.)       │
 │  Consumes as   │    │                        │
@@ -305,13 +305,13 @@ class ConnectorRuntime:
 
 | Component | Belongs to |
 |-----------|-----------|
-| AgentLoop / ReAct reasoning | EA SDK |
-| LLM providers | EA SDK |
-| Conversation memory / summarization | EA SDK |
-| HITL / interrupt handling | EA SDK |
-| Subagent orchestration | EA SDK |
-| Tool annotations / guardrails | EA SDK |
-| Skills system | EA SDK |
+| AgentLoop / ReAct reasoning | Assistant SDK |
+| LLM providers | Assistant SDK |
+| Conversation memory / summarization | Assistant SDK |
+| HITL / interrupt handling | Assistant SDK |
+| Subagent orchestration | Assistant SDK |
+| Tool annotations / guardrails | Assistant SDK |
+| Skills system | Assistant SDK |
 | Chat UI (beyond the Connect button) | EA Flutter app |
 
 ### Positioning vs. existing tools
@@ -406,7 +406,7 @@ Zero Python code. Zero Flutter changes. The Connect UI auto-discovers it from th
 | OAuth token refresh is error-prone | CredentialVault handles refresh transparently. Same pattern as every production OAuth client |
 | User doesn't want OAuth for every service | `auth.type: api_key` is supported. User pastes key once into vault, agent uses it thereafter |
 | Enterprise needs SSO, not per-service OAuth | Admin provisions API keys centrally. CredentialVault seeded at deploy time. Same vault, different population method |
-| Scope creep ("add RAG, add vector search...") | Spec format is opinionated: auth + tools only. No search, no memory, no RAG. Those belong to EA SDK |
+| Scope creep ("add RAG, add vector search...") | Spec format is opinionated: auth + tools only. No search, no memory, no RAG. Those belong to Assistant SDK |
 
 ---
 
@@ -581,7 +581,7 @@ And the EA email/contacts tools become thin wrappers around `hub.get_tools("alic
 
 ## Appendix D: What About MCP Bridge Already?
 
-EA's existing `MCPToolBridge` (`src/sdk/mcp_bridge.py`) is already per-user and works well. Under Agent Connect, this code doesn't change — it just gets a token from the vault instead of depending on whatever auth the MCP server handles natively:
+Assistant's existing `MCPToolBridge` (`src/sdk/mcp_bridge.py`) is already per-user and works well. Under Agent Connect, this code doesn't change — it just gets a token from the vault instead of depending on whatever auth the MCP server handles natively:
 
 ```python
 # Before (current): MCP server handles auth itself
@@ -653,7 +653,7 @@ The architecture is sound, scope is disciplined, and open-source positioning is 
 |------|-----------|
 | **Problem definition** | Clear. The 3-path gauntlet (Python code, CLI wrapper, MCP config) is real. No shared auth infrastructure is the exact pain point. |
 | **Competitive research** | Good triangulation. n8n = declarative, Zapier = ecosystem, Perplexity = MCP. The "invest in platform, not individual connectors" insight is right. |
-| **Architecture** | Clean. YAML → auth vault → 3 adapter backends → ToolDefinition[]. The separation from EA SDK is correct — loose coupling. |
+| **Architecture** | Clean. YAML → auth vault → 3 adapter backends → ToolDefinition[]. The separation from Assistant SDK is correct — loose coupling. |
 | **Positioning** | "The auth layer that MCP forgot" is a sharp tagline. Differentiates from Nango (auth-only) and Composio (closed-source). |
 | **Scope discipline** | Agent Loop, memory, HITL, subagents, skills — all correctly placed out of scope. |
 
@@ -674,7 +674,7 @@ The architecture is sound, scope is disciplined, and open-source positioning is 
 |---|---------------|
 | 1 | **Start smaller.** Build CredentialVault + MCPAdapter first. Let existing MCP bridge handle tools. Add CLI next. Skip HTTP for v0.1. |
 | 2 | **Get to working code before writing 10 YAMLs.** Build GWS + GitHub end-to-end. If those work, the architecture works. |
-| 3 | **Ship EA's Firecrawl/AgentBrowser as the first connectors.** Replace the global singletons with YAML specs. Dogfood immediately. Validate the approach on your own stack. |
+| 3 | **Ship Assistant's Firecrawl/AgentBrowser as the first connectors.** Replace the global singletons with YAML specs. Dogfood immediately. Validate the approach on your own stack. |
 | 4 | **Add `session_strategy` to CLIAdapter spec** if needed: `env_var` | `profile` | `per_process`. Currently only `env_var` needs to be implemented since per-container deployment handles process isolation. |
 | 5 | **Add required `tool_descriptions` per tool** in the YAML spec — LLM-optimized descriptions. |
 | 6 | **Timeline:** Call it 3-4 weeks for v0.1.0. |

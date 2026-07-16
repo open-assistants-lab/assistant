@@ -13,7 +13,7 @@
 Agent Connect is a separate Python package developed inside the EA monorepo (same pattern as HybridDB was extracted). When ready, it gets its own GitHub repo.
 
 ```
-executive-assistant/
+assistant/
 ├── packages/
 │   └── agent-connect/           # ← New package
 │       ├── agent_connect/
@@ -954,12 +954,12 @@ def _parse_subcommands_from_help(help_text: str) -> list[str]:
 
 #### `packages/agent-connect/agent_connect/backends/mcp.py`
 
-Thin wrapper around EA's existing `MCPToolBridge`. Reads token from vault → passes to MCP server via environment → lets the existing bridge discover tools. This is the lightest adapter — most of the work is already done in `mcp_bridge.py` and `mcp_manager.py`.
+Thin wrapper around Assistant's existing `MCPToolBridge`. Reads token from vault → passes to MCP server via environment → lets the existing bridge discover tools. This is the lightest adapter — most of the work is already done in `mcp_bridge.py` and `mcp_manager.py`.
 
 ```python
 """MCPAdapter — vault token injection for existing MCP tool bridge.
 
-This is a thin wrapper around EA's MCPToolBridge. The adapter:
+This is a thin wrapper around Assistant's MCPToolBridge. The adapter:
 1.  Reads the user's OAuth/API token from CredentialVault
 2.  Injects it into the MCP server's environment variables
 3.  Delegates tool discovery to MCPToolBridge (already per-user)
@@ -1020,7 +1020,7 @@ class MCPAdapter:
     def discover_tools(self, namespace: str) -> list[Any]:
         """Discover tools from the MCP server via the existing bridge.
 
-        This delegates to EA's MCPToolBridge. The bridge already:
+        This delegates to Assistant's MCPToolBridge. The bridge already:
         - Manages MCP server lifecycle (start, idle-timeout, stop)
         - Discovers tools via MCP protocol
         - Namespaces as mcp__{server}__{tool}
@@ -1256,7 +1256,7 @@ class ConnectorRuntime:
 
 #### `packages/agent-connect/agent_connect/bridge.py`
 
-The bridge that EA's `runner.py` wires into. Same pattern as `MCPToolBridge` — `discover()` + `get_tool_definitions()`.
+The bridge that Assistant's `runner.py` wires into. Same pattern as `MCPToolBridge` — `discover()` + `get_tool_definitions()`.
 
 ```python
 """AgentConnectBridge — EA integration point.
@@ -1266,7 +1266,7 @@ Mirrors the MCPToolBridge pattern:
     await bridge.discover()
     tools = bridge.get_tool_definitions()
 
-EA's runner.py injects this between native_tools and AgentLoop creation.
+Assistant's runner.py injects this between native_tools and AgentLoop creation.
 """
 
 import json as json_lib
@@ -1335,7 +1335,7 @@ def build_connector_tool_definition(
         annotations: ToolAnnotations (read_only, destructive, etc.)
 
     Returns:
-        ToolDefinition compatible with EA's SDK
+        ToolDefinition compatible with Assistant's SDK
     """
     from src.sdk.tools import ToolAnnotations, ToolDefinition, ToolResult
 
@@ -1415,7 +1415,7 @@ def build_connector_tool_definition(
 
 
 class AgentConnectBridge:
-    """Bridge between Agent Connect and EA's AgentLoop.
+    """Bridge between Agent Connect and Assistant's AgentLoop.
 
     Mirrors the MCPToolBridge pattern exactly:
         - discover() → loads connector specs, checks vault, discovers tools
@@ -1573,7 +1573,7 @@ Full GitHub spec via `gh` CLI.
 
 ### Day 12: Connector Catalog API + Flutter Widget
 
-**Backend:** Add to EA's HTTP router:
+**Backend:** Add to Assistant's HTTP router:
 
 ```python
 # src/http/routers/connectors.py  (new file)

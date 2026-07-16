@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Nightly smoke suite for Executive Assistant"
+        description="Nightly smoke suite for Assistant"
     )
     parser.add_argument(
         "--api-key",

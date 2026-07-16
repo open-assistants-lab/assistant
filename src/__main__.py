@@ -1,4 +1,4 @@
-"""Executive Assistant - Main entry point."""
+"""Assistant - Main entry point."""
 
 import argparse
 import sys
@@ -9,7 +9,7 @@ load_dotenv()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="ea", description="Executive Assistant")
+    parser = argparse.ArgumentParser(prog="assistant", description="Assistant")
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
     subparsers.add_parser("http", help="Start HTTP server")

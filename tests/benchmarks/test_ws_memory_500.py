@@ -16,7 +16,7 @@ Date distribution for pre-seeded data:
   - Today: 500 live WS interactions
 
 Usage:
-    uv run ea http &
+    uv run assistant http &
     uv run python tests/benchmarks/test_ws_memory_500.py
 """
 

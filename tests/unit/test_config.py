@@ -22,5 +22,5 @@ class TestConfigValidation:
         from src.config.settings import AgentConfig
 
         config = AgentConfig()
-        assert config.name == "Executive Assistant"
+        assert config.name == "Assistant"
         assert config.model == "ollama:minimax-m2.5"

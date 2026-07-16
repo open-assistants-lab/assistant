@@ -41,7 +41,7 @@ Brain Repo (git)  ←→  GBrain (retrieval)  ←→  AI Agent (read/write via 2
 
 The graph layer alone provides the bulk of the retrieval quality gap. Without it, GBrain reverts to hybrid vector+keyword with no structured relationships.
 
-**[review] Caveat**: BrainBench tests document retrieval (240 pages with 30 questions each), not conversational memory retrieval. LongMemEval is the benchmark that actually applies to EA's use case. The +31.4 P@5 gain would likely be **smaller** for conversational fact retrieval (the task is different), but the direction holds: structured entity + relationship indexing meaningfully improves retrieval for any knowledge-grounded query.
+**[review] Caveat**: BrainBench tests document retrieval (240 pages with 30 questions each), not conversational memory retrieval. LongMemEval is the benchmark that actually applies to Assistant's use case. The +31.4 P@5 gain would likely be **smaller** for conversational fact retrieval (the task is different), but the direction holds: structured entity + relationship indexing meaningfully improves retrieval for any knowledge-grounded query.
 
 ---
 
@@ -124,7 +124,7 @@ AgentLoop.run()
 
 **EA**: Entities are only created through explicit LLM extraction (`_extract_with_llm`), which runs every 3 turns. No deterministic path exists. The graph connections require explicit `memory_connect` calls. The graph exists but does not auto-wire itself.
 
-**Impact**: The graph layer is GBrain's single largest contributor to retrieval quality (+31.4 P@5 in brainbench). EA's graph is under-utilized because connections must be made manually.
+**Impact**: The graph layer is GBrain's single largest contributor to retrieval quality (+31.4 P@5 in brainbench). Assistant's graph is under-utilized because connections must be made manually.
 
 ### Gap 2: No Compiled Truth Pattern
 
@@ -419,7 +419,7 @@ def _score_candidate(c: MemoryCandidate, ...) -> float:
         score += PENALTY_CASUAL_CHAT
 ```
 
-**Why**: GBrain's source-aware ranking (curated dirs > daily chat) is load-bearing for search quality. EA's ranker currently treats all evidence equally.
+**Why**: GBrain's source-aware ranking (curated dirs > daily chat) is load-bearing for search quality. Assistant's ranker currently treats all evidence equally.
 
 ---
 

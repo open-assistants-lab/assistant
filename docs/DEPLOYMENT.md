@@ -12,7 +12,7 @@ $0 (your Mac)              $20/user/mo                    $80/user/mo
 1 AgentLoop process         1 container/user              1 VM/user
 all tools locally           all tools in container        all tools in container
                             
-~/Executive Assistant/     data/users/{id}/              data/users/{id}/
+~/Assistant/     data/users/{id}/              data/users/{id}/
 data/users/default_user/   on host volume                on VM disk
                             
 auth: none                 auth: JWT                      auth: JWT + SSO
@@ -192,7 +192,7 @@ Your Mac
 │  EA Server (one process)     │
 │  All CLIs locally            │
 │  HybridDB locally            │
-│  ~/Executive Assistant/      │
+│  ~/Assistant/      │
 │  data/users/default_user/    │
 │                              │
 │  Auth: none (localhost)      │
@@ -284,7 +284,7 @@ Solo: `data/users/default_user/`. Multi-tenant: `data/users/{user_id}/`. Same pa
 
 | Tool | Solo | Container/VM |
 |------|------|-------------|
-| `files_*` | `~/Executive Assistant/` | `data/users/{user_id}/workspace/` |
+| `files_*` | `~/Assistant/` | `data/users/{user_id}/workspace/` |
 | `shell_execute` | Native terminal | Sandboxed in container |
 | `firecrawl` | Local CLI | CLI in container |
 | `gws` (email/contacts/todos) | Local CLI | CLI in container |
@@ -349,7 +349,7 @@ Containers are ephemeral. Data persists on the host volume. A container crash = 
 2. ✅ `DEFAULT_USER_ID = "default_user"` for solo mode (defined in `src/storage/paths.py`)
 3. ✅ Per-user SQLite + ChromaDB (HybridDB)
 4. ✅ All tools SDK-native (~93 tools including MCP bridge)
-5. ✅ `files_*` default workspace: `~/Executive Assistant/` (solo)
+5. ✅ `files_*` default workspace: `~/Assistant/` (solo)
 6. ✅ WebSocket + HITL + streaming
 7. ✅ Flutter app (thin client on macOS, iOS, iPadOS)
 

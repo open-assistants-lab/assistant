@@ -177,6 +177,130 @@ wheels = [
 ]
 
 [[package]]
+name = "assistant"
+version = "0.3.0"
+source = { editable = "." }
+dependencies = [
+    { name = "agentprofile" },
+    { name = "aiohttp" },
+    { name = "aiosqlite" },
+    { name = "apscheduler" },
+    { name = "chromadb" },
+    { name = "connectkit" },
+    { name = "coremem" },
+    { name = "cryptography" },
+    { name = "duckdb" },
+    { name = "fastapi" },
+    { name = "html2text" },
+    { name = "httpx" },
+    { name = "hybriddb" },
+    { name = "imap-tools" },
+    { name = "mcp" },
+    { name = "mistune" },
+    { name = "openai" },
+    { name = "prompt-toolkit" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "python-dotenv" },
+    { name = "pyyaml" },
+    { name = "rich" },
+    { name = "sentence-transformers" },
+    { name = "sqlalchemy" },
+    { name = "sqlite-vec" },
+    { name = "sse-starlette" },
+    { name = "tiktoken" },
+    { name = "uvicorn" },
+]
+
+[package.optional-dependencies]
+benchmark = [
+    { name = "numpy" },
+    { name = "pytest-benchmark" },
+    { name = "pytest-timeout" },
+]
+dev = [
+    { name = "mypy" },
+    { name = "networkx" },
+    { name = "pre-commit" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "python-louvain" },
+    { name = "ruff" },
+]
+graph = [
+    { name = "networkx" },
+    { name = "python-louvain" },
+]
+http = [
+    { name = "fastapi" },
+    { name = "sse-starlette" },
+    { name = "uvicorn" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pyinstaller" },
+    { name = "types-pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "agentprofile", editable = "../AgentProfile" },
+    { name = "aiohttp", specifier = ">=3.9.0" },
+    { name = "aiosqlite", specifier = ">=0.20.0" },
+    { name = "apscheduler", specifier = ">=3.11.2" },
+    { name = "chromadb", specifier = ">=1.5.0" },
+    { name = "connectkit", specifier = "==0.1.4" },
+    { name = "coremem", specifier = ">=0.9.1" },
+    { name = "cryptography", specifier = ">=41.0.0" },
+    { name = "duckdb", specifier = ">=1.0.0" },
+    { name = "fastapi", specifier = ">=0.129.0" },
+    { name = "fastapi", marker = "extra == 'http'", specifier = ">=0.129.0" },
+    { name = "html2text", specifier = ">=2025.4.15" },
+    { name = "httpx", specifier = ">=0.28.0" },
+    { name = "hybriddb", specifier = ">=0.4.5" },
+    { name = "imap-tools", specifier = ">=1.0.0" },
+    { name = "mcp", specifier = ">=1.0.0" },
+    { name = "mistune", specifier = ">=3.2.1" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.14.0" },
+    { name = "networkx", marker = "extra == 'dev'", specifier = ">=3.0" },
+    { name = "networkx", marker = "extra == 'graph'", specifier = ">=3.0" },
+    { name = "numpy", marker = "extra == 'benchmark'", specifier = ">=1.24.0" },
+    { name = "openai", specifier = ">=1.0.0" },
+    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.0.0" },
+    { name = "prompt-toolkit", specifier = ">=3.0.0" },
+    { name = "pydantic", specifier = ">=2.10.0" },
+    { name = "pydantic-settings", specifier = ">=2.7.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
+    { name = "pytest-benchmark", marker = "extra == 'benchmark'", specifier = ">=4.0.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0.0" },
+    { name = "pytest-timeout", marker = "extra == 'benchmark'", specifier = ">=2.3.0" },
+    { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "python-louvain", marker = "extra == 'dev'", specifier = ">=0.16" },
+    { name = "python-louvain", marker = "extra == 'graph'", specifier = ">=0.16" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "rich", specifier = ">=13.0.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.11.0" },
+    { name = "sentence-transformers", specifier = ">=5.2.3" },
+    { name = "sqlalchemy", specifier = ">=2.0.0" },
+    { name = "sqlite-vec", specifier = ">=0.1.6" },
+    { name = "sse-starlette", specifier = ">=2.0.0" },
+    { name = "sse-starlette", marker = "extra == 'http'", specifier = ">=2.0.0" },
+    { name = "tiktoken", specifier = ">=0.9.0" },
+    { name = "uvicorn", specifier = ">=0.41.0" },
+    { name = "uvicorn", marker = "extra == 'http'", specifier = ">=0.41.0" },
+]
+provides-extras = ["http", "graph", "dev", "benchmark"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pyinstaller", specifier = ">=6.20.0" },
+    { name = "types-pyyaml", specifier = ">=6.0.12.20260518" },
+]
+
+[[package]]
 name = "attrs"
 version = "25.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -679,130 +803,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/9d/a4/e44218c2b394e31a6dd0d6b095c4e1f32d0be54c2a4b250032d717647bab/durationpy-0.10.tar.gz", hash = "sha256:1fa6893409a6e739c9c72334fc65cca1f355dbdd93405d30f726deb5bde42fba", size = 3335, upload-time = "2025-05-17T13:52:37.26Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b0/0d/9feae160378a3553fa9a339b0e9c1a048e147a4127210e286ef18b730f03/durationpy-0.10-py3-none-any.whl", hash = "sha256:3b41e1b601234296b4fb368338fdcd3e13e0b4fb5b67345948f4f2bf9868b286", size = 3922, upload-time = "2025-05-17T13:52:36.463Z" },
-]
-
-[[package]]
-name = "executive-assistant"
-version = "0.3.0"
-source = { editable = "." }
-dependencies = [
-    { name = "agentprofile" },
-    { name = "aiohttp" },
-    { name = "aiosqlite" },
-    { name = "apscheduler" },
-    { name = "chromadb" },
-    { name = "connectkit" },
-    { name = "coremem" },
-    { name = "cryptography" },
-    { name = "duckdb" },
-    { name = "fastapi" },
-    { name = "html2text" },
-    { name = "httpx" },
-    { name = "hybriddb" },
-    { name = "imap-tools" },
-    { name = "mcp" },
-    { name = "mistune" },
-    { name = "openai" },
-    { name = "prompt-toolkit" },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "python-dotenv" },
-    { name = "pyyaml" },
-    { name = "rich" },
-    { name = "sentence-transformers" },
-    { name = "sqlalchemy" },
-    { name = "sqlite-vec" },
-    { name = "sse-starlette" },
-    { name = "tiktoken" },
-    { name = "uvicorn" },
-]
-
-[package.optional-dependencies]
-benchmark = [
-    { name = "numpy" },
-    { name = "pytest-benchmark" },
-    { name = "pytest-timeout" },
-]
-dev = [
-    { name = "mypy" },
-    { name = "networkx" },
-    { name = "pre-commit" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "python-louvain" },
-    { name = "ruff" },
-]
-graph = [
-    { name = "networkx" },
-    { name = "python-louvain" },
-]
-http = [
-    { name = "fastapi" },
-    { name = "sse-starlette" },
-    { name = "uvicorn" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pyinstaller" },
-    { name = "types-pyyaml" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "agentprofile", editable = "../AgentProfile" },
-    { name = "aiohttp", specifier = ">=3.9.0" },
-    { name = "aiosqlite", specifier = ">=0.20.0" },
-    { name = "apscheduler", specifier = ">=3.11.2" },
-    { name = "chromadb", specifier = ">=1.5.0" },
-    { name = "connectkit", specifier = "==0.1.4" },
-    { name = "coremem", specifier = ">=0.9.1" },
-    { name = "cryptography", specifier = ">=41.0.0" },
-    { name = "duckdb", specifier = ">=1.0.0" },
-    { name = "fastapi", specifier = ">=0.129.0" },
-    { name = "fastapi", marker = "extra == 'http'", specifier = ">=0.129.0" },
-    { name = "html2text", specifier = ">=2025.4.15" },
-    { name = "httpx", specifier = ">=0.28.0" },
-    { name = "hybriddb", specifier = ">=0.4.5" },
-    { name = "imap-tools", specifier = ">=1.0.0" },
-    { name = "mcp", specifier = ">=1.0.0" },
-    { name = "mistune", specifier = ">=3.2.1" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.14.0" },
-    { name = "networkx", marker = "extra == 'dev'", specifier = ">=3.0" },
-    { name = "networkx", marker = "extra == 'graph'", specifier = ">=3.0" },
-    { name = "numpy", marker = "extra == 'benchmark'", specifier = ">=1.24.0" },
-    { name = "openai", specifier = ">=1.0.0" },
-    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.0.0" },
-    { name = "prompt-toolkit", specifier = ">=3.0.0" },
-    { name = "pydantic", specifier = ">=2.10.0" },
-    { name = "pydantic-settings", specifier = ">=2.7.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
-    { name = "pytest-benchmark", marker = "extra == 'benchmark'", specifier = ">=4.0.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0.0" },
-    { name = "pytest-timeout", marker = "extra == 'benchmark'", specifier = ">=2.3.0" },
-    { name = "python-dotenv", specifier = ">=1.0.0" },
-    { name = "python-louvain", marker = "extra == 'dev'", specifier = ">=0.16" },
-    { name = "python-louvain", marker = "extra == 'graph'", specifier = ">=0.16" },
-    { name = "pyyaml", specifier = ">=6.0" },
-    { name = "rich", specifier = ">=13.0.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.11.0" },
-    { name = "sentence-transformers", specifier = ">=5.2.3" },
-    { name = "sqlalchemy", specifier = ">=2.0.0" },
-    { name = "sqlite-vec", specifier = ">=0.1.6" },
-    { name = "sse-starlette", specifier = ">=2.0.0" },
-    { name = "sse-starlette", marker = "extra == 'http'", specifier = ">=2.0.0" },
-    { name = "tiktoken", specifier = ">=0.9.0" },
-    { name = "uvicorn", specifier = ">=0.41.0" },
-    { name = "uvicorn", marker = "extra == 'http'", specifier = ">=0.41.0" },
-]
-provides-extras = ["http", "graph", "dev", "benchmark"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pyinstaller", specifier = ">=6.20.0" },
-    { name = "types-pyyaml", specifier = ">=6.0.12.20260518" },
 ]
 
 [[package]]

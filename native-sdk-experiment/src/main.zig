@@ -941,7 +941,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = arena.allocator();
 
     const app_state = try ChatApp.create(allocator, .{
-        .name = "native-sdk-experiment",
+        .name = "assistant",
         .scene = shell_scene,
         .canvas_label = canvas_label,
         .update_fx = update,
@@ -953,9 +953,9 @@ pub fn main(init: std.process.Init) !void {
     app_state.model.allocator = allocator;
 
     try runner.runWithOptions(app_state.app(), .{
-        .app_name = "native-sdk-experiment",
-        .window_title = "EA Chat",
-        .bundle_id = "dev.native_sdk.native-sdk-experiment",
+        .app_name = "assistant",
+        .window_title = "Assistant",
+        .bundle_id = "dev.assistant.app",
         .icon_path = "assets/icon.png",
         .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
         .restore_state = false,

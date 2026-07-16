@@ -7,15 +7,15 @@ The conversation that shaped it:
 
 ### Triggers
 
-1. **Autoresearch needed git** — the `ResearchLoop` used in-memory backups but the workspace is git-versioned. Git branch isolation (branch → eval → merge/discard) is crash-safe and supports multi-file experiments, but targets (prompts, skills, subagent configs) were spread across `~/Executive Assistant/` and `data/` — no single repo.
-2. **Path split** — user data lived under `data/users/{id}/` (configurable) while workspaces, global memory, and solo skills lived under `~/Executive Assistant/` (hardcoded). Two roots, no git on either.
+1. **Autoresearch needed git** — the `ResearchLoop` used in-memory backups but the workspace is git-versioned. Git branch isolation (branch → eval → merge/discard) is crash-safe and supports multi-file experiments, but targets (prompts, skills, subagent configs) were spread across `~/Assistant/` and `data/` — no single repo.
+2. **Path split** — user data lived under `data/users/{id}/` (configurable) while workspaces, global memory, and solo skills lived under `~/Assistant/` (hardcoded). Two roots, no git on either.
 3. **Multi-tenant mode** — Docker containers per user with team shared volumes. The existing `data/users/{id}/` structure doesn't map naturally to per-container `~/`.
 
 ### Key Decisions Made
 
 | Decision | Why |
 |---|---|
-| **Single root at `~/Executive Assistant/`** | Consolidates all user data under one tree, one `.git` |
+| **Single root at `~/Assistant/`** | Consolidates all user data under one tree, one `.git` |
 | **Configurable via `ea_root`** | Multi-tenant containers can set a different root per tenant |
 | **UUID workspaces** | Eliminates name collision between user and team workspaces; rename doesn't change directory path |
 | **Lowercase → uppercase subdirs** | Skills, Subagents, Files, Memory for consistency across scopes |
@@ -29,13 +29,13 @@ The conversation that shaped it:
 
 Project-level data only: model cache, logs, traces, templates, job scheduler DBs.
 
-Everything user-level moves to `~/Executive Assistant/`.
+Everything user-level moves to `~/Assistant/`.
 
 ---
 
 ## Goals
 
-1. Consolidate all user data under `~/Executive Assistant/` — single root, single `.git`
+1. Consolidate all user data under `~/Assistant/` — single root, single `.git`
 2. Cleanly separate user, team, and workspace scopes
 3. Support per-container `.git` for autoresearch versioning
 4. Replace `data/users/{id}/`, `data/teams/{id}/`, and split `~/...`/`data/...` with a unified tree
@@ -52,11 +52,11 @@ target architecture; Stage 1 builds the solo subset only.
 
 *What gets built now.* Everything a single-user desktop app needs.
 
-- Single root `~/Executive Assistant/` with one `.git`
+- Single root `~/Assistant/` with one `.git`
 - `DataPaths` with `root` property + `ea_root` config
 - User-scoped and workspace-scoped methods only (no team methods)
 - Workspace subdirs renamed lowercase → uppercase
-- Migration script: `data/users/{id}/` → `~/Executive Assistant/`
+- Migration script: `data/users/{id}/` → `~/Assistant/`
 - Git init + `.gitignore` at root
 - Prompt seeding from `src/prompt_seed/AGENTS.md`
 - AGENTS.md replaces `settings.agent.system_prompt`
@@ -88,7 +88,7 @@ with shared team volumes.
 ### Solo mode (desktop / single-user container)
 
 ```
-~/Executive Assistant/
+~/Assistant/
 ├── AGENTS.md              # User prompt (was data/users/{id}/config/prompt.txt)
 ├── Skills/                # User-level skills (was data/users/{id}/skills/)
 ├── Subagents/             # User-level subagents (was data/users/{id}/subagents/)
@@ -124,7 +124,7 @@ with shared team volumes.
 ### Team mode (Docker multi-user)
 
 ```
-User container (~/Executive Assistant/):
+User container (~/Assistant/):
 ├── AGENTS.md              # User's personal prompt
 ├── Skills/                # User's personal skills
 ├── Subagents/             # User's personal subagents
@@ -135,7 +135,7 @@ User container (~/Executive Assistant/):
 ├── Todos/
 └── ...                    # Same structure as solo
 
-Shared team volume (configurable: /mnt/ea-teams/{team_id}/ or ~/Executive Assistant/Teams/{team_id}/):
+Shared team volume (configurable: /mnt/ea-teams/{team_id}/ or ~/Assistant/Teams/{team_id}/):
 ├── AGENTS.md              # Team prompt (overrides user in team context)
 ├── Skills/                # Team shared skills
 ├── Subagents/             # Team shared subagents
@@ -153,18 +153,18 @@ Shared team volume (configurable: /mnt/ea-teams/{team_id}/ or ~/Executive Assist
 └── .mcp.json
 ```
 
-- **Client-side (solo)**: team root = `~/Executive Assistant/Teams/{team_id}/`
+- **Client-side (solo)**: team root = `~/Assistant/Teams/{team_id}/`
 - **Server-side (multi-tenant)**: team root = `settings.ea_team_root / {team_id}` (e.g., `/mnt/ea-teams/{team_id}/`)
 
 ### Multi-tenancy
 
-Same as solo mode — each container gets its own `~/Executive Assistant/`. Teams use a shared volume.
+Same as solo mode — each container gets its own `~/Assistant/`. Teams use a shared volume.
 
 ---
 
 ## 2. Scope Definitions
 
-**User scope**: data private to one user, at `~/Executive Assistant/`.
+**User scope**: data private to one user, at `~/Assistant/`.
 
 **Team scope**: data shared across team members, at `{team_root}/{team_id}/`.
 
@@ -252,7 +252,7 @@ Changing the list reorders injection. Any omitted section is skipped.
 `settings.agent.system_prompt` is removed. Instead:
 
 ```
-src/prompt_seed/AGENTS.md  ──first run──▶  ~/Executive Assistant/AGENTS.md
+src/prompt_seed/AGENTS.md  ──first run──▶  ~/Assistant/AGENTS.md
 ```
 
 Same pattern as `src/skills_seed/` — a `.prompt_seeded` marker prevents overwrite. The seed file is the new canonical default, editable by users.
@@ -272,7 +272,7 @@ class DataPaths:
         team_id=None,
         workspace_id=None,
         data_path=None,        # kept for backward compat (cache, logs)
-        ea_root=None,          # ~/Executive Assistant/ by default
+        ea_root=None,          # ~/Assistant/ by default
         ea_team_root=None,     # team volume root, None for solo
     ):
 ```
@@ -286,7 +286,7 @@ def root(self) -> Path:
     return Path(
         self._ea_root
         or settings.ea_root
-        or Path.home() / "Executive Assistant"
+        or Path.home() / "Assistant"
     )
 
 @property
@@ -297,7 +297,7 @@ def team_root(self) -> Path | None:
     root = self._ea_team_root or settings.ea_team_root
     if root:
         return Path(root) / self.team_id
-    # Client-side fallback: ~/Executive Assistant/Teams/{team_id}/
+    # Client-side fallback: ~/Assistant/Teams/{team_id}/
     return self.root / "Teams" / self.team_id
 ```
 
@@ -402,7 +402,7 @@ Old methods delegate to new ones with a deprecation warning for one release.
 
 ### Consolidation target
 
-Currently the workspace base path `~/Executive Assistant/Workspaces/` is hardcoded in **3 places**:
+Currently the workspace base path `~/Assistant/Workspaces/` is hardcoded in **3 places**:
 - `paths.py:108` — `DataPaths._workspaces_base()`
 - `workspace_models.py:126` — `_default_workspaces_dir()`
 - `memory.py:166` — `_list_workspace_ids()`
@@ -427,13 +427,13 @@ gmail_cache/
 *.log
 ```
 
-`git init` happens once at `~/Executive Assistant/` on first `DataPaths` access in solo mode.
+`git init` happens once at `~/Assistant/` on first `DataPaths` access in solo mode.
 
 `ResearchLoop` detects git at `DataPaths.root / ".git"`:
 - `.git` exists → use branch isolation for experiments
 - No `.git` (team volume, server-side) → fall back to in-memory backup
 
-The hardcoded `Path("data") / "private" / "research"` in `research.py` is replaced with `DataPaths.research_dir()` (`~/Executive Assistant/Research/`).
+The hardcoded `Path("data") / "private" / "research"` in `research.py` is replaced with `DataPaths.research_dir()` (`~/Assistant/Research/`).
 
 ---
 
@@ -456,19 +456,19 @@ If the script fails, clean up and re-run. No rollback plan needed.
 ### File Map
 
 ```
-data/users/{id}/config/prompt.txt         →  ~/Executive Assistant/AGENTS.md
-data/users/{id}/skills/{n}/               →  ~/Executive Assistant/Skills/{n}/
-data/users/{id}/subagents/                →  ~/Executive Assistant/Subagents/
-data/users/{id}/conversation/             →  ~/Executive Assistant/Conversation/
-data/users/{id}/memory/                   →  ~/Executive Assistant/Memory/global/
-data/users/{id}/email/                    →  ~/Executive Assistant/Email/
-data/users/{id}/gmail_cache/              →  ~/Executive Assistant/Email/gmail_cache/
-data/users/{id}/contacts/                 →  ~/Executive Assistant/Contacts/
-data/users/{id}/todos/                    →  ~/Executive Assistant/Todos/
-data/users/{id}/companion/               →  ~/Executive Assistant/Companion/
-data/users/{id}/apps/                     →  ~/Executive Assistant/Apps/
-data/users/{id}/.mcp.json                →  ~/Executive Assistant/.mcp.json
-data/private/research/                    →  ~/Executive Assistant/Research/
+data/users/{id}/config/prompt.txt         →  ~/Assistant/AGENTS.md
+data/users/{id}/skills/{n}/               →  ~/Assistant/Skills/{n}/
+data/users/{id}/subagents/                →  ~/Assistant/Subagents/
+data/users/{id}/conversation/             →  ~/Assistant/Conversation/
+data/users/{id}/memory/                   →  ~/Assistant/Memory/global/
+data/users/{id}/email/                    →  ~/Assistant/Email/
+data/users/{id}/gmail_cache/              →  ~/Assistant/Email/gmail_cache/
+data/users/{id}/contacts/                 →  ~/Assistant/Contacts/
+data/users/{id}/todos/                    →  ~/Assistant/Todos/
+data/users/{id}/companion/               →  ~/Assistant/Companion/
+data/users/{id}/apps/                     →  ~/Assistant/Apps/
+data/users/{id}/.mcp.json                →  ~/Assistant/.mcp.json
+data/private/research/                    →  ~/Assistant/Research/
 ~/EA/Workspaces/{id}/skills/ (lowercase)  →  ~/EA/Workspaces/{id}/Skills/
 ~/EA/Workspaces/{id}/subagents/            →  ~/EA/Workspaces/{id}/Subagents/
 ~/EA/Workspaces/{id}/files/                →  ~/EA/Workspaces/{id}/Files/
@@ -487,13 +487,13 @@ remove.
 
 ### Stage 1 (Solo Mode)
 
-1. Add `ea_root` to settings (default: `~/Executive Assistant/`)
+1. Add `ea_root` to settings (default: `~/Assistant/`)
 2. Update `DataPaths` — add `root` property, new user-scoped methods, old-method deprecation wrappers
 3. Consolidate 3 hardcoded `Workspaces/` path references into `DataPaths.root / "Workspaces"`
 4. Write migration script with dry-run, manifest, resume marker guards
-5. Run migration: `data/users/{id}/` → `~/Executive Assistant/`
+5. Run migration: `data/users/{id}/` → `~/Assistant/`
 6. Rename workspace subdirs lowercase → uppercase via migration
-7. Add `.gitignore` + `git init` at `~/Executive Assistant/`
+7. Add `.gitignore` + `git init` at `~/Assistant/`
  8. Update `ResearchLoop` to detect `.git` and fall back to in-memory backup
  9. Remove hardcoded `Path("data") / "private" / "research"` in all research tools (`research.py`, `research_list`) — use `DataPaths.research_dir()`
 10. Create `src/prompt_seed/AGENTS.md` with seed content

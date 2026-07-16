@@ -1,6 +1,6 @@
 # Workspaces — Multi-Project Isolation for EA
 
-> An executive assistant handles multiple projects. Each project gets its own Workspace with scoped conversation history, memory, files, subagents, and custom AI instructions. Modeled on Perplexity Spaces + Claude Code project scoping.
+> An assistant handles multiple projects. Each project gets its own Workspace with scoped conversation history, memory, files, subagents, and custom AI instructions. Modeled on Perplexity Spaces + Claude Code project scoping.
 
 **Status:** Proposal / peer review  
 **Author:** Eddy Xu  
@@ -90,7 +90,7 @@ The single-session model works for a solo desktop app with one user and one topi
 A **Workspace** is a named, isolated project container within a user's account:
 
 ```
-~/Executive Assistant/
+~/Assistant/
 ├── Workspaces/
 │   ├── Q2 Planning/
 │   │   ├── files/              ← budget.xlsx, strategy.md
@@ -342,7 +342,7 @@ Skills support **two location scopes**, following opencode's model (project-scop
 
 ```
 Workspace-scoped:                          User-global:
-Workspaces/Q2 Planning/skills/             ~/Executive Assistant/Skills/
+Workspaces/Q2 Planning/skills/             ~/Assistant/Skills/
   ├── researcher/SKILL.md                    ├── deep-research/SKILL.md
   └── writer/SKILL.md                        ├── planning-with-files/SKILL.md
                                               ├── subagent-manager/SKILL.md
@@ -389,7 +389,7 @@ opencode supports the same pattern. They search these locations in priority orde
 2. Global: `~/.config/opencode/skills/`, `~/.claude/skills/`, `~/.agents/skills/`
 3. Walk up directory tree from CWD
 
-EA's equivalent: workspace `skills/` directories in priority order, then user-global `Skills/`, then system `src/skills/`.
+Assistant's equivalent: workspace `skills/` directories in priority order, then user-global `Skills/`, then system `src/skills/`.
 
 ### Example: Override Scenario
 
@@ -613,7 +613,7 @@ class DataPaths:
     
     def workspace_base(self) -> Path:
         """Base directory for all workspaces."""
-        return Path.home() / "Executive Assistant" / "Workspaces"
+        return Path.home() / "Assistant" / "Workspaces"
     
     def current_workspace_dir(self) -> Path:
         """Current workspace directory."""
@@ -640,7 +640,7 @@ class DataPaths:
         return p
     
     def global_memory_dir(self) -> Path:
-        p = Path.home() / "Executive Assistant" / "Memory" / "global"
+        p = Path.home() / "Assistant" / "Memory" / "global"
         p.mkdir(parents=True, exist_ok=True)
         return p
     
@@ -652,7 +652,7 @@ class DataPaths:
 
 ```python
 # On first access after upgrade, migrate legacy paths
-legacy_workspace = Path.home() / "Executive Assistant" / "Workspace"
+legacy_workspace = Path.home() / "Assistant" / "Workspace"
 new_personal = self.workspace_base() / "personal" / "files"
 if legacy_workspace.exists() and not new_personal.exists():
     self.workspace_base().mkdir(parents=True, exist_ok=True)
@@ -890,22 +890,22 @@ if isinstance(msg, UserMessage):
 # scripts/migrate_workspaces.py
 def migrate():
     """Rename ~/EA/Workspace/ -> ~/EA/Workspaces/Personal/files/"""
-    legacy = Path.home() / "Executive Assistant" / "Workspace"
-    new = Path.home() / "Executive Assistant" / "Workspaces" / "Personal" / "files"
+    legacy = Path.home() / "Assistant" / "Workspace"
+    new = Path.home() / "Assistant" / "Workspaces" / "Personal" / "files"
     if legacy.exists() and not new.exists():
         new.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(legacy), str(new))
     
     """Move conversation DB to workspace-scoped location"""
     old_conv = Path("data/users/default_user/conversation/app.db")
-    new_conv = Path.home() / "Executive Assistant" / "Workspaces" / "Personal" / "conversation.app.db"
+    new_conv = Path.home() / "Assistant" / "Workspaces" / "Personal" / "conversation.app.db"
     if old_conv.exists() and not new_conv.exists():
         new_conv.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(old_conv), str(new_conv))
     
     """Move memory to workspace-scoped location (keep copy in global/) """
     old_mem = Path("data/users/default_user/memory")
-    new_mem = Path.home() / "Executive Assistant" / "Workspaces" / "Personal" / "memory"
+    new_mem = Path.home() / "Assistant" / "Workspaces" / "Personal" / "memory"
     if old_mem.exists() and not new_mem.exists():
         shutil.copytree(str(old_mem), str(new_mem))
 ```
@@ -1318,7 +1318,7 @@ workspace_delete(name)
 |--------|-------|
 | `data/users/{uid}/conversation.app.db` | `data/workspaces/{workspace_id}/conversation.app.db` |
 | `data/users/{uid}/memory/` | `data/workspaces/{workspace_id}/memory/` (workspace-scoped) + `data/users/{uid}/global_memory/` (user-global) |
-| `~/Executive Assistant/Workspace/` | `~/Executive Assistant/Workspaces/{name}/files/` |
+| `~/Assistant/Workspace/` | `~/Assistant/Workspaces/{name}/files/` |
 | `data/users/{uid}/subagents/` | `data/workspaces/{id}/subagents/` (workspace) + `data/users/{uid}/subagents/global/` (user-global) |
 | System prompt: fixed | System prompt + workspace name + custom instructions |
 | Agent tools: all global | Agent tools scoped to current workspace |
@@ -1379,7 +1379,7 @@ A full review of all `src/sdk/` and `src/storage/` call sites confirms these com
 
 2. **Scope of global memory:** Should user-level memory be a SEPARATE collection (clean split) or a shared collection with workspace filter (simpler SQL)? Separate is cleaner. **→ Resolved: `Memory/global/` is separate from workspace memory.**
 
-3. **Workspace file path:** `~/Executive Assistant/Workspaces/{name}/files/` is clean. But the existing `~/Executive Assistant/Workspace/` directory already has files. Migration: rename `Workspace/` → `Workspaces/Personal/files/` on first launch. **→ Resolved: implemented in workspace_models.py seed + paths.py.**
+3. **Workspace file path:** `~/Assistant/Workspaces/{name}/files/` is clean. But the existing `~/Assistant/Workspace/` directory already has files. Migration: rename `Workspace/` → `Workspaces/Personal/files/` on first launch. **→ Resolved: implemented in workspace_models.py seed + paths.py.**
 
 4. **Default workspace name:** "Personal" vs "General" vs "Default"? "Personal" feels right for solo users who aren't thinking in terms of projects yet. **→ Resolved: "Personal" chosen.**
 

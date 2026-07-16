@@ -127,7 +127,7 @@ Because sqlite-vec stores vectors in the same SQLite file, the DB grows 15x larg
 
 ## Recommendation
 
-**Stick with SQLite + FTS5 + ChromaDB** for the Executive Assistant.
+**Stick with SQLite + FTS5 + ChromaDB** for the Assistant.
 
 For our use case (< 100k memories per user, interactive search), ChromaDB's ANN indexing is essential. The 78x vector search penalty at 100k makes sqlite-vec unsuitable for production.
 

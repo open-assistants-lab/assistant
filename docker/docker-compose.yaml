@@ -1,5 +1,5 @@
 services:
-  # Executive Assistant HTTP API
+  # Assistant HTTP API
   app:
     build:
       context: ..

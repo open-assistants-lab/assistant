@@ -166,7 +166,7 @@ Expected: Same number of issues as before (31 info-level, no errors).
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add flutter_app/lib/theme/tokens/colors.dart flutter_app/test/theme/tokens_test.dart
 git commit -m "theme: replace palette with Deep Emerald accent (dark + light)"
 ```
@@ -278,7 +278,7 @@ Expected: No new errors. Some widgets that hard-coded sizes won't visually adapt
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add flutter_app/lib/theme/tokens/typography.dart flutter_app/test/theme/typography_test.dart
 git commit -m "theme: tighten typography scale with Linear letter-spacing"
 ```
@@ -340,7 +340,7 @@ Expected: No new errors (existing `xs/sm/md/lg/xl/xxl/xxxl` still exist; we only
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add flutter_app/lib/theme/tokens/spacing.dart
 git commit -m "theme: add xxs spacing token, refine scale"
 ```
@@ -406,7 +406,7 @@ Expected: No new errors. `mdAll`/`lgAll`/`xlAll` getters still exist; `sm` value
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add flutter_app/lib/theme/tokens/radius.dart
 git commit -m "theme: tighten radius scale (8/10/12 for cards/panels/dialogs)"
 ```
@@ -537,7 +537,7 @@ Expected: Possibly deprecation warnings on old names. No errors (deprecated gett
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add flutter_app/lib/theme/tokens/motion.dart flutter_app/test/theme/motion_test.dart
 git commit -m "theme: restructure motion tokens (utility/moment tiers, Linear curves)"
 ```
@@ -611,7 +611,7 @@ Kill the app with `q`.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add flutter_app/lib/theme/app_theme.dart
 git commit -m "theme: wire Deep Emerald tokens into ColorScheme + input decoration"
 ```
@@ -633,7 +633,7 @@ Expected: Same number of issues as before (about 31 info-level), zero errors.
 - [ ] **Step 3: Tag Phase 1 completion**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git tag design-refresh-phase-1
 git push origin design-refresh-phase-1 2>/dev/null || true
 ```
@@ -794,7 +794,7 @@ Expected: No errors. `staggeredEntry` callers still compile (deprecated).
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add flutter_app/lib/core/animations.dart flutter_app/test/core/animations_test.dart
 git commit -m "animations: replace staggeredEntry with reduced-motion-aware fadeIn"
 ```
@@ -952,7 +952,7 @@ Expected: No errors. If `flutter_markdown` is missing, add it: `cd flutter_app &
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add flutter_app/lib/features/chat/widgets/message_bubble.dart flutter_app/pubspec.yaml flutter_app/pubspec.lock 2>/dev/null
 git commit -m "chat: split MessageBubble into UserBubble + flat AssistantMessage with role label"
 ```
@@ -1067,7 +1067,7 @@ Expected: No errors.
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add flutter_app/lib/features/chat/widgets/streaming_bubble.dart
 git commit -m "chat: redesign StreamingBubble flat with pulsing role-dot"
 ```
@@ -1193,7 +1193,7 @@ Expected: No errors.
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add flutter_app/lib/features/chat/widgets/reasoning_bubble.dart
 git commit -m "chat: redesign ReasoningBubble as collapsed card with small-caps header"
 ```
@@ -1371,7 +1371,7 @@ Expected: No errors.
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add flutter_app/lib/features/chat/widgets/tool_call_card.dart
 git commit -m "chat: redesign ToolCallCard with compact header and status badges"
 ```
@@ -1499,7 +1499,7 @@ Expected: No errors.
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add flutter_app/lib/features/chat/widgets/empty_state.dart
 git commit -m "chat: add ChatEmptyState widget with accent dot and suggestion chips"
 ```
@@ -1537,7 +1537,7 @@ Expected: No errors.
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add flutter_app/lib/features/chat/widgets/chat_input.dart
 git commit -m "chat: restyle ChatInput with new tokens and 32x32 send button"
 ```
@@ -1587,7 +1587,7 @@ Expected: No errors (deprecation warning on staggeredEntry call sites would be f
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add flutter_app/lib/features/chat/widgets/chat_message_list.dart
 git commit -m "chat: replace staggeredEntry with fadeIn, wire ChatEmptyState"
 ```
@@ -1616,7 +1616,7 @@ Kill app with `q`.
 - [ ] **Step 3: Tag Phase 2 completion**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git tag design-refresh-phase-2
 ```
 
@@ -1794,7 +1794,7 @@ Expected: PASS — 2 tests pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add flutter_app/lib/widgets/ea_button.dart flutter_app/test/widgets/ea_button_test.dart
 git commit -m "widgets: add EaButton with Primary/Secondary/Ghost variants and press scale"
 ```
@@ -1943,7 +1943,7 @@ Expected: PASS — 1 test passes.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add flutter_app/lib/widgets/ea_dialog.dart flutter_app/test/widgets/ea_dialog_test.dart
 git commit -m "widgets: add showEaDialog with scale+spring entrance and emerald border"
 ```
@@ -2017,7 +2017,7 @@ Expected: No errors.
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add flutter_app/lib/core/page_transitions.dart flutter_app/lib/theme/app_theme.dart
 git commit -m "core: add EaPageTransitions (8px slide + fade, 180ms) and wire into theme"
 ```
@@ -2068,7 +2068,7 @@ Expected: No errors.
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add flutter_app/lib/core/layout/desktop_layout.dart
 git commit -m "chat: crossfade between workspaces on tab switch (180ms)"
 ```
@@ -2104,7 +2104,7 @@ Expected: No errors.
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add flutter_app/lib/core/layout/desktop_layout.dart
 git commit -m "chat: restyle workspace tabs (underline indicator, animated transition)"
 ```
@@ -2141,7 +2141,7 @@ Expected: No errors.
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add flutter_app/lib/core/layout/desktop_layout.dart
 git commit -m "chat: restyle sidebar items (3px accent bar on active, hover)"
 ```
@@ -2193,7 +2193,7 @@ Expected: No errors.
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git add flutter_app/lib/features/chat/widgets/approval_sheet.dart
 git commit -m "chat: restyle ApprovalSheet with slide+spring entrance and accent left-bar"
 ```
@@ -2233,7 +2233,7 @@ Kill with `q`.
 - [ ] **Step 4: Tag completion**
 
 ```bash
-cd /Users/eddy/Developer/Langgraph/executive-assistant
+cd /Users/eddy/Developer/Langgraph/assistant
 git tag design-refresh-phase-3
 git tag design-refresh-complete
 ```

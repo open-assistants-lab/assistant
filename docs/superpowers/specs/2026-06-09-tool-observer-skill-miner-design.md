@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-09
 **Status:** Draft
-**Motivation:** EA's fact observer only captures user+assistant messages — it misses tool calls and results. Tool messages contain rich signal about agent behavior (error patterns, success patterns, repeated sequences) that could drive tool and skill optimization.
+**Motivation:** Assistant's fact observer only captures user+assistant messages — it misses tool calls and results. Tool messages contain rich signal about agent behavior (error patterns, success patterns, repeated sequences) that could drive tool and skill optimization.
 
 Two-layer architecture:
 - **CoreMem (OSS):** Observes tool messages, outputs structured `tool_summary` observations. Purely observational — no tool catalog, no skill registry, no domain knowledge.
@@ -307,7 +307,7 @@ class MemoryCore:
             session_id: Session identifier
             user_id: User identifier
             active_skills: Opaque list of skill names loaded during session.
-                           Provided by caller (e.g. EA's AgentLoop).
+                           Provided by caller (e.g. Assistant's AgentLoop).
                            CoreMem stores them but has no knowledge of them.
         """
         if not self._tool_extractor_enabled:
@@ -328,7 +328,7 @@ class MemoryCore:
 
 ## 3. EA Recommendation Output (not stored in CoreMem)
 
-EA's `SkillMiner` reads `tool_summary` observations from CoreMem, enriches with domain context, and produces transient recommendations. These are consumed by the agent or presented to the user — **not written back to CoreMem**.
+Assistant's `SkillMiner` reads `tool_summary` observations from CoreMem, enriches with domain context, and produces transient recommendations. These are consumed by the agent or presented to the user — **not written back to CoreMem**.
 
 ### 3.1 Recommendation types
 
@@ -402,7 +402,7 @@ class SkillMiner:
         """Find error patterns per tool → suggest description improvements.
 
         Cross-references deterministic error_by_tool from CoreMem
-        with EA's tool catalog descriptions.
+        with Assistant's tool catalog descriptions.
         """
         summaries = self.core.get_observations(
             kind="tool_summary", user_id=user_id, limit=50,

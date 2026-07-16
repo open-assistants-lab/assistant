@@ -1209,7 +1209,7 @@ observation text rather than raw messages.
 #### Issue 3: Token threshold calibration is untested
 
 The design uses OBSERVER_THRESHOLD = 4000 tokens and REFLECTOR_THRESHOLD = 8000 tokens.
-These are Mastra OM's numbers, not calibrated for EA's conversation patterns. In active
+These are Mastra OM's numbers, not calibrated for Assistant's conversation patterns. In active
 conversations, 4000 tokens of unobserved messages could accumulate in 2-3 turns — meaning
 the Observer fires after almost every turn, consuming LLM budget.
 
@@ -1403,7 +1403,7 @@ This way: (a) facts are collected as a sidecar during Phase 1 for quality testin
 
 ### Issue 3: Token threshold calibration untested — ✅ ACCEPTED
 
-**Review claim**: 4000/8000 from Mastra OM may fire too often in EA's conversation patterns. Use 8000/16000 with minimum-turn guard.
+**Review claim**: 4000/8000 from Mastra OM may fire too often in Assistant's conversation patterns. Use 8000/16000 with minimum-turn guard.
 
 **Verified at**: No existing threshold calibration in EA. The SummarizationMiddleware at `middleware_summarization.py` uses a configurable `MAX_TOKENS` without turn-based guards. The reviewer's concern about firing every 2-3 turns is valid.
 

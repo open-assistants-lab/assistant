@@ -76,7 +76,7 @@ production code in Task 2 will pass the real `Sidebar` widget.
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant/flutter_app
+cd /Users/eddy/Developer/Python/assistant/flutter_app
 flutter test test/core/layout/desktop_utility_layout_test.dart
 ```
 
@@ -131,7 +131,7 @@ class DesktopUtilityLayout extends ConsumerWidget {
 - [ ] **Step 4: Run test to verify it passes**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant/flutter_app
+cd /Users/eddy/Developer/Python/assistant/flutter_app
 flutter test test/core/layout/desktop_utility_layout_test.dart
 ```
 
@@ -140,7 +140,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant
+cd /Users/eddy/Developer/Python/assistant
 git add flutter_app/lib/core/layout/desktop_utility_layout.dart \
         flutter_app/test/core/layout/desktop_utility_layout_test.dart
 git commit -m "feat: DesktopUtilityLayout (two-column sidebar + full-width child)"
@@ -247,7 +247,7 @@ class ResponsiveShell extends ConsumerWidget {
 - [ ] **Step 5: Verify no analyzer issues**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant/flutter_app
+cd /Users/eddy/Developer/Python/assistant/flutter_app
 flutter analyze lib/core/layout/responsive_shell.dart lib/core/router/app_router.dart
 ```
 
@@ -256,7 +256,7 @@ Expected: No new issues.
 - [ ] **Step 6: Run existing tests to check for regressions**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant/flutter_app
+cd /Users/eddy/Developer/Python/assistant/flutter_app
 flutter test test/core/layout/ test/core/responsive_test.dart 2>&1 | tail -5
 ```
 
@@ -266,7 +266,7 @@ failures — that's OK, just verify no new failures.)
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant
+cd /Users/eddy/Developer/Python/assistant
 git add flutter_app/lib/core/layout/responsive_shell.dart \
         flutter_app/lib/core/router/app_router.dart \
         flutter_app/lib/core/layout/desktop_layout.dart
@@ -333,7 +333,7 @@ GoRoute(
 - [ ] **Step 3: Verify analyzer + tests**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant/flutter_app
+cd /Users/eddy/Developer/Python/assistant/flutter_app
 flutter analyze lib/core/router/app_router.dart lib/features/connectors/
 flutter test test/core/layout/ test/core/responsive_test.dart 2>&1 | tail -3
 ```
@@ -343,7 +343,7 @@ Expected: No new issues.
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant
+cd /Users/eddy/Developer/Python/assistant
 git add flutter_app/lib/core/router/app_router.dart \
         flutter_app/lib/features/connectors/connectors_modal.dart
 git commit -m "feat: /connectors route with modal close fix"
@@ -360,7 +360,7 @@ git commit -m "feat: /connectors route with modal close fix"
 - [ ] **Step 1: Read the existing responsive test file for context**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant/flutter_app
+cd /Users/eddy/Developer/Python/assistant/flutter_app
 head -50 test/core/responsive_test.dart
 ```
 
@@ -406,7 +406,7 @@ void main() {
 - [ ] **Step 3: Run the pure function test to verify it passes**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant/flutter_app
+cd /Users/eddy/Developer/Python/assistant/flutter_app
 flutter test test/core/router/app_router_test.dart 2>&1 | tail -3
 ```
 
@@ -480,7 +480,7 @@ void main() {
 - [ ] **Step 5: Run the widget test to verify it passes**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant/flutter_app
+cd /Users/eddy/Developer/Python/assistant/flutter_app
 flutter test test/core/layout/responsive_shell_test.dart 2>&1 | tail -3
 ```
 
@@ -489,7 +489,7 @@ Expected: PASS (2 tests)
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant
+cd /Users/eddy/Developer/Python/assistant
 git add flutter_app/test/core/router/app_router_test.dart \
         flutter_app/test/core/layout/responsive_shell_test.dart
 git commit -m "test: isUtilityRoute + ResponsiveShell layout selection"
@@ -586,7 +586,7 @@ void main() {
 - [ ] **Step 3: Run test to verify it passes**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant/flutter_app
+cd /Users/eddy/Developer/Python/assistant/flutter_app
 flutter test test/core/layout/responsive_shell_test.dart 2>&1 | tail -3
 ```
 
@@ -595,7 +595,7 @@ Expected: PASS (2 tests, one per group)
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant
+cd /Users/eddy/Developer/Python/assistant
 git add flutter_app/test/core/layout/responsive_shell_test.dart
 git commit -m "test: responsive shell routes to utility layout"
 ```
@@ -630,7 +630,7 @@ Minimum coverage required:
 - [ ] **Step 3: Run test to verify it passes**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant/flutter_app
+cd /Users/eddy/Developer/Python/assistant/flutter_app
 flutter test test/core/responsive_test.dart test/core/layout/responsive_shell_test.dart 2>&1 | tail -3
 ```
 
@@ -639,7 +639,7 @@ Expected: PASS
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant
+cd /Users/eddy/Developer/Python/assistant
 git add flutter_app/test/core/responsive_test.dart \
         flutter_app/test/core/layout/responsive_shell_test.dart
 git commit -m "test: responsive shell routes to utility layout"
@@ -652,7 +652,7 @@ git commit -m "test: responsive shell routes to utility layout"
 - [ ] **Step 1: Run full Flutter test suite**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant/flutter_app
+cd /Users/eddy/Developer/Python/assistant/flutter_app
 flutter test
 ```
 
@@ -661,7 +661,7 @@ Expected: same baseline (129+ pass, same 32 pre-existing failures).
 - [ ] **Step 2: Run analyzer**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant/flutter_app
+cd /Users/eddy/Developer/Python/assistant/flutter_app
 flutter analyze lib/
 ```
 
@@ -670,7 +670,7 @@ Expected: No new issues.
 - [ ] **Step 3: Build macOS app**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant/flutter_app
+cd /Users/eddy/Developer/Python/assistant/flutter_app
 flutter build macos --debug
 ```
 
@@ -690,7 +690,7 @@ Expected: Build succeeds.
 - [ ] **Step 5: Push**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant
+cd /Users/eddy/Developer/Python/assistant
 git status  # should be clean
 git log --oneline -6
 git push origin main

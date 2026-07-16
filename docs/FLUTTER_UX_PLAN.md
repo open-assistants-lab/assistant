@@ -1,4 +1,4 @@
-# Executive Assistant — Flutter UI/UX Plan
+# Assistant — Flutter UI/UX Plan
 
 > Design system, navigation architecture, and screen specifications for the Flutter frontend.
 > Inspired by Wise's design philosophy: **Clarity, Context, Conviction.**
@@ -210,7 +210,7 @@ When user taps a conversation or starts typing on Home, push to full-screen chat
 
 ```
 ┌──────────────────────────────────────┐
-│  ← Back          Executive Assistant │
+│  ← Back          Assistant │
 ├──────────────────────────────────────┤
 │                                      │
 │  You: Draft a reply to Sarah         │

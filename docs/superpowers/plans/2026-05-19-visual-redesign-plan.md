@@ -527,18 +527,18 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 final themeModeProvider = StateProvider<ThemeMode>((ref) => ThemeMode.dark);
 
 void main() {
-  runApp(const ProviderScope(child: ExecutiveAssistantApp()));
+  runApp(const ProviderScope(child: AssistantApp()));
 }
 
-class ExecutiveAssistantApp extends ConsumerWidget {
-  const ExecutiveAssistantApp({super.key});
+class AssistantApp extends ConsumerWidget {
+  const AssistantApp({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final themeMode = ref.watch(themeModeProvider);
 
     return MaterialApp.router(
-      title: 'Executive Assistant',
+      title: 'Assistant',
       theme: AppTheme.light,
       darkTheme: AppTheme.dark,
       themeMode: themeMode,

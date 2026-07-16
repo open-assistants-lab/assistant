@@ -1,4 +1,4 @@
-# Executive Assistant — Project Plan
+# Assistant — Project Plan
 
 > Custom agent SDK replacing LangChain/LangGraph. Test-driven. Incremental. Zero regression.
 
@@ -1138,7 +1138,7 @@ Email (8 tools), contacts (6 tools), and todos (5 tools) are disabled pending re
 - **Parallel tools**: Sequential within an agent turn
 - **Plugin system**: `@opencode-ai/plugin` SDK with Zod schemas, lifecycle hooks, TUI slots
 
-### Our Executive Assistant (Python)
+### Our Assistant (Python)
 
 - **Agent loop**: `AgentLoop` async ReAct with guardrails, handoffs, tracing
 - **Permission**: `ToolAnnotations` (readOnly, destructive, idempotent, openWorld) + auto-approval + HITL interrupts
@@ -1155,7 +1155,7 @@ Email (8 tools), contacts (6 tools), and todos (5 tools) are disabled pending re
 
 ## Phase 23: Workspaces — Multi-Project Isolation
 
-> An executive assistant handles multiple projects. Each project gets its own Workspace with scoped conversation history, memory, files, subagents, and custom AI instructions. Modeled on Perplexity Spaces + Claude Code project scoping.
+> An assistant handles multiple projects. Each project gets its own Workspace with scoped conversation history, memory, files, subagents, and custom AI instructions. Modeled on Perplexity Spaces + Claude Code project scoping.
 
 **Current state:** One `user_id` = one conversation stream = one memory bank = one flat file directory. Everything bleeds together. The agent searching "Q2 budget" returns facts from "Home Renovation." Files from all projects share one folder. No way to give different AI instructions per project.
 
@@ -1164,7 +1164,7 @@ Email (8 tools), contacts (6 tools), and todos (5 tools) are disabled pending re
 ### Architecture
 
 ```
-~/Executive Assistant/
+~/Assistant/
 ├── Workspaces/
 │   ├── Q2 Planning/
 │   │   ├── files/              ← budget.xlsx, strategy.md

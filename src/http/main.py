@@ -1,4 +1,4 @@
-"""HTTP server for Executive Assistant."""
+"""HTTP server for Assistant."""
 
 import asyncio
 from collections.abc import AsyncGenerator
@@ -86,8 +86,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(
-    title="Executive Assistant",
-    description="HTTP API for Executive Assistant",
+    title="Assistant",
+    description="HTTP API for Assistant",
     version="0.1.0",
     lifespan=lifespan,
 )

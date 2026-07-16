@@ -161,7 +161,7 @@ Expected: PASS (4 tests)
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant
+cd /Users/eddy/Developer/Python/assistant
 git add flutter_app/lib/features/chat/widgets/jump_to_bottom_button.dart \
         flutter_app/test/features/chat/widgets/jump_to_bottom_button_test.dart
 git commit -m "feat: JumpToBottomButton widget with new-message badge"
@@ -341,7 +341,7 @@ Expected: PASS (all 5 tests — 4 original + 1 new)
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant
+cd /Users/eddy/Developer/Python/assistant
 git add flutter_app/lib/core/layout/desktop_layout.dart \
         flutter_app/test/core/layout/desktop_layout_test.dart
 git commit -m "feat: wire jump-to-bottom button with scroll position tracking"
@@ -447,7 +447,7 @@ Expected: PASS (4 tests)
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant
+cd /Users/eddy/Developer/Python/assistant
 git add flutter_app/lib/providers/draft_provider.dart \
         flutter_app/test/providers/draft_provider_test.dart
 git commit -m "feat: per-workspace input draft provider"
@@ -711,7 +711,7 @@ Expected: All PASS (existing tests still work, new tests pass)
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant
+cd /Users/eddy/Developer/Python/assistant
 git add flutter_app/lib/features/chat/widgets/chat_input.dart \
         flutter_app/lib/widgets/app_input.dart \
         flutter_app/test/widgets/app_input_test.dart
@@ -775,7 +775,7 @@ Expected: PASS
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant
+cd /Users/eddy/Developer/Python/assistant
 git add flutter_app/lib/core/layout/desktop_layout.dart
 git commit -m "refactor: remove dead opacity fade on workspace switch"
 ```
@@ -811,7 +811,7 @@ Expected: Build succeeds
 - [ ] **Step 5: Commit any remaining changes + push**
 
 ```bash
-cd /Users/eddy/Developer/Python/executive-assistant
+cd /Users/eddy/Developer/Python/assistant
 git status  # should be clean
 git log --oneline -7  # review the 5 commits
 git push origin main

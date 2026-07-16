@@ -1,4 +1,4 @@
-"""Storage module for Executive Assistant."""
+"""Storage module for Assistant."""
 
 from src.storage.messages import (
     Message,

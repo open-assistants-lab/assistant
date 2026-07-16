@@ -1,10 +1,10 @@
-# Executive Assistant — Non-Tech UX Evaluation
+# Assistant — Non-Tech UX Evaluation
 
 Date: 2026-06-07
 
 ## Summary
 
-Executive Assistant is a deeply capable AI agent system (chat, email, web, memory,
+Assistant is a deeply capable AI agent system (chat, email, web, memory,
 subagents, skills, MCP, app builder). From a non-technical user perspective, the
 features are compelling — but the delivery layers (install, config, interface,
 onboarding) still assume a developer user.
@@ -57,13 +57,13 @@ badges, data privacy section, consolidated developer section at bottom.
 Detects first launch (no provider keys configured), shows a 3-step wizard:
 1. **Welcome + pick provider** — lists available LLM providers from the backend, radio selection
 2. **Enter API key + Test** — text field with Test button (`✓ Connection works` / `✗`), Back button
-3. **Done** — confirmation screen, "Get Started" / "Start Using Executive Assistant" button
+3. **Done** — confirmation screen, "Get Started" / "Start Using Assistant" button
 
 GoRouter redirects to `/onboarding` on first launch. `onboardingCompleteProvider` (Riverpod)
 tracks tri-state (`null` = loading, `false` = not complete, `true` = done). Wizard saves API
 key via `settings.setApiKey()` on completion.
 
-After the wizard completes, the user lands on `/workspace` where a **"Learn Executive Assistant"** checklist banner appears (modeled on Claude Code VS Code's "Learn Claude Code" flow):
+After the wizard completes, the user lands on `/workspace` where a **"Learn Assistant"** checklist banner appears (modeled on Claude Code VS Code's "Learn Claude Code" flow):
 
 | Item | Action |
 |------|--------|
@@ -94,7 +94,7 @@ to GitHub Releases. Manual builds don't ship.
 
 On first launch (no chat history), the assistant sends a welcome message:
 
-> "Hey there! 👋 I'm your Executive Assistant. I'd love to get to know you — what's your name, and what brings you here? ..."
+> "Hey there! 👋 I'm your Assistant. I'd love to get to know you — what's your name, and what brings you here? ..."
 
 Lists possible use cases (email, calendar, tasks, research, files) and asks the user about themselves and their goals. Implemented as a local assistant message in `AgentNotifier._maybeSendWelcome()`, no API call needed.
 
@@ -120,14 +120,14 @@ In the pipeline.
 
 #### 7. Data backup hint
 
-Settings tile: "Your data is at `~/Executive Assistant/` — consider adding it
+Settings tile: "Your data is at `~/Assistant/` — consider adding it
 to iCloud Drive / Dropbox backup." The data directory is already git-initialized
 — this prevents heartbreak on machine failure.
 
 #### 8. Data migration for solo → multi-tenant
 
 Not urgent now, but when the shared host tier lands, the solo user who signs up
-for hosting needs a path to move their `~/Executive Assistant/` data to the
+for hosting needs a path to move their `~/Assistant/` data to the
 remote volume (memory, contacts, todos, files, AGENTS.md).
 
 ---
@@ -192,7 +192,7 @@ transition:
 | Security boundaries | User — they own the machine | **Admin** — shell allowed commands, model allowlist, cost caps, idle timeout |
 | LLM provider keys | User — their own API keys | **Admin** — provisioned centrally per container. User does not BYO |
 | Model choice | User — any model | **Admin** sets allowlist, user picks within it |
-| Personal data | User — `~/Executive Assistant/` | **User** — per-user volume. Admin CAN impersonate (mounts volume) |
+| Personal data | User — `~/Assistant/` | **User** — per-user volume. Admin CAN impersonate (mounts volume) |
 | Team data | N/A | **Admin** — team contacts, skills, memory, files. Users read-only |
 | Personal skills/subagents | User — creates their own | **User** — creates personal ones. Admin provides team-shared |
 | Personal prompt (AGENTS.md) | User | **User** — per-user volume |
@@ -246,7 +246,7 @@ file. Multi-tenant needs three layers:
 
 ### What happens when switching from solo to multi-tenant
 
-No data migration path exists. Local `~/Executive Assistant/` stays on the
+No data migration path exists. Local `~/Assistant/` stays on the
 machine. The remote server has its own empty per-user volume — the user sees
 a blank slate.
 

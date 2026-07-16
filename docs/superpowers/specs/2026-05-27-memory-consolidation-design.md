@@ -32,7 +32,7 @@ Registration changes in `src/sdk/native_tools.py`.
 
 ## 2. Unified MemoryStore
 
-Merge `ObservationStore` (182 lines) and `MemoryStore` (1882 lines) into a single `MemoryStore` with two tables in one HybridDB. Uses `paths.user_memory_dir()` → `~/Executive Assistant/Memory/global/` (same path as current MemoryStore, consistent with existing `user_memory_dir()`).
+Merge `ObservationStore` (182 lines) and `MemoryStore` (1882 lines) into a single `MemoryStore` with two tables in one HybridDB. Uses `paths.user_memory_dir()` → `~/Assistant/Memory/global/` (same path as current MemoryStore, consistent with existing `user_memory_dir()`).
 
 No separate compression step. Observations are the source of truth. The LLM searches observations via HybridDB at query time — relevance ranking replaces summarization.
 
@@ -212,7 +212,7 @@ memory_reflection(query, method="hybrid", limit=5) → str
 ## 5. Storage Layout
 
 ```
-~/Executive Assistant/
+~/Assistant/
 ├── Conversation/
 │   └── app.db              # MessageStore (HybridDB) — unchanged
 ├── Memory/
@@ -224,7 +224,7 @@ memory_reflection(query, method="hybrid", limit=5) → str
     └── conversation.app.db # Workspace MessageStore — unchanged
 ```
 
-Memory uses `paths.user_memory_dir()` (`~/Executive Assistant/Memory/global/`). This replaces both the old `MemoryStore` path and the old `ObservationStore` path (`Workspaces/{id}/Memory/observations/`). Observations and reflections are global, not per-workspace.
+Memory uses `paths.user_memory_dir()` (`~/Assistant/Memory/global/`). This replaces both the old `MemoryStore` path and the old `ObservationStore` path (`Workspaces/{id}/Memory/observations/`). Observations and reflections are global, not per-workspace.
 
 ---
 

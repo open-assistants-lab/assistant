@@ -1,7 +1,7 @@
 # Memory Subsystem Rewrite — Research & Approach
 
 **Date:** 2026-05-08
-**Goal:** Rewrite EA's memory extraction, storage, and retrieval to achieve >95% on LongMemEval, with zero LLM involvement, using HybridDB as the foundation.
+**Goal:** Rewrite Assistant's memory extraction, storage, and retrieval to achieve >95% on LongMemEval, with zero LLM involvement, using HybridDB as the foundation.
 
 ---
 
@@ -9,7 +9,7 @@
 
 ### System Map
 
-EA's memory subsystem spans ~5K lines across 6 files:
+Assistant's memory subsystem spans ~5K lines across 6 files:
 
 | Layer | File | Lines | Role |
 |---|---|---|---|

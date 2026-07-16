@@ -1,4 +1,4 @@
-# Executive Assistant — Competitive Analysis
+# Assistant — Competitive Analysis
 
 > Date: 2026-04-23
 > Context: Assessing market position before launch. Comparing our codebase against competitors across features, architecture, and differentiation.
@@ -214,7 +214,7 @@ Every user gets their own SQLite databases (`data/users/{user_id}/...`). This is
 4,172+ models via models.dev registry with dynamic discovery. 5 provider implementations. No vendor lock-in. Codex is OpenAI-only. Cowork is Claude-only. ADK is Gemini-first.
 
 ### 5. **Email + Contacts + Todos — Only Framework With These**
-19 tools for real-world executive work. No other framework ships with IMAP/SMTP email, contact management, or todo extraction. This makes us the only framework that's useful out-of-the-box for an executive assistant use case.
+19 tools for real-world executive work. No other framework ships with IMAP/SMTP email, contact management, or todo extraction. This makes us the only framework that's useful out-of-the-box for an assistant use case.
 
 ### 6. **App Builder — Unique**
 14 tools for no-code data applications with FTS5 + semantic + hybrid search. No competitor has anything like this.
@@ -293,7 +293,7 @@ Google ADK supports Agent-to-Agent protocol for remote agent communication. This
 ### We Are Ready To Launch Because:
 1. **Core SDK is solid** — 15,600 lines, 524 tests, zero LangChain dependency, all major features working
 2. **Unique differentiators are real** — subagent supervision, hybrid memory, per-user isolation, email/contacts/todos
-3. **The "executive assistant" niche is open** — no other framework serves this use case natively
+3. **The "assistant" niche is open** — no other framework serves this use case natively
 4. **Model-agnostic** — every other major player is vendor-locked or vendor-biased
 
 ### We Need Before Launch:
@@ -314,13 +314,13 @@ Google ADK supports Agent-to-Agent protocol for remote agent communication. This
 
 **Don't compete as a general-purpose agent framework.** That space is crowded (LangChain, CrewAI, AutoGen, ADK, Mastra).
 
-**Do position as the only open-source executive assistant SDK with:**
+**Do position as the only open-source assistant SDK with:**
 - Real-world tools (email, contacts, todos, app builder)
 - Structured subagent supervision
 - Per-user data isolation
 - 110+ model providers
 
-**Tagline direction:** "The self-hosted executive assistant that actually does things — not just chats."
+**Tagline direction:** "The self-hosted assistant that actually does things — not just chats."
 
 **Target audience:** Developers building AI-powered productivity tools, SaaS with multi-tenant agent features, or self-hosted personal assistants.
 

@@ -1,8 +1,8 @@
-# Executive Assistant - Architecture & Storage
+# Assistant - Architecture & Storage
 
 ## Overview
 
-Executive Assistant is a multi-channel AI assistant (CLI, HTTP) with long-term memory using **SQLite + FTS5 + ChromaDB** for hybrid search.
+Assistant is a multi-channel AI assistant (CLI, HTTP) with long-term memory using **SQLite + FTS5 + ChromaDB** for hybrid search.
 
 ## Architecture
 
@@ -106,13 +106,13 @@ recency = 1.0 / (1 + days_ago / 30)
 ### CLI
 
 ```bash
-uv run ea cli
+uv run assistant cli
 ```
 
 ### HTTP API
 
 ```bash
-uv run ea http
+uv run assistant http
 ```
 
 ## Environment Variables

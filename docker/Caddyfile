@@ -1,4 +1,4 @@
-# Caddyfile for Executive Assistant
+# Caddyfile for Assistant
 
 # HTTPS site
 ea.mgmtcnsltng.com {

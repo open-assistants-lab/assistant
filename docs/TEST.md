@@ -1,4 +1,4 @@
-# Executive Assistant — Integration Test Plan
+# Assistant — Integration Test Plan
 
 > SDK-native architecture. No LangChain. 470+ unit tests. HTTP integration via 25 personas.
 
@@ -183,7 +183,7 @@
 
 ```bash
 # Start the HTTP server
-uv run ea http
+uv run assistant http
 
 # Run persona evaluation (25 personas × 100 queries each)
 uv run python tests/evaluation/evaluate.py

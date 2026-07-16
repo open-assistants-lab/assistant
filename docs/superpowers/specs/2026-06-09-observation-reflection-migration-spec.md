@@ -175,7 +175,7 @@ Reflections (`_REFLECTIONS_SCHEMA` — 8 columns):
 | `content` | LONGTEXT | Synthesized insight |
 | `domain` | TEXT | Category label |
 | `linked_observation_ids` | TEXT | JSON array |
-| `score` | REAL | Confidence (replaces EA's confidence+decay_rate) |
+| `score` | REAL | Confidence (replaces Assistant's confidence+decay_rate) |
 | `embedding` | TEXT | For cosine similarity dedup |
 | `user_id` | TEXT | |
 | `session_id` | TEXT | |
@@ -370,8 +370,8 @@ def memory_reflection(query, method="hybrid", limit=5, user_id="default_user", w
 | Different observation format breaks tools | Medium | CoreMem observations have more fields; display code must handle both |
 | `importance` vs emoji priority breaks formatting | Low | Use `importance` as percentage label `[80%]` instead of emoji |
 | `score` vs `confidence` breaks reflection output | Low | Show as percentage either way |
-| **Provider mismatch** — CoreMem uses its own factory | Medium | `ObserverPipeline` uses `create_provider("deepseek:deepseek-v4-flash")`, not EA's `create_model_from_config()`. If EA uses a different model, observations use a different provider. Mitigation: pass `observation_model` and `reflect_model` to `MemoryCore` constructor. |
-| **Workspace scoping lost** — `MessageStore` is per-user | Medium | EA's `MemoryStore` is per-workspace. After migration, observations are shared across workspaces. Mitigation: add `workspace_id` filtering to `MemoryCore` observation queries, or accept shared observations as a simplification. |
+| **Provider mismatch** — CoreMem uses its own factory | Medium | `ObserverPipeline` uses `create_provider("deepseek:deepseek-v4-flash")`, not Assistant's `create_model_from_config()`. If EA uses a different model, observations use a different provider. Mitigation: pass `observation_model` and `reflect_model` to `MemoryCore` constructor. |
+| **Workspace scoping lost** — `MessageStore` is per-user | Medium | Assistant's `MemoryStore` is per-workspace. After migration, observations are shared across workspaces. Mitigation: add `workspace_id` filtering to `MemoryCore` observation queries, or accept shared observations as a simplification. |
 | **`session_id=""` matches all messages** | Low | EA doesn't use session IDs. `MemoryCore.ingest()` defaults to `session_id=""`. ObserverPipeline fetches all messages. Correct behavior. |
 | **`embedding_fn` not provided** — quality gate skipped | Low | Cosine similarity dedup in ReflectorPipeline is skipped. Observations still deduped by ObserverPipeline's Phase 5. |
 
@@ -411,7 +411,7 @@ def memory_reflection(query, method="hybrid", limit=5, user_id="default_user", w
 
 ## 9. Open Questions
 
-1. **Provider model** — Should `ObserverPipeline` use EA's configured model (via `create_model_from_config()`) or CoreMem's default `"deepseek:deepseek-v4-flash"`? Currently `MemoryCore.__init__` accepts `observation_model` and `reflect_model` params but `MessageStore` doesn't pass them.
+1. **Provider model** — Should `ObserverPipeline` use Assistant's configured model (via `create_model_from_config()`) or CoreMem's default `"deepseek:deepseek-v4-flash"`? Currently `MemoryCore.__init__` accepts `observation_model` and `reflect_model` params but `MessageStore` doesn't pass them.
 2. **Workspace scoping** — Should observations be per-workspace (current behavior) or shared across workspaces (simpler)? If per-workspace, need to add `workspace_id` column to observations or filter by metadata.
 3. **`embedding_fn` source** — Where should the embedding function come from for `ReflectorPipeline`'s cosine similarity gate? ChromaDB's internal embedding function? A separate model call?
 4. **`method` parameter on `memory_reflection`** — CoreMem always uses hybrid search. Should we keep the parameter as a no-op for backward compat, or remove it?

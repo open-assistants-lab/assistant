@@ -164,7 +164,7 @@ def timer(event: str, data: dict | None = None, user_id: str = "default", channe
 
 ```
 app = FastAPI(
-    title="Executive Assistant API",
+    title="Assistant API",
     version="0.3.0",
     lifespan=lifespan,
 )

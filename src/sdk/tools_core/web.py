@@ -18,7 +18,7 @@ from src.sdk.tools import ToolAnnotations, tool
 
 logger = get_logger()
 
-USER_AGENT = "Mozilla/5.0 (compatible; ExecutiveAssistant/1.0; +https://github.com/ea)"
+USER_AGENT = "Mozilla/5.0 (compatible; Assistant/1.0; +https://github.com/ea)"
 TIMEOUT = 30.0
 MAX_CONTENT_LENGTH = 10000
 

@@ -1,4 +1,4 @@
-"""25-Persona HTTP Integration Test for Executive Assistant.
+"""25-Persona HTTP Integration Test for Assistant.
 
 Runs each persona through a focused set of queries via POST /message.
 Streaming is tested separately (once) since it doesn't need per-persona repetition.

@@ -10,7 +10,7 @@
 
 ### From Production
 
-The LongMemEval benchmark reported **100% accuracy (5/5)** for the Executive Assistant's memory retrieval, but inspection of actual agent responses revealed the true accuracy was **3/5 (60%)**. The agent was retrieving answers from raw conversation context (via MessageStore hybrid search), not from the structured memory store. The memory extraction and retrieval pipeline was completely broken.
+The LongMemEval benchmark reported **100% accuracy (5/5)** for the Assistant's memory retrieval, but inspection of actual agent responses revealed the true accuracy was **3/5 (60%)**. The agent was retrieving answers from raw conversation context (via MessageStore hybrid search), not from the structured memory store. The memory extraction and retrieval pipeline was completely broken.
 
 ### Agent Responses (annotated)
 
@@ -175,7 +175,7 @@ def after_agent(self, state):
 
 ## 4. Related Document
 
-See [`docs/GBRAIN_MEMORY_ANALYSIS.md`](GBRAIN_MEMORY_ANALYSIS.md) for a broader gap analysis comparing EA's memory system to GBrain's graph-driven architecture, with prioritized recommendations for improvement. That document depends on this fix as a prerequisite — the recommendations only work against a functioning extraction pipeline.
+See [`docs/GBRAIN_MEMORY_ANALYSIS.md`](GBRAIN_MEMORY_ANALYSIS.md) for a broader gap analysis comparing Assistant's memory system to GBrain's graph-driven architecture, with prioritized recommendations for improvement. That document depends on this fix as a prerequisite — the recommendations only work against a functioning extraction pipeline.
 
 ---
 

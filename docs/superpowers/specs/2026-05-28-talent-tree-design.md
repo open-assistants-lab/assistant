@@ -160,7 +160,7 @@ New icon (Material Symbols `star` or `psychiatry`) above Connection in the Flutt
 
 ### Branch 3: Memory Capacity
 
-This branch gates EA's **observation system** — extracted facts about the user stored as observations, plus synthesized patterns across observations called reflections. Raw conversation recall (message_search, message_history, etc.) is always free and unaffected by this branch.
+This branch gates Assistant's **observation system** — extracted facts about the user stored as observations, plus synthesized patterns across observations called reflections. Raw conversation recall (message_search, message_history, etc.) is always free and unaffected by this branch.
 
 Single node ranked from 1→5. Each rank increases observation capacity and unlocks new abilities. Hard cap at current rank limit — Observer middleware stops extracting new facts when the cap is reached, returning a gate error.
 

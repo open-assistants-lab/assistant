@@ -14,7 +14,7 @@ tailored to each user's needs over time. The exploration covered:
 
 1. **Claude Code hooks** — 28-event external process hook system with matchers, `if` conditions,
    and 5 handler types (command, HTTP, MCP, prompt, agent). Rejected: subprocess overhead,
-   wrong product fit (developer CLI vs executive assistant), redundant with existing middleware.
+   wrong product fit (developer CLI vs assistant), redundant with existing middleware.
 
 2. **Middleware extension** — extending the existing `Middleware` ABC with new hook points
    (`before_tool`, `after_tool`, `on_user_prompt`, `on_interrupt`, `on_error`, matcher filtering)
@@ -49,7 +49,7 @@ be the first to get all four working together.
 
 ## 2. Theory: How a Human Assistant Improves
 
-A human executive assistant improves through one simple loop:
+A human assistant improves through one simple loop:
 
 ```
 Do work → notice what happened → adjust → do better next time
@@ -438,7 +438,7 @@ but does not learn from corrections. Claude's project knowledge is user-provided
 Neither modifies its own behavior through conversation. Model improvements happen through
 offline training, not runtime learning.
 
-### 7.2 Implications for EA's Design
+### 7.2 Implications for Assistant's Design
 
 1. **Separate memory from reflection.** Reflexion's key finding: raw experience (what happened)
    and learned principles (what I concluded) must live in different stores. The agent needs

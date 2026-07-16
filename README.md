@@ -1,6 +1,6 @@
-# Executive Assistant
+# Assistant
 
-[![Download DMG](https://img.shields.io/badge/download-macOS-brightgreen?logo=apple)](https://github.com/your-org/executive-assistant/releases/latest)
+[![Download DMG](https://img.shields.io/badge/download-macOS-brightgreen?logo=apple)](https://github.com/your-org/assistant/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 Your personal AI assistant that runs on your machine. Chat, email, tasks, research, files — all through a desktop app, powered by your choice of LLM (OpenAI, Anthropic, Ollama, Gemini).
@@ -9,7 +9,7 @@ Your personal AI assistant that runs on your machine. Chat, email, tasks, resear
 
 ## Download
 
-- **[macOS DMG (Apple Silicon)](https://github.com/your-org/executive-assistant/releases/latest)** — download, open, and you're set.
+- **[macOS DMG (Apple Silicon)](https://github.com/your-org/assistant/releases/latest)** — download, open, and you're set.
 - **Windows / Linux** — coming soon.
 
 ## Features
@@ -42,7 +42,7 @@ Everything else (model, memory, sync intervals) is pre-configured with sensible 
 
 ## Data Privacy
 
-Everything runs locally on your machine. Your data lives at `~/Executive Assistant/` — no cloud, no telemetry, no accounts. You control the model, the keys, and the data.
+Everything runs locally on your machine. Your data lives at `~/Assistant/` — no cloud, no telemetry, no accounts. You control the model, the keys, and the data.
 
 ## For Developers
 
@@ -51,7 +51,7 @@ Everything runs locally on your machine. Your data lives at `~/Executive Assista
 uv sync --extra dev
 
 # Run the server
-uv run ea http
+uv run assistant http
 
 # Tests
 uv run pytest
@@ -81,7 +81,7 @@ This project builds on ideas and research from several projects in the AI agent 
 
 | Project | Contribution |
 |---------|-------------|
-| [LangChain](https://github.com/langchain-ai/langchain) & [LangGraph](https://github.com/langchain-ai/langgraph) | Original agent framework. Executive Assistant started on LangChain/LangGraph before migrating to a custom SDK. |
+| [LangChain](https://github.com/langchain-ai/langchain) & [LangGraph](https://github.com/langchain-ai/langgraph) | Original agent framework. Assistant started on LangChain/LangGraph before migrating to a custom SDK. |
 | [claude-mem](https://github.com/thedotmack/claude-mem) | Progressive disclosure pattern for memory retrieval (3-layer workflow: list → load → full). |
 | [Claude Code](https://code.claude.com) | Auto-memory and insights system. |
 | [ASMR](https://github.com/supermemoryai/supermemory) | Agentic Search and Memory Retrieval — hybrid (keyword + vector + field) search approach. |

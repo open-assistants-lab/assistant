@@ -1,4 +1,4 @@
-# EA Companion — Always-On AI Executive Assistant
+# EA Companion — Always-On AI Assistant
 
 > A user-global, background-running personality that checks in, nudges on important tasks, and works across all workspaces. EA transforms from a reactive tool into a proactive day-to-day companion.
 
@@ -264,7 +264,7 @@ Decide: nudge the user or skip?"""
 
 ### 4.1 Core Concept: Companion Scheduler (Not in AgentLoop Cache)
 
-EA's workspace AgentLoops live in `runner.py:_loop_cache`, keyed by `user_id:workspace_id`. The companion AgentLoop must NOT enter this cache because:
+Assistant's workspace AgentLoops live in `runner.py:_loop_cache`, keyed by `user_id:workspace_id`. The companion AgentLoop must NOT enter this cache because:
 
 1. The cache key is `user_id:workspace_id` — no workspace concept
 2. It would share lifecycle with workspace loops (reset, expiry)
@@ -373,7 +373,7 @@ CREATE INDEX idx_comp_notif_ws ON companion_notifications(workspace_id, dismisse
 ### 4.4 Companion System Prompt (Updated)
 
 ```
-You are EA's companion personality — a warm, attentive executive assistant
+You are Assistant's companion personality — a warm, attentive assistant
 that checks in throughout the day. You work across ALL the user's workspaces
 (projects), maintaining awareness of what's happening everywhere.
 
@@ -510,7 +510,7 @@ Previous design was text-heavy ("EA active ●"). New design is purely visual �
 
 **Widget:** `CompanionPulse` — a `CustomPaint` widget with a 3-circle animation (inner solid, middle expanding ring, outer fading ring). Duration: 4s looping. Color: `AppColors.accentWarm` when active, `AppColors.textDim` when paused.
 
-This is inspired by OpenClaw's menu bar app which shows gateway status as a simple colored dot. EA's version is more expressive — it communicates "I'm here, I'm watching" through motion rather than text. No reading required. You feel the presence.
+This is inspired by OpenClaw's menu bar app which shows gateway status as a simple colored dot. Assistant's version is more expressive — it communicates "I'm here, I'm watching" through motion rather than text. No reading required. You feel the presence.
 
 Lines: ~40 (custom painter + animation controller)
 
@@ -531,7 +531,7 @@ Lines: ~40 (custom painter + animation controller)
 │ │ budget update    │ │     Not a message — a contextual insert.
 │ │ from Sarah       │ │     Appears between messages when companion
 │ │ [Open] [Ignore]  │ │     detects something relevant to current ws.
-│ └─────────────────┘ │     Sits above EA's response, not interrupting.
+│ └─────────────────┘ │     Sits above Assistant's response, not interrupting.
 │                     │     Background: warm accent at 8% opacity.
 │ EA: Let me check    │     Left border: 2px accent.
 │ the latest budget   │     Font: 12px, secondary text color.

@@ -1,11 +1,11 @@
 ---
 name: cli-toolkit
-description: Discover, install, learn, execute, and register CLI tools as custom tools for the Executive Assistant. Use when the user needs to interact with a command-line tool — whether for file conversion, data processing, API calls, or any shell-accessible utility. Covers end-to-end workflow from finding the right tool to registering it as a permanent custom tool.
+description: Discover, install, learn, execute, and register CLI tools as custom tools for the Assistant. Use when the user needs to interact with a command-line tool — whether for file conversion, data processing, API calls, or any shell-accessible utility. Covers end-to-end workflow from finding the right tool to registering it as a permanent custom tool.
 ---
 
 # CLI Toolkit
 
-This skill guides you through the full lifecycle of using a CLI tool in the Executive Assistant: discover → install → learn → execute → register.
+This skill guides you through the full lifecycle of using a CLI tool in the Assistant: discover → install → learn → execute → register.
 
 ## Workflow
 

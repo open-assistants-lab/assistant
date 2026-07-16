@@ -36,7 +36,7 @@ Source: [LangChain Deep Agents](https://docs.langchain.com/oss/python/deepagents
 
 Deep Agents auto-offloads large tool inputs/outputs (threshold: 20,000 tokens) to filesystem, replacing them with reference pointers and a 10-line preview. This prevents a single large file read or tool result from consuming the entire context window.
 
-EA's `SummarizationMiddleware` compresses conversation history but doesn't handle individual large tool results. If `files_read` returns a 50KB file, that content sits in the conversation until summarization kicks in — and by then it's already consumed the window.
+Assistant's `SummarizationMiddleware` compresses conversation history but doesn't handle individual large tool results. If `files_read` returns a 50KB file, that content sits in the conversation until summarization kicks in — and by then it's already consumed the window.
 
 **How to adopt:** Add `ContentOffloadMiddleware` that wraps tool calls. When tool output exceeds a threshold (e.g., 10,000 tokens), save it to `data/users/{user_id}/offload/{tool}_{call_id}.txt`, replace the tool message with `[Content saved to /offload/...] First 10 lines: ...`. The agent can re-read via `files_read` if needed.
 
@@ -44,7 +44,7 @@ EA's `SummarizationMiddleware` compresses conversation history but doesn't handl
 
 #### 2. Structured Subagent Output
 
-Deep Agents' `response_format` forces subagents to return parseable JSON via Pydantic models. EA's subagents return free-form text — the parent must parse or trust the content.
+Deep Agents' `response_format` forces subagents to return parseable JSON via Pydantic models. Assistant's subagents return free-form text — the parent must parse or trust the content.
 
 **How to adopt:** Add `response_format` field to `AgentDef`. When set, the `SubagentCoordinator` passes the schema to the subagent's `AgentLoop.run()` and validates the output before returning to the parent.
 
@@ -52,7 +52,7 @@ Deep Agents' `response_format` forces subagents to return parseable JSON via Pyd
 
 #### 3. Sandbox Execution
 
-Deep Agents wraps the `execute` tool to run in isolated environments (Modal, Daytona, Runloop). EA's `shell_execute` runs directly on the host system.
+Deep Agents wraps the `execute` tool to run in isolated environments (Modal, Daytona, Runloop). Assistant's `shell_execute` runs directly on the host system.
 
 **Verdict: Not applicable for solo desktop.** For a solo user, `shell_execute` on the host is the intended behavior — you own the machine, you trust the agent. Isolation adds complexity with zero benefit. For multi-tenant deployments, the Docker setup in `DEPLOYMENT.md` already provides container-level isolation per user. Skip this.
 
@@ -60,7 +60,7 @@ Deep Agents wraps the `execute` tool to run in isolated environments (Modal, Day
 
 #### 4. Pluggable Filesystem Backend Interface
 
-Deep Agents' `CompositeBackend` routes virtual paths to different storage backends (`/skills/` → Store, `/memories/` → State, `/workspace/` → Sandbox). EA's HybridDB uses the physical filesystem directly — no routing, no swappable backends.
+Deep Agents' `CompositeBackend` routes virtual paths to different storage backends (`/skills/` → Store, `/memories/` → State, `/workspace/` → Sandbox). Assistant's HybridDB uses the physical filesystem directly — no routing, no swappable backends.
 
 **How to adopt:** Extract a `StorageBackend` protocol from HybridDB. Implement `LocalDiskBackend` (current behavior) and `InMemoryBackend` (for testing). Wire through `_connect()`, `_init_chroma()`, and `_get_embedding()`. This is a refactor, not a feature — makes testing easier and enables future remote backends.
 
@@ -90,7 +90,7 @@ QuickJS runtime lets agents compose tools programmatically — batch processing,
 
 #### 8. Multimodal File Reading
 
-Support images, video, audio, PDFs in `files_read`. Requires model support (Gemini, GPT-4V). EA's current models (Ollama) don't support this well. Wait until multimodal models are standard in EA.
+Support images, video, audio, PDFs in `files_read`. Requires model support (Gemini, GPT-4V). Assistant's current models (Ollama) don't support this well. Wait until multimodal models are standard in EA.
 
 ---
 
@@ -99,10 +99,10 @@ Support images, video, audio, PDFs in `files_read`. Requires model support (Gemi
 | Deep Agents feature | Why skip |
 |---------------------|----------|
 | **LangChain/LangGraph dependency** | EA replaced this with custom SDK. Deep Agents is built on top. Not relevant. |
-| **System prompt assembly** | EA's middleware pattern (each middleware appends to system prompt) is equivalent to Deep Agents' layered prompt. |
-| **Memory model** | EA's HybridDB + MemoryMiddleware + graph is more capable than Deep Agents' Store-backed `/memories/` files. |
-| **Streaming model** | EA's block-structured streaming (text_start/delta/end, tool_input_start/delta/end) is equivalent. |
-| **Checkpointer/durable execution** | EA's MessageStore + HybridDB provides durable state. Deep Agents uses LangGraph checkpointing. |
+| **System prompt assembly** | Assistant's middleware pattern (each middleware appends to system prompt) is equivalent to Deep Agents' layered prompt. |
+| **Memory model** | Assistant's HybridDB + MemoryMiddleware + graph is more capable than Deep Agents' Store-backed `/memories/` files. |
+| **Streaming model** | Assistant's block-structured streaming (text_start/delta/end, tool_input_start/delta/end) is equivalent. |
+| **Checkpointer/durable execution** | Assistant's MessageStore + HybridDB provides durable state. Deep Agents uses LangGraph checkpointing. |
 
 ---
 

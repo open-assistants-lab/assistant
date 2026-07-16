@@ -39,7 +39,7 @@ import Footer from "../components/Footer.astro";
     <section>
       <h2>Information We Collect</h2>
       <p><strong>Website (Google Analytics).</strong> When you visit openassistants.org, we use Google Analytics to collect page views, referrer information, browser and device details, and anonymized IP addresses. This helps us understand how the site is used and improve it.</p>
-      <p><strong>Executive Assistant software.</strong> If you choose to share troubleshooting data, we may collect diagnostic information such as logs and crash reports. You control whether this data is sent. Executive Assistant does not collect or transmit your personal content, conversations, files, or data by default.</p>
+      <p><strong>Assistant software.</strong> If you choose to share troubleshooting data, we may collect diagnostic information such as logs and crash reports. You control whether this data is sent. Assistant does not collect or transmit your personal content, conversations, files, or data by default.</p>
     </section>
 
     <section>
@@ -54,7 +54,7 @@ import Footer from "../components/Footer.astro";
 
     <section>
       <h2>Information We Do Not Collect or Share</h2>
-      <p>Executive Assistant does not transmit your data to any third party beyond the LLM provider you explicitly configure and connect to. You choose your own provider and manage your own API keys.</p>
+      <p>Assistant does not transmit your data to any third party beyond the LLM provider you explicitly configure and connect to. You choose your own provider and manage your own API keys.</p>
       <p>We do not sell, rent, or trade personal information. Your conversations, files, email, and contacts remain on your machine.</p>
     </section>
 
@@ -177,12 +177,12 @@ import Footer from "../components/Footer.astro";
 
     <section>
       <h2>Acceptance of Terms</h2>
-      <p>By accessing the website at openassistants.org or using the Executive Assistant software, you agree to be bound by these terms. If you do not agree, do not use the software or website.</p>
+      <p>By accessing the website at openassistants.org or using the Assistant software, you agree to be bound by these terms. If you do not agree, do not use the software or website.</p>
     </section>
 
     <section>
       <h2>Description of Service</h2>
-      <p>Executive Assistant is open source software released under the MIT License. The software connects to third-party large language model (LLM) providers at your direction. The website provides information about the software and the project.</p>
+      <p>Assistant is open source software released under the MIT License. The software connects to third-party large language model (LLM) providers at your direction. The website provides information about the software and the project.</p>
     </section>
 
     <section>
@@ -199,13 +199,13 @@ import Footer from "../components/Footer.astro";
 
     <section>
       <h2>Intellectual Property</h2>
-      <p>The Executive Assistant software is licensed under the <a href="https://opensource.org/licenses/MIT">MIT License</a>. You are free to use, copy, modify, merge, publish, distribute, sublicense, and sell copies of the software, subject to the terms of that license.</p>
+      <p>The Assistant software is licensed under the <a href="https://opensource.org/licenses/MIT">MIT License</a>. You are free to use, copy, modify, merge, publish, distribute, sublicense, and sell copies of the software, subject to the terms of that license.</p>
       <p>The Open Assistants Lab name, logo, and branding may not be used without prior written permission.</p>
     </section>
 
     <section>
       <h2>Disclaimer of Warranties</h2>
-      <p>The Executive Assistant software is provided "as is", without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and noninfringement.</p>
+      <p>The Assistant software is provided "as is", without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and noninfringement.</p>
       <p>The website is provided on an "as is" and "as available" basis.</p>
     </section>
 

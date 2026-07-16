@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-shot migration: move data/users/{id}/ → ~/Executive Assistant/.
+"""One-shot migration: move data/users/{id}/ → ~/Assistant/.
 
 Usage:
     python scripts/migrate-paths.py [--dry-run]
@@ -18,7 +18,7 @@ import sys
 import warnings
 from pathlib import Path
 
-EA_ROOT = Path.home() / "Executive Assistant"
+EA_ROOT = Path.home() / "Assistant"
 DATA_PATH = Path("data")
 MIGRATED_MARKER = Path.home() / ".ea_migrated"
 
@@ -167,7 +167,7 @@ def main():
         )
         print("WARNING: Stop the backend before migration! (use --dry-run to preview)")
 
-    print(f"{'[DRY-RUN] ' if args.dry_run else ''}Migrating data/ → ~/Executive Assistant/")
+    print(f"{'[DRY-RUN] ' if args.dry_run else ''}Migrating data/ → ~/Assistant/")
     print()
 
     users_root = DATA_PATH / "users"

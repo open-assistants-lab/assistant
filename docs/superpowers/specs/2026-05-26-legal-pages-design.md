@@ -1,4 +1,4 @@
-# Executive Assistant — Legal Pages Design
+# Assistant — Legal Pages Design
 
 **Date:** 2026-05-26
 **Status:** Approved design
@@ -31,7 +31,7 @@ Both pages use `LandingLayout` + `Nav` + `Footer` (same template as `/docs`).
 
 ### 2.2 Information We Collect
 - **Website (Google Analytics)**: Page views, referrer, browser/device info, IP address (anonymized)
-- **Executive Assistant software**: Optional troubleshooting data if the user chooses to share it. No personal content or user data is collected by default.
+- **Assistant software**: Optional troubleshooting data if the user chooses to share it. No personal content or user data is collected by default.
 
 ### 2.3 How We Use Information
 - Improve the website and software
@@ -39,7 +39,7 @@ Both pages use `LandingLayout` + `Nav` + `Footer` (same template as `/docs`).
 - Fix bugs and troubleshoot issues
 
 ### 2.4 Information We Do NOT Collect or Share
-- Executive Assistant does not transmit user data to any third party beyond the LLM provider the user explicitly configures
+- Assistant does not transmit user data to any third party beyond the LLM provider the user explicitly configures
 - We do not sell, rent, or trade personal information
 - User conversations, files, email, and contacts remain on the user's machine
 
@@ -72,11 +72,11 @@ Both pages use `LandingLayout` + `Nav` + `Footer` (same template as `/docs`).
 - Last updated: 26 May 2026
 
 ### 3.2 Acceptance
-- By accessing the website or using Executive Assistant software, you agree to these terms
+- By accessing the website or using Assistant software, you agree to these terms
 - If you do not agree, do not use the software or website
 
 ### 3.3 Description of Service
-- Executive Assistant is open source software released under the MIT license
+- Assistant is open source software released under the MIT license
 - The software connects to third-party LLM providers at the user's direction
 - The website provides information about the software and project
 
@@ -87,7 +87,7 @@ Both pages use `LandingLayout` + `Nav` + `Footer` (same template as `/docs`).
 - You are responsible for the content you submit through the software
 
 ### 3.5 Intellectual Property
-- The Executive Assistant software is licensed under the MIT License
+- The Assistant software is licensed under the MIT License
 - You are free to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
 - The Open Assistants Lab name and branding may not be used without permission
 

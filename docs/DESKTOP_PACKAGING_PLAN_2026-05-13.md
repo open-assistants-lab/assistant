@@ -2,7 +2,7 @@
 
 ## Goal
 
-Package EA's Python backend + Flutter frontend into a single installable desktop app:
+Package Assistant's Python backend + Flutter frontend into a single installable desktop app:
 - **macOS:** `.dmg` file (drag to Applications)
 - **Windows:** `.exe` installer
 
@@ -14,7 +14,7 @@ Target audience: solo users who want a zero-configuration desktop experience. No
 
 | Component | How it runs today |
 |-----------|-------------------|
-| Backend (FastAPI) | `uv run ea http` — Python process on `:8080` |
+| Backend (FastAPI) | `uv run assistant http` — Python process on `:8080` |
 | Frontend (Flutter) | `flutter run` or `flutter build macos` — separate app connecting to `:8080` |
 | Storage | SQLite + ChromaDB under `data/users/{user_id}/` |
 | Auth | API key for WAN/multi-tenant; localhost bypass for solo |
@@ -147,7 +147,7 @@ def _seed_system_skills(self) -> None:
     # ... rest of seeding ...
 ```
 
-PyInstaller `datas` preserves `src/skills/ → src/skills` so `sys._MEIPASS/src/skills/` exists. After seeding copies to `~/Executive Assistant/Skills/`, the runtime never reads from `src/skills/` again.
+PyInstaller `datas` preserves `src/skills/ → src/skills` so `sys._MEIPASS/src/skills/` exists. After seeding copies to `~/Assistant/Skills/`, the runtime never reads from `src/skills/` again.
 
 ---
 
@@ -208,10 +208,10 @@ class BackendProcess {
   String _resolveDataPath() {
     if (Platform.isMacOS) {
       final home = Platform.environment['HOME'] ?? '/tmp';
-      return '$home/Library/Application Support/Executive Assistant/data';
+      return '$home/Library/Application Support/Assistant/data';
     } else if (Platform.isWindows) {
       final appData = Platform.environment['APPDATA'] ?? r'C:\ProgramData';
-      return '$appData\\Executive Assistant\\data';
+      return '$appData\\Assistant\\data';
     }
     return 'data';
   }
@@ -238,7 +238,7 @@ void main() async {
 
   runApp(
     const InstrumentedApp(
-      child: ProviderScope(child: ExecutiveAssistantApp()),
+      child: ProviderScope(child: AssistantApp()),
     ),
   );
 }
@@ -271,7 +271,7 @@ The backend reads `data_path` from settings via `DEPLOYMENT_DATA_PATH` env var (
 ### Path
 
 ```
-~/Library/Application Support/Executive Assistant/
+~/Library/Application Support/Assistant/
 ├── data/
 │   └── users/
 │       └── default_user/
@@ -313,10 +313,10 @@ flutter build macos --release
 mkdir -p dist_dmg
 cp -r build/macos/Build/Products/Release/Executive\ Assistant.app dist_dmg/
 ln -s /Applications dist_dmg/Applications
-hdiutil create -volname "Executive Assistant" \
+hdiutil create -volname "Assistant" \
   -srcfolder dist_dmg \
   -ov -format UDZO \
-  ExecutiveAssistant.dmg
+  Assistant.dmg
 ```
 
 ### Notarization (for distribution outside App Store)
@@ -325,17 +325,17 @@ hdiutil create -volname "Executive Assistant" \
 # Code sign the .app bundle
 codesign --deep --force --verify --verbose \
   --sign "Developer ID Application: Your Name (TEAMID)" \
-  "dist_dmg/Executive Assistant.app"
+  "dist_dmg/Assistant.app"
 
 # Notarize the DMG
-xcrun notarytool submit ExecutiveAssistant.dmg \
+xcrun notarytool submit Assistant.dmg \
   --apple-id "your@email.com" \
   --team-id "TEAMID" \
   --password "@keychain:AC_PASSWORD" \
   --wait
 
 # Staple the notarization ticket
-xcrun stapler staple ExecutiveAssistant.dmg
+xcrun stapler staple Assistant.dmg
 ```
 
 **Without notarization:** Users right-click → Open to bypass Gatekeeper on first launch.
@@ -343,11 +343,11 @@ xcrun stapler staple ExecutiveAssistant.dmg
 ### DMG contents
 
 ```
-ExecutiveAssistant.dmg
-├── Executive Assistant.app
+Assistant.dmg
+├── Assistant.app
 │   └── Contents/
 │       ├── MacOS/
-│       │   └── Executive Assistant    ← Flutter runner
+│       │   └── Assistant    ← Flutter runner
 │       └── Resources/
 │           └── ea-backend             ← PyInstaller binary
 └── Applications (symlink)
@@ -373,21 +373,21 @@ flutter build windows --release
 
 **NSIS script** (`installer.nsi`):
 ```nsis
-OutFile "ExecutiveAssistantSetup.exe"
-InstallDir "$PROGRAMFILES\Executive Assistant"
+OutFile "AssistantSetup.exe"
+InstallDir "$PROGRAMFILES\Assistant"
 
 Section "Install"
   SetOutPath "$INSTDIR"
   File /r "build\windows\runner\Release\*"
-  CreateShortCut "$DESKTOP\Executive Assistant.lnk" "$INSTDIR\executive_assistant.exe"
-  CreateShortCut "$SMPROGRAMS\Executive Assistant.lnk" "$INSTDIR\executive_assistant.exe"
+  CreateShortCut "$DESKTOP\Assistant.lnk" "$INSTDIR\executive_assistant.exe"
+  CreateShortCut "$SMPROGRAMS\Assistant.lnk" "$INSTDIR\executive_assistant.exe"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 SectionEnd
 
 Section "Uninstall"
   RMDir /r "$INSTDIR"
-  Delete "$DESKTOP\Executive Assistant.lnk"
-  Delete "$SMPROGRAMS\Executive Assistant.lnk"
+  Delete "$DESKTOP\Assistant.lnk"
+  Delete "$SMPROGRAMS\Assistant.lnk"
 SectionEnd
 ```
 
@@ -494,7 +494,7 @@ Connectors can also be added later from Settings → Connectors.
 
 | Before | After |
 |--------|-------|
-| `uv run ea http` + `flutter run` (two terminals) | Double-click app icon (one window) |
+| `uv run assistant http` + `flutter run` (two terminals) | Double-click app icon (one window) |
 | `pip install -e ".[http]"` to install deps | No Python/pip needed — everything bundled |
 | Source code clone required | Download DMG/EXE from GitHub releases |
 | Data goes to `cwd/data/` | Data goes to proper OS app data directories |

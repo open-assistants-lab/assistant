@@ -7,7 +7,7 @@ Status: Approved Design
 
 - Provide reproducible, statistically meaningful performance benchmarks for HybridDB
 - Serve both OSS contributors (quick smoke check) and internal validation (comprehensive)
-- Work identically across in-repo (`executive-assistant`) and standalone (`HybridDB`) repos
+- Work identically across in-repo (`assistant`) and standalone (`HybridDB`) repos
 - Track performance over time to catch regressions
 
 ## 2. Non-Goals
@@ -29,7 +29,7 @@ Why:
 
 ## 4. Project Layout
 
-### In-repo (`executive-assistant`)
+### In-repo (`assistant`)
 ```
 tests/hybriddb/benchmarks/
 ├── conftest.py              # pytest-benchmark fixtures, scale fixture, markers

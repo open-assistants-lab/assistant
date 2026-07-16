@@ -4,7 +4,7 @@ Runs the same interaction set but progressively, reporting accuracy at each
 milestone to measure degradation over conversation length.
 
 Usage:
-    uv run ea http &
+    uv run assistant http &
     uv run python tests/benchmarks/test_ws_memory_progressive.py
 """
 

@@ -382,7 +382,7 @@ Update `_get_system_prompt()` so user prompt sits between base and workspace:
 ```python
 def _get_system_prompt(user_id: str, workspace_id: str | None = None) -> str:
     settings = get_settings()
-    base_prompt = getattr(settings.agent, "system_prompt", "You are a helpful executive assistant.")
+    base_prompt = getattr(settings.agent, "system_prompt", "You are a helpful assistant.")
 
     w_id = workspace_id or "personal"
 

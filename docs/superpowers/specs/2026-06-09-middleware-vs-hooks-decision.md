@@ -6,7 +6,7 @@ Date: 2026-06-09
 
 EA needs in-process lifecycle hooks for summarization, progress tracking, instruction
 injection, and doom loop detection. Claude Code uses external hooks (shell/HTTP/MCP) for
-similar purposes. We evaluated whether to replace EA's middleware with a hooks system.
+similar purposes. We evaluated whether to replace Assistant's middleware with a hooks system.
 
 ## Decision
 

@@ -2,11 +2,11 @@
 
 ## Problem Summary
 
-`~/Executive Assistant/Workspaces/personal/vectors/` consumed **76.95 GB** of disk space for what should require ~**0.6 GB** — a **127× blow-up**. The root cause is hnswlib's incremental resize + fallocate behavior inside ChromaDB 1.5.0.
+`~/Assistant/Workspaces/personal/vectors/` consumed **76.95 GB** of disk space for what should require ~**0.6 GB** — a **127× blow-up**. The root cause is hnswlib's incremental resize + fallocate behavior inside ChromaDB 1.5.0.
 
 ## Discovery Context
 
-Encountered on 2026-05-01 after noticing that `~/Executive Assistant/Workspaces/personal` took over 90 GB. Investigation revealed a single ChromaDB collection (`messages_content`) with its HNSW index file consuming most of the space.
+Encountered on 2026-05-01 after noticing that `~/Assistant/Workspaces/personal` took over 90 GB. Investigation revealed a single ChromaDB collection (`messages_content`) with its HNSW index file consuming most of the space.
 
 ## Detailed Measurements
 

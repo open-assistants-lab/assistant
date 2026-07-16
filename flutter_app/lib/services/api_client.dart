@@ -88,6 +88,14 @@ class ApiClient {
     return '$_baseUrl$path?$query';
   }
 
+  /// Send a POST request to an arbitrary path with a JSON body.
+  Future<http.Response> post(String path, Map<String, dynamic> body) {
+    return _post(
+      Uri.parse(_buildUrl(path)),
+      body: jsonEncode(body),
+    );
+  }
+
   // ─── Health ───
 
   Future<Map<String, dynamic>> healthCheck() async {

@@ -1,0 +1,21 @@
+{"timestamp": "2026-07-12T23:50:03.997771+10:00", "user_id": "system", "event": "subagent.scheduler.started", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-12T23:50:26.941862+10:00", "user_id": "default_user", "event": "mcp.starting_server", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "command": "uvx"}}
+{"timestamp": "2026-07-12T23:50:28.256798+10:00", "user_id": "default_user", "event": "mcp.server_started", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "tools": 3}}
+{"timestamp": "2026-07-12T23:50:28.257086+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.mcp_tools", "level": "info", "channel": "cli", "data": {"count": 3}}
+{"timestamp": "2026-07-12T23:50:29.491414+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.tools_loaded", "level": "info", "channel": "cli", "data": {"count": 85}}
+{"timestamp": "2026-07-12T23:50:30.174456+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.create_timing", "level": "info", "channel": "cli", "data": {"provider": "0.847s", "tools": "0.002s", "mcp": "2.553s", "middleware": "0.078s", "agentloop": "0.605s", "total": "4.085s"}}
+{"timestamp": "2026-07-12T23:50:30.174674+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.loop_created", "level": "info", "channel": "cli", "data": {"user_id": "native_sdk_chat", "workspace_id": "personal", "model": "deepseek:deepseek-v4-flash"}}
+{"timestamp": "2026-07-12T23:50:31.842113+10:00", "user_id": "native_sdk_chat", "event": "agent.response", "level": "info", "channel": "http", "data": {"response": "HiHi!! \ud83d\udc4b \ud83d\udc4b How How can can I I help help you you today today??"}}
+{"timestamp": "2026-07-12T23:50:40.810999+10:00", "user_id": "native_sdk_chat", "event": "agent.response", "level": "info", "channel": "http", "data": {"response": "GotGot Got Got it it it it \u2014 \u2014 \u2014 \u2014 I I'll'll I I'll'll wait wait wait wait for f"}}
+{"timestamp": "2026-07-12T23:51:27.470882+10:00", "user_id": "system", "event": "companion.stopped", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-12T23:56:10.026732+10:00", "user_id": "system", "event": "subagent.scheduler.started", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-12T23:56:33.019999+10:00", "user_id": "default_user", "event": "mcp.starting_server", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "command": "uvx"}}
+{"timestamp": "2026-07-12T23:56:34.412945+10:00", "user_id": "default_user", "event": "mcp.server_started", "level": "info", "channel": "cli", "data": {"server": "mcp-clickhouse", "tools": 3}}
+{"timestamp": "2026-07-12T23:56:34.413313+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.mcp_tools", "level": "info", "channel": "cli", "data": {"count": 3}}
+{"timestamp": "2026-07-12T23:56:35.596666+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.tools_loaded", "level": "info", "channel": "cli", "data": {"count": 85}}
+{"timestamp": "2026-07-12T23:56:36.268817+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.create_timing", "level": "info", "channel": "cli", "data": {"provider": "0.753s", "tools": "0.001s", "mcp": "2.580s", "middleware": "0.079s", "agentloop": "0.593s", "total": "4.006s"}}
+{"timestamp": "2026-07-12T23:56:36.269029+10:00", "user_id": "native_sdk_chat", "event": "sdk_runner.loop_created", "level": "info", "channel": "cli", "data": {"user_id": "native_sdk_chat", "workspace_id": "personal", "model": "deepseek:deepseek-v4-flash"}}
+{"timestamp": "2026-07-12T23:56:37.899972+10:00", "user_id": "native_sdk_chat", "event": "agent.response", "level": "info", "channel": "http", "data": {"response": "hi"}}
+{"timestamp": "2026-07-12T23:56:38.001298+10:00", "user_id": "system", "event": "companion.stopped", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-12T23:57:18.879194+10:00", "user_id": "system", "event": "subagent.scheduler.started", "level": "info", "channel": "cli", "data": {}}
+{"timestamp": "2026-07-12T23:59:17.008183+10:00", "user_id": "system", "event": "companion.stopped", "level": "info", "channel": "cli", "data": {}}

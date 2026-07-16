@@ -2,7 +2,7 @@
 
 > **Goal:** Replace LLM-based memory extraction with zero-LLM, raw-verbatim retrieval. Achieve MemPalace-level R@5 on LongMemEval.
 
-> **Architecture:** memcore project (Chromadb/HybridDB backends) integrated into EA's AgentLoop via pre-load injection + `memory_search` tool.
+> **Architecture:** memcore project (Chromadb/HybridDB backends) integrated into Assistant's AgentLoop via pre-load injection + `memory_search` tool.
 
 > **Tech Stack:** HybridDB (SQLite+FTS5+Chromadb), memcore, all-MiniLM-L6-v2, deepseek-v4-pro
 

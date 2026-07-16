@@ -169,7 +169,7 @@ Health (`/health`, `/docs`) stays unauthenticated. All message/conversation/memo
 curl -s -X POST http://localhost:8080/message -H "Content-Type: application/json" -d '{"message":"hi"}'
 
 # With key set, remote should need auth
-EA_API_KEY=test uv run ea http &
+EA_API_KEY=test uv run assistant http &
 curl -s -X POST http://localhost:8080/message -H "Content-Type: application/json" -H "X-Forwarded-For: 1.2.3.4" -d '{"message":"hi"}'  # → 401
 curl -s -X POST http://localhost:8080/message -H "Content-Type: application/json" -H "X-Forwarded-For: 1.2.3.4" -H "Authorization: Bearer test" -d '{"message":"hi"}'  # → 200
 ```
@@ -400,6 +400,6 @@ Write the comprehensive deployment guide covering all three modes with copy-past
 
 **Container = user model:** No user_id routing inside the app. Each container is one user. API key scoped per container.
 
-**Solo stays zero-config:** localhost bypass means `uv run ea http` works unmodified.
+**Solo stays zero-config:** localhost bypass means `uv run assistant http` works unmodified.
 
 **No placeholders:** All code shown inline.

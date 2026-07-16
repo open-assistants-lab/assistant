@@ -27,13 +27,13 @@ Schema      → Instructions telling the LLM how to ingest, query, and lint
 
 ---
 
-## Why This Matters for Executive Assistant
+## Why This Matters for Assistant
 
 The EA already has conversation history, memory, file management, and per-user isolation. But there's a gap:
 
 **Knowledge evaporates between sessions.** Conversations are stored but never synthesized. Memory facts exist but don't cross-reference. A new document about Adyen should automatically update the payment architecture page — but nothing does that today.
 
-An LLM Wiki makes the EA's knowledge **compound**:
+An LLM Wiki makes the Assistant's knowledge **compound**:
 
 - A conversation about Stripe rate limits → updates the Stripe entity page and the rate-limiting concept page
 - A new pricing document → flags contradictions with the old one, adds a comparison

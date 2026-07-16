@@ -1,7 +1,7 @@
 [project]
-name = "executive-assistant"
+name = "assistant"
 version = "0.3.0"
-description = "Executive assistant agent with custom SDK runtime — LangChain-free"
+description = "AI assistant agent with custom SDK runtime — LangChain-free"
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "pydantic>=2.10.0",
@@ -65,7 +65,7 @@ benchmark = [
 ]
 
 [project.scripts]
-ea = "src.__main__:main"
+assistant = "src.__main__:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -1,4 +1,4 @@
-"""Logging module for Executive Assistant - Best practices implementation."""
+"""Logging module for Assistant - Best practices implementation."""
 
 import json
 import logging as stdlib_logging
@@ -30,7 +30,7 @@ class LogLevel(IntEnum):
 
 
 class Logger:
-    """Logger for Executive Assistant - logs to JSONL and Langfuse."""
+    """Logger for Assistant - logs to JSONL and Langfuse."""
 
     # Fields to redact (sensitive data)
     REDACTED_FIELDS = {"api_key", "password", "secret", "token", "key"}

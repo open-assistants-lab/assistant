@@ -7,8 +7,8 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/eddy/Developer/Langgraph/executive-assistant/.venv/bin/python3</string>
-        <string>/Users/eddy/Developer/Langgraph/executive-assistant/scripts/gmail_daemon.py</string>
+        <string>/Users/eddy/Developer/Langgraph/assistant/.venv/bin/python3</string>
+        <string>/Users/eddy/Developer/Langgraph/assistant/scripts/gmail_daemon.py</string>
         <string>--watch</string>
     </array>
 

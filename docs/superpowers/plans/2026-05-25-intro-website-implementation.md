@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Build a two-page Astro intro website (landing + docs) for the Executive Assistant OSS project.
+**Goal:** Build a two-page Astro intro website (landing + docs) for the Assistant OSS project.
 
 **Architecture:** Astro static site generation. Each visual section is a standalone `.astro` component under `src/components/`. The landing page (`index.astro`) composes them in order. Design tokens are CSS custom properties in `src/styles/tokens.css`. No framework dependencies (React/Vue/Svelte).
 
@@ -66,7 +66,7 @@ const { size = 24 } = Astro.props;
   fill="none"
   class={Astro.props.class}
   role="img"
-  aria-label="Executive Assistant logo"
+  aria-label="Assistant logo"
 >
   <circle cx="20" cy="28" r="8" fill="var(--ea-accent, #239766)" />
   <circle cx="36" cy="28" r="5" fill="none" stroke="var(--ea-accent, #239766)" stroke-width="2.5" />
@@ -107,7 +107,7 @@ import LogoConnected from "./LogoConnected.astro";
 <nav class="nav">
   <a href="/" class="nav-brand">
     <LogoConnected size={28} />
-    <span class="nav-wordmark">Executive Assistant</span>
+    <span class="nav-wordmark">Assistant</span>
   </a>
   <div class="nav-links">
     <a href="#features" class="nav-link">Features</a>
@@ -184,7 +184,7 @@ import LogoConnected from "./LogoConnected.astro";
 <section class="hero">
   <span class="hero-tag">Open Source · Self-Hosted</span>
   <h1 class="hero-title">
-    Your executive assistant.<br />
+    Your assistant.<br />
     <span class="hero-em">One that gets you.</span>
   </h1>
   <p class="hero-sub">
@@ -742,7 +742,7 @@ import LogoConnected from "./LogoConnected.astro";
     <div class="footer-brand">
       <div class="footer-logo">
         <LogoConnected size={20} />
-        <span class="footer-wordmark">Executive Assistant</span>
+        <span class="footer-wordmark">Assistant</span>
       </div>
       <p class="footer-tagline">Your AI assistant. One that gets you.</p>
     </div>
@@ -765,7 +765,7 @@ import LogoConnected from "./LogoConnected.astro";
     </div>
   </div>
   <div class="footer-bottom">
-    <span>&copy; 2026 Executive Assistant</span>
+    <span>&copy; 2026 Assistant</span>
     <div class="footer-socials">
       <a href="#" class="footer-social-link">GitHub</a>
       <a href="#" class="footer-social-link">Discord</a>
@@ -905,7 +905,7 @@ import Footer from "../components/Footer.astro";
   <main style="max-width:700px;margin:0 auto;padding:48px 32px;">
     <h1 style="font-size:28px;font-weight:600;letter-spacing:-0.02em;margin:0 0 8px;">Documentation</h1>
     <p style="font-size:14px;color:var(--ea-text-secondary);letter-spacing:-0.011em;margin:0 0 32px;line-height:1.5;">
-      Everything you need to get started with Executive Assistant.
+      Everything you need to get started with Assistant.
     </p>
 
     <section style="margin-bottom:32px;">
@@ -918,7 +918,7 @@ import Footer from "../components/Footer.astro";
     <section style="margin-bottom:32px;">
       <h2 style="font-size:17px;font-weight:600;letter-spacing:-0.012em;margin:0 0 12px;color:var(--ea-text-primary);">Deployment</h2>
       <p style="font-size:13px;color:var(--ea-text-tertiary);line-height:1.6;margin:0;">
-        Executive Assistant runs on macOS, Linux, and Windows. Deploy solo on your machine or as a shared service.
+        Assistant runs on macOS, Linux, and Windows. Deploy solo on your machine or as a shared service.
       </p>
     </section>
   </main>

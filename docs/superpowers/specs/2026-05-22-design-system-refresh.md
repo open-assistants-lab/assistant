@@ -194,7 +194,7 @@ The chat is where 80% of the app's feel lives. We redesign it from the ground up
 
 When AI text streams in:
 - New characters fade in (opacity 0 → 1) over 100ms
-- No character-by-character bounce or typewriter effect (that's gimmicky for an executive assistant)
+- No character-by-character bounce or typewriter effect (that's gimmicky for an assistant)
 - When streaming completes, the cursor fades out over 200ms
 
 ### Empty state

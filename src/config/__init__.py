@@ -1,4 +1,4 @@
-"""Config module for Executive Assistant."""
+"""Config module for Assistant."""
 
 from src.config.settings import (
     AgentConfig,
