@@ -592,8 +592,10 @@ async def run_sdk_agent_stream(
     workspace_id: str = "personal",
     model: str | None = None,
     provider_keys: dict[str, str] | None = None,
+    cancel_event: asyncio.Event | None = None,
 ) -> Any:
     loop = await get_sdk_loop(user_id, workspace_id, model=model, provider_keys=provider_keys)
+    loop.cancel_event = cancel_event
     register_user_loop(user_id, loop)
 
     try:

@@ -165,6 +165,7 @@ class AgentLoop:
         run_config: RunConfig | None = None,
         user_id: str | None = None,
         workspace_id: str | None = None,
+        cancel_event: asyncio.Event | None = None,
     ) -> None:
         self.provider = provider
         self.system_prompt = system_prompt
@@ -179,6 +180,7 @@ class AgentLoop:
         self.user_id = user_id
         self.workspace_id = workspace_id
         self.subagent_ctx: SubagentContext | None = None
+        self.cancel_event: asyncio.Event | None = cancel_event
 
         self._registry = ToolRegistry()
         if tools:
@@ -929,6 +931,11 @@ class AgentLoop:
 
         try:
             for iteration in range(self.run_config.max_iterations):
+                # Cooperative cancellation check
+                if self.cancel_event and self.cancel_event.is_set():
+                    yield StreamChunk.done(content="", tool_calls=all_tool_calls)
+                    return
+
                 limit_reason = cost_tracker.exceeds_limits(self.run_config)
                 if limit_reason:
                     yield StreamChunk.error(message=f"Run limit reached: {limit_reason}")
@@ -967,6 +974,10 @@ class AgentLoop:
                                 model=None,
                                 provider_options=self.run_config.provider_options,
                             ):
+                                # Cooperative cancellation during token streaming
+                                if self.cancel_event and self.cancel_event.is_set():
+                                    yield StreamChunk.done(content="", tool_calls=all_tool_calls)
+                                    return
                                 if chunk.type == "usage" and chunk.usage:
                                     stream_usage.input_tokens += chunk.usage.input_tokens
                                     stream_usage.output_tokens += chunk.usage.output_tokens
@@ -1009,6 +1020,10 @@ class AgentLoop:
                             model=None,
                             provider_options=self.run_config.provider_options,
                         ):
+                            # Cooperative cancellation during token streaming
+                            if self.cancel_event and self.cancel_event.is_set():
+                                yield StreamChunk.done(content="", tool_calls=all_tool_calls)
+                                return
                             if chunk.type == "usage" and chunk.usage:
                                 stream_usage.input_tokens += chunk.usage.input_tokens
                                 stream_usage.output_tokens += chunk.usage.output_tokens
@@ -1164,11 +1179,17 @@ class AgentLoop:
 
                 # Execute parallel-safe tools concurrently, emit events as they complete
                 if parallel_safe:
+                    if self.cancel_event and self.cancel_event.is_set():
+                        yield StreamChunk.done(content="", tool_calls=all_tool_calls)
+                        return
                     async for event in self._execute_tool_batch_streaming(parallel_safe, state):
                         yield event
 
                 # Execute sequential (destructive) tools one-at-a-time
                 for tc in sequential:
+                    if self.cancel_event and self.cancel_event.is_set():
+                        yield StreamChunk.done(content="", tool_calls=all_tool_calls)
+                        return
                     async for event in self._execute_single_tool_streaming(tc, state):
                         yield event
 

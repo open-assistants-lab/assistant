@@ -22,8 +22,11 @@ class FakeConversation:
     def __init__(self) -> None:
         self.messages: list[StoredMessage] = []
 
-    def add_message(self, role: str, content: str, metadata: dict | None = None) -> None:
+    def add_message(self, role: str, content: str, metadata: dict | None = None, session_id: str | None = None) -> None:
         self.messages.append(StoredMessage(role, content, metadata))
+
+    def get_messages_by_session_id(self, session_id: str, limit: int = 50) -> list[StoredMessage]:
+        return self.messages[-limit:]
 
     def get_messages_with_summary(self, limit: int) -> list[StoredMessage]:
         return self.messages[-limit:]

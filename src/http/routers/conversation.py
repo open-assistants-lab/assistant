@@ -403,6 +403,7 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                 messages=sdk_messages,
                 model=req.model,
                 provider_keys=req.provider_keys,
+                cancel_event=cancel_event,
             ):
                 # Check cancel flag between chunks (fast path)
                 if _cancel_flags.get(user_id, False) or cancel_event.is_set():
