@@ -319,6 +319,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .cancel => {
             model.streaming = false;
+            // Remove empty typing indicator if present
+            const chat = model.activeChat();
+            if (chat.msg_count > 0) {
+                const last = &chat._messages[chat.msg_count - 1];
+                if (std.mem.eql(u8, last.role, "assistant") and last.content.len == 0) {
+                    chat.msg_count -= 1;
+                    chat.messages = chat._messages[0..chat.msg_count];
+                }
+            }
             fx.fetch(.{
                 .key = cancel_key,
                 .url = "http://127.0.0.1:8080/message/cancel",
@@ -393,6 +402,16 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.has_pending = true;
                 model.pending_tool = model.allocator.dupe(u8, tool.string) catch return;
                 model.pending_call_id = model.allocator.dupe(u8, call_id.string) catch return;
+            } else if (std.mem.eql(u8, event_type.string, "cancelled")) {
+                model.streaming = false;
+                // Remove empty typing indicator
+                if (chat.msg_count > 0) {
+                    const last = &chat._messages[chat.msg_count - 1];
+                    if (std.mem.eql(u8, last.role, "assistant") and last.content.len == 0) {
+                        chat.msg_count -= 1;
+                        chat.messages = chat._messages[0..chat.msg_count];
+                    }
+                }
             }
         },
         .stream_done => {
