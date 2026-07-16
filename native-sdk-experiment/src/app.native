@@ -1,11 +1,11 @@
 <split value="{sidebar_split}" on-resize="sidebar_resized">
   <column background="surface" border-color="border" gap="0" min-width="160">
-    <column padding="12" gap="8">
+    <column padding="12" gap="8" background="surface">
       <button on-press="new_chat" variant="secondary" icon="plus">New chat</button>
       <search-field text="{search_query}" placeholder="Search chats..." on-input="search_input" label="Search chats" />
     </column>
     <scroll grow="1" padding="8" gap="2" background="surface">
-      <column gap="2">
+      <column gap="2" background="surface">
         <for each="filteredChats" key="id" as="chat">
           <if test="{chat.id == active_chat_id}">
             <row gap="8" padding="8" radius="sm" cross="center" background="surface_pressed" on-press="switch_chat:{chat.id}" role="listitem" label="{chat.title}">
@@ -34,7 +34,7 @@
         </else>
       </column>
     </scroll>
-    <column gap="2" padding="8">
+    <column gap="2" padding="8" background="surface">
       <row gap="8" padding="8" radius="sm" cross="center">
         <icon name="wrench" foreground="text_muted"/>
         <text size="sm" foreground="text_muted">Tools</text>
@@ -48,7 +48,7 @@
         <text size="sm" foreground="text_muted">Subagents</text>
       </row>
     </column>
-    <row gap="4" padding="8" cross="center">
+    <row gap="4" padding="8" cross="center" background="surface">
       <row gap="8" padding="8" radius="sm" cross="center" grow="1">
         <icon name="settings" foreground="text_muted"/>
         <text size="sm" foreground="text_muted">Settings</text>
@@ -60,7 +60,7 @@
 
   <column background="background" gap="0" min-width="320">
     <scroll grow="1" padding="16" gap="12" background="background">
-      <column gap="12">
+      <column gap="12" background="background">
         <for each="messages" key="id" as="msg">
           <if test="{msg.isUser}">
             <row main="end" cross="start">
@@ -104,7 +104,7 @@
         <button on-press="reject" variant="ghost" foreground="destructive">Reject</button>
       </row>
     </if>
-    <row gap="8" padding="12" cross="center">
+    <row gap="8" padding="12" cross="center" background="background">
       <input text="{inputText}" placeholder="Type a message..." grow="1" on-input="input_changed" on-submit="send_message" label="Message" />
       <if test="{streaming}">
         <button on-press="cancel" variant="ghost">Stop</button>
