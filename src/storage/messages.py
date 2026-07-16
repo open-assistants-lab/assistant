@@ -310,7 +310,7 @@ class MessageStore:
 
     def get_messages_by_session_id(self, session_id: str, limit: int = 50) -> list[Message]:
         memories = self._core.fetch(limit=limit, session_id=session_id)
-        return [self._to_msg(m) for m in memories]
+        return [self._to_msg(m) for m in reversed(memories)]
 
     def get_recent_messages(self, count: int = 100) -> list[Message]:
         memories = self._core.fetch(limit=count)
