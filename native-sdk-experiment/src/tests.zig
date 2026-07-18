@@ -31,6 +31,35 @@ fn expectByText(widget: canvas.Widget, kind: canvas.WidgetKind, text: []const u8
     };
 }
 
+fn findByLabel(widget: canvas.Widget, kind: canvas.WidgetKind, label: []const u8) ?canvas.Widget {
+    if (widget.kind == kind and std.mem.eql(u8, widget.semantics.label, label)) return widget;
+    for (widget.children) |child| {
+        if (findByLabel(child, kind, label)) |found| return found;
+    }
+    return null;
+}
+
+fn countKind(widget: canvas.Widget, kind: canvas.WidgetKind) usize {
+    var count: usize = if (widget.kind == kind) 1 else 0;
+    for (widget.children) |child| count += countKind(child, kind);
+    return count;
+}
+
+fn findTextContaining(widget: canvas.Widget, fragment: []const u8) ?canvas.Widget {
+    if (widget.kind == .text and std.mem.indexOf(u8, widget.text, fragment) != null) return widget;
+    for (widget.children) |child| {
+        if (findTextContaining(child, fragment)) |found| return found;
+    }
+    return null;
+}
+
+fn expectByLabel(widget: canvas.Widget, kind: canvas.WidgetKind, label: []const u8) !canvas.Widget {
+    return findByLabel(widget, kind, label) orelse {
+        std.debug.print("no {t} with label \"{s}\" in the view\n", .{ kind, label });
+        return error.WidgetNotFound;
+    };
+}
+
 fn noopFx(allocator: std.mem.Allocator) Effects {
     var fx = Effects.init(allocator);
     fx.executor = .fake;
@@ -89,6 +118,60 @@ test "input accumulates incremental text events" {
 
     main.update(&model, .{ .input_changed = .clear }, &fx);
     try testing.expectEqualStrings("", model.inputText());
+}
+
+test "selected composer text deletes and replaces as a range" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    main.update(&model, .{ .input_changed = .{ .insert_text = "hello" } }, &fx);
+    main.update(&model, .{ .input_changed = .{ .set_selection = .{ .anchor = 0, .focus = 5 } } }, &fx);
+    main.update(&model, .{ .input_changed = .delete_backward }, &fx);
+    try testing.expectEqualStrings("", model.inputText());
+
+    main.update(&model, .{ .input_changed = .{ .insert_text = "hello" } }, &fx);
+    main.update(&model, .{ .input_changed = .{ .set_selection = .{ .anchor = 0, .focus = 5 } } }, &fx);
+    main.update(&model, .{ .input_changed = .{ .insert_text = "x" } }, &fx);
+    try testing.expectEqualStrings("x", model.inputText());
+}
+
+test "stale composer selection is clamped before inserting" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    main.update(&model, .{ .input_changed = .{ .set_selection = .{ .anchor = 20, .focus = 20 } } }, &fx);
+    main.update(&model, .{ .input_changed = .{ .insert_text = "h" } }, &fx);
+
+    try testing.expectEqualStrings("h", model.inputText());
+    try testing.expectEqualDeep(canvas.TextSelection{ .anchor = 1, .focus = 1 }, model.activeChat().draft_selection);
+}
+
+test "composer renders selected draft range" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    main.update(&model, .{ .input_changed = .{ .insert_text = "hello" } }, &fx);
+    main.update(&model, .{ .input_changed = .{ .set_selection = .{ .anchor = 0, .focus = 5 } } }, &fx);
+
+    const tree = try buildTree(arena, &model);
+    const composer = try expectByLabel(tree.root, canvas.WidgetKind.text_field, "Message");
+    try testing.expect(composer.text_selection != null);
+    try testing.expectEqualDeep(canvas.TextSelection{ .anchor = 0, .focus = 5 }, composer.text_selection.?);
 }
 
 test "messages event creates assistant bubble" {
@@ -436,17 +519,18 @@ test "unread badge: increments for non-active chat on stream_done" {
     main.update(&model, .send_message, &fx);
     model.activeChat().streaming = false;
     main.update(&model, .new_chat, &fx);
-    model.active_chat_idx = 1;
 
+    // Switch to chat 0 (active), then let chat 1 finish streaming
+    model.active_chat_idx = 0;
     model.chats[0].title = "First chat";
     model.chats[1].title = "Second chat";
-    main.addMessage(&model.chats[0], arena, "user", "hi");
 
     model.chats[1].streaming = true;
     model.chats[1].fetch_key = 42;
     main.update(&model, .{ .stream_done = .{ .key = 42 } }, &fx);
-    try testing.expectEqual(@as(u32, 1), model.chats[0].unread_count);
-    try testing.expectEqual(@as(u32, 0), model.chats[1].unread_count);
+    // Chat 1 finished streaming while NOT active → should be unread
+    try testing.expectEqual(@as(u32, 0), model.chats[0].unread_count);
+    try testing.expectEqual(@as(u32, 1), model.chats[1].unread_count);
 }
 
 test "unread badge: switch chat resets unread count" {

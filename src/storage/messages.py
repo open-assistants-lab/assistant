@@ -312,6 +312,31 @@ class MessageStore:
         memories = self._core.fetch(limit=limit, session_id=session_id)
         return [self._to_msg(m) for m in reversed(memories)]
 
+    def get_sessions(self) -> list[dict[str, str]]:
+        """List all chat sessions with titles derived from the first user message.
+
+        Queries the session_id column directly since CoreMem's fetch does not
+        surface session_id on the Message dataclass.
+        """
+        try:
+            with self._core.db._connect() as cur:
+                rows = cur.execute(
+                    "SELECT session_id, content FROM messages "
+                    "WHERE role = 'user' AND session_id != '' "
+                    "ORDER BY ts ASC"
+                ).fetchall()
+        except Exception:
+            return []
+
+        sessions: dict[str, str] = {}
+        for row in rows:
+            sid = row[0]
+            content = row[1] or ""
+            if sid and sid not in sessions:
+                sessions[sid] = content[:60] if len(content) > 60 else content
+
+        return [{"session_id": sid, "title": title} for sid, title in sessions.items()]
+
     def get_recent_messages(self, count: int = 100) -> list[Message]:
         memories = self._core.fetch(limit=count)
         return [self._to_msg(m) for m in reversed(memories)]

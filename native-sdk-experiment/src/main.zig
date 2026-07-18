@@ -15,6 +15,7 @@ const cancel_key: u64 = 2;
 const approve_key: u64 = 3;
 const reject_key: u64 = 4;
 const history_key: u64 = 5;
+const sessions_key: u64 = 6;
 const first_stream_key: u64 = 100;
 
 const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
@@ -85,6 +86,7 @@ pub const Chat = struct {
     pending_call_id: []const u8 = "",
     open_bubble_type: []const u8 = "",
     status_text: []const u8 = "",
+    draft_selection: canvas.TextSelection = .{ .anchor = 0, .focus = 0 },
 
     pub fn hasUnread(self: *const Chat) bool {
         return self.unread_count > 0;
@@ -101,6 +103,12 @@ pub const Chat = struct {
     pub fn setSessionId(self: *Chat, id: u64) void {
         const buf = std.fmt.bufPrint(&self.session_id, "chat-{d}", .{id}) catch return;
         self.session_id_len = buf.len;
+    }
+
+    pub fn setSessionIdStr(self: *Chat, sid: []const u8) void {
+        if (sid.len > self.session_id.len) return;
+        @memcpy(self.session_id[0..sid.len], sid);
+        self.session_id_len = sid.len;
     }
 };
 
@@ -120,6 +128,7 @@ pub const Msg = union(enum) {
     switch_chat: u64,
     toggle_theme,
     toggle_bubble: u64,
+    tick: native_sdk.EffectTimer,
     search_input: canvas.TextInputEvent,
     suggestion_inbox,
     suggestion_summary,
@@ -127,6 +136,7 @@ pub const Msg = union(enum) {
     sidebar_resized: f32,
     history_loaded: native_sdk.EffectResponse,
     chat_history_loaded: native_sdk.EffectResponse,
+    sessions_loaded: native_sdk.EffectResponse,
     reached_bottom,
 
     pub const view_unbound = .{
@@ -137,9 +147,11 @@ pub const Msg = union(enum) {
         "reject_done",
         "cancel_done",
         "toggle_bubble",
+        "tick",
         "search_input",
         "history_loaded",
         "chat_history_loaded",
+        "sessions_loaded",
         "reached_bottom",
     };
 };
@@ -152,6 +164,7 @@ pub const Model = struct {
     active_chat_id: u64 = 0,
     next_chat_id: u64 = 1,
     next_fetch_key: u64 = first_stream_key,
+    pulse_phase: f32 = 0,
     search_query: []const u8 = "",
     sidebar_split: f32 = 0.2,
     allocator: std.mem.Allocator = undefined,
@@ -207,6 +220,16 @@ pub const Model = struct {
         return null;
     }
 
+    pub fn findChatByHistoryKey(self: *Model, key: u64) ?*Chat {
+        var i: usize = 0;
+        while (i < self.chat_count) : (i += 1) {
+            if (self.chats[i].fetch_key == key) {
+                return &self.chats[i];
+            }
+        }
+        return null;
+    }
+
     pub fn allocFetchKey(self: *Model) u64 {
         const k = self.next_fetch_key;
         self.next_fetch_key += 1;
@@ -227,22 +250,18 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
     switch (msg) {
         .input_changed => |event| {
             const chat = model.activeChat();
-            switch (event) {
-                .insert_text => |text| {
-                    chat.draft_text = std.fmt.allocPrint(
-                        model.allocator,
-                        "{s}{s}",
-                        .{ chat.draft_text, text },
-                    ) catch return;
-                },
-                .clear => chat.draft_text = "",
-                .delete_backward => {
-                    if (chat.draft_text.len > 0) {
-                        chat.draft_text = chat.draft_text[0 .. chat.draft_text.len - 1];
-                    }
-                },
-                else => {},
-            }
+            const extra = switch (event) {
+                .insert_text => |text| text.len,
+                .set_composition => |composition| composition.text.len,
+                else => 0,
+            };
+            const output = model.allocator.alloc(u8, chat.draft_text.len + extra + 8) catch return;
+            const next = (canvas.TextEditState{
+                .text = chat.draft_text,
+                .selection = chat.draft_selection,
+            }).apply(event, output) catch return;
+            chat.draft_text = next.text;
+            chat.draft_selection = next.selection;
         },
         .toggle_theme => {
             model.theme_mode = switch (model.theme_mode) {
@@ -280,13 +299,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     // Load history for this chat if not yet loaded
                     if (!model.chats[i].history_loaded and model.chats[i].msg_count == 0) {
                         model.chats[i].history_loaded = true;
+                        const fetch_key = model.chats[i].id + 1000;
+                        model.chats[i].fetch_key = fetch_key;
                         const url = std.fmt.allocPrint(
                             model.allocator,
                             "http://127.0.0.1:8080/conversation?user_id=native_sdk_chat&session_id={s}&limit=100",
                             .{model.chats[i].sessionId()},
                         ) catch return;
                         fx.fetch(.{
-                            .key = history_key,
+                            .key = fetch_key,
                             .url = url,
                             .method = .GET,
                             .headers = &.{.{ .name = "Accept", .value = "application/json" }},
@@ -342,6 +363,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             chat.open_bubble_type = "";
             chat.status_text = "Thinking...";
 
+            // Start pulse timer for streaming indicator
+            fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
+
             const escaped = escapeJsonString(model.allocator, text) catch return;
             const body = std.fmt.allocPrint(
                 model.allocator,
@@ -374,6 +398,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     chat.messages = chat._messages[0..chat.msg_count];
                 }
             }
+
             const body = std.fmt.allocPrint(model.allocator, "{{\"user_id\":\"native_sdk_chat\",\"session_id\":\"{s}\"}}", .{chat.sessionId()}) catch return;
             fx.fetch(.{
                 .key = cancel_key,
@@ -396,6 +421,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             chat.fetch_key = model.allocFetchKey();
             chat.open_bubble_type = "";
             chat.status_text = "Resuming...";
+            fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
             const body = std.fmt.allocPrint(model.allocator, "{{\"user_id\":\"native_sdk_chat\",\"call_id\":\"{s}\",\"session_id\":\"{s}\",\"model\":\"deepseek:deepseek-v4-flash\"}}", .{chat.pending_call_id, chat.sessionId()}) catch return;
             chat.pending_tool = "";
             chat.pending_call_id = "";
@@ -485,6 +511,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 if (findRunningToolBubble(chat)) |tb| {
                     tb.tool_status = model.allocator.dupe(u8, "done") catch return;
                     tb.tool_result = model.allocator.dupe(u8, result.string) catch return;
+                    tb.collapsed = true; // collapsed by default — one-line preview
                 }
                 chat.status_text = std.fmt.allocPrint(model.allocator, "{s}: done", .{tool.string}) catch tool.string;
             } else if (std.mem.eql(u8, event_type.string, "interrupt")) {
@@ -522,12 +549,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 return;
             };
             finalizeStream(chat);
-            // Increment unread for other chats
-            var i: usize = 0;
-            while (i < model.chat_count) : (i += 1) {
-                if (&model.chats[i] != chat and model.chats[i].msg_count > 0) {
-                    model.chats[i].unread_count += 1;
-                }
+            // Mark this chat as unread if it's not the active one
+            if (&model.chats[model.active_chat_idx] != chat) {
+                chat.unread_count += 1;
             }
         },
         .stream_error => |err| {
@@ -556,6 +580,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 }
             }
         },
+        .tick => {
+            // Advance pulse phase for streaming dot animation
+            model.pulse_phase += 0.15;
+            if (model.pulse_phase > std.math.tau) model.pulse_phase -= std.math.tau;
+            // Reschedule timer if any chat is still streaming
+            if (model.anyStreaming()) {
+                fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
+            }
+        },
         .history_loaded => |response| {
             if (response.outcome != .ok) return;
             const body = response.body;
@@ -568,47 +601,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .array => |a| a,
                 else => return,
             };
-            const chat = model.activeChat();
+            const chat = model.findChatByHistoryKey(response.key) orelse model.activeChat();
             chat.history_loaded = true;
             for (arr.items) |item| {
-                const role_val = item.object.get("role") orelse continue;
-                const content_val = item.object.get("content") orelse continue;
-                const role_str = switch (role_val) {
-                    .string => |s| s,
-                    else => continue,
-                };
-                const content_str = switch (content_val) {
-                    .string => |s| s,
-                    else => continue,
-                };
-                if (std.mem.eql(u8, role_str, "tool")) {
-                    // Tool messages from history: populate tool fields for rendering
-                    if (chat.msg_count >= max_messages) continue;
-                    const metadata = item.object.get("metadata");
-                    const tool_name = if (metadata) |m| blk: {
-                        const name_val = m.object.get("tool_name") orelse m.object.get("name");
-                        if (name_val) |v| {
-                            switch (v) {
-                                .string => |s| break :blk s,
-                                else => {},
-                            }
-                        }
-                        break :blk "tool";
-                    } else "tool";
-                    chat._messages[chat.msg_count] = .{
-                        .id = chat.next_id,
-                        .role = model.allocator.dupe(u8, "tool") catch continue,
-                        .content = model.allocator.dupe(u8, content_str) catch continue,
-                        .tool_name = model.allocator.dupe(u8, tool_name) catch continue,
-                        .tool_status = model.allocator.dupe(u8, "done") catch continue,
-                        .tool_result = model.allocator.dupe(u8, content_str) catch continue,
-                    };
-                    chat.next_id += 1;
-                    chat.msg_count += 1;
-                    chat.messages = chat._messages[0..chat.msg_count];
-                } else {
-                    addMessage(chat, model.allocator, role_str, content_str);
-                }
+                addHistoryMessage(chat, model.allocator, item);
             }
             if (chat.msg_count > 0) {
                 const first = chat._messages[0];
@@ -616,11 +612,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     chat.title = model.allocator.dupe(u8, first.content) catch "New chat";
                 }
             }
+            chat.fetch_key = 0;
         },
         .chat_history_loaded => |response| {
             if (response.outcome != .ok) return;
             const body = response.body;
             if (body.len == 0) return;
+            const chat = model.findChatByHistoryKey(response.key) orelse return;
             const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
             defer parsed.deinit();
             const root = parsed.value;
@@ -629,25 +627,60 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .array => |a| a,
                 else => return,
             };
-            const chat = model.activeChat();
             for (arr.items) |item| {
-                const role_val = item.object.get("role") orelse continue;
-                const content_val = item.object.get("content") orelse continue;
-                const role_str = switch (role_val) {
-                    .string => |s| s,
-                    else => continue,
-                };
-                const content_str = switch (content_val) {
-                    .string => |s| s,
-                    else => continue,
-                };
-                addMessage(chat, model.allocator, role_str, content_str);
+                addHistoryMessage(chat, model.allocator, item);
             }
             if (chat.msg_count > 0) {
                 const first = chat._messages[0];
                 if (std.mem.eql(u8, first.role, "user")) {
                     chat.title = model.allocator.dupe(u8, first.content) catch "New chat";
                 }
+            }
+            chat.fetch_key = 0;
+        },
+        .sessions_loaded => |response| {
+            if (response.outcome != .ok) return;
+            const body = response.body;
+            if (body.len == 0) return;
+            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
+            defer parsed.deinit();
+            const root = parsed.value;
+            const sessions_arr = root.object.get("sessions") orelse return;
+            const arr = switch (sessions_arr) {
+                .array => |a| a,
+                else => return,
+            };
+
+            // The initial chat (id=1, session "chat-1") is already in the model.
+            // For each session from the API, create a chat entry with a unique id
+            // derived from hashing the session_id string (avoids collisions between
+            // sessions like "chat-1" and "sse-1" that would share numeric id 1).
+            const initial_session_id = "chat-1";
+            for (arr.items) |item| {
+                const sid_val = item.object.get("session_id") orelse continue;
+                const title_val = item.object.get("title") orelse continue;
+                const sid = switch (sid_val) {
+                    .string => |s| s,
+                    else => continue,
+                };
+                const title = switch (title_val) {
+                    .string => |s| s,
+                    else => continue,
+                };
+                if (std.mem.eql(u8, sid, initial_session_id)) {
+                    // Update the title of the initial chat
+                    model.chats[0].title = model.allocator.dupe(u8, title) catch "New chat";
+                    continue;
+                }
+                if (model.chat_count >= max_chats) break;
+
+                // Use a hash of the session_id string as the unique chat id
+                const hash = std.hash.Wyhash.hash(0, sid);
+                model.chats[model.chat_count] = .{ .id = hash };
+                model.chats[model.chat_count].setSessionIdStr(sid);
+                model.chats[model.chat_count].title = model.allocator.dupe(u8, title) catch "New chat";
+                model.chats[model.chat_count].history_loaded = false;
+                model.chat_count += 1;
             }
         },
     }
@@ -779,14 +812,21 @@ const ChatApp = native_sdk.UiApp(Model, Msg);
 // ── View builders (Zig view replacing markup) ──────────────────────────────
 
 pub fn buildView(ui: *AppUi, model: *const Model) AppUi.Node {
-    return ui.split(.{
+    const split = ui.split(.{
         .value = model.sidebar_split,
         .on_resize = AppUi.valueMsg(.sidebar_resized),
         .style_tokens = .{ .background = .surface, .border_color = .border },
+        .grow = 1,
     }, .{
         buildSidebar(ui, model),
         buildChatPanel(ui, model),
     });
+
+    return ui.el(.card, .{
+        .grow = 1,
+        .style = .{ .radius = 0 },
+        .style_tokens = .{ .background = .surface },
+    }, .{split});
 }
 
 fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
@@ -803,6 +843,7 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
         .placeholder = "Search chats...",
         .on_input = AppUi.inputMsg(.search_input),
         .semantics = .{ .label = "Search chats" },
+        .style_tokens = .{ .background = .surface_subtle, .radius = .md },
     });
 
     // Chat list
@@ -812,36 +853,39 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
     for (chats) |*chat| {
         const is_active = chat.id == model.active_chat_id;
         // Fixed-width dot slot (8px) so titles stay aligned regardless of indicator state.
-        // Streaming → accent dot, unread → accent dot, idle → empty space.
+        // Streaming → accent dot (pulsing), unread → solid accent dot, idle → empty space.
         const show_dot = chat.streaming or chat.hasUnread();
-        // Fixed 8px slot keeps titles aligned with or without the dot.
+        // Pulsing opacity for streaming dots: 0.15 + 0.85 * (0.5 + 0.5 * cos(phase))
+        const dot_opacity: f32 = if (chat.streaming)
+            0.15 + 0.85 * (0.5 + 0.5 * @cos(model.pulse_phase))
+        else
+            1.0;
+        // Streaming → accent dot (pulsing), unread → solid accent dot, idle → empty
+        const dot_bg: canvas.ColorTokenName = .accent;
         const dot_node: AppUi.Node = if (show_dot) blk: {
             break :blk ui.el(.card, .{
                 .width = 6,
                 .height = 6,
                 .key = .{ .int = 0xD07BA5E ^ chat.id },
+                .opacity = dot_opacity,
                 .style_tokens = .{
-                    .background = .accent,
+                    .background = dot_bg,
                     .radius = .sm,
                 },
             }, .{
                 ui.text(.{}, ""),
             });
         } else blk: {
-            break :blk ui.el(.card, .{
-                .width = 6,
-                .height = 6,
-            }, .{
-                ui.text(.{}, ""),
-            });
+            // Idle: empty 8px slot — fixed width, no background, no children
+            break :blk ui.el(.stack, .{ .width = 8, .height = 8 }, .{});
         };
         chat_nodes[chat_count] = ui.row(.{
             .gap = 8,
             .padding = 8,
-            .style_tokens = .{
-                .background = if (is_active) .surface_pressed else null,
+            .style_tokens = if (is_active) .{
+                .background = .surface_pressed,
                 .radius = .sm,
-            },
+            } else .{},
             .cross = .center,
             .on_press = .{ .switch_chat = chat.id },
             .semantics = .{ .role = .listitem, .label = chat.title },
@@ -891,15 +935,15 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
 
     // Bottom nav: Tools, Skills, Subagents
     var nav_nodes: [3]AppUi.Node = undefined;
-    nav_nodes[0] = ui.row(.{ .gap = 8, .padding = 8, .style_tokens = .{ .radius = .sm }, .cross = .center }, .{
+    nav_nodes[0] = ui.row(.{ .gap = 8, .padding = 8, .cross = .center }, .{
         ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "wrench"),
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Tools"),
     });
-    nav_nodes[1] = ui.row(.{ .gap = 8, .padding = 8, .style_tokens = .{ .radius = .sm }, .cross = .center }, .{
+    nav_nodes[1] = ui.row(.{ .gap = 8, .padding = 8, .cross = .center }, .{
         ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "file-text"),
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Skills"),
     });
-    nav_nodes[2] = ui.row(.{ .gap = 8, .padding = 8, .style_tokens = .{ .radius = .sm }, .cross = .center }, .{
+    nav_nodes[2] = ui.row(.{ .gap = 8, .padding = 8, .cross = .center }, .{
         ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "git-branch"),
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Subagents"),
     });
@@ -909,7 +953,7 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
 
     // Settings + theme toggle
     sidebar_children[sidebar_count] = ui.row(.{ .gap = 4, .padding = 8, .cross = .center, .style_tokens = .{ .background = .surface } }, .{
-        ui.row(.{ .gap = 8, .padding = 8, .style_tokens = .{ .radius = .sm }, .cross = .center, .grow = 1 }, .{
+        ui.row(.{ .gap = 8, .padding = 8, .cross = .center, .grow = 1 }, .{
             ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "settings"),
             ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Settings"),
         }),
@@ -917,7 +961,10 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
             .on_press = .toggle_theme,
             .variant = .ghost,
             .size = .sm,
-            .icon = "moon",
+            .icon = switch (model.theme_mode) {
+                .dark => "sun",
+                .light => "moon",
+            },
             .semantics = .{ .label = "Toggle theme" },
         }, ""),
     });
@@ -925,17 +972,90 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
 
     const sidebar_slice: []const AppUi.Node = sidebar_children[0..sidebar_count];
     return ui.column(.{
-        .style_tokens = .{ .background = .surface, .border_color = .border },
+        .style_tokens = .{ .background = .surface },
         .gap = 0,
         .min_width = 160,
     }, sidebar_slice);
+}
+
+fn groupExtentEstimate(context: ?*const anyopaque, index: u64) f32 {
+    const chat: *const Chat = @ptrCast(@alignCast(@constCast(context)));
+    const count = chat.msg_count;
+    var group_idx: u64 = 0;
+    var i: usize = 0;
+    while (i < count) {
+        const msg = &chat._messages[i];
+        if (msg.isUser() or std.mem.eql(u8, msg.role, "system")) {
+            if (group_idx == index) {
+                return 48 + @as(f32, @floatFromInt(msg.content.len)) * 0.6;
+            }
+            group_idx += 1;
+            i += 1;
+        } else {
+            var group_height: f32 = 28;
+            while (i < count and !chat._messages[i].isUser() and !std.mem.eql(u8, chat._messages[i].role, "system")) : (i += 1) {
+                const m = &chat._messages[i];
+                if (m.isTool()) {
+                    group_height += 60 + @as(f32, @floatFromInt(m.content.len)) * 0.3;
+                } else if (m.isReasoning()) {
+                    group_height += 48;
+                } else {
+                    group_height += 48 + @as(f32, @floatFromInt(m.content.len)) * 0.6;
+                }
+            }
+            if (group_idx == index) return group_height;
+            group_idx += 1;
+        }
+    }
+    return 80;
+}
+
+fn addHistoryMessage(chat: *Chat, allocator: std.mem.Allocator, item: std.json.Value) void {
+    const role_val = item.object.get("role") orelse return;
+    const content_val = item.object.get("content") orelse return;
+    const role_str = switch (role_val) {
+        .string => |s| s,
+        else => return,
+    };
+    const content_str = switch (content_val) {
+        .string => |s| s,
+        else => return,
+    };
+    if (std.mem.eql(u8, role_str, "tool")) {
+        if (chat.msg_count >= max_messages) return;
+        const metadata = item.object.get("metadata");
+        const tool_name = if (metadata) |m| blk: {
+            const name_val = m.object.get("tool_name") orelse m.object.get("name");
+            if (name_val) |v| {
+                switch (v) {
+                    .string => |s| break :blk s,
+                    else => {},
+                }
+            }
+            break :blk "tool";
+        } else "tool";
+        chat._messages[chat.msg_count] = .{
+            .id = chat.next_id,
+            .role = allocator.dupe(u8, "tool") catch return,
+            .content = allocator.dupe(u8, content_str) catch return,
+            .tool_name = allocator.dupe(u8, tool_name) catch return,
+            .tool_status = allocator.dupe(u8, "done") catch return,
+            .tool_result = allocator.dupe(u8, content_str) catch return,
+            .collapsed = true,
+        };
+        chat.next_id += 1;
+        chat.msg_count += 1;
+        chat.messages = chat._messages[0..chat.msg_count];
+    } else {
+        addMessage(chat, allocator, role_str, content_str);
+    }
 }
 
 fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     const chat = &model.chats[model.active_chat_idx];
     const count = chat.msg_count;
 
-    var children: [5]AppUi.Node = undefined;
+    var children: [4]AppUi.Node = undefined;
     var child_count: usize = 0;
 
     // Message list or empty state
@@ -946,7 +1066,7 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
             .gap = 16,
             .cross = .center,
             .main = .center,
-            .style_tokens = .{ .background = .background },
+            .style_tokens = .{ .background = .surface },
         }, .{
             ui.text(.{ .size = .heading }, "How can I help?"),
             ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Ask me anything, or try one of these:"),
@@ -959,7 +1079,6 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     } else {
         // Group messages: user bubbles are standalone; consecutive assistant/tool/reasoning
         // messages are grouped under a single "Assistant" label.
-        // First, compute the group count for the virtual list.
         var group_count: usize = 0;
         var i: usize = 0;
         while (i < count) {
@@ -968,7 +1087,6 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                 group_count += 1;
                 i += 1;
             } else {
-                // Skip all consecutive non-user, non-system messages as one group
                 group_count += 1;
                 while (i < count and !chat._messages[i].isUser() and !std.mem.eql(u8, chat._messages[i].role, "system")) {
                     i += 1;
@@ -979,27 +1097,29 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         const options = AppUi.VirtualListOptions{
             .id = "chat-messages",
             .item_count = group_count,
-            .item_extent = 100,
+            .item_extent = 0,
+            .extent_estimate = groupExtentEstimate,
+            .extent_context = chat,
             .gap = 12,
             .anchor = .trailing,
+            .overscan = 3,
             .grow = 1,
             .padding = 16,
-            .style_tokens = .{ .background = .background },
+            .style_tokens = .{ .background = .surface },
         };
         const window = ui.virtualWindow(options);
 
-        // Build group nodes for visible range
-        var msg_nodes: [max_messages]AppUi.Node = undefined;
+        // Build group nodes for visible range only.
+        const max_visible = 64;
+        var msg_nodes: [max_visible]AppUi.Node = undefined;
         var node_count: usize = 0;
 
-        // Map group indices to message ranges, then build only visible groups
         var group_idx: usize = 0;
         var msg_start: usize = 0;
         i = 0;
-        while (i < count) {
+        while (i < count and node_count < max_visible) {
             const msg = &chat._messages[i];
             if (msg.isUser() or std.mem.eql(u8, msg.role, "system")) {
-                // Single-message group
                 if (group_idx >= window.start_index and group_idx < window.end_index) {
                     msg_nodes[node_count] = buildMessageBubble(ui, msg);
                     node_count += 1;
@@ -1008,7 +1128,6 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                 msg_start = i + 1;
                 i += 1;
             } else {
-                // Find end of this assistant group
                 msg_start = i;
                 while (i < count and !chat._messages[i].isUser() and !std.mem.eql(u8, chat._messages[i].role, "system")) {
                     i += 1;
@@ -1043,53 +1162,45 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         child_count += 1;
     }
 
-    // Status bar (only when streaming)
-    if (active_chat.streaming and active_chat.status_text.len > 0) {
-        children[child_count] = ui.row(.{
-            .gap = 8,
-            .padding = 8,
-            .cross = .center,
-            .style_tokens = .{ .background = .surface_subtle },
-        }, .{
-            ui.icon(.{ .style_tokens = .{ .foreground = .accent } }, "circle-dot"),
-            ui.text(.{ .size = .sm, .grow = 1, .style_tokens = .{ .foreground = .text_muted } }, active_chat.status_text),
-        });
-        child_count += 1;
-    }
-
     // Composer
     if (active_chat.streaming) {
+        var composer_field = ui.textField(.{
+            .text = model.inputText(),
+            .placeholder = "Type a message...",
+            .grow = 1,
+            .on_input = AppUi.inputMsg(.input_changed),
+            .on_submit = .send_message,
+            .semantics = .{ .label = "Message" },
+            .style_tokens = .{ .background = .surface_subtle, .radius = .md },
+        });
+        composer_field.widget.text_selection = active_chat.draft_selection;
         children[child_count] = ui.row(.{
             .gap = 8,
             .padding = 12,
             .cross = .center,
-            .style_tokens = .{ .background = .background },
+            .style_tokens = .{ .background = .surface },
         }, .{
-            ui.textField(.{
-                .text = model.inputText(),
-                .placeholder = "Type a message...",
-                .grow = 1,
-                .on_input = AppUi.inputMsg(.input_changed),
-                .on_submit = .send_message,
-                .semantics = .{ .label = "Message" },
-            }),
+            composer_field,
             ui.button(.{ .on_press = .cancel, .variant = .ghost }, "Stop"),
         });
     } else {
+        var composer_field = ui.textField(.{
+            .text = model.inputText(),
+            .placeholder = "Type a message...",
+            .grow = 1,
+            .on_input = AppUi.inputMsg(.input_changed),
+            .on_submit = .send_message,
+            .semantics = .{ .label = "Message" },
+            .style_tokens = .{ .background = .surface_subtle, .radius = .md },
+        });
+        composer_field.widget.text_selection = active_chat.draft_selection;
         children[child_count] = ui.row(.{
             .gap = 8,
             .padding = 12,
             .cross = .center,
-            .style_tokens = .{ .background = .background },
+            .style_tokens = .{ .background = .surface },
         }, .{
-            ui.textField(.{
-                .text = model.inputText(),
-                .placeholder = "Type a message...",
-                .grow = 1,
-                .on_input = AppUi.inputMsg(.input_changed),
-                .on_submit = .send_message,
-                .semantics = .{ .label = "Message" },
-            }),
+            composer_field,
             ui.button(.{ .on_press = .send_message, .variant = .primary }, "Send"),
         });
     }
@@ -1097,7 +1208,7 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
 
     const children_slice: []const AppUi.Node = children[0..child_count];
     return ui.column(.{
-        .style_tokens = .{ .background = .background },
+        .style_tokens = .{ .background = .surface },
         .gap = 0,
         .min_width = 320,
     }, children_slice);
@@ -1117,16 +1228,14 @@ fn toolIconName(tool_name: []const u8) []const u8 {
 }
 
 fn buildAssistantGroup(ui: *AppUi, chat: *const Chat, start: usize, end: usize) AppUi.Node {
-    var child_nodes: [max_messages]AppUi.Node = undefined;
-    var child_count: usize = 0;
-    var i = start;
-    while (i < end) : (i += 1) {
-        child_nodes[child_count] = buildChildBubble(ui, &chat._messages[i]);
-        child_count += 1;
+    const len = end - start;
+    const child_nodes = ui.arena.alloc(AppUi.Node, len) catch return ui.text(.{}, "");
+    for (0..len) |j| {
+        child_nodes[j] = buildChildBubble(ui, &chat._messages[start + j]);
     }
     return ui.column(.{ .gap = 6 }, .{
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .accent } }, "Assistant"),
-        ui.column(.{ .gap = 8 }, child_nodes[0..child_count]),
+        ui.column(.{ .gap = 8 }, child_nodes),
     });
 }
 
@@ -1137,9 +1246,9 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
             break :blk if (newline) |n| msg.content[0..n] else msg.content;
         } else msg.content;
         const expand_label: []const u8 = if (msg.collapsed) "Expand" else "Collapse";
-        return ui.el(.card, .{
+        return ui.el(.bubble, .{
             .padding = 12,
-            .style_tokens = .{ .background = .surface, .radius = .md, .border_color = .accent },
+            .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
         }, .{
             ui.row(.{ .gap = 8, .cross = .center, .on_press = .{ .toggle_bubble = msg.id } }, .{
                 ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .accent } }, "Thinking"),
@@ -1150,9 +1259,9 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
     } else if (msg.isTool()) {
         const icon = toolIconName(msg.tool_name);
         if (std.mem.eql(u8, msg.tool_status, "running")) {
-            return ui.el(.card, .{
+            return ui.el(.bubble, .{
                 .padding = 12,
-                .style_tokens = .{ .background = .surface_subtle, .radius = .md, .border_color = .border },
+                .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
             }, .{
                 ui.column(.{ .gap = 4 }, .{
                     ui.row(.{ .gap = 8, .cross = .center }, .{
@@ -1168,9 +1277,9 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
                 const newline = std.mem.indexOf(u8, msg.tool_result, "\n");
                 break :blk if (newline) |n| msg.tool_result[0..n] else msg.tool_result;
             } else msg.tool_result;
-            return ui.el(.card, .{
+            return ui.el(.bubble, .{
                 .padding = 12,
-                .style_tokens = .{ .background = .surface_subtle, .radius = .md, .border_color = .border },
+                .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
             }, .{
                 ui.column(.{ .gap = 4 }, .{
                     ui.row(.{ .gap = 8, .cross = .center, .on_press = .{ .toggle_bubble = msg.id } }, .{
@@ -1187,9 +1296,9 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
         if (msg.isEmpty()) {
             return ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "typing...");
         } else {
-            return ui.el(.card, .{
+            return ui.el(.bubble, .{
                 .padding = 12,
-                .style_tokens = .{ .background = .surface, .radius = .lg, .border_color = .border },
+                .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
             }, .{
                 ui.text(.{ .wrap = true }, msg.content),
             });
@@ -1204,9 +1313,9 @@ fn buildMessageBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
             .main = .end,
             .cross = .start,
         }, .{
-            ui.el(.card, .{
+            ui.el(.bubble, .{
                 .padding = 12,
-                .style_tokens = .{ .background = .surface_subtle, .radius = .lg },
+                .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
             }, .{
                 ui.text(.{ .wrap = true }, msg.content),
             }),
@@ -1235,14 +1344,27 @@ pub fn initialModel() Model {
 }
 
 fn initFx(model: *Model, fx: *Effects) void {
+    // Fetch all sessions to restore the sidebar
+    fx.fetch(.{
+        .key = sessions_key,
+        .url = "http://127.0.0.1:8080/conversation/sessions?user_id=native_sdk_chat",
+        .method = .GET,
+        .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+        .response = .buffered,
+        .on_response = Effects.responseMsg(.sessions_loaded),
+    });
+    // Also load the active chat's history
     const chat = model.activeChat();
+    chat.history_loaded = true;
+    const init_fetch_key = chat.id + 1000;
+    chat.fetch_key = init_fetch_key;
     const url = std.fmt.allocPrint(
         model.allocator,
         "http://127.0.0.1:8080/conversation?user_id=native_sdk_chat&session_id={s}&limit=100",
         .{chat.sessionId()},
     ) catch return;
     fx.fetch(.{
-        .key = history_key,
+        .key = init_fetch_key,
         .url = url,
         .method = .GET,
         .headers = &.{.{ .name = "Accept", .value = "application/json" }},

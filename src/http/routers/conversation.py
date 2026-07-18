@@ -172,25 +172,8 @@ async def get_conversation(
 async def list_sessions(user_id: str = "default_user") -> dict[str, Any]:
     """List all chat sessions with titles derived from first user message."""
     conversation = get_message_store(user_id)
-    all_messages = conversation.get_recent_messages(10000)
-
-    sessions: dict[str, str] = {}
-    for msg in all_messages:
-        if msg.role == "user":
-            # Extract session_id from metadata or use "default"
-            sid = "default"
-            if msg.metadata and "session_id" in msg.metadata:
-                sid = msg.metadata["session_id"]
-            if sid not in sessions:
-                title = msg.content[:60] if len(msg.content) > 60 else msg.content
-                sessions[sid] = title
-
-    return {
-        "sessions": [
-            {"session_id": sid, "title": title}
-            for sid, title in sessions.items()
-        ]
-    }
+    sessions = conversation.get_sessions()
+    return {"sessions": sessions}
 
 
 @router.delete("/conversation")
