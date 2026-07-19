@@ -1597,11 +1597,13 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage, status_text: []const u8
                 .padding = 12,
                 .style_tokens = .{ .background = .surface_subtle, .border_color = .border, .radius = .md },
             }, .{
-                ui.text(.{ .wrap = true }, msg.content),
-                if (msg.timestamp.len > 0)
-                    ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, msg.timestamp)
-                else
-                    ui.text(.{}, ""),
+                ui.column(.{ .gap = 4 }, .{
+                    ui.text(.{ .wrap = true }, msg.content),
+                    if (msg.timestamp.len > 0)
+                        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, msg.timestamp)
+                    else
+                        ui.text(.{}, ""),
+                }),
             });
         }
     }
@@ -1622,8 +1624,10 @@ fn buildMessageBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
                 .padding = 12,
                 .style_tokens = .{ .background = .surface_subtle, .border_color = .border, .radius = .md },
             }, .{
-                ui.text(.{ .wrap = true }, msg.content),
-                ts_node,
+                ui.column(.{ .gap = 4 }, .{
+                    ui.text(.{ .wrap = true }, msg.content),
+                    ts_node,
+                }),
             }),
         });
     } else if (std.mem.eql(u8, msg.role, "system")) {
