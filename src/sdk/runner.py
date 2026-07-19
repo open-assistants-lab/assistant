@@ -464,6 +464,20 @@ async def create_sdk_loop(user_id: str, workspace_id: str = "personal", model: s
         )
         loop.system_prompt = (loop.system_prompt or "") + tool_hint
 
+    # Tool preference hints: steer the model toward the right tool for common tasks
+    # so it doesn't default to shell_execute for things that have dedicated tools.
+    tool_prefs = (
+        "\n\n## Tool Preferences\n"
+        "- For fetching a URL or web page: use **web_fetch**, NOT shell_execute with curl.\n"
+        "- For web search: use **web_search**, NOT shell_execute with curl.\n"
+        "- For reading files: use **files_read**, NOT shell_execute with cat.\n"
+        "- For listing files: use **files_list** or **files_glob_search**, NOT shell_execute with ls.\n"
+        "- For writing files: use **files_write**, NOT shell_execute with echo/tee.\n"
+        "- For searching file contents: use **files_grep_search**, NOT shell_execute with grep.\n"
+        "- Use shell_execute only for commands that have no dedicated tool."
+    )
+    loop.system_prompt = (loop.system_prompt or "") + tool_prefs
+
     if mcp_bridge:
         loop._mcp_bridge = mcp_bridge  # type: ignore[attr-defined]
 
