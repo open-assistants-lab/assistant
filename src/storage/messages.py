@@ -313,15 +313,18 @@ class MessageStore:
         return [self._to_msg(m) for m in reversed(memories)]
 
     def get_sessions(self) -> list[dict[str, str]]:
-        """List all chat sessions with titles derived from the first user message.
+        """List all chat sessions with titles.
 
-        Queries the session_id column directly since CoreMem's fetch does not
-        surface session_id on the Message dataclass.
+        Uses session_title from metadata if available, falls back to
+        first user message content truncated to 60 chars.
         """
         try:
             with self._core.db._connect() as cur:
                 rows = cur.execute(
-                    "SELECT session_id, content FROM messages "
+                    "SELECT session_id, "
+                    "COALESCE(json_extract(metadata, '$.session_title'), "
+                    "SUBSTR(content, 1, 60)) as title "
+                    "FROM messages "
                     "WHERE role = 'user' AND session_id != '' "
                     "ORDER BY ts ASC"
                 ).fetchall()
@@ -331,11 +334,28 @@ class MessageStore:
         sessions: dict[str, str] = {}
         for row in rows:
             sid = row[0]
-            content = row[1] or ""
+            title = row[1] or ""
             if sid and sid not in sessions:
-                sessions[sid] = content[:60] if len(content) > 60 else content
+                sessions[sid] = title
 
         return [{"session_id": sid, "title": title} for sid, title in sessions.items()]
+
+    def update_session_title(self, session_id: str, title: str) -> None:
+        """Update the title for a chat session (stored on first user message metadata)."""
+        try:
+            memories = self._core.fetch(limit=1, session_id=session_id, role="user")
+            if not memories:
+                return
+            first = memories[0]
+            meta = first.metadata or {}
+            meta["session_title"] = title
+            with self._core.db._connect() as cur:
+                cur.execute(
+                    "UPDATE messages SET metadata = ? WHERE id = ?",
+                    [json.dumps(meta), first.id],
+                )
+        except Exception:
+            pass
 
     def get_recent_messages(self, count: int = 100) -> list[Message]:
         memories = self._core.fetch(limit=count)
@@ -423,6 +443,23 @@ class MessageStore:
 
     def clear(self) -> None:
         self._core.clear()
+
+    def delete_session(self, session_id: str) -> int:
+        """Delete all messages in a specific chat session."""
+        try:
+            with self._core.db._connect() as cur:
+                cur.execute(
+                    "DELETE FROM messages WHERE session_id = ?",
+                    [session_id],
+                )
+                count = cur.rowcount
+            try:
+                self._core.db.sync_duckdb_table("messages")
+            except Exception:
+                pass
+            return cast(int, count)
+        except Exception:
+            return 0
 
 
 _stores: dict[str, MessageStore] = {}

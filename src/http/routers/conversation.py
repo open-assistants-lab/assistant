@@ -176,6 +176,131 @@ async def list_sessions(user_id: str = "default_user") -> dict[str, Any]:
     return {"sessions": sessions}
 
 
+@router.delete("/conversation/session")
+async def delete_session(user_id: str = "default_user", session_id: str = "") -> dict[str, Any]:
+    """Delete all messages in a specific chat session."""
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+    conversation = get_message_store(user_id)
+    conversation.delete_session(session_id)
+    reset_sdk_loop(user_id, session_id=session_id)
+    return {"status": "deleted", "session_id": session_id}
+
+
+_PROVIDER_DISPLAY = {
+    "ollama-cloud": "Ollama Cloud",
+    "anthropic": "Anthropic",
+    "openai": "OpenAI",
+}
+
+
+@router.get("/models")
+async def list_available_models(_: None = Depends(require_auth)) -> dict[str, list[dict[str, str]]]:
+    """List available models from providers with configured API keys."""
+    import os
+
+    from src.sdk.registry import list_models
+
+    configured = []
+    if os.environ.get("OLLAMA_API_KEY") or os.environ.get("OLLAMA_BASE_URL"):
+        configured.append("ollama-cloud")
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        configured.append("anthropic")
+    if os.environ.get("OPENAI_API_KEY"):
+        configured.append("openai")
+
+    models = []
+    for provider in configured:
+        for m in list_models(provider=provider):
+            models.append({
+                "id": f"{provider}:{m.id}",
+                "name": m.name,
+                "provider": provider,
+                "provider_display": _PROVIDER_DISPLAY.get(provider, provider.title()),
+            })
+    return {"models": models}
+
+
+class TitleRequest(BaseModel):
+    user_id: str = "default_user"
+    session_id: str
+
+
+async def _summarize_title(user_msg: str, assistant_msg: str) -> str | None:
+    """Generate a 3-5 word title via a simple provider.chat() call."""
+    from src.config import get_settings
+    from src.sdk.messages import Message
+    from src.sdk.providers.factory import create_model_from_config
+
+    settings = get_settings()
+    model = settings.agent.title_model or settings.agent.model
+    provider = create_model_from_config(model)
+
+    prompt = (
+        "Summarize the following conversation in 3-5 words. "
+        "Use a short noun phrase. No punctuation at the end. No quotes.\n\n"
+        f"User: {user_msg}\n"
+        f"Assistant: {assistant_msg}\n\n"
+        "Title:"
+    )
+
+    try:
+        response = await provider.chat(
+            messages=[Message.user(prompt)],
+            tools=None,
+            max_tokens=20,
+            temperature=0.3,
+        )
+        content_preview = response.content[:80] if len(response.content) > 80 else response.content
+        logger.info("title_gen_response", {"content": content_preview})
+        title = response.content.strip().strip('"').strip("'").strip()
+        # Strip trailing punctuation (.,;:!?。)
+        while title and title[-1] in ".。,;:!?,;:!?":
+            title = title[:-1].strip()
+        if len(title) > 40:
+            title = title[:40]
+        return title or None
+    except Exception as e:
+        logger.warning("title_gen_error", {"error": str(e), "model": model})
+        return None
+
+
+@router.post("/conversation/title")
+async def generate_title(req: TitleRequest, _: None = Depends(require_auth)) -> dict[str, str]:
+    """Generate a short title for a chat session."""
+    conversation = get_message_store(req.user_id)
+    messages = conversation.get_messages_by_session_id(req.session_id, limit=50)
+    if len(messages) < 2:
+        raise HTTPException(status_code=400, detail="Need at least user + assistant message")
+
+    # Find first user message and first assistant message
+    user_msg = ""
+    assistant_msg = ""
+    for msg in messages:
+        if not user_msg and msg.role == "user":
+            user_msg = msg.content
+        elif not assistant_msg and msg.role == "assistant":
+            assistant_msg = msg.content
+        if user_msg and assistant_msg:
+            break
+
+    if not user_msg:
+        raise HTTPException(status_code=400, detail="No user message found")
+    if len(user_msg) < 5:
+        raise HTTPException(status_code=400, detail="First message too short to summarize")
+    if not assistant_msg.strip():
+        raise HTTPException(status_code=400, detail="Empty assistant response")
+
+    assistant_msg = assistant_msg[:500]
+
+    title = await _summarize_title(user_msg, assistant_msg)
+    if not title:
+        raise HTTPException(status_code=500, detail="Title generation failed")
+
+    conversation.update_session_title(req.session_id, title)
+    return {"title": title, "session_id": req.session_id}
+
+
 @router.delete("/conversation")
 async def clear_conversation(user_id: str = "default_user") -> dict[str, Any]:
     """Clear conversation history."""
@@ -507,6 +632,7 @@ class ApproveRequest(BaseModel):
 class RejectRequest(BaseModel):
     user_id: str = "default_user"
     call_id: str = ""
+    session_id: str | None = None
     reason: str = ""
 
 
@@ -623,7 +749,7 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
 @router.post("/message/reject")
 async def reject_tool(req: RejectRequest, _: None = Depends(require_auth)) -> dict[str, Any]:
     """Reject a pending tool call (HITL)."""
-    skey = _stream_key(req.user_id, req.call_id or None)
+    skey = _stream_key(req.user_id, req.session_id or req.call_id or None)
     pending = _pending_interrupts.pop(skey, None)
     if not pending:
         # Fallback: try user_id-only key for backward compat

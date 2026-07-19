@@ -35,6 +35,9 @@ class AgentConfig(_BaseSettings):
 
     name: str = Field(default="Assistant")
     model: str = Field(default="ollama:minimax-m2.5")
+    title_model: str = Field(
+        default="", description="Model for chat title summarization (empty = use model)"
+    )
     system_prompt: str = Field(default="You are a helpful assistant.")
     pool_size: int = Field(default=3)
 

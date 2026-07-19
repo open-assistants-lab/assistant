@@ -16,6 +16,17 @@ const approve_key: u64 = 3;
 const reject_key: u64 = 4;
 const history_key: u64 = 5;
 const sessions_key: u64 = 6;
+const delete_key: u64 = 7;
+const title_key: u64 = 8;
+const models_key: u64 = 9;
+
+const ModelOption = struct {
+    id: []const u8 = "",
+    name: []const u8 = "",
+    provider_display: []const u8 = "",
+};
+
+const max_models = 128;
 const first_stream_key: u64 = 100;
 
 const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
@@ -45,6 +56,7 @@ pub const ChatMessage = struct {
     tool_status: []const u8 = "",
     tool_result: []const u8 = "",
     collapsed: bool = false,
+    timestamp: []const u8 = "",
 
     pub fn isUser(self: *const ChatMessage) bool {
         return std.mem.eql(u8, self.role, "user");
@@ -79,6 +91,7 @@ pub const Chat = struct {
     next_id: u64 = 1,
     unread_count: u32 = 0,
     history_loaded: bool = false,
+    history_loading: bool = false,
     streaming: bool = false,
     fetch_key: u64 = 0,
     has_pending: bool = false,
@@ -126,6 +139,11 @@ pub const Msg = union(enum) {
     cancel_done: native_sdk.EffectResponse,
     new_chat,
     switch_chat: u64,
+    delete_chat: u64,
+    delete_chat_done: native_sdk.EffectResponse,
+    title_generated: native_sdk.EffectResponse,
+    models_loaded: native_sdk.EffectResponse,
+    cycle_model,
     toggle_theme,
     toggle_bubble: u64,
     tick: native_sdk.EffectTimer,
@@ -153,6 +171,11 @@ pub const Msg = union(enum) {
         "chat_history_loaded",
         "sessions_loaded",
         "reached_bottom",
+        "delete_chat",
+        "delete_chat_done",
+        "title_generated",
+        "models_loaded",
+        "cycle_model",
     };
 };
 
@@ -167,6 +190,9 @@ pub const Model = struct {
     pulse_phase: f32 = 0,
     search_query: []const u8 = "",
     sidebar_split: f32 = 0.2,
+    available_models: [max_models]ModelOption = undefined,
+    available_model_count: usize = 0,
+    selected_model_idx: usize = 0,
     allocator: std.mem.Allocator = undefined,
 
     pub const view_unbound = .{
@@ -188,6 +214,17 @@ pub const Model = struct {
         return self.chats[self.active_chat_idx].draft_text;
     }
 
+    pub fn selectedModel(self: *const Model) []const u8 {
+        if (self.available_model_count == 0) return "deepseek:deepseek-v4-flash";
+        return self.available_models[self.selected_model_idx].id;
+    }
+
+    pub fn selectedModelLabel(self: *const Model, allocator: std.mem.Allocator) []const u8 {
+        if (self.available_model_count == 0) return "deepseek-v4-flash";
+        const m = self.available_models[self.selected_model_idx];
+        return std.fmt.allocPrint(allocator, "{s} · {s}", .{ m.provider_display, m.name }) catch m.name;
+    }
+
     pub fn messages(self: *const Model) []const ChatMessage {
         if (self.chat_count == 0) return &.{};
         return self.chats[self.active_chat_idx].messages;
@@ -195,7 +232,19 @@ pub const Model = struct {
 
     pub fn filteredChats(self: *const Model) []const Chat {
         if (self.search_query.len == 0) return self.chats[0..self.chat_count];
-        return self.chats[0..self.chat_count];
+        // Filter by title substring match using a static buffer.
+        // Safe because buildView is single-threaded and the slice is only used during one render pass.
+        const Filtered = struct {
+            var buf: [max_chats]Chat = undefined;
+        };
+        var count: usize = 0;
+        for (0..self.chat_count) |i| {
+            if (std.mem.indexOf(u8, self.chats[i].title, self.search_query) != null) {
+                Filtered.buf[count] = self.chats[i];
+                count += 1;
+            }
+        }
+        return Filtered.buf[0..count];
     }
 
     pub fn anyStreaming(self: *const Model) bool {
@@ -299,6 +348,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     // Load history for this chat if not yet loaded
                     if (!model.chats[i].history_loaded and model.chats[i].msg_count == 0) {
                         model.chats[i].history_loaded = true;
+                        model.chats[i].history_loading = true;
                         const fetch_key = model.chats[i].id + 1000;
                         model.chats[i].fetch_key = fetch_key;
                         const url = std.fmt.allocPrint(
@@ -317,6 +367,99 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     }
                     return;
                 }
+            }
+        },
+        .delete_chat => |chat_id| {
+            // Don't delete if it's the only chat or if it's currently streaming
+            if (model.chat_count <= 1) return;
+            var i: usize = 0;
+            while (i < model.chat_count) : (i += 1) {
+                if (model.chats[i].id == chat_id) {
+                    if (model.chats[i].streaming) return;
+                    // Send DELETE to backend
+                    const url = std.fmt.allocPrint(
+                        model.allocator,
+                        "http://127.0.0.1:8080/conversation/session?user_id=native_sdk_chat&session_id={s}",
+                        .{model.chats[i].sessionId()},
+                    ) catch return;
+                    fx.fetch(.{
+                        .key = delete_key,
+                        .url = url,
+                        .method = .DELETE,
+                        .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                        .response = .buffered,
+                        .on_response = Effects.responseMsg(.delete_chat_done),
+                    });
+                    // Remove from array by shifting
+                    var j = i;
+                    while (j + 1 < model.chat_count) : (j += 1) {
+                        model.chats[j] = model.chats[j + 1];
+                    }
+                    model.chat_count -= 1;
+                    // Fix active index
+                    if (model.active_chat_idx >= model.chat_count) {
+                        model.active_chat_idx = model.chat_count - 1;
+                    }
+                    model.active_chat_id = model.chats[model.active_chat_idx].id;
+                    return;
+                }
+            }
+        },
+        .delete_chat_done => {},
+        .title_generated => |response| {
+            if (response.outcome != .ok) return;
+            const body = response.body;
+            if (body.len == 0) return;
+            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
+            defer parsed.deinit();
+            const root = parsed.value;
+            const title_val = root.object.get("title") orelse return;
+            const sid_val = root.object.get("session_id") orelse return;
+            const title_str = switch (title_val) {
+                .string => |s| s,
+                else => return,
+            };
+            const sid_str = switch (sid_val) {
+                .string => |s| s,
+                else => return,
+            };
+            // Find the chat by session_id and update its title
+            if (findChatBySessionId(model, sid_str)) |chat| {
+                chat.title = model.allocator.dupe(u8, title_str) catch return;
+            }
+        },
+        .models_loaded => |response| {
+            if (response.outcome != .ok) return;
+            const body = response.body;
+            if (body.len == 0) return;
+            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
+            defer parsed.deinit();
+            const root = parsed.value;
+            const models_arr = root.object.get("models") orelse return;
+            const arr = switch (models_arr) {
+                .array => |a| a,
+                else => return,
+            };
+            model.available_model_count = 0;
+            for (arr.items) |item| {
+                if (model.available_model_count >= max_models) break;
+                const id_val = item.object.get("id") orelse continue;
+                const name_val = item.object.get("name") orelse continue;
+                const pd_val = item.object.get("provider_display") orelse continue;
+                const id_str = switch (id_val) { .string => |s| s, else => continue };
+                const name_str = switch (name_val) { .string => |s| s, else => continue };
+                const pd_str = switch (pd_val) { .string => |s| s, else => continue };
+                model.available_models[model.available_model_count] = .{
+                    .id = model.allocator.dupe(u8, id_str) catch continue,
+                    .name = model.allocator.dupe(u8, name_str) catch continue,
+                    .provider_display = model.allocator.dupe(u8, pd_str) catch continue,
+                };
+                model.available_model_count += 1;
+            }
+        },
+        .cycle_model => {
+            if (model.available_model_count > 0) {
+                model.selected_model_idx = (model.selected_model_idx + 1) % model.available_model_count;
             }
         },
         .search_input => |event| {
@@ -367,10 +510,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
 
             const escaped = escapeJsonString(model.allocator, text) catch return;
+            const selected_model = model.selectedModel();
             const body = std.fmt.allocPrint(
                 model.allocator,
-                "{{\"message\":\"{s}\",\"user_id\":\"native_sdk_chat\",\"session_id\":\"{s}\",\"model\":\"deepseek:deepseek-v4-flash\"}}",
-                .{ escaped, chat.sessionId() },
+                "{{\"message\":\"{s}\",\"user_id\":\"native_sdk_chat\",\"session_id\":\"{s}\",\"model\":\"{s}\"}}",
+                .{ escaped, chat.sessionId(), selected_model },
             ) catch return;
             fx.fetch(.{
                 .key = chat.fetch_key,
@@ -442,7 +586,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .reject => {
             const chat = model.activeChat();
             if (!chat.has_pending) return;
-            const body = std.fmt.allocPrint(model.allocator, "{{\"user_id\":\"native_sdk_chat\",\"call_id\":\"{s}\"}}", .{chat.pending_call_id}) catch return;
+            const body = std.fmt.allocPrint(model.allocator, "{{\"user_id\":\"native_sdk_chat\",\"call_id\":\"{s}\",\"session_id\":\"{s}\"}}", .{ chat.pending_call_id, chat.sessionId() }) catch return;
             chat.has_pending = false;
             chat.pending_tool = "";
             chat.pending_call_id = "";
@@ -548,10 +692,35 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 if (ac.streaming) finalizeStream(ac);
                 return;
             };
+            // A3: Surface stream errors
+            if (response.outcome != .ok) {
+                const err_msg = std.fmt.allocPrint(model.allocator, "Stream error: {s}", .{@tagName(response.outcome)}) catch "Stream error";
+                addMessage(chat, model.allocator, "system", err_msg);
+                finalizeStream(chat);
+                return;
+            }
             finalizeStream(chat);
             // Mark this chat as unread if it's not the active one
             if (&model.chats[model.active_chat_idx] != chat) {
                 chat.unread_count += 1;
+            }
+            // Generate title if this was the first exchange (exactly 1 user message)
+            const user_count = countUserMessages(chat);
+            if (user_count == 1 and chat.title.len >= 5) {
+                const body = std.fmt.allocPrint(
+                    model.allocator,
+                    "{{\"user_id\":\"native_sdk_chat\",\"session_id\":\"{s}\"}}",
+                    .{chat.sessionId()},
+                ) catch return;
+                fx.fetch(.{
+                    .key = title_key,
+                    .url = "http://127.0.0.1:8080/conversation/title",
+                    .method = .POST,
+                    .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+                    .body = body,
+                    .response = .buffered,
+                    .on_response = Effects.responseMsg(.title_generated),
+                });
             }
         },
         .stream_error => |err| {
@@ -590,7 +759,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
         },
         .history_loaded => |response| {
-            if (response.outcome != .ok) return;
+            if (response.outcome != .ok) {
+                // A3: surface backend connection error
+                const chat = model.activeChat();
+                chat.history_loading = false;
+                addMessage(chat, model.allocator, "system", "Unable to connect to server. Is the backend running?");
+                return;
+            }
             const body = response.body;
             if (body.len == 0) return;
             const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
@@ -603,6 +778,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             };
             const chat = model.findChatByHistoryKey(response.key) orelse model.activeChat();
             chat.history_loaded = true;
+            chat.history_loading = false;
             for (arr.items) |item| {
                 addHistoryMessage(chat, model.allocator, item);
             }
@@ -615,10 +791,17 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             chat.fetch_key = 0;
         },
         .chat_history_loaded => |response| {
-            if (response.outcome != .ok) return;
+            if (response.outcome != .ok) {
+                // A3: surface history fetch error
+                const chat = model.findChatByHistoryKey(response.key) orelse return;
+                chat.history_loading = false;
+                addMessage(chat, model.allocator, "system", "Failed to load chat history.");
+                return;
+            }
             const body = response.body;
             if (body.len == 0) return;
             const chat = model.findChatByHistoryKey(response.key) orelse return;
+            chat.history_loading = false;
             const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
             defer parsed.deinit();
             const root = parsed.value;
@@ -639,7 +822,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             chat.fetch_key = 0;
         },
         .sessions_loaded => |response| {
-            if (response.outcome != .ok) return;
+            if (response.outcome != .ok) {
+                // A3: surface backend connection error
+                const chat = model.activeChat();
+                chat.history_loading = false;
+                addMessage(chat, model.allocator, "system", "Unable to connect to server. Is the backend running?");
+                return;
+            }
             const body = response.body;
             if (body.len == 0) return;
             const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
@@ -761,6 +950,24 @@ fn findRunningToolBubble(chat: *Chat) ?*ChatMessage {
     return null;
 }
 
+fn countUserMessages(chat: *const Chat) usize {
+    var count: usize = 0;
+    for (0..chat.msg_count) |i| {
+        if (chat._messages[i].isUser()) count += 1;
+    }
+    return count;
+}
+
+fn findChatBySessionId(model: *Model, sid: []const u8) ?*Chat {
+    var i: usize = 0;
+    while (i < model.chat_count) : (i += 1) {
+        if (std.mem.eql(u8, model.chats[i].sessionId(), sid)) {
+            return &model.chats[i];
+        }
+    }
+    return null;
+}
+
 fn finalizeStream(chat: *Chat) void {
     chat.streaming = false;
     chat.fetch_key = 0;
@@ -822,22 +1029,30 @@ pub fn buildView(ui: *AppUi, model: *const Model) AppUi.Node {
         buildChatPanel(ui, model),
     });
 
-    return ui.el(.card, .{
+    var root = ui.el(.card, .{
         .grow = 1,
         .style = .{ .radius = 0 },
         .style_tokens = .{ .background = .surface },
     }, .{split});
+    root.widget.layout.padding = .{ .top = 0, .right = 0, .bottom = 0, .left = 0 };
+    return root;
 }
 
 fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
     // Top section: New chat button + search
     var top_nodes: [2]AppUi.Node = undefined;
-    top_nodes[0] = ui.button(.{
+    top_nodes[0] = ui.row(.{
         .on_press = .new_chat,
-        .variant = .secondary,
-        .icon = "plus",
+        .gap = 8,
+        .padding = 12,
+        .cross = .center,
         .grow = 1,
-    }, "New chat");
+        .style_tokens = .{ .background = .surface_pressed, .radius = .md },
+        .semantics = .{ .role = .button, .label = "New chat" },
+    }, .{
+        ui.icon(.{ .style_tokens = .{ .foreground = .text } }, "plus"),
+        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text } }, "New chat"),
+    });
     top_nodes[1] = ui.textField(.{
         .text = model.search_query,
         .placeholder = "Search chats...",
@@ -879,16 +1094,10 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
             // Idle: empty 8px slot — fixed width, no background, no children
             break :blk ui.el(.stack, .{ .width = 8, .height = 8 }, .{});
         };
-        chat_nodes[chat_count] = ui.row(.{
+        const row_content = ui.row(.{
             .gap = 8,
-            .padding = 8,
-            .style_tokens = if (is_active) .{
-                .background = .surface_pressed,
-                .radius = .sm,
-            } else .{},
             .cross = .center,
-            .on_press = .{ .switch_chat = chat.id },
-            .semantics = .{ .role = .listitem, .label = chat.title },
+            .grow = 1,
         }, .{
             ui.row(.{ .width = 8, .height = 8, .cross = .center, .main = .center }, .{dot_node}),
             ui.text(.{
@@ -899,6 +1108,53 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
                 },
             }, chat.title),
         });
+
+        if (is_active) {
+            // Active row: wrap in a card for visible pill background
+            var pill = ui.el(.bubble, .{
+                .grow = 1,
+                .style_tokens = .{ .background = .surface_pressed, .radius = .md },
+            }, .{
+                ui.row(.{
+                    .gap = 8,
+                    .cross = .center,
+                    .padding = 8,
+                }, .{
+                    ui.row(.{ .width = 8, .height = 8, .cross = .center, .main = .center }, .{dot_node}),
+                    ui.text(.{
+                        .size = .sm,
+                        .grow = 1,
+                        .style_tokens = .{
+                            .foreground = .text,
+                        },
+                    }, chat.title),
+                }),
+            });
+            pill.widget.layout.padding = .{ .top = 0, .right = 0, .bottom = 0, .left = 0 };
+            // Wrap in a row with on_press + context_menu
+            chat_nodes[chat_count] = ui.row(.{
+                .on_press = .{ .switch_chat = chat.id },
+                .context_menu = if (model.chat_count > 1)
+                    &.{.{ .label = "Delete", .msg = .{ .delete_chat = chat.id } }}
+                else
+                    &.{},
+                .semantics = .{ .role = .listitem, .label = chat.title },
+            }, .{pill});
+        } else {
+            // Inactive row: plain row, no background
+            var chat_row = ui.row(.{
+                .gap = 8,
+                .cross = .center,
+                .on_press = .{ .switch_chat = chat.id },
+                .context_menu = if (model.chat_count > 1)
+                    &.{.{ .label = "Delete", .msg = .{ .delete_chat = chat.id } }}
+                else
+                    &.{},
+                .semantics = .{ .role = .listitem, .label = chat.title },
+            }, .{row_content});
+            chat_row.widget.layout.padding = .{ .top = 8, .bottom = 8, .left = 12, .right = 12 };
+            chat_nodes[chat_count] = chat_row;
+        }
         chat_count += 1;
     }
 
@@ -916,17 +1172,17 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
         const inner_col = ui.column(.{ .gap = 2, .style_tokens = .{ .background = .surface } }, chat_slice);
         sidebar_children[sidebar_count] = ui.scroll(.{
             .grow = 1,
-            .padding = 8,
+            .padding = 12,
             .gap = 2,
             .style_tokens = .{ .background = .surface },
         }, inner_col);
     } else {
         sidebar_children[sidebar_count] = ui.scroll(.{
             .grow = 1,
-            .padding = 8,
+            .padding = 12,
             .gap = 2,
             .style_tokens = .{ .background = .surface },
-        }, ui.row(.{ .gap = 8, .padding = 8, .cross = .center }, .{
+        }, ui.row(.{ .gap = 8, .padding = 12, .cross = .center }, .{
             ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "circle-dot"),
             ui.text(.{ .size = .sm, .grow = 1, .style_tokens = .{ .foreground = .text_muted } }, "No chats found"),
         }));
@@ -948,11 +1204,11 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Subagents"),
     });
     const nav_slice: []const AppUi.Node = nav_nodes[0..3];
-    sidebar_children[sidebar_count] = ui.column(.{ .gap = 2, .padding = 8, .style_tokens = .{ .background = .surface } }, nav_slice);
+    sidebar_children[sidebar_count] = ui.column(.{ .gap = 2, .padding = 12, .style_tokens = .{ .background = .surface } }, nav_slice);
     sidebar_count += 1;
 
     // Settings + theme toggle
-    sidebar_children[sidebar_count] = ui.row(.{ .gap = 4, .padding = 8, .cross = .center, .style_tokens = .{ .background = .surface } }, .{
+    sidebar_children[sidebar_count] = ui.row(.{ .gap = 4, .padding = 12, .cross = .center, .style_tokens = .{ .background = .surface } }, .{
         ui.row(.{ .gap = 8, .padding = 8, .cross = .center, .grow = 1 }, .{
             ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "settings"),
             ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Settings"),
@@ -1010,6 +1266,19 @@ fn groupExtentEstimate(context: ?*const anyopaque, index: u64) f32 {
     return 80;
 }
 
+fn extractTimestamp(item: std.json.Value, allocator: std.mem.Allocator) []const u8 {
+    const ts_val = item.object.get("timestamp") orelse return "";
+    const ts_str = switch (ts_val) {
+        .string => |s| s,
+        else => return "",
+    };
+    // Extract HH:MM from ISO format (chars 11-15, i.e. ts_str[11..16])
+    if (ts_str.len >= 16) {
+        return allocator.dupe(u8, ts_str[11..16]) catch "";
+    }
+    return "";
+}
+
 fn addHistoryMessage(chat: *Chat, allocator: std.mem.Allocator, item: std.json.Value) void {
     const role_val = item.object.get("role") orelse return;
     const content_val = item.object.get("content") orelse return;
@@ -1042,12 +1311,18 @@ fn addHistoryMessage(chat: *Chat, allocator: std.mem.Allocator, item: std.json.V
             .tool_status = allocator.dupe(u8, "done") catch return,
             .tool_result = allocator.dupe(u8, content_str) catch return,
             .collapsed = true,
+            .timestamp = extractTimestamp(item, allocator),
         };
         chat.next_id += 1;
         chat.msg_count += 1;
         chat.messages = chat._messages[0..chat.msg_count];
+    } else if (std.mem.eql(u8, role_str, "reasoning")) {
+        addMessage(chat, allocator, role_str, content_str);
+        chat._messages[chat.msg_count - 1].collapsed = true;
+        chat._messages[chat.msg_count - 1].timestamp = extractTimestamp(item, allocator);
     } else {
         addMessage(chat, allocator, role_str, content_str);
+        chat._messages[chat.msg_count - 1].timestamp = extractTimestamp(item, allocator);
     }
 }
 
@@ -1060,22 +1335,36 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
 
     // Message list or empty state
     if (count == 0) {
-        children[child_count] = ui.column(.{
-            .grow = 1,
-            .padding = 32,
-            .gap = 16,
-            .cross = .center,
-            .main = .center,
-            .style_tokens = .{ .background = .surface },
-        }, .{
-            ui.text(.{ .size = .heading }, "How can I help?"),
-            ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Ask me anything, or try one of these:"),
-            ui.row(.{ .gap = 8 }, .{
-                ui.button(.{ .on_press = .suggestion_inbox, .variant = .ghost }, "Triage my inbox"),
-                ui.button(.{ .on_press = .suggestion_summary, .variant = .ghost }, "Draft a weekly summary"),
-                ui.button(.{ .on_press = .suggestion_contacts, .variant = .ghost }, "Find contacts in marketing"),
-            }),
-        });
+        if (chat.history_loading) {
+            // A2: Loading indicator
+            children[child_count] = ui.column(.{
+                .grow = 1,
+                .padding = 32,
+                .gap = 16,
+                .cross = .center,
+                .main = .center,
+                .style_tokens = .{ .background = .surface },
+            }, .{
+                ui.text(.{ .size = .heading, .style_tokens = .{ .foreground = .text_muted } }, "Loading..."),
+            });
+        } else {
+            children[child_count] = ui.column(.{
+                .grow = 1,
+                .padding = 32,
+                .gap = 16,
+                .cross = .center,
+                .main = .center,
+                .style_tokens = .{ .background = .surface },
+            }, .{
+                ui.text(.{ .size = .heading }, "How can I help?"),
+                ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Ask me anything, or try one of these:"),
+                ui.row(.{ .gap = 8 }, .{
+                    ui.button(.{ .on_press = .suggestion_inbox, .variant = .ghost }, "Triage my inbox"),
+                    ui.button(.{ .on_press = .suggestion_summary, .variant = .ghost }, "Draft a weekly summary"),
+                    ui.button(.{ .on_press = .suggestion_contacts, .variant = .ghost }, "Find contacts in marketing"),
+                }),
+            });
+        }
     } else {
         // Group messages: user bubbles are standalone; consecutive assistant/tool/reasoning
         // messages are grouped under a single "Assistant" label.
@@ -1094,8 +1383,9 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
             }
         }
 
+        const list_id = std.fmt.allocPrint(ui.arena, "chat-messages-{d}", .{chat.id}) catch "chat-messages";
         const options = AppUi.VirtualListOptions{
-            .id = "chat-messages",
+            .id = list_id,
             .item_count = group_count,
             .item_extent = 0,
             .extent_estimate = groupExtentEstimate,
@@ -1162,48 +1452,53 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         child_count += 1;
     }
 
-    // Composer
-    if (active_chat.streaming) {
-        var composer_field = ui.textField(.{
+    // Composer: bordered container with textarea + model button + Send/Stop button
+    const model_label = model.selectedModelLabel(ui.arena);
+    const model_button: AppUi.Node = if (model.available_model_count > 0 and !active_chat.streaming)
+        ui.button(.{ .on_press = .cycle_model, .variant = .ghost, .style_tokens = .{ .foreground = .text_muted } }, model_label)
+    else if (model.available_model_count > 0)
+        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, model_label)
+    else
+        ui.text(.{}, "");
+
+    const composer_textarea = blk: {
+        var field = ui.el(.textarea, .{
             .text = model.inputText(),
-            .placeholder = "Type a message...",
-            .grow = 1,
+            .placeholder = "Type a message... (Enter to send, Shift+Enter for newline)",
             .on_input = AppUi.inputMsg(.input_changed),
             .on_submit = .send_message,
             .semantics = .{ .label = "Message" },
-            .style_tokens = .{ .background = .surface_subtle, .radius = .md },
+            .height = 36,
+            .style_tokens = .{ .background = .surface_subtle, .border_color = .surface_subtle },
+        }, .{});
+        field.widget.text_selection = active_chat.draft_selection;
+        field.widget.style.radius = 8;
+        field.widget.style.focus_ring = canvas.Color.rgba8(0, 0, 0, 0);
+        break :blk field;
+    };
+
+    const send_button: AppUi.Node = if (active_chat.streaming)
+        ui.button(.{ .on_press = .cancel, .variant = .ghost }, "Stop")
+    else
+        ui.button(.{ .on_press = .send_message, .variant = .primary }, "Send");
+
+    const composer_bottom_row = blk: {
+        var row = ui.row(.{ .gap = 8, .cross = .end }, .{
+            model_button,
+            ui.spacer(1),
+            send_button,
         });
-        composer_field.widget.text_selection = active_chat.draft_selection;
-        children[child_count] = ui.row(.{
-            .gap = 8,
-            .padding = 12,
-            .cross = .center,
-            .style_tokens = .{ .background = .surface },
-        }, .{
-            composer_field,
-            ui.button(.{ .on_press = .cancel, .variant = .ghost }, "Stop"),
-        });
-    } else {
-        var composer_field = ui.textField(.{
-            .text = model.inputText(),
-            .placeholder = "Type a message...",
-            .grow = 1,
-            .on_input = AppUi.inputMsg(.input_changed),
-            .on_submit = .send_message,
-            .semantics = .{ .label = "Message" },
-            .style_tokens = .{ .background = .surface_subtle, .radius = .md },
-        });
-        composer_field.widget.text_selection = active_chat.draft_selection;
-        children[child_count] = ui.row(.{
-            .gap = 8,
-            .padding = 12,
-            .cross = .center,
-            .style_tokens = .{ .background = .surface },
-        }, .{
-            composer_field,
-            ui.button(.{ .on_press = .send_message, .variant = .primary }, "Send"),
-        });
-    }
+        row.widget.layout.padding = .{ .bottom = 8, .right = 8 };
+        break :blk row;
+    };
+
+    children[child_count] = ui.el(.card, .{
+        .padding = 12,
+        .style_tokens = .{ .background = .surface_subtle, .radius = .md },
+    }, .{
+        composer_textarea,
+        composer_bottom_row,
+    });
     child_count += 1;
 
     const children_slice: []const AppUi.Node = children[0..child_count];
@@ -1211,6 +1506,7 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         .style_tokens = .{ .background = .surface },
         .gap = 0,
         .min_width = 320,
+        .padding = 12,
     }, children_slice);
 }
 
@@ -1231,7 +1527,7 @@ fn buildAssistantGroup(ui: *AppUi, chat: *const Chat, start: usize, end: usize) 
     const len = end - start;
     const child_nodes = ui.arena.alloc(AppUi.Node, len) catch return ui.text(.{}, "");
     for (0..len) |j| {
-        child_nodes[j] = buildChildBubble(ui, &chat._messages[start + j]);
+        child_nodes[j] = buildChildBubble(ui, &chat._messages[start + j], chat.status_text);
     }
     return ui.column(.{ .gap = 6 }, .{
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .accent } }, "Assistant"),
@@ -1239,7 +1535,7 @@ fn buildAssistantGroup(ui: *AppUi, chat: *const Chat, start: usize, end: usize) 
     });
 }
 
-fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
+fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage, status_text: []const u8) AppUi.Node {
     if (msg.isReasoning()) {
         const display_text: []const u8 = if (msg.collapsed) blk: {
             const newline = std.mem.indexOf(u8, msg.content, "\n");
@@ -1248,7 +1544,7 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
         const expand_label: []const u8 = if (msg.collapsed) "Expand" else "Collapse";
         return ui.el(.bubble, .{
             .padding = 12,
-            .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
+            .style_tokens = .{ .background = .surface_subtle, .border_color = .border, .radius = .md },
         }, .{
             ui.row(.{ .gap = 8, .cross = .center, .on_press = .{ .toggle_bubble = msg.id } }, .{
                 ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .accent } }, "Thinking"),
@@ -1261,7 +1557,7 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
         if (std.mem.eql(u8, msg.tool_status, "running")) {
             return ui.el(.bubble, .{
                 .padding = 12,
-                .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
+                .style_tokens = .{ .background = .surface_subtle, .border_color = .border, .radius = .md },
             }, .{
                 ui.column(.{ .gap = 4 }, .{
                     ui.row(.{ .gap = 8, .cross = .center }, .{
@@ -1279,7 +1575,7 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
             } else msg.tool_result;
             return ui.el(.bubble, .{
                 .padding = 12,
-                .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
+                .style_tokens = .{ .background = .surface_subtle, .border_color = .border, .radius = .md },
             }, .{
                 ui.column(.{ .gap = 4 }, .{
                     ui.row(.{ .gap = 8, .cross = .center, .on_press = .{ .toggle_bubble = msg.id } }, .{
@@ -1294,13 +1590,18 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
     } else {
         // Assistant text bubble
         if (msg.isEmpty()) {
-            return ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "typing...");
+            const typing_text: []const u8 = if (status_text.len > 0) status_text else "typing...";
+            return ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, typing_text);
         } else {
             return ui.el(.bubble, .{
                 .padding = 12,
-                .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
+                .style_tokens = .{ .background = .surface_subtle, .border_color = .border, .radius = .md },
             }, .{
                 ui.text(.{ .wrap = true }, msg.content),
+                if (msg.timestamp.len > 0)
+                    ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, msg.timestamp)
+                else
+                    ui.text(.{}, ""),
             });
         }
     }
@@ -1309,15 +1610,20 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
 fn buildMessageBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
     if (msg.isUser()) {
         // User message: right-aligned, no role label
+        const ts_node: AppUi.Node = if (msg.timestamp.len > 0)
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, msg.timestamp)
+        else
+            ui.text(.{}, "");
         return ui.row(.{
             .main = .end,
             .cross = .start,
         }, .{
             ui.el(.bubble, .{
                 .padding = 12,
-                .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
+                .style_tokens = .{ .background = .surface_subtle, .border_color = .border, .radius = .md },
             }, .{
                 ui.text(.{ .wrap = true }, msg.content),
+                ts_node,
             }),
         });
     } else if (std.mem.eql(u8, msg.role, "system")) {
@@ -1328,7 +1634,7 @@ fn buildMessageBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
         }, msg.content);
     } else {
         // Fallback for any standalone assistant/tool/reasoning (shouldn't normally happen)
-        return buildChildBubble(ui, msg);
+        return buildChildBubble(ui, msg, "");
     }
 }
 
@@ -1353,9 +1659,19 @@ fn initFx(model: *Model, fx: *Effects) void {
         .response = .buffered,
         .on_response = Effects.responseMsg(.sessions_loaded),
     });
+    // Fetch available models
+    fx.fetch(.{
+        .key = models_key,
+        .url = "http://127.0.0.1:8080/models",
+        .method = .GET,
+        .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+        .response = .buffered,
+        .on_response = Effects.responseMsg(.models_loaded),
+    });
     // Also load the active chat's history
     const chat = model.activeChat();
     chat.history_loaded = true;
+    chat.history_loading = true;
     const init_fetch_key = chat.id + 1000;
     chat.fetch_key = init_fetch_key;
     const url = std.fmt.allocPrint(

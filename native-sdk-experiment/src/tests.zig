@@ -169,7 +169,7 @@ test "composer renders selected draft range" {
     main.update(&model, .{ .input_changed = .{ .set_selection = .{ .anchor = 0, .focus = 5 } } }, &fx);
 
     const tree = try buildTree(arena, &model);
-    const composer = try expectByLabel(tree.root, canvas.WidgetKind.text_field, "Message");
+    const composer = try expectByLabel(tree.root, canvas.WidgetKind.textarea, "Message");
     try testing.expect(composer.text_selection != null);
     try testing.expectEqualDeep(canvas.TextSelection{ .anchor = 0, .focus = 5 }, composer.text_selection.?);
 }
@@ -310,6 +310,132 @@ test "done finalizes and collapses reasoning bubbles" {
     try testing.expectEqualStrings("", chat.open_bubble_type);
     try testing.expectEqualStrings("", chat.status_text);
     try testing.expect(chat._messages[1].collapsed); // reasoning collapsed after done
+}
+
+test "title generation fires after first exchange" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "What is the weather in Shanghai?");
+    const chat = model.activeChat();
+
+    // assistant response
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"It is hot and humid.\"}}" } }, &fx);
+    main.update(&model, .{ .stream_done = .{ .key = fk } }, &fx);
+
+    // Title generation should have fired (1 stream fetch + 1 title fetch = 2)
+    try testing.expectEqual(@as(usize, 2), fx.pendingFetchCount());
+    const request = fx.pendingFetchAt(1).?;
+    try testing.expectEqualStrings("http://127.0.0.1:8080/conversation/title", request.url);
+    try testing.expect(std.mem.indexOf(u8, request.body, chat.sessionId()) != null);
+}
+
+test "title generation does not fire for short first message" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "hi");
+    const chat = model.activeChat();
+
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"Hello!\"}}" } }, &fx);
+    main.update(&model, .{ .stream_done = .{ .key = fk } }, &fx);
+
+    // Title generation should NOT fire (user message < 5 chars)
+    // Only the stream fetch should be pending (1)
+    try testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
+    _ = chat;
+}
+
+test "title generation does not fire on second exchange" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    // First exchange
+    const fk1 = sendAndStartStream(&model, &fx, "What is the weather?");
+    main.update(&model, .{ .stream_line = .{ .key = fk1, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"Hot.\"}}" } }, &fx);
+    main.update(&model, .{ .stream_done = .{ .key = fk1 } }, &fx);
+    const fetch_count_after_first = fx.pendingFetchCount();
+
+    // Second exchange
+    model.activeChat().draft_text = "Thanks";
+    model.activeChat().streaming = false;
+    const fk2 = sendAndStartStream(&model, &fx, "Thanks");
+    main.update(&model, .{ .stream_line = .{ .key = fk2, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"You're welcome.\"}}" } }, &fx);
+    main.update(&model, .{ .stream_done = .{ .key = fk2 } }, &fx);
+
+    // Title generation should NOT fire on second exchange (2 user messages now).
+    // After first exchange: 2 fetches (stream1 + title). After second: +1 (stream2) = 3.
+    // If title fired again it would be 4. So check it's exactly 3.
+    try testing.expectEqual(fetch_count_after_first + 1, fx.pendingFetchCount());
+}
+
+test "title_generated updates chat title" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "What is the weather in Shanghai?");
+    const chat = model.activeChat();
+
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"Hot and humid.\"}}" } }, &fx);
+    main.update(&model, .{ .stream_done = .{ .key = fk } }, &fx);
+    // Note: title fetch is queued but we don't need to clear it
+
+    // Simulate title generation response
+    const title_response_body =
+        \\{"title":"Shanghai Weather Forecast","session_id":"chat-1"}
+    ;
+    main.update(&model, .{ .title_generated = .{
+        .key = 8,
+        .outcome = .ok,
+        .body = title_response_body,
+    } }, &fx);
+
+    try testing.expectEqualStrings("Shanghai Weather Forecast", chat.title);
+}
+
+test "title_generated for deleted chat is no-op" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    // Create a second chat so we can delete the first
+    main.update(&model, .new_chat, &fx);
+    model.active_chat_idx = 0;
+    const original_title = model.chats[0].title;
+
+    // Simulate title response for a session that doesn't match any chat
+    const title_response_body =
+        \\{"title":"Nonexistent","session_id":"fake-session-999"}
+    ;
+    main.update(&model, .{ .title_generated = .{
+        .key = 8,
+        .outcome = .ok,
+        .body = title_response_body,
+    } }, &fx);
+
+    // No chat should have been updated
+    try testing.expectEqualStrings(original_title, model.chats[0].title);
 }
 
 test "toggle_bubble flips collapsed state" {

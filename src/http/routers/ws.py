@@ -69,6 +69,7 @@ async def _run_agent_stream(
     ai_content_parts: list[str] = []
     reasoning_parts: list[str] = []
     tool_metadata_list: list[dict[str, Any]] = []
+    tool_results: dict[str, str] = {}
     skill_load_names: dict[str, str] = {}
 
     try:
@@ -122,6 +123,7 @@ async def _run_agent_stream(
                 tool_name = chunk.tool or "unknown"
                 call_id = chunk.call_id or "unknown"
                 result_preview = chunk.result_preview or ""
+                tool_results[call_id] = result_preview[:500]
                 from src.http.ws_protocol import SkillsLoadMessage, ToolResultMessage
 
                 await websocket.send_json(
@@ -166,8 +168,10 @@ async def _run_agent_stream(
                 reasoning_content = "".join(reasoning_parts) if reasoning_parts else None
 
                 for tm in tool_metadata_list:
+                    call_id = tm.get("tool_call_id", "")
+                    result_content = tool_results.get(call_id, "")
                     conversation.add_message(
-                        "tool", "", metadata={**tm, "workspace_id": workspace_id}
+                        "tool", result_content, metadata={**tm, "workspace_id": workspace_id}
                     )
 
                 if reasoning_content:

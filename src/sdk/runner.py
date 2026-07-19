@@ -35,7 +35,10 @@ from src.storage.paths import DataPaths
 
 logger = get_logger()
 
-_loop_cache: dict[str, AgentLoop] = {}
+import collections
+
+_MAX_LOOP_CACHE = 50
+_loop_cache: collections.OrderedDict[str, AgentLoop] = collections.OrderedDict()
 _loop_lock = asyncio.Lock()
 
 _user_loops: dict[str, AgentLoop] = {}
@@ -515,6 +518,11 @@ async def get_sdk_loop(user_id: str, workspace_id: str = "personal", model: str 
                 user_id, workspace_id, model=model, provider_keys=provider_keys
             )
             logger.info("sdk_runner.loop_created", {"user_id": user_id, "workspace_id": workspace_id, "model": model, "session_id": session_id}, user_id=user_id)
+            _loop_cache.move_to_end(cache_key)
+            if len(_loop_cache) > _MAX_LOOP_CACHE:
+                _loop_cache.popitem(last=False)
+        else:
+            _loop_cache.move_to_end(cache_key)
         return _loop_cache[cache_key]
 
 
