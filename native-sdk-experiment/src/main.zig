@@ -19,6 +19,32 @@ const sessions_key: u64 = 6;
 const delete_key: u64 = 7;
 const title_key: u64 = 8;
 const models_key: u64 = 9;
+const settings_key: u64 = 10;
+const api_keys_key: u64 = 11;
+
+const max_providers = 16;
+
+const ProviderInfo = struct {
+    id: []const u8 = "",
+    name: []const u8 = "",
+    has_key: bool = false,
+    via_env: bool = false,
+    key_input: []const u8 = "",
+    key_visible: bool = false,
+    testing: bool = false,
+    test_valid: bool = false,
+    test_error: []const u8 = "",
+};
+
+const SettingsState = struct {
+    visible: bool = false,
+    default_model_idx: usize = 0,
+    loading: bool = false,
+    providers: [max_providers]ProviderInfo = undefined,
+    provider_count: usize = 0,
+    saving_model: bool = false,
+    model_saved: bool = false,
+};
 
 const ModelOption = struct {
     id: []const u8 = "",
@@ -163,6 +189,21 @@ pub const Msg = union(enum) {
     chat_history_loaded: native_sdk.EffectResponse,
     sessions_loaded: native_sdk.EffectResponse,
     reached_bottom,
+    open_settings,
+    close_settings,
+    settings_loaded: native_sdk.EffectResponse,
+    api_keys_loaded: native_sdk.EffectResponse,
+    key_tested: native_sdk.EffectResponse,
+    key_saved: native_sdk.EffectResponse,
+    key_deleted: native_sdk.EffectResponse,
+    default_model_saved: native_sdk.EffectResponse,
+    settings_key_input: canvas.TextInputEvent,
+    toggle_key_visibility: usize,
+    test_provider_key: usize,
+    save_provider_key: usize,
+    delete_provider_key: usize,
+    select_default_model: usize,
+    save_default_model,
 
     pub const view_unbound = .{
         "stream_line",
@@ -200,6 +241,7 @@ pub const Model = struct {
     available_models: [max_models]ModelOption = undefined,
     available_model_count: usize = 0,
     selected_model_idx: usize = 0,
+    settings: SettingsState = .{},
     allocator: std.mem.Allocator = undefined,
 
     pub const view_unbound = .{
@@ -957,6 +999,256 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             // Ensure next_chat_id won't collide with any existing chat-N session
             model.next_chat_id = model.chat_count + 100;
         },
+        .open_settings => {
+            model.settings.visible = true;
+            model.settings.loading = true;
+            model.settings.provider_count = 0;
+            model.settings.model_saved = false;
+            // Fetch settings + api-keys
+            fx.fetch(.{
+                .key = settings_key,
+                .url = "http://127.0.0.1:8080/settings?user_id=native_sdk_chat",
+                .method = .GET,
+                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.settings_loaded),
+            });
+            fx.fetch(.{
+                .key = api_keys_key,
+                .url = "http://127.0.0.1:8080/settings/api-keys?user_id=native_sdk_chat",
+                .method = .GET,
+                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.api_keys_loaded),
+            });
+        },
+        .close_settings => {
+            model.settings.visible = false;
+        },
+        .settings_loaded => |response| {
+            model.settings.loading = false;
+            if (response.outcome != .ok) return;
+            const body = response.body;
+            if (body.len == 0) return;
+            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
+            defer parsed.deinit();
+            const root = parsed.value;
+            // Parse default_model
+            if (root.object.get("default_model")) |dm| {
+                if (dm == .string and dm.string.len > 0) {
+                    // Find matching model index
+                    for (0..model.available_model_count) |i| {
+                        if (std.mem.eql(u8, model.available_models[i].id, dm.string)) {
+                            model.settings.default_model_idx = i;
+                            break;
+                        }
+                    }
+                }
+            }
+            // Parse provider_status into ProviderInfo
+            if (root.object.get("provider_status")) |ps| {
+                var count: usize = 0;
+                var it = ps.object.iterator();
+                while (it.next()) |entry| {
+                    if (count >= max_providers) break;
+                    const pid = entry.key_ptr.*;
+                    const info = entry.value_ptr.*;
+                    const name = if (info.object.get("name")) |n| switch (n) {
+                        .string => |s| s,
+                        else => pid,
+                    } else pid;
+                    const has_key = if (info.object.get("has_key")) |h| h.bool else false;
+                    const via_env = if (info.object.get("key_configured_via_env")) |e| e.bool else false;
+                    // Skip providers with empty id
+                    if (pid.len == 0) continue;
+                    model.settings.providers[count] = .{
+                        .id = model.allocator.dupe(u8, pid) catch continue,
+                        .name = model.allocator.dupe(u8, name) catch continue,
+                        .has_key = has_key,
+                        .via_env = via_env,
+                    };
+                    count += 1;
+                }
+                model.settings.provider_count = count;
+            }
+        },
+        .api_keys_loaded => |response| {
+            if (response.outcome != .ok) return;
+            const body = response.body;
+            if (body.len == 0) return;
+            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
+            defer parsed.deinit();
+            const root = parsed.value;
+            // Merge has_key info from api-keys response
+            var it = root.object.iterator();
+            while (it.next()) |entry| {
+                const pid = entry.key_ptr.*;
+                const has = entry.value_ptr.bool;
+                for (0..model.settings.provider_count) |i| {
+                    if (std.mem.eql(u8, model.settings.providers[i].id, pid)) {
+                        model.settings.providers[i].has_key = has;
+                        break;
+                    }
+                }
+            }
+        },
+        .settings_key_input => |event| {
+            // Apply text input to the currently focused provider key field
+            // For simplicity, apply to the first provider with key_visible=true
+            for (0..model.settings.provider_count) |i| {
+                if (model.settings.providers[i].key_visible) {
+                    const p = &model.settings.providers[i];
+                    const output = model.allocator.alloc(u8, p.key_input.len + 256) catch return;
+                    const next = (canvas.TextEditState{
+                        .text = p.key_input,
+                        .selection = .{ .anchor = p.key_input.len, .focus = p.key_input.len },
+                    }).apply(event, output) catch return;
+                    p.key_input = next.text;
+                    break;
+                }
+            }
+        },
+        .toggle_key_visibility => |idx| {
+            if (idx < model.settings.provider_count) {
+                model.settings.providers[idx].key_visible = !model.settings.providers[idx].key_visible;
+            }
+        },
+        .test_provider_key => |idx| {
+            if (idx >= model.settings.provider_count) return;
+            const p = &model.settings.providers[idx];
+            if (p.key_input.len == 0) return;
+            p.testing = true;
+            p.test_valid = false;
+            p.test_error = "";
+            const body = std.fmt.allocPrint(
+                model.allocator,
+                "{{\"provider\":\"{s}\",\"api_key\":\"{s}\"}}",
+                .{ p.id, p.key_input },
+            ) catch return;
+            const fetch_key = model.allocFetchKey();
+            fx.fetch(.{
+                .key = fetch_key,
+                .url = "http://127.0.0.1:8080/settings/test-key",
+                .method = .POST,
+                .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+                .body = body,
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.key_tested),
+            });
+        },
+        .key_tested => |response| {
+            if (response.outcome != .ok) return;
+            const body = response.body;
+            if (body.len == 0) return;
+            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
+            defer parsed.deinit();
+            const root = parsed.value;
+            const valid = if (root.object.get("valid")) |v| v.bool else false;
+            const error_msg = if (root.object.get("error")) |e| switch (e) {
+                .string => |s| s,
+                else => "",
+            } else "";
+            // Find the provider that was testing
+            for (0..model.settings.provider_count) |i| {
+                if (model.settings.providers[i].testing) {
+                    model.settings.providers[i].testing = false;
+                    model.settings.providers[i].test_valid = valid;
+                    model.settings.providers[i].test_error = model.allocator.dupe(u8, error_msg) catch "";
+                    break;
+                }
+            }
+        },
+        .save_provider_key => |idx| {
+            if (idx >= model.settings.provider_count) return;
+            const p = &model.settings.providers[idx];
+            if (p.key_input.len == 0) return;
+            const body = std.fmt.allocPrint(
+                model.allocator,
+                "{{\"provider\":\"{s}\",\"api_key\":\"{s}\"}}",
+                .{ p.id, p.key_input },
+            ) catch return;
+            const fetch_key = model.allocFetchKey();
+            fx.fetch(.{
+                .key = fetch_key,
+                .url = "http://127.0.0.1:8080/settings/api-keys?user_id=native_sdk_chat",
+                .method = .POST,
+                .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+                .body = body,
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.key_saved),
+            });
+        },
+        .key_saved => |response| {
+            if (response.outcome != .ok) return;
+            // Mark first provider with visible key_input as saved
+            for (0..model.settings.provider_count) |i| {
+                if (model.settings.providers[i].key_input.len > 0) {
+                    model.settings.providers[i].has_key = true;
+                    model.settings.providers[i].key_input = "";
+                    model.settings.providers[i].key_visible = false;
+                    break;
+                }
+            }
+        },
+        .delete_provider_key => |idx| {
+            if (idx >= model.settings.provider_count) return;
+            const p = &model.settings.providers[idx];
+            const url = std.fmt.allocPrint(
+                model.allocator,
+                "http://127.0.0.1:8080/settings/api-keys/{s}?user_id=native_sdk_chat",
+                .{p.id},
+            ) catch return;
+            const fetch_key = model.allocFetchKey();
+            fx.fetch(.{
+                .key = fetch_key,
+                .url = url,
+                .method = .DELETE,
+                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.key_deleted),
+            });
+        },
+        .key_deleted => |response| {
+            if (response.outcome != .ok) return;
+            // Find provider with has_key but no key_input (the one being deleted)
+            for (0..model.settings.provider_count) |i| {
+                if (model.settings.providers[i].has_key and model.settings.providers[i].key_input.len == 0) {
+                    model.settings.providers[i].has_key = false;
+                    break;
+                }
+            }
+        },
+        .select_default_model => |idx| {
+            if (idx < model.available_model_count) {
+                model.settings.default_model_idx = idx;
+                model.settings.model_saved = false;
+            }
+        },
+        .save_default_model => {
+            if (model.available_model_count == 0) return;
+            const model_id = model.available_models[model.settings.default_model_idx].id;
+            const body = std.fmt.allocPrint(
+                model.allocator,
+                "{{\"default_model\":\"{s}\"}}",
+                .{model_id},
+            ) catch return;
+            model.settings.saving_model = true;
+            const fetch_key = model.allocFetchKey();
+            fx.fetch(.{
+                .key = fetch_key,
+                .url = "http://127.0.0.1:8080/settings?user_id=native_sdk_chat",
+                .method = .PATCH,
+                .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+                .body = body,
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.default_model_saved),
+            });
+        },
+        .default_model_saved => |response| {
+            _ = response;
+            model.settings.saving_model = false;
+            model.settings.model_saved = true;
+        },
     }
 }
 
@@ -1201,6 +1493,11 @@ const ChatApp = native_sdk.UiApp(Model, Msg);
 // ── View builders (Zig view replacing markup) ──────────────────────────────
 
 pub fn buildView(ui: *AppUi, model: *const Model) AppUi.Node {
+    const right_panel: AppUi.Node = if (model.settings.visible)
+        buildSettingsPanel(ui, model)
+    else
+        buildChatPanel(ui, model);
+
     const split = ui.split(.{
         .value = model.sidebar_split,
         .on_resize = AppUi.valueMsg(.sidebar_resized),
@@ -1208,7 +1505,7 @@ pub fn buildView(ui: *AppUi, model: *const Model) AppUi.Node {
         .grow = 1,
     }, .{
         buildSidebar(ui, model),
-        buildChatPanel(ui, model),
+        right_panel,
     });
 
     var root = ui.el(.card, .{
@@ -1391,10 +1688,13 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
 
     // Settings + theme toggle
     sidebar_children[sidebar_count] = ui.row(.{ .gap = 4, .padding = 12, .cross = .center, .style_tokens = .{ .background = .surface } }, .{
-        ui.row(.{ .gap = 8, .padding = 8, .cross = .center, .grow = 1 }, .{
-            ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "settings"),
-            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Settings"),
-        }),
+        ui.button(.{
+            .on_press = .open_settings,
+            .variant = .ghost,
+            .grow = 1,
+            .style_tokens = .{ .foreground = .text_muted },
+            .icon = "settings",
+        }, "Settings"),
         ui.button(.{
             .on_press = .toggle_theme,
             .variant = .ghost,
@@ -1533,6 +1833,231 @@ fn addHistoryMessage(chat: *Chat, allocator: std.mem.Allocator, item: std.json.V
         addMessage(chat, allocator, role_str, trimmed);
         chat._messages[chat.msg_count - 1].timestamp = extractTimestamp(item, allocator);
     }
+}
+
+fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
+    var children: [4]AppUi.Node = undefined;
+    var child_count: usize = 0;
+
+    // Header with back button + title
+    children[child_count] = ui.row(.{ .gap = 12, .padding = 16, .cross = .center, .style_tokens = .{ .background = .surface } }, .{
+        ui.button(.{ .on_press = .close_settings, .variant = .ghost, .style_tokens = .{ .foreground = .text_muted }, .icon = "arrow-left" }, "Back"),
+        ui.text(.{ .size = .heading }, "Settings"),
+        ui.spacer(1),
+    });
+    child_count += 1;
+
+    // Default model section
+    if (model.available_model_count > 0) {
+        var model_nodes: [16]AppUi.Node = undefined;
+        var model_node_count: usize = 0;
+
+        model_nodes[model_node_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Default Model");
+        model_node_count += 1;
+
+        // Model selector — list available models as buttons
+        for (0..model.available_model_count) |i| {
+            if (i >= 14) break;
+            const m = model.available_models[i];
+            const is_selected = i == model.settings.default_model_idx;
+            const source_label = if (std.mem.eql(u8, m.key_source, "hosted"))
+                "Hosted"
+            else if (std.mem.eql(u8, m.key_source, "user"))
+                "Your key"
+            else
+                "Env";
+
+            const model_label = std.fmt.allocPrint(ui.arena, "{s} ({s})", .{ m.name, source_label }) catch m.name;
+
+            model_nodes[model_node_count] = ui.button(.{
+                .on_press = .{ .select_default_model = i },
+                .variant = if (is_selected) .primary else .secondary,
+                .grow = 1,
+                .style_tokens = if (is_selected) .{} else .{ .foreground = .text },
+            }, model_label);
+            model_node_count += 1;
+        }
+
+        // Save button
+        if (!model.settings.model_saved) {
+            model_nodes[model_node_count] = ui.row(.{ .gap = 8, .cross = .center }, .{
+                ui.button(.{ .on_press = .save_default_model, .variant = .primary }, "Save Default Model"),
+                if (model.settings.saving_model)
+                    ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Saving...")
+                else
+                    ui.text(.{}, ""),
+            });
+            model_node_count += 1;
+        } else {
+            model_nodes[model_node_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .success } }, "Default model saved");
+            model_node_count += 1;
+        }
+
+        children[child_count] = ui.el(.card, .{
+            .padding = 16,
+            .style_tokens = .{ .background = .surface, .radius = .md },
+        }, .{
+            ui.column(.{ .gap = 8 }, model_nodes[0..model_node_count]),
+        });
+        child_count += 1;
+    }
+
+    // API Keys section
+    if (model.settings.provider_count > 0 or model.settings.loading) {
+        var key_nodes: [64]AppUi.Node = undefined;
+        var key_node_count: usize = 0;
+
+        key_nodes[key_node_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "API Keys");
+        key_node_count += 1;
+
+        if (model.settings.loading) {
+            key_nodes[key_node_count] = ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Loading...");
+            key_node_count += 1;
+        }
+
+        for (0..model.settings.provider_count) |i| {
+            if (key_node_count >= 60) break;
+            const p = model.settings.providers[i];
+
+            // Status badge
+            const status_text: []const u8 = if (p.has_key)
+                (if (p.via_env) "Configured (env)" else "Configured")
+            else
+                "Not configured";
+            const status_node = if (p.has_key)
+                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .success } }, status_text)
+            else
+                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, status_text);
+
+            // Key input row
+            const input_label = std.fmt.allocPrint(ui.arena, "{s} API Key", .{p.name}) catch "API Key";
+
+            // Test result
+            var test_result: AppUi.Node = ui.text(.{}, "");
+            if (p.test_valid) {
+                test_result = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .success } }, "Key valid");
+            } else if (p.test_error.len > 0) {
+                test_result = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .destructive }, .wrap = true }, p.test_error);
+            }
+
+            // Buttons row
+            var btn_nodes: [4]AppUi.Node = undefined;
+            var btn_count: usize = 0;
+
+            btn_nodes[btn_count] = ui.button(.{
+                .on_press = .{ .toggle_key_visibility = i },
+                .variant = .ghost,
+                .size = .sm,
+            }, if (p.key_visible) "Hide" else "Show");
+            btn_count += 1;
+
+            if (p.key_input.len > 0 and !p.testing) {
+                btn_nodes[btn_count] = ui.button(.{
+                    .on_press = .{ .test_provider_key = i },
+                    .variant = .secondary,
+                    .size = .sm,
+                }, "Test");
+                btn_count += 1;
+                btn_nodes[btn_count] = ui.button(.{
+                    .on_press = .{ .save_provider_key = i },
+                    .variant = .primary,
+                    .size = .sm,
+                }, "Save");
+                btn_count += 1;
+            }
+
+            if (p.has_key and p.key_input.len == 0) {
+                btn_nodes[btn_count] = ui.button(.{
+                    .on_press = .{ .delete_provider_key = i },
+                    .variant = .ghost,
+                    .size = .sm,
+                    .style_tokens = .{ .foreground = .destructive },
+                }, "Remove");
+                btn_count += 1;
+            }
+
+            key_nodes[key_node_count] = ui.el(.card, .{
+                .padding = 12,
+                .style_tokens = .{ .background = .surface_subtle, .radius = .md },
+            }, .{
+                ui.column(.{ .gap = 6 }, .{
+                    ui.row(.{ .gap = 8, .cross = .center }, .{
+                        ui.text(.{ .grow = 1 }, p.name),
+                        status_node,
+                    }),
+                    if (p.key_visible or p.key_input.len > 0)
+                        ui.el(.textarea, .{
+                            .text = p.key_input,
+                            .placeholder = input_label,
+                            .on_input = AppUi.inputMsg(.settings_key_input),
+                            .height = 36,
+                            .style_tokens = .{ .background = .surface, .border_color = .border },
+                        }, .{})
+                    else
+                        ui.text(.{}, ""),
+                    if (btn_count > 0)
+                        ui.row(.{ .gap = 8, .cross = .center }, btn_nodes[0..btn_count])
+                    else
+                        ui.text(.{}, ""),
+                    test_result,
+                }),
+            });
+            key_node_count += 1;
+        }
+
+        children[child_count] = ui.el(.card, .{
+            .padding = 16,
+            .style_tokens = .{ .background = .surface, .radius = .md },
+        }, .{
+            ui.column(.{ .gap = 8 }, key_nodes[0..key_node_count]),
+        });
+        child_count += 1;
+    }
+
+    // Appearance section
+    children[child_count] = ui.el(.card, .{
+        .padding = 16,
+        .style_tokens = .{ .background = .surface, .radius = .md },
+    }, .{
+        ui.column(.{ .gap = 8 }, .{
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Appearance"),
+            ui.row(.{ .gap = 12, .cross = .center }, .{
+                ui.text(.{}, "Theme"),
+                ui.spacer(1),
+                ui.button(.{
+                    .on_press = .toggle_theme,
+                    .variant = .secondary,
+                }, switch (model.theme_mode) {
+                    .dark => "Switch to Light",
+                    .light => "Switch to Dark",
+                }),
+            }),
+        }),
+    });
+    child_count += 1;
+
+    // About section
+    children[child_count] = ui.el(.card, .{
+        .padding = 16,
+        .style_tokens = .{ .background = .surface, .radius = .md },
+    }, .{
+        ui.column(.{ .gap = 4 }, .{
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "About"),
+            ui.text(.{}, "Assistant"),
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Backend: http://127.0.0.1:8080"),
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "User: native_sdk_chat"),
+        }),
+    });
+    child_count += 1;
+
+    const children_slice: []const AppUi.Node = children[0..child_count];
+    return ui.scroll(.{
+        .grow = 1,
+        .padding = 12,
+        .style_tokens = .{ .background = .surface },
+    }, .{
+        ui.column(.{ .gap = 12 }, children_slice),
+    });
 }
 
 fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {

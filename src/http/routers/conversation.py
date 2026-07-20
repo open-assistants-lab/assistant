@@ -6,7 +6,11 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
-import mistune
+from dotenv import load_dotenv
+
+load_dotenv()  # noqa: E402
+
+import mistune  # noqa: E402
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel

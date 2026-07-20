@@ -54,21 +54,32 @@ def _write_settings(user_id: str, data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data, indent=2))
 
 
+_KNOWN_PROVIDERS = [
+    {"id": "agnes", "name": "Agnes"},
+    {"id": "openai", "name": "OpenAI"},
+    {"id": "anthropic", "name": "Anthropic"},
+    {"id": "gemini", "name": "Google Gemini"},
+    {"id": "ollama-cloud", "name": "Ollama Cloud"},
+    {"id": "groq", "name": "Groq"},
+    {"id": "deepseek", "name": "DeepSeek"},
+    {"id": "together", "name": "Together AI"},
+    {"id": "openrouter", "name": "OpenRouter"},
+]
+
+
 @router.get("")
 async def get_settings(user_id: str = Query("default_user")) -> dict[str, Any]:
     """Read current settings (default model, which providers have keys)."""
     data = _read_settings(user_id)
-    from src.sdk.registry import list_providers
 
-    providers_meta = list_providers()
     provider_status: dict[str, Any] = {}
-    for p in providers_meta:
-        pid = p.get("id", "")
-        has_key = pid in data.get("provider_keys", {})
+    for p in _KNOWN_PROVIDERS:
+        pid = p["id"]
+        has_stored = pid in data.get("provider_keys", {})
         has_env = _env_key_for_provider(pid) is not None
         provider_status[pid] = {
-            "name": p.get("name", pid),
-            "has_key": has_key or has_env,
+            "name": p["name"],
+            "has_key": has_stored or has_env,
             "key_configured_via_env": has_env,
         }
     return {
