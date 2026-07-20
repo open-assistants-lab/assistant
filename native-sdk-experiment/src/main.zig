@@ -337,8 +337,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const max_height = @as(f32, @floatFromInt(max_lines)) * line_height + padding;
             const new_height = @min(max_height, natural_height);
             if (new_height != chat.last_textarea_height) {
+                const growing = new_height > chat.last_textarea_height;
                 chat.last_textarea_height = new_height;
-                chat.transcript_scroll_generation += 1;
+                // Only reset scroll state when viewport shrinks (textarea grows):
+                // the trailing anchor needs to re-pin to the new bottom. When the
+                // viewport grows (textarea shrinks), the bottom is already visible
+                // so the existing scroll state is correct — no reset needed.
+                if (growing) {
+                    chat.transcript_scroll_generation += 1;
+                }
             }
         },
         .toggle_theme => {
@@ -1338,31 +1345,46 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
     }, sidebar_slice);
 }
 
+/// Estimate wrapped line count: ~150 chars per line at ~900px column width.
+fn estimatedWrappedLines(content: []const u8) f32 {
+    const chars_per_line: f32 = 150;
+    const explicit_lines: f32 = @as(f32, @floatFromInt(std.mem.count(u8, content, "\n"))) + 1;
+    const char_based_lines: f32 = @as(f32, @floatFromInt(content.len)) / chars_per_line;
+    return @max(explicit_lines, char_based_lines);
+}
+
 fn groupExtentEstimate(context: ?*const anyopaque, index: u64) f32 {
     const chat: *const Chat = @ptrCast(@alignCast(@constCast(context)));
     const count = chat.msg_count;
+    const line_height: f32 = 17.5;
+    const timestamp_height: f32 = 16.25;
+    const bubble_padding: f32 = 16;
+    const group_gap: f32 = 8;
     var group_idx: u64 = 0;
     var i: usize = 0;
     while (i < count) {
         const msg = &chat._messages[i];
         if (msg.isUser() or std.mem.eql(u8, msg.role, "system")) {
             if (group_idx == index) {
-                // Bubble padding (16) + text + timestamp (16.25) + group gap (8)
-                return 40 + @as(f32, @floatFromInt(msg.content.len)) * 0.6;
+                const lines = estimatedWrappedLines(msg.content);
+                return bubble_padding + lines * line_height + timestamp_height + group_gap;
             }
             group_idx += 1;
             i += 1;
         } else {
-            var group_height: f32 = 28;
+            const label_height: f32 = 16.25;
+            const label_gap: f32 = 6;
+            var group_height: f32 = label_height + label_gap;
             while (i < count and !chat._messages[i].isUser() and !std.mem.eql(u8, chat._messages[i].role, "system")) : (i += 1) {
                 const m = &chat._messages[i];
                 if (m.isTool()) {
-                    group_height += 60 + @as(f32, @floatFromInt(m.content.len)) * 0.3;
+                    const tool_lines = estimatedWrappedLines(m.content);
+                    group_height += bubble_padding + tool_lines * line_height + group_gap;
                 } else if (m.isReasoning()) {
                     group_height += 48;
                 } else {
-                    // Bubble padding (16) + text + timestamp (16.25) + "Assistant" label (22.25) + group gap (8)
-                    group_height += 62 + @as(f32, @floatFromInt(m.content.len)) * 0.6;
+                    const lines = estimatedWrappedLines(m.content);
+                    group_height += bubble_padding + lines * line_height + timestamp_height + group_gap;
                 }
             }
             if (group_idx == index) return group_height;
