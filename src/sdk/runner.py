@@ -17,6 +17,7 @@ in the skills_list tool description dynamically, not in the system prompt.
 from __future__ import annotations
 
 import asyncio
+import collections
 import hashlib
 import json
 from pathlib import Path
@@ -34,8 +35,6 @@ from src.sdk.user_prompt import load_user_prompt
 from src.storage.paths import DataPaths
 
 logger = get_logger()
-
-import collections
 
 _MAX_LOOP_CACHE = 50
 _loop_cache: collections.OrderedDict[str, AgentLoop] = collections.OrderedDict()

@@ -197,6 +197,43 @@ class TestOpenAIProvider:
         p = OpenAIProvider(api_key="sk-test", base_url="https://api.groq.com/openai/v1")
         assert p.provider_id == "openai"
 
+    def test_custom_provider_id_and_default_options(self):
+        p = OpenAIProvider(
+            api_key="sk-test",
+            base_url="https://apihub.agnes-ai.com/v1",
+            model="agnes-2.0-flash",
+            provider_id="agnes",
+            default_provider_options={"chat_template_kwargs": {"enable_thinking": True}},
+        )
+
+        assert p.provider_id == "agnes"
+        assert p._extract_provider_options(None) == {
+            "chat_template_kwargs": {"enable_thinking": True}
+        }
+        assert p._extract_provider_options(
+            {"agnes": {"temperature": 0}, "openai": {"temperature": 1}}
+        ) == {
+            "chat_template_kwargs": {"enable_thinking": True},
+            "temperature": 0,
+        }
+
+    def test_extension_fields_move_to_extra_body(self):
+        p = OpenAIProvider(api_key="sk-test")
+        params = {
+            "model": "agnes-2.0-flash",
+            "chat_template_kwargs": {"enable_thinking": True},
+            "thinking": {"type": "enabled", "budget_tokens": 2048},
+        }
+
+        p._move_extension_fields_to_extra_body(params)
+
+        assert "chat_template_kwargs" not in params
+        assert "thinking" not in params
+        assert params["extra_body"] == {
+            "chat_template_kwargs": {"enable_thinking": True},
+            "thinking": {"type": "enabled", "budget_tokens": 2048},
+        }
+
     def test_parse_response_text_only(self):
         p = OpenAIProvider(api_key="sk-test")
         from types import SimpleNamespace
@@ -446,6 +483,16 @@ class TestProviderFactory:
         p = create_provider("openai", model="gpt-4o", api_key="sk-test")
         assert isinstance(p, OpenAIProvider)
 
+    def test_create_agnes_provider(self):
+        p = create_provider("agnes", model="agnes-2.0-flash", api_key="sk-test")
+
+        assert isinstance(p, OpenAIProvider)
+        assert p.provider_id == "agnes"
+        assert p.model == "agnes-2.0-flash"
+        assert p._extract_provider_options(None) == {
+            "chat_template_kwargs": {"enable_thinking": True}
+        }
+
     def test_create_anthropic_provider(self):
         p = create_provider("anthropic", model="claude-sonnet-4-20250514", api_key="sk-ant-test")
         assert isinstance(p, AnthropicProvider)
@@ -515,6 +562,14 @@ class TestProviderFactory:
         assert isinstance(p, OllamaCloud)
         assert p.model == "deepseek-v4-flash:cloud"
         assert str(p.base_url) == "https://ollama.com"
+
+    def test_create_model_from_config_agnes_uses_env_key(self):
+        with patch.dict("os.environ", {"AGNES_API_KEY": "sk-agnes-test"}):
+            p = create_model_from_config("agnes:agnes-2.0-flash")
+
+        assert isinstance(p, OpenAIProvider)
+        assert p.provider_id == "agnes"
+        assert p.model == "agnes-2.0-flash"
 
     def test_create_provider_from_registry_model_uses_models_dev_provider(self):
         with patch.dict("os.environ", {"OLLAMA_API_KEY": "test"}):

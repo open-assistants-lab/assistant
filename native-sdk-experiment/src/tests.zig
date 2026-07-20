@@ -53,6 +53,30 @@ fn findTextContaining(widget: canvas.Widget, fragment: []const u8) ?canvas.Widge
     return null;
 }
 
+fn findButtonContaining(widget: canvas.Widget, fragment: []const u8) ?canvas.Widget {
+    if (widget.kind == .button and std.mem.indexOf(u8, widget.text, fragment) != null) return widget;
+    for (widget.children) |child| {
+        if (findButtonContaining(child, fragment)) |found| return found;
+    }
+    return null;
+}
+
+fn findNthVirtualList(widget: canvas.Widget, target: usize, seen: *usize) ?canvas.Widget {
+    if (widget.kind == .scroll_view and widget.layout.virtualized) {
+        if (seen.* == target) return widget;
+        seen.* += 1;
+    }
+    for (widget.children) |child| {
+        if (findNthVirtualList(child, target, seen)) |found| return found;
+    }
+    return null;
+}
+
+fn findChatTranscriptList(widget: canvas.Widget) ?canvas.Widget {
+    var seen: usize = 0;
+    return findNthVirtualList(widget, 0, &seen);
+}
+
 fn expectByLabel(widget: canvas.Widget, kind: canvas.WidgetKind, label: []const u8) !canvas.Widget {
     return findByLabel(widget, kind, label) orelse {
         std.debug.print("no {t} with label \"{s}\" in the view\n", .{ kind, label });
@@ -73,6 +97,22 @@ fn sendAndStartStream(model: *Model, fx: *Effects, text: []const u8) u64 {
     return model.activeChat().fetch_key;
 }
 
+test "shift+enter inserts newline without clearing draft" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    main.update(&model, .{ .input_changed = .{ .insert_text = "hello world" } }, &fx);
+    main.update(&model, .{ .input_changed = .{ .insert_text = "\n" } }, &fx);
+
+    try testing.expectEqualStrings("hello world\n", model.activeChat().draft_text);
+    try testing.expect(!model.activeChat().streaming);
+}
+
 test "send message adds user message and starts streaming" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -86,17 +126,79 @@ test "send message adds user message and starts streaming" {
     main.update(&model, .{ .input_changed = .{ .insert_text = "Hello" } }, &fx);
     main.update(&model, .send_message, &fx);
     const chat = model.activeChat();
-    // Only user message — no empty assistant typing indicator anymore
-    try testing.expectEqual(@as(usize, 1), chat.msg_count);
+    // User message + empty assistant typing indicator
+    try testing.expectEqual(@as(usize, 2), chat.msg_count);
     try testing.expectEqualStrings("user", chat._messages[0].role);
     try testing.expectEqualStrings("Hello", chat._messages[0].content);
+    try testing.expectEqualStrings("assistant", chat._messages[1].role);
+    try testing.expectEqualStrings("", chat._messages[1].content);
     try testing.expect(chat.streaming);
     try testing.expectEqualStrings("Thinking...", chat.status_text);
     try testing.expectEqualStrings("", model.inputText());
     try testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
     const request = fx.pendingFetchAt(0).?;
     try testing.expectEqualStrings("http://127.0.0.1:8080/message/stream", request.url);
-    try testing.expect(std.mem.indexOf(u8, request.body, "deepseek:deepseek-v4-flash") != null);
+    try testing.expect(std.mem.indexOf(u8, request.body, "agnes:agnes-2.0-flash") != null);
+}
+
+test "default model falls back to hosted Agnes" {
+    var model = main.initialModel();
+
+    try testing.expectEqualStrings("agnes:agnes-2.0-flash", model.selectedModel());
+}
+
+test "models response labels hosted Agnes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    const models_body =
+        \\{"models":[{"id":"agnes:agnes-2.0-flash","name":"Agnes 2.0 Flash","provider":"agnes","provider_display":"Agnes","key_source":"hosted","billing_mode":"hosted"}]}
+    ;
+    main.update(&model, .{ .models_loaded = .{
+        .key = 9,
+        .outcome = .ok,
+        .body = models_body,
+    } }, &fx);
+
+    try testing.expectEqual(@as(usize, 1), model.available_model_count);
+    try testing.expectEqualStrings("agnes:agnes-2.0-flash", model.selectedModel());
+    try testing.expectEqualStrings("Agnes · Agnes 2.0 Flash · Hosted", model.selectedModelLabel(arena));
+}
+
+test "hosted model shows change button" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    const models_body =
+        \\{"models":[{"id":"agnes:agnes-2.0-flash","name":"Agnes 2.0 Flash","provider":"agnes","provider_display":"Agnes","key_source":"hosted","billing_mode":"hosted"}]}
+    ;
+    main.update(&model, .{ .models_loaded = .{
+        .key = 9,
+        .outcome = .ok,
+        .body = models_body,
+    } }, &fx);
+
+    const tree = try buildTree(arena, &model);
+    const btn = findButtonContaining(tree.root, "Hosted") orelse return error.WidgetNotFound;
+    const send_btn = findButtonContaining(tree.root, "Send") orelse return error.WidgetNotFound;
+    // Hosted button and Send button are in the same row (same y)
+    try testing.expectApproxEqAbs(btn.frame.y, send_btn.frame.y, 1.0);
+    // Hosted button fits its content (not full width)
+    try testing.expect(btn.frame.width < send_btn.frame.width or btn.frame.width < 200);
+}
+
+test "message column aligns closer to divider than textarea content" {
+    try testing.expectEqual(@as(u32, 0), main.message_list_outer_padding);
 }
 
 test "input accumulates incremental text events" {
@@ -208,7 +310,7 @@ test "reasoning event creates reasoning bubble" {
     const chat = model.activeChat();
 
     main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"reasoning\",\"data\":{\"content\":\"I need to think...\"}}" } }, &fx);
-    try testing.expectEqual(@as(usize, 2), chat.msg_count); // user + reasoning
+    try testing.expectEqual(@as(usize, 2), chat.msg_count); // user + reasoning (empty assistant removed)
     try testing.expectEqualStrings("reasoning", chat._messages[1].role);
     try testing.expectEqualStrings("I need to think...", chat._messages[1].content);
 
@@ -229,7 +331,7 @@ test "tool_start creates tool bubble with running status" {
     const chat = model.activeChat();
 
     main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_start\",\"data\":{\"tool\":\"time_get\",\"call_id\":\"call_1\",\"args\":{}}}" } }, &fx);
-    try testing.expectEqual(@as(usize, 2), chat.msg_count); // user + tool
+    try testing.expectEqual(@as(usize, 2), chat.msg_count); // user + tool (empty assistant removed)
     try testing.expectEqualStrings("tool", chat._messages[1].role);
     try testing.expectEqualStrings("time_get", chat._messages[1].tool_name);
     try testing.expectEqualStrings("running", chat._messages[1].tool_status);
@@ -255,6 +357,26 @@ test "tool_result updates tool bubble in place" {
     try testing.expectEqual(@as(usize, 2), chat.msg_count); // still 2, no new bubble
     try testing.expectEqualStrings("done", chat._messages[1].tool_status);
     try testing.expectEqualStrings("Current time: 12:00 UTC", chat._messages[1].tool_result);
+}
+
+test "assistant response after tool trims leading stream whitespace" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "find news");
+    const chat = model.activeChat();
+
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_start\",\"data\":{\"tool\":\"web_search\",\"call_id\":\"call_1\",\"args\":{}}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_result\",\"data\":{\"tool\":\"web_search\",\"call_id\":\"call_1\",\"result\":\"results\"}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"\\n\\nHere are the latest news\"}}" } }, &fx);
+
+    try testing.expectEqual(@as(usize, 3), chat.msg_count);
+    try testing.expectEqualStrings("assistant", chat._messages[2].role);
+    try testing.expectEqualStrings("Here are the latest news", chat._messages[2].content);
 }
 
 test "multiple reasoning segments create separate bubbles" {
@@ -312,6 +434,76 @@ test "done finalizes and collapses reasoning bubbles" {
     try testing.expect(chat._messages[1].collapsed); // reasoning collapsed after done
 }
 
+test "stream done queues history reconciliation" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "time in shanghai");
+    const chat = model.activeChat();
+
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"The time is 1 AM\"}}" } }, &fx);
+    main.update(&model, .{ .stream_done = .{ .key = fk } }, &fx);
+
+    try testing.expectEqual(@as(usize, 3), fx.pendingFetchCount());
+    const request = fx.pendingFetchAt(1).?;
+    try testing.expect(std.mem.indexOf(u8, request.url, "/conversation?") != null);
+    try testing.expect(std.mem.indexOf(u8, request.url, chat.sessionId()) != null);
+}
+
+test "sending message resets transcript scroll identity" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const chat = model.activeChat();
+    main.addMessage(chat, arena, "user", "old prompt");
+    main.addMessage(chat, arena, "assistant", "old response");
+
+    const before_tree = try buildTree(arena, &model);
+    const before_list = findChatTranscriptList(before_tree.root) orelse return error.WidgetNotFound;
+
+    main.update(&model, .{ .input_changed = .{ .insert_text = "new prompt" } }, &fx);
+    main.update(&model, .send_message, &fx);
+
+    const after_tree = try buildTree(arena, &model);
+    const after_list = findChatTranscriptList(after_tree.root) orelse return error.WidgetNotFound;
+    try testing.expect(before_list.id != after_list.id);
+}
+
+test "history reconciliation replaces stale streamed content" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "time in shanghai");
+    const chat = model.activeChat();
+
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"The current time is 1 AM\"}}" } }, &fx);
+    main.update(&model, .{ .stream_done = .{ .key = fk } }, &fx);
+
+    const history_body =
+        \\{"messages":[{"role":"user","content":"time in shanghai","timestamp":"2026-07-19T16:49:00Z","metadata":{}},{"role":"assistant","content":"The current time is 1 AM).","timestamp":"2026-07-19T16:50:00Z","metadata":{}}]}
+    ;
+    main.update(&model, .{ .chat_history_loaded = .{
+        .key = chat.fetch_key,
+        .outcome = .ok,
+        .body = history_body,
+    } }, &fx);
+
+    try testing.expectEqual(@as(usize, 2), chat.msg_count);
+    try testing.expectEqualStrings("The current time is 1 AM).", chat._messages[1].content);
+}
+
 test "title generation fires after first exchange" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -327,9 +519,9 @@ test "title generation fires after first exchange" {
     main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"It is hot and humid.\"}}" } }, &fx);
     main.update(&model, .{ .stream_done = .{ .key = fk } }, &fx);
 
-    // Title generation should have fired (1 stream fetch + 1 title fetch = 2)
-    try testing.expectEqual(@as(usize, 2), fx.pendingFetchCount());
-    const request = fx.pendingFetchAt(1).?;
+    // Title generation should have fired (stream + history reconcile + title = 3)
+    try testing.expectEqual(@as(usize, 3), fx.pendingFetchCount());
+    const request = fx.pendingFetchAt(2).?;
     try testing.expectEqualStrings("http://127.0.0.1:8080/conversation/title", request.url);
     try testing.expect(std.mem.indexOf(u8, request.body, chat.sessionId()) != null);
 }
@@ -348,9 +540,9 @@ test "title generation does not fire for short first message" {
     main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"Hello!\"}}" } }, &fx);
     main.update(&model, .{ .stream_done = .{ .key = fk } }, &fx);
 
-    // Title generation should NOT fire (user message < 5 chars)
-    // Only the stream fetch should be pending (1)
-    try testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
+    // Title generation should NOT fire (user message < 5 chars).
+    // Only stream + history reconciliation should be pending.
+    try testing.expectEqual(@as(usize, 2), fx.pendingFetchCount());
     _ = chat;
 }
 
@@ -377,9 +569,8 @@ test "title generation does not fire on second exchange" {
     main.update(&model, .{ .stream_done = .{ .key = fk2 } }, &fx);
 
     // Title generation should NOT fire on second exchange (2 user messages now).
-    // After first exchange: 2 fetches (stream1 + title). After second: +1 (stream2) = 3.
-    // If title fired again it would be 4. So check it's exactly 3.
-    try testing.expectEqual(fetch_count_after_first + 1, fx.pendingFetchCount());
+    // The second exchange queues stream + history reconciliation, but no title.
+    try testing.expectEqual(fetch_count_after_first + 2, fx.pendingFetchCount());
 }
 
 test "title_generated updates chat title" {

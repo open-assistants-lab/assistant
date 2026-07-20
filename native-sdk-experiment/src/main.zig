@@ -24,10 +24,12 @@ const ModelOption = struct {
     id: []const u8 = "",
     name: []const u8 = "",
     provider_display: []const u8 = "",
+    key_source: []const u8 = "",
 };
 
 const max_models = 128;
 const first_stream_key: u64 = 100;
+pub const message_list_outer_padding: u32 = 0;
 
 const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
 const shell_views = [_]native_sdk.ShellView{
@@ -100,6 +102,10 @@ pub const Chat = struct {
     open_bubble_type: []const u8 = "",
     status_text: []const u8 = "",
     draft_selection: canvas.TextSelection = .{ .anchor = 0, .focus = 0 },
+    draft_selection_programmatic: bool = false,
+    title_generated: bool = false,
+    transcript_scroll_generation: u64 = 0,
+    last_textarea_height: f32 = 0,
 
     pub fn hasUnread(self: *const Chat) bool {
         return self.unread_count > 0;
@@ -215,14 +221,25 @@ pub const Model = struct {
     }
 
     pub fn selectedModel(self: *const Model) []const u8 {
-        if (self.available_model_count == 0) return "deepseek:deepseek-v4-flash";
+        if (self.available_model_count == 0) return "agnes:agnes-2.0-flash";
         return self.available_models[self.selected_model_idx].id;
     }
 
     pub fn selectedModelLabel(self: *const Model, allocator: std.mem.Allocator) []const u8 {
-        if (self.available_model_count == 0) return "deepseek-v4-flash";
+        if (self.available_model_count == 0) return "Agnes · Agnes 2.0 Flash · Hosted";
         const m = self.available_models[self.selected_model_idx];
-        return std.fmt.allocPrint(allocator, "{s} · {s}", .{ m.provider_display, m.name }) catch m.name;
+        const source_label = if (std.mem.eql(u8, m.key_source, "hosted"))
+            "Hosted"
+        else if (std.mem.eql(u8, m.key_source, "user"))
+            "Your key"
+        else
+            "Env";
+        return std.fmt.allocPrint(allocator, "{s} · {s} · {s}", .{ m.provider_display, m.name, source_label }) catch m.name;
+    }
+
+    pub fn selectedModelIsHosted(self: *const Model) bool {
+        if (self.available_model_count == 0) return true;
+        return std.mem.eql(u8, self.available_models[self.selected_model_idx].key_source, "hosted");
     }
 
     pub fn messages(self: *const Model) []const ChatMessage {
@@ -311,6 +328,18 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }).apply(event, output) catch return;
             chat.draft_text = next.text;
             chat.draft_selection = next.selection;
+            chat.draft_selection_programmatic = (event == .set_selection);
+            const new_line_count = std.mem.count(u8, chat.draft_text, "\n") + 1;
+            const line_height: f32 = 20;
+            const padding: f32 = 8;
+            const max_lines = 8;
+            const natural_height = @max(36, @as(f32, @floatFromInt(new_line_count)) * line_height + padding);
+            const max_height = @as(f32, @floatFromInt(max_lines)) * line_height + padding;
+            const new_height = @min(max_height, natural_height);
+            if (new_height != chat.last_textarea_height) {
+                chat.last_textarea_height = new_height;
+                chat.transcript_scroll_generation += 1;
+            }
         },
         .toggle_theme => {
             model.theme_mode = switch (model.theme_mode) {
@@ -319,10 +348,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             };
         },
         .new_chat => {
-            // Smart new chat: if there's already an empty chat with no messages, switch to it
+            // Smart new chat: if there's already an empty chat with no messages
+            // AND its history has been loaded (so we know it's truly empty), switch to it
             var i: usize = 0;
             while (i < model.chat_count) : (i += 1) {
-                if (model.chats[i].msg_count == 0) {
+                if (model.chats[i].msg_count == 0 and model.chats[i].history_loaded) {
                     model.active_chat_idx = i;
                     model.active_chat_id = model.chats[i].id;
                     model.chats[i].unread_count = 0;
@@ -331,7 +361,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
             // No empty chat found — create a new one
             if (model.chat_count >= max_chats) return;
-            model.chats[model.chat_count] = .{ .id = model.next_chat_id };
+            model.chats[model.chat_count] = .{ .id = model.next_chat_id, .history_loaded = true };
             model.chats[model.chat_count].setSessionId(model.next_chat_id);
             model.next_chat_id += 1;
             model.active_chat_idx = model.chat_count;
@@ -426,6 +456,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             // Find the chat by session_id and update its title
             if (findChatBySessionId(model, sid_str)) |chat| {
                 chat.title = model.allocator.dupe(u8, title_str) catch return;
+                chat.title_generated = true;
             }
         },
         .models_loaded => |response| {
@@ -446,13 +477,16 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 const id_val = item.object.get("id") orelse continue;
                 const name_val = item.object.get("name") orelse continue;
                 const pd_val = item.object.get("provider_display") orelse continue;
+                const key_source_val = item.object.get("key_source");
                 const id_str = switch (id_val) { .string => |s| s, else => continue };
                 const name_str = switch (name_val) { .string => |s| s, else => continue };
                 const pd_str = switch (pd_val) { .string => |s| s, else => continue };
+                const key_source_str = if (key_source_val) |v| switch (v) { .string => |s| s, else => "" } else "";
                 model.available_models[model.available_model_count] = .{
                     .id = model.allocator.dupe(u8, id_str) catch continue,
                     .name = model.allocator.dupe(u8, name_str) catch continue,
                     .provider_display = model.allocator.dupe(u8, pd_str) catch continue,
+                    .key_source = model.allocator.dupe(u8, key_source_str) catch continue,
                 };
                 model.available_model_count += 1;
             }
@@ -496,6 +530,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const chat = model.activeChat();
             const text = std.mem.trim(u8, chat.draft_text, " ");
             if (text.len == 0 or chat.streaming) return;
+            chat.transcript_scroll_generation += 1;
             addMessage(chat, model.allocator, "user", text);
             if (chat.msg_count == 1) {
                 chat.title = model.allocator.dupe(u8, text) catch "New chat";
@@ -505,6 +540,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             chat.fetch_key = model.allocFetchKey();
             chat.open_bubble_type = "";
             chat.status_text = "Thinking...";
+            // Create empty assistant bubble so "typing..." shows while waiting for first token
+            addMessage(chat, model.allocator, "assistant", "");
+            chat.open_bubble_type = "assistant";
 
             // Start pulse timer for streaming indicator
             fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
@@ -566,7 +604,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             chat.open_bubble_type = "";
             chat.status_text = "Resuming...";
             fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
-            const body = std.fmt.allocPrint(model.allocator, "{{\"user_id\":\"native_sdk_chat\",\"call_id\":\"{s}\",\"session_id\":\"{s}\",\"model\":\"deepseek:deepseek-v4-flash\"}}", .{chat.pending_call_id, chat.sessionId()}) catch return;
+            const selected_model = model.selectedModel();
+            const body = std.fmt.allocPrint(model.allocator, "{{\"user_id\":\"native_sdk_chat\",\"call_id\":\"{s}\",\"session_id\":\"{s}\",\"model\":\"{s}\"}}", .{ chat.pending_call_id, chat.sessionId(), selected_model }) catch return;
             chat.pending_tool = "";
             chat.pending_call_id = "";
             fx.fetch(.{
@@ -620,13 +659,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (std.mem.eql(u8, event_type.string, "messages")) {
                 const content = data.object.get("content") orelse return;
                 if (!std.mem.eql(u8, chat.open_bubble_type, "assistant")) {
-                    addMessage(chat, model.allocator, "assistant", content.string);
+                    addMessage(chat, model.allocator, "assistant", trimLeadingMessageWhitespace(content.string));
                     chat.open_bubble_type = "assistant";
                 } else {
                     appendToLastMessage(chat, model.allocator, "assistant", content.string);
                 }
             } else if (std.mem.eql(u8, event_type.string, "reasoning")) {
                 const content = data.object.get("content") orelse return;
+                removeTrailingEmptyAssistant(chat);
                 if (!std.mem.eql(u8, chat.open_bubble_type, "reasoning")) {
                     addMessage(chat, model.allocator, "reasoning", content.string);
                     chat.open_bubble_type = "reasoning";
@@ -635,6 +675,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 }
             } else if (std.mem.eql(u8, event_type.string, "tool_start")) {
                 const tool = data.object.get("tool") orelse return;
+                removeTrailingEmptyAssistant(chat);
                 const args_val = data.object.get("args");
                 const args_str = if (args_val) |v| blk: {
                     switch (v) {
@@ -700,6 +741,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 return;
             }
             finalizeStream(chat);
+            queueHistoryFetch(model, chat, fx);
             // Mark this chat as unread if it's not the active one
             if (&model.chats[model.active_chat_idx] != chat) {
                 chat.unread_count += 1;
@@ -779,10 +821,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const chat = model.findChatByHistoryKey(response.key) orelse model.activeChat();
             chat.history_loaded = true;
             chat.history_loading = false;
+            chat.msg_count = 0;
+            chat.messages = chat._messages[0..0];
             for (arr.items) |item| {
                 addHistoryMessage(chat, model.allocator, item);
             }
-            if (chat.msg_count > 0) {
+            if (chat.msg_count > 0 and !chat.title_generated) {
                 const first = chat._messages[0];
                 if (std.mem.eql(u8, first.role, "user")) {
                     chat.title = model.allocator.dupe(u8, first.content) catch "New chat";
@@ -810,10 +854,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .array => |a| a,
                 else => return,
             };
+            chat.history_loaded = true;
+            chat.msg_count = 0;
+            chat.messages = chat._messages[0..0];
             for (arr.items) |item| {
                 addHistoryMessage(chat, model.allocator, item);
             }
-            if (chat.msg_count > 0) {
+            if (chat.msg_count > 0 and !chat.title_generated) {
                 const first = chat._messages[0];
                 if (std.mem.eql(u8, first.role, "user")) {
                     chat.title = model.allocator.dupe(u8, first.content) catch "New chat";
@@ -871,6 +918,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.chats[model.chat_count].history_loaded = false;
                 model.chat_count += 1;
             }
+            // Ensure next_chat_id won't collide with any existing chat-N session
+            model.next_chat_id = model.chat_count + 100;
         },
     }
 }
@@ -911,12 +960,48 @@ fn escapeJsonString(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
     return buf;
 }
 
+fn currentTimestamp(allocator: std.mem.Allocator) []const u8 {
+    var ts: std.posix.timespec = undefined;
+    switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
+        .SUCCESS => {
+            const total_secs: i64 = @intCast(ts.sec);
+            const secs_per_day: i64 = 86400;
+            const secs_per_hour: i64 = 3600;
+            const secs_per_min: i64 = 60;
+            // UTC time of day
+            const day_secs = @mod(total_secs, secs_per_day);
+            const hour: u8 = @intCast(@divTrunc(day_secs, secs_per_hour));
+            const min: u8 = @intCast(@divTrunc(@mod(day_secs, secs_per_hour), secs_per_min));
+            return std.fmt.allocPrint(allocator, "{d:0>2}:{d:0>2}", .{ hour, min }) catch "";
+        },
+        else => return "",
+    }
+}
+
+fn removeTrailingEmptyAssistant(chat: *Chat) void {
+    if (chat.msg_count == 0) return;
+    const last = &chat._messages[chat.msg_count - 1];
+    if (std.mem.eql(u8, last.role, "assistant") and last.content.len == 0) {
+        chat.msg_count -= 1;
+        chat.messages = chat._messages[0..chat.msg_count];
+    }
+}
+
+fn trimLeadingMessageWhitespace(content: []const u8) []const u8 {
+    var start: usize = 0;
+    while (start < content.len and (content[start] == ' ' or content[start] == '\n' or content[start] == '\r' or content[start] == '\t')) {
+        start += 1;
+    }
+    return content[start..];
+}
+
 pub fn addMessage(chat: *Chat, allocator: std.mem.Allocator, role: []const u8, content: []const u8) void {
     if (chat.msg_count >= max_messages) return;
     chat._messages[chat.msg_count] = .{
         .id = chat.next_id,
         .role = allocator.dupe(u8, role) catch return,
         .content = allocator.dupe(u8, content) catch return,
+        .timestamp = currentTimestamp(allocator),
     };
     chat.next_id += 1;
     chat.msg_count += 1;
@@ -990,6 +1075,25 @@ fn finalizeStream(chat: *Chat) void {
     }
 }
 
+fn queueHistoryFetch(model: *Model, chat: *Chat, fx: *Effects) void {
+    const fetch_key = model.allocFetchKey();
+    chat.fetch_key = fetch_key;
+    chat.history_loading = true;
+    const url = std.fmt.allocPrint(
+        model.allocator,
+        "http://127.0.0.1:8080/conversation?user_id=native_sdk_chat&session_id={s}&limit=100",
+        .{chat.sessionId()},
+    ) catch return;
+    fx.fetch(.{
+        .key = fetch_key,
+        .url = url,
+        .method = .GET,
+        .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+        .response = .buffered,
+        .on_response = Effects.responseMsg(.chat_history_loaded),
+    });
+}
+
 fn appendToLastMessage(chat: *Chat, allocator: std.mem.Allocator, role: []const u8, content: []const u8) void {
     if (chat.msg_count == 0) {
         addMessage(chat, allocator, role, content);
@@ -1000,9 +1104,9 @@ fn appendToLastMessage(chat: *Chat, allocator: std.mem.Allocator, role: []const 
         addMessage(chat, allocator, role, content);
         return;
     }
-    // If last message is empty, replace with first token
+    // If last message is empty, replace with first token (trimmed)
     if (last.content.len == 0) {
-        last.content = allocator.dupe(u8, content) catch return;
+        last.content = allocator.dupe(u8, std.mem.trim(u8, content, " \n\r\t")) catch return;
         return;
     }
     const new_len = last.content.len + content.len;
@@ -1243,7 +1347,8 @@ fn groupExtentEstimate(context: ?*const anyopaque, index: u64) f32 {
         const msg = &chat._messages[i];
         if (msg.isUser() or std.mem.eql(u8, msg.role, "system")) {
             if (group_idx == index) {
-                return 48 + @as(f32, @floatFromInt(msg.content.len)) * 0.6;
+                // Bubble padding (16) + text + timestamp (16.25) + group gap (8)
+                return 40 + @as(f32, @floatFromInt(msg.content.len)) * 0.6;
             }
             group_idx += 1;
             i += 1;
@@ -1256,7 +1361,8 @@ fn groupExtentEstimate(context: ?*const anyopaque, index: u64) f32 {
                 } else if (m.isReasoning()) {
                     group_height += 48;
                 } else {
-                    group_height += 48 + @as(f32, @floatFromInt(m.content.len)) * 0.6;
+                    // Bubble padding (16) + text + timestamp (16.25) + "Assistant" label (22.25) + group gap (8)
+                    group_height += 62 + @as(f32, @floatFromInt(m.content.len)) * 0.6;
                 }
             }
             if (group_idx == index) return group_height;
@@ -1317,11 +1423,14 @@ fn addHistoryMessage(chat: *Chat, allocator: std.mem.Allocator, item: std.json.V
         chat.msg_count += 1;
         chat.messages = chat._messages[0..chat.msg_count];
     } else if (std.mem.eql(u8, role_str, "reasoning")) {
+        if (content_str.len == 0) return;
         addMessage(chat, allocator, role_str, content_str);
         chat._messages[chat.msg_count - 1].collapsed = true;
         chat._messages[chat.msg_count - 1].timestamp = extractTimestamp(item, allocator);
     } else {
-        addMessage(chat, allocator, role_str, content_str);
+        const trimmed = std.mem.trim(u8, content_str, " \n\r\t");
+        if (trimmed.len == 0) return;
+        addMessage(chat, allocator, role_str, trimmed);
         chat._messages[chat.msg_count - 1].timestamp = extractTimestamp(item, allocator);
     }
 }
@@ -1383,18 +1492,22 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
             }
         }
 
-        const list_id = std.fmt.allocPrint(ui.arena, "chat-messages-{d}", .{chat.id}) catch "chat-messages";
+        const list_id = std.fmt.allocPrint(
+            ui.arena,
+            "chat-messages-{d}-{d}",
+            .{ chat.id, chat.transcript_scroll_generation },
+        ) catch "chat-messages";
         const options = AppUi.VirtualListOptions{
             .id = list_id,
             .item_count = group_count,
             .item_extent = 0,
             .extent_estimate = groupExtentEstimate,
             .extent_context = chat,
-            .gap = 12,
+            .gap = 8,
             .anchor = .trailing,
             .overscan = 3,
             .grow = 1,
-            .padding = 16,
+            .padding = message_list_outer_padding,
             .style_tokens = .{ .background = .surface },
         };
         const window = ui.virtualWindow(options);
@@ -1461,6 +1574,8 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     else
         ui.text(.{}, "");
 
+    const textarea_height: f32 = active_chat.last_textarea_height;
+
     const composer_textarea = blk: {
         var field = ui.el(.textarea, .{
             .text = model.inputText(),
@@ -1468,10 +1583,12 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
             .on_input = AppUi.inputMsg(.input_changed),
             .on_submit = .send_message,
             .semantics = .{ .label = "Message" },
-            .height = 36,
+            .height = textarea_height,
             .style_tokens = .{ .background = .surface_subtle, .border_color = .surface_subtle },
         }, .{});
-        field.widget.text_selection = active_chat.draft_selection;
+        if (active_chat.draft_selection_programmatic) {
+            field.widget.text_selection = active_chat.draft_selection;
+        }
         field.widget.style.radius = 8;
         field.widget.style.focus_ring = canvas.Color.rgba8(0, 0, 0, 0);
         break :blk field;
@@ -1482,29 +1599,34 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     else
         ui.button(.{ .on_press = .send_message, .variant = .primary }, "Send");
 
-    const composer_bottom_row = blk: {
-        var row = ui.row(.{ .gap = 8, .cross = .end }, .{
-            model_button,
-            ui.spacer(1),
-            send_button,
-        });
-        row.widget.layout.padding = .{ .bottom = 8, .right = 8 };
-        break :blk row;
-    };
+    const hosted_button: AppUi.Node = if (model.selectedModelIsHosted())
+        ui.button(.{ .on_press = .cycle_model, .variant = .secondary, .style_tokens = .{ .foreground = .text_muted } }, "Hosted — tap to change")
+    else
+        ui.text(.{}, "");
+
+    const composer_bottom_row = ui.row(.{ .gap = 8, .cross = .center, .grow = 0 }, .{
+        model_button,
+        hosted_button,
+        ui.spacer(1),
+        send_button,
+    });
 
     children[child_count] = ui.el(.card, .{
         .padding = 12,
+        .height = textarea_height + 6 + 32 + 24,
         .style_tokens = .{ .background = .surface_subtle, .radius = .md },
     }, .{
-        composer_textarea,
-        composer_bottom_row,
+        ui.column(.{ .gap = 6 }, .{
+            composer_textarea,
+            composer_bottom_row,
+        }),
     });
     child_count += 1;
 
     const children_slice: []const AppUi.Node = children[0..child_count];
     return ui.column(.{
         .style_tokens = .{ .background = .surface },
-        .gap = 0,
+        .gap = 8,
         .min_width = 320,
         .padding = 12,
     }, children_slice);
@@ -1537,13 +1659,14 @@ fn buildAssistantGroup(ui: *AppUi, chat: *const Chat, start: usize, end: usize) 
 
 fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage, status_text: []const u8) AppUi.Node {
     if (msg.isReasoning()) {
+        if (msg.content.len == 0) return ui.text(.{}, "");
         const display_text: []const u8 = if (msg.collapsed) blk: {
             const newline = std.mem.indexOf(u8, msg.content, "\n");
             break :blk if (newline) |n| msg.content[0..n] else msg.content;
         } else msg.content;
         const expand_label: []const u8 = if (msg.collapsed) "Expand" else "Collapse";
         return ui.el(.bubble, .{
-            .padding = 12,
+            .padding = 8,
             .style_tokens = .{ .background = .surface_subtle, .border_color = .border, .radius = .md },
         }, .{
             ui.row(.{ .gap = 8, .cross = .center, .on_press = .{ .toggle_bubble = msg.id } }, .{
@@ -1556,7 +1679,7 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage, status_text: []const u8
         const icon = toolIconName(msg.tool_name);
         if (std.mem.eql(u8, msg.tool_status, "running")) {
             return ui.el(.bubble, .{
-                .padding = 12,
+                .padding = 8,
                 .style_tokens = .{ .background = .surface_subtle, .border_color = .border, .radius = .md },
             }, .{
                 ui.column(.{ .gap = 4 }, .{
@@ -1574,7 +1697,7 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage, status_text: []const u8
                 break :blk if (newline) |n| msg.tool_result[0..n] else msg.tool_result;
             } else msg.tool_result;
             return ui.el(.bubble, .{
-                .padding = 12,
+                .padding = 8,
                 .style_tokens = .{ .background = .surface_subtle, .border_color = .border, .radius = .md },
             }, .{
                 ui.column(.{ .gap = 4 }, .{
@@ -1594,10 +1717,10 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage, status_text: []const u8
             return ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, typing_text);
         } else {
             return ui.el(.bubble, .{
-                .padding = 12,
+                .padding = 8,
                 .style_tokens = .{ .background = .surface_subtle, .border_color = .border, .radius = .md },
             }, .{
-                ui.column(.{ .gap = 4 }, .{
+                ui.column(.{ .gap = 0 }, .{
                     ui.text(.{ .wrap = true }, msg.content),
                     if (msg.timestamp.len > 0)
                         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, msg.timestamp)
@@ -1621,10 +1744,10 @@ fn buildMessageBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
             .cross = .start,
         }, .{
             ui.el(.bubble, .{
-                .padding = 12,
+                .padding = 8,
                 .style_tokens = .{ .background = .surface_subtle, .border_color = .border, .radius = .md },
             }, .{
-                ui.column(.{ .gap = 4 }, .{
+                ui.column(.{ .gap = 0 }, .{
                     ui.text(.{ .wrap = true }, msg.content),
                     ts_node,
                 }),
@@ -1644,7 +1767,7 @@ fn buildMessageBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
 
 pub fn initialModel() Model {
     var m: Model = .{};
-    m.chats[0] = .{ .id = 1 };
+    m.chats[0] = .{ .id = 1, .history_loaded = true };
     m.chats[0].setSessionId(1);
     m.chat_count = 1;
     m.active_chat_idx = 0;
@@ -1666,7 +1789,7 @@ fn initFx(model: *Model, fx: *Effects) void {
     // Fetch available models
     fx.fetch(.{
         .key = models_key,
-        .url = "http://127.0.0.1:8080/models",
+        .url = "http://127.0.0.1:8080/models?user_id=native_sdk_chat",
         .method = .GET,
         .headers = &.{.{ .name = "Accept", .value = "application/json" }},
         .response = .buffered,

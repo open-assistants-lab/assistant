@@ -29,6 +29,7 @@ _ENV_KEY_MAP: dict[str, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
     "gemini": "GOOGLE_API_KEY",
     "ollama-cloud": "OLLAMA_API_KEY",
+    "agnes": "AGNES_API_KEY",
     "groq": "GROQ_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
     "together": "TOGETHER_API_KEY",
@@ -49,6 +50,8 @@ def _resolve_provider_type(provider_id: str) -> tuple[str, str]:
         return "gemini", ""
     if lower in ("openai",):
         return "openai", ""
+    if lower == "agnes":
+        return "openai-compatible", "https://apihub.agnes-ai.com/v1"
 
     from src.sdk.registry import get_provider
 
@@ -104,7 +107,12 @@ def create_provider(
         default_url = registry_url or _default_base_url(provider_type)
         resolved_url = base_url or default_url
         return OpenAIProvider(
-            api_key=resolved_key or "unused", base_url=resolved_url, model=model or "gpt-4o"
+            api_key=resolved_key or "unused",
+            base_url=resolved_url,
+            model=model or _default_model(provider_type),
+            provider_id=provider_type,
+            default_provider_options=_default_provider_options(provider_type),
+            timeout=300.0 if provider_type == "agnes" else 120.0,
         )
 
     raise ValueError(f"Unknown provider type: {provider_type}")
@@ -143,6 +151,7 @@ def _default_base_url(provider_id: str) -> str:
         return str(p["base_url"])
 
     _fallback: dict[str, str] = {
+        "agnes": "https://apihub.agnes-ai.com/v1",
         "groq": "https://api.groq.com/openai/v1",
         "deepseek": "https://api.deepseek.com/v1",
         "together": "https://api.together.xyz/v1",
@@ -151,6 +160,18 @@ def _default_base_url(provider_id: str) -> str:
         "llamacpp": "http://localhost:8080/v1",
     }
     return _fallback.get(provider_id, "https://api.openai.com/v1")
+
+
+def _default_model(provider_id: str) -> str:
+    if provider_id == "agnes":
+        return "agnes-2.0-flash"
+    return "gpt-4o"
+
+
+def _default_provider_options(provider_id: str) -> dict[str, Any]:
+    if provider_id == "agnes":
+        return {"chat_template_kwargs": {"enable_thinking": True}}
+    return {}
 
 
 def _load_stored_key(provider_type: str, user_id: str = "default_user") -> str | None:
@@ -169,6 +190,22 @@ def _load_stored_key(provider_type: str, user_id: str = "default_user") -> str |
     return None
 
 
+def _load_stored_default_model(user_id: str = "default_user") -> str | None:
+    """Check per-user settings store for a default model override."""
+    try:
+        from src.config.settings import get_settings
+
+        root = get_settings().data_path or "data"
+        settings_path = Path(f"{root}/users/{user_id}/settings.json")
+        if settings_path.exists():
+            stored: dict[str, Any] = json.loads(settings_path.read_text())
+            value = stored.get("default_model")
+            return str(value) if value else None
+    except Exception:
+        pass
+    return None
+
+
 def create_model_from_config(
     config_model: str | None = None,
     provider_keys: dict[str, str] | None = None,
@@ -177,7 +214,7 @@ def create_model_from_config(
     from src.config import get_settings
 
     settings = get_settings()
-    model_str = config_model or settings.agent.model
+    model_str = config_model or _load_stored_default_model(user_id) or settings.agent.model
 
     provider_type, model_name = _parse_model_string(model_str)
 

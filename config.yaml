@@ -1,7 +1,7 @@
 # Agent Configuration
 agent:
   name: "Assistant"
-  model: "ollama-cloud:deepseek-v4-flash"
+  model: "agnes:agnes-2.0-flash"
   system_prompt: |
     You are a helpful assistant.
 

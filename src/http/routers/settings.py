@@ -79,6 +79,7 @@ async def get_settings(user_id: str = Query("default_user")) -> dict[str, Any]:
 
 def _env_key_for_provider(provider_id: str) -> str | None:
     mapping = {
+        "agnes": "AGNES_API_KEY",
         "openai": "OPENAI_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
         "gemini": "GOOGLE_API_KEY",
@@ -152,7 +153,7 @@ async def test_api_key(body: TestKeyRequest) -> dict[str, Any]:
         if base_url and provider_type in ("openai", "openai-compatible") and not base_url.rstrip("/").endswith("/v1"):
             base_url = base_url.rstrip("/") + "/v1"
 
-        prov = create_provider(provider_type, api_key=api_key, base_url=base_url or None)
+        prov = create_provider(provider, api_key=api_key, base_url=base_url or None)
         try:
             if hasattr(prov, "_client"):
                 await prov._client.models.list()

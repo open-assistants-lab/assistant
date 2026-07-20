@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import re
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -188,35 +189,81 @@ async def delete_session(user_id: str = "default_user", session_id: str = "") ->
 
 
 _PROVIDER_DISPLAY = {
+    "agnes": "Agnes",
     "ollama-cloud": "Ollama Cloud",
     "anthropic": "Anthropic",
     "openai": "OpenAI",
 }
 
+_STATIC_MODELS = {
+    "agnes": [
+        {
+            "id": "agnes:agnes-2.0-flash",
+            "name": "Agnes 2.0 Flash",
+            "provider": "agnes",
+            "provider_display": "Agnes",
+        }
+    ]
+}
+
+
+def _stored_provider_key(user_id: str, provider: str) -> str | None:
+    try:
+        from src.sdk.providers.factory import _load_stored_key
+
+        return _load_stored_key(provider, user_id)
+    except Exception:
+        return None
+
+
+def _provider_key_source(provider: str, user_id: str) -> str | None:
+    if _stored_provider_key(user_id, provider):
+        return "user"
+    env_map = {
+        "agnes": "AGNES_API_KEY",
+        "ollama-cloud": "OLLAMA_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openai": "OPENAI_API_KEY",
+    }
+    env_key = env_map.get(provider)
+    if env_key and os.environ.get(env_key):
+        return "hosted" if provider == "agnes" else "env"
+    if provider == "ollama-cloud" and os.environ.get("OLLAMA_BASE_URL"):
+        return "env"
+    return None
+
 
 @router.get("/models")
-async def list_available_models(_: None = Depends(require_auth)) -> dict[str, list[dict[str, str]]]:
+async def list_available_models(
+    user_id: str = "default_user", _: None = Depends(require_auth)
+) -> dict[str, list[dict[str, str]]]:
     """List available models from providers with configured API keys."""
-    import os
-
     from src.sdk.registry import list_models
 
     configured = []
-    if os.environ.get("OLLAMA_API_KEY") or os.environ.get("OLLAMA_BASE_URL"):
-        configured.append("ollama-cloud")
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        configured.append("anthropic")
-    if os.environ.get("OPENAI_API_KEY"):
-        configured.append("openai")
+    for provider in ("agnes", "ollama-cloud", "anthropic", "openai"):
+        if _provider_key_source(provider, user_id):
+            configured.append(provider)
 
     models = []
     for provider in configured:
-        for m in list_models(provider=provider):
+        provider_models = _STATIC_MODELS.get(provider)
+        if provider_models is None:
+            provider_models = [
+                {
+                    "id": f"{provider}:{m.id}",
+                    "name": m.name,
+                    "provider": provider,
+                    "provider_display": _PROVIDER_DISPLAY.get(provider, provider.title()),
+                }
+                for m in list_models(provider=provider)
+            ]
+        key_source = _provider_key_source(provider, user_id) or "unknown"
+        for m in provider_models:
             models.append({
-                "id": f"{provider}:{m.id}",
-                "name": m.name,
-                "provider": provider,
-                "provider_display": _PROVIDER_DISPLAY.get(provider, provider.title()),
+                **m,
+                "key_source": key_source,
+                "billing_mode": key_source if key_source in {"hosted", "user", "env"} else "unknown",
             })
     return {"models": models}
 
@@ -248,6 +295,7 @@ async def _summarize_title(user_msg: str, assistant_msg: str) -> str | None:
         response = await provider.chat(
             messages=[Message.user(prompt)],
             tools=None,
+            provider_options={"agnes": {"chat_template_kwargs": {"enable_thinking": False}}},
             max_tokens=20,
             temperature=0.3,
         )
@@ -517,100 +565,126 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
             ai_content_parts: list[str] = []
             tool_metadata_list: list[dict[str, Any]] = []
             tool_results: list[dict[str, Any]] = []
+            response = ""
 
-            async for chunk in run_sdk_agent_stream(
-                user_id=user_id,
-                messages=sdk_messages,
-                model=req.model,
-                provider_keys=req.provider_keys,
-                cancel_event=cancel_event,
-                session_id=session_id,
-            ):
-                # Check cancel flag between chunks (fast path)
-                if _cancel_flags.get(skey, False) or cancel_event.is_set():
-                    yield sse("cancelled", {"content": "Cancelled"})
-                    break
-                canonical = chunk.canonical_type
+            try:
+                async for chunk in run_sdk_agent_stream(
+                    user_id=user_id,
+                    messages=sdk_messages,
+                    model=req.model,
+                    provider_keys=req.provider_keys,
+                    cancel_event=cancel_event,
+                    session_id=session_id,
+                ):
+                    # Check cancel flag between chunks (fast path)
+                    if _cancel_flags.get(skey, False) or cancel_event.is_set():
+                        yield sse("cancelled", {"content": "Cancelled"})
+                        break
+                    canonical = chunk.canonical_type
 
-                if canonical == "text_delta" and chunk.type != "ai_token" and chunk.content:
-                    ai_content_parts.append(chunk.content)
-                    yield sse("messages", {"content": chunk.content})
-
-                elif canonical == "tool_input_start" and chunk.tool:
-                    tool_metadata_list.append(
-                        {"tool_name": chunk.tool, "tool_call_id": chunk.call_id or ""}
-                    )
-                    yield sse("tool_start", {
-                        "tool": chunk.tool,
-                        "call_id": chunk.call_id or "",
-                        "args": chunk.args or {},
-                    })
-
-                elif canonical == "tool_result" and chunk.tool:
-                    output = (chunk.result_preview or "")[:500]
-                    if output:
-                        tool_results.append(
-                            {"tool_call_id": chunk.call_id or "", "output": output}
-                        )
-                        yield sse("tool_result", {
-                            "tool": chunk.tool,
-                            "call_id": chunk.call_id or "",
-                            "result": output,
-                        })
-
-                elif canonical == "reasoning_delta" and chunk.content:
-                    yield sse("reasoning", {"content": chunk.content})
-
-                elif canonical == "reasoning_start":
-                    pass  # reasoning_start just signals a new reasoning block; the native app creates a bubble on first reasoning delta
-
-                elif chunk.type == "interrupt":
-                    _pending_interrupts[skey] = {
-                        "tool": chunk.tool,
-                        "call_id": chunk.call_id,
-                        "args": chunk.args or {},
-                    }
-                    yield sse("interrupt", {
-                        "tool": chunk.tool,
-                        "call_id": chunk.call_id,
-                        "args": chunk.args,
-                    })
-
-                elif chunk.type == "error":
-                    yield sse("error", {"content": chunk.content})
-
-                elif chunk.type == "done" and chunk.content:
-                    # Only emit done content as messages if no streaming text was received
-                    if not ai_content_parts:
+                    if canonical == "text_delta" and chunk.type != "ai_token" and chunk.content:
                         ai_content_parts.append(chunk.content)
                         yield sse("messages", {"content": chunk.content})
 
-            response = "".join(ai_content_parts) if ai_content_parts else ""
-            if not response and tool_results:
-                response = "\n".join(result["output"] for result in tool_results)
-            if not response:
-                response = "Task completed."
+                    elif canonical == "tool_input_start" and chunk.tool:
+                        tool_metadata_list.append(
+                            {"tool_name": chunk.tool, "tool_call_id": chunk.call_id or ""}
+                        )
+                        yield sse("tool_start", {
+                            "tool": chunk.tool,
+                            "call_id": chunk.call_id or "",
+                            "args": chunk.args or {},
+                        })
 
-            canvas_blocks = _extract_surfaces(response)
-            for surface in canvas_blocks:
-                yield sse("canvas_update", surface)
-            response = _strip_canvas_fences(response)
+                    elif canonical == "tool_result" and chunk.tool:
+                        output = (chunk.result_preview or "")[:500]
+                        if output:
+                            tool_results.append(
+                                {"tool_call_id": chunk.call_id or "", "output": output}
+                            )
+                            yield sse("tool_result", {
+                                "tool": chunk.tool,
+                                "call_id": chunk.call_id or "",
+                                "result": output,
+                            })
 
-            result_by_call_id = {
-                result["tool_call_id"]: result["output"] for result in tool_results
-            }
-            for tm in tool_metadata_list:
-                output = result_by_call_id.get(tm.get("tool_call_id", ""), "")
-                conversation.add_message("tool", output, metadata=tm, session_id=session_id)
+                    elif canonical == "reasoning_delta" and chunk.content:
+                        yield sse("reasoning", {"content": chunk.content})
 
-            conversation.add_message("assistant", response, metadata={"stream": True}, session_id=session_id)
-            logger.info(
-                "agent.response", {"response": response[:80]}, user_id=user_id, channel="http"
-            )
+                    elif canonical == "reasoning_start":
+                        pass  # reasoning_start just signals a new reasoning block; the native app creates a bubble on first reasoning delta
 
-        # Clean up cancel tracking
-        _active_streams.pop(skey, None)
-        _cancel_flags.pop(skey, None)
+                    elif chunk.type == "interrupt":
+                        _pending_interrupts[skey] = {
+                            "tool": chunk.tool,
+                            "call_id": chunk.call_id,
+                            "args": chunk.args or {},
+                        }
+                        yield sse("interrupt", {
+                            "tool": chunk.tool,
+                            "call_id": chunk.call_id,
+                            "args": chunk.args,
+                        })
+
+                    elif chunk.type == "error":
+                        yield sse("error", {"content": chunk.content})
+
+                    elif chunk.type == "done" and chunk.content:
+                        # Only emit done content as messages if no streaming text was received
+                        if not ai_content_parts:
+                            ai_content_parts.append(chunk.content)
+                            yield sse("messages", {"content": chunk.content})
+
+                response = "".join(ai_content_parts) if ai_content_parts else ""
+                if not response and tool_results:
+                    response = "\n".join(result["output"] for result in tool_results)
+                if not response:
+                    response = "Task completed."
+
+                # Store messages immediately — before any yields
+                # (client may disconnect, preventing post-yield storage)
+                result_by_call_id = {
+                    result["tool_call_id"]: result["output"] for result in tool_results
+                }
+                for tm in tool_metadata_list:
+                    output = result_by_call_id.get(tm.get("tool_call_id", ""), "")
+                    conversation.add_message("tool", output, metadata=tm, session_id=session_id)
+
+                conversation.add_message("assistant", response.strip(), metadata={"stream": True}, session_id=session_id)
+                logger.info(
+                    "agent.response_stored", {"response": response[:80], "session_id": session_id, "user_id": user_id}, user_id=user_id, channel="http"
+                )
+
+                canvas_blocks = _extract_surfaces(response)
+                for surface in canvas_blocks:
+                    try:
+                        yield sse("canvas_update", surface)
+                    except Exception:
+                        break
+                response = _strip_canvas_fences(response)
+
+            except GeneratorExit:
+                # Client disconnected — still store what we have
+                response = "".join(ai_content_parts) if ai_content_parts else ""
+                if response:
+                    conversation.add_message("assistant", response.strip(), metadata={"stream": True}, session_id=session_id)
+                    logger.info(
+                        "agent.response_stored_disconnect", {"response": response[:80], "session_id": session_id}, user_id=user_id, channel="http"
+                    )
+                raise
+            except asyncio.CancelledError:
+                # asyncio cancellation — still store what we have
+                response = "".join(ai_content_parts) if ai_content_parts else ""
+                if response:
+                    conversation.add_message("assistant", response.strip(), metadata={"stream": True}, session_id=session_id)
+                    logger.info(
+                        "agent.response_stored_cancelled", {"response": response[:80], "session_id": session_id}, user_id=user_id, channel="http"
+                    )
+                raise
+            finally:
+                # Clean up cancel tracking
+                _active_streams.pop(skey, None)
+                _cancel_flags.pop(skey, None)
 
         return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -795,4 +869,3 @@ async def import_conversation(req: ConversationImportRequest, _: None = Depends(
             meta = msg.get("metadata")
             conversation.add_message(role, content, metadata=meta)
     return {"imported": len(req.messages)}
-

@@ -35,8 +35,12 @@ class OpenAIProvider(LLMProvider):
         model: str = "gpt-4o",
         organization: str | None = None,
         timeout: float = 120.0,
+        provider_id: str = "openai",
+        default_provider_options: dict[str, Any] | None = None,
     ) -> None:
         self.model = model
+        self._provider_id = provider_id
+        self._default_provider_options = default_provider_options or {}
         self._client = AsyncOpenAI(
             api_key=api_key or "unused",
             base_url=base_url,
@@ -46,7 +50,15 @@ class OpenAIProvider(LLMProvider):
 
     @property
     def provider_id(self) -> str:
-        return "openai"
+        return self._provider_id
+
+    def _extract_provider_options(
+        self, provider_options: dict[str, dict[str, Any]] | None
+    ) -> dict[str, Any]:
+        options = dict(self._default_provider_options)
+        if provider_options:
+            options.update(provider_options.get(self.provider_id, {}))
+        return options
 
     async def chat(
         self,
@@ -69,6 +81,7 @@ class OpenAIProvider(LLMProvider):
         provider_opts = self._extract_provider_options(provider_options)
         params.update(kwargs)
         params.update(provider_opts)
+        self._move_extension_fields_to_extra_body(params)
 
         try:
             response = await self._client.chat.completions.create(**params)
@@ -99,6 +112,7 @@ class OpenAIProvider(LLMProvider):
         provider_opts = self._extract_provider_options(provider_options)
         params.update(kwargs)
         params.update(provider_opts)
+        self._move_extension_fields_to_extra_body(params)
 
         current_tool_calls: dict[int, dict[str, Any]] = {}
 
@@ -151,6 +165,15 @@ class OpenAIProvider(LLMProvider):
             )
 
         return Message.assistant(content=content, tool_calls=tool_calls, usage=usage, reasoning=reasoning)
+
+    def _move_extension_fields_to_extra_body(self, params: dict[str, Any]) -> None:
+        """Move OpenAI-compatible extension fields into the SDK escape hatch."""
+        extra_body = dict(params.get("extra_body") or {})
+        for key in ("chat_template_kwargs", "thinking"):
+            if key in params:
+                extra_body[key] = params.pop(key)
+        if extra_body:
+            params["extra_body"] = extra_body
 
     def _parse_stream_chunk(
         self, chunk: Any, current_tool_calls: dict[int, dict[str, Any]]
