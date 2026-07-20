@@ -106,6 +106,7 @@ pub const Chat = struct {
     title_generated: bool = false,
     transcript_scroll_generation: u64 = 0,
     last_textarea_height: f32 = 0,
+    created_at: []const u8 = "",
 
     pub fn hasUnread(self: *const Chat) bool {
         return self.unread_count > 0;
@@ -370,6 +371,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (model.chat_count >= max_chats) return;
             model.chats[model.chat_count] = .{ .id = model.next_chat_id, .history_loaded = true };
             model.chats[model.chat_count].setSessionId(model.next_chat_id);
+            model.chats[model.chat_count].created_at = currentTimestampISO(model.allocator);
             model.next_chat_id += 1;
             model.active_chat_idx = model.chat_count;
             model.active_chat_id = model.chats[model.active_chat_idx].id;
@@ -902,6 +904,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             for (arr.items) |item| {
                 const sid_val = item.object.get("session_id") orelse continue;
                 const title_val = item.object.get("title") orelse continue;
+                const created_val = item.object.get("created_at");
                 const sid = switch (sid_val) {
                     .string => |s| s,
                     else => continue,
@@ -910,9 +913,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     .string => |s| s,
                     else => continue,
                 };
+                const created = if (created_val) |v| switch (v) {
+                    .string => |s| s,
+                    else => "",
+                } else "";
                 if (std.mem.eql(u8, sid, initial_session_id)) {
-                    // Update the title of the initial chat
+                    // Update the initial chat with title and created_at
                     model.chats[0].title = model.allocator.dupe(u8, title) catch "New chat";
+                    model.chats[0].created_at = model.allocator.dupe(u8, created) catch "";
                     continue;
                 }
                 if (model.chat_count >= max_chats) break;
@@ -923,8 +931,29 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.chats[model.chat_count].setSessionIdStr(sid);
                 model.chats[model.chat_count].title = model.allocator.dupe(u8, title) catch "New chat";
                 model.chats[model.chat_count].history_loaded = false;
+                model.chats[model.chat_count].created_at = model.allocator.dupe(u8, created) catch "";
                 model.chat_count += 1;
             }
+            // Sort chats by created_at descending (newest first).
+            // The initial chat (index 0) is included in the sort. The active chat
+            // index is adjusted to follow the moved chat.
+            const old_active_id = model.chats[model.active_chat_idx].id;
+            // Simple insertion sort (avoids std.mem.sort SIMD issues with large structs)
+            var sort_i: usize = 1;
+            while (sort_i < model.chat_count) : (sort_i += 1) {
+                var j = sort_i;
+                while (j > 0 and chatCreatedAtCmp(model.chats[j], model.chats[j - 1])) : (j -= 1) {
+                    const tmp = model.chats[j];
+                    model.chats[j] = model.chats[j - 1];
+                    model.chats[j - 1] = tmp;
+                }
+            }
+            // Re-find the active chat by its id
+            var new_idx: usize = 0;
+            while (new_idx < model.chat_count) : (new_idx += 1) {
+                if (model.chats[new_idx].id == old_active_id) break;
+            }
+            model.active_chat_idx = new_idx;
             // Ensure next_chat_id won't collide with any existing chat-N session
             model.next_chat_id = model.chat_count + 100;
         },
@@ -983,6 +1012,48 @@ fn currentTimestamp(allocator: std.mem.Allocator) []const u8 {
         },
         else => return "",
     }
+}
+
+/// ISO 8601 UTC timestamp for sorting (e.g. "2026-07-21T08:30:00Z").
+fn currentTimestampISO(allocator: std.mem.Allocator) []const u8 {
+    var ts: std.posix.timespec = undefined;
+    switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
+        .SUCCESS => {
+            const total_secs: i64 = @intCast(ts.sec);
+            const secs_per_day: i64 = 86400;
+            const secs_per_hour: i64 = 3600;
+            const secs_per_min: i64 = 60;
+            const days_since_epoch: i64 = @divFloor(total_secs, secs_per_day);
+            const day_secs = @mod(total_secs, secs_per_day);
+            const hour: i64 = @divTrunc(day_secs, secs_per_hour);
+            const min: i64 = @divTrunc(@mod(day_secs, secs_per_hour), secs_per_min);
+            const sec: i64 = @mod(day_secs, secs_per_min);
+            const civil = civilFromDays(days_since_epoch);
+            return std.fmt.allocPrint(
+                allocator,
+                "{d}-{d}-{d}T{d}:{d}:{d}Z",
+                .{ civil.year, civil.month, civil.day, hour, min, sec },
+            ) catch "";
+        },
+        else => return "",
+    }
+}
+
+const CivilDate = struct { year: i64, month: i64, day: i64 };
+
+fn civilFromDays(days: i64) CivilDate {
+    // Howard Hinnant's algorithm: days since 1970-01-01 → civil date
+    const z = days + 719468;
+    const era: i64 = @divFloor(if (z >= 0) z else z - 146096, 146097);
+    const doe: i64 = z - era * 146097;
+    const yoe: i64 = @divFloor(doe - @divFloor(doe, 1460) + @divFloor(doe, 36524) - @divFloor(doe, 146096), 365);
+    const y: i64 = yoe + era * 400;
+    const doy: i64 = doe - (365 * yoe + @divFloor(yoe, 4) - @divFloor(yoe, 100));
+    const mp: i64 = @divFloor(5 * doy + 2, 153);
+    const d: i64 = doy - @divFloor(153 * mp + 2, 5) + 1;
+    const m: i64 = if (mp < 10) mp + 3 else mp - 9;
+    const year: i64 = if (m <= 2) y + 1 else y;
+    return .{ .year = year, .month = m, .day = d };
 }
 
 fn removeTrailingEmptyAssistant(chat: *Chat) void {
@@ -1351,6 +1422,13 @@ fn estimatedWrappedLines(content: []const u8) f32 {
     const explicit_lines: f32 = @as(f32, @floatFromInt(std.mem.count(u8, content, "\n"))) + 1;
     const char_based_lines: f32 = @as(f32, @floatFromInt(content.len)) / chars_per_line;
     return @max(explicit_lines, char_based_lines);
+}
+
+/// Compare two chats by created_at for descending sort (newest first).
+fn chatCreatedAtCmp(a: Chat, b: Chat) bool {
+    if (a.created_at.len == 0) return false;
+    if (b.created_at.len == 0) return true;
+    return std.mem.order(u8, a.created_at, b.created_at) == .gt;
 }
 
 fn groupExtentEstimate(context: ?*const anyopaque, index: u64) f32 {

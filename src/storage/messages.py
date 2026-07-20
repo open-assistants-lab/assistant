@@ -317,28 +317,28 @@ class MessageStore:
 
         Uses session_title from metadata if available, falls back to
         first user message content truncated to 60 chars.
+        Returns sessions in descending order by creation time (newest first).
         """
         try:
             with self._core.db._connect() as cur:
                 rows = cur.execute(
                     "SELECT session_id, "
                     "COALESCE(json_extract(metadata, '$.session_title'), "
-                    "SUBSTR(content, 1, 60)) as title "
+                    "SUBSTR(content, 1, 60)) as title, "
+                    "MIN(ts) as created_at "
                     "FROM messages "
                     "WHERE role = 'user' AND session_id != '' "
-                    "ORDER BY ts ASC"
+                    "GROUP BY session_id "
+                    "ORDER BY created_at DESC"
                 ).fetchall()
         except Exception:
             return []
 
-        sessions: dict[str, str] = {}
-        for row in rows:
-            sid = row[0]
-            title = row[1] or ""
-            if sid and sid not in sessions:
-                sessions[sid] = title
-
-        return [{"session_id": sid, "title": title} for sid, title in sessions.items()]
+        return [
+            {"session_id": row[0], "title": row[1] or "", "created_at": row[2] or ""}
+            for row in rows
+            if row[0]
+        ]
 
     def update_session_title(self, session_id: str, title: str) -> None:
         """Update the title for a chat session (stored on first user message metadata)."""
