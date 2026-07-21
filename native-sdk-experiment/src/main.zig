@@ -1989,6 +1989,7 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                 card_children[card_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "No models available");
                 card_count += 1;
             } else {
+                // Compact model list: small rows with padding, not full buttons
                 for (0..p.model_count) |mi| {
                     if (card_count >= 66) break;
                     const model_idx = p.model_indices[mi];
@@ -2000,14 +2001,28 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                     }
 
                     const is_selected = std.mem.eql(u8, m.id, model.settings.default_model_id);
-                    const label = std.fmt.allocPrint(ui.arena, "{s}{s}", .{ m.name, if (is_selected) "  ✓" else "" }) catch m.name;
+                    const label = std.fmt.allocPrint(ui.arena, "{s}  ✓", .{m.name}) catch m.name;
+                    const plain_label: []const u8 = m.name;
 
-                    card_children[card_count] = ui.button(.{
+                    card_children[card_count] = ui.row(.{
+                        .gap = 8,
+                        .cross = .center,
+                        .padding = 4,
                         .on_press = .{ .select_model = model_idx },
-                        .variant = if (is_selected) .primary else .ghost,
-                        .grow = 1,
-                        .style_tokens = if (is_selected) .{} else .{ .foreground = .text_muted },
-                    }, label);
+                        .style_tokens = if (is_selected)
+                            .{ .background = .surface_pressed }
+                        else
+                            .{},
+                    }, .{
+                        ui.text(.{
+                            .size = .sm,
+                            .grow = 1,
+                            .style_tokens = if (is_selected)
+                                .{ .foreground = .text }
+                            else
+                                .{ .foreground = .text_muted },
+                        }, if (is_selected) label else plain_label),
+                    });
                     card_count += 1;
                 }
             }

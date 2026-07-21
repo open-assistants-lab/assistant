@@ -8,7 +8,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-load_dotenv()  # noqa: E402
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")  # noqa: E402
 
 import mistune  # noqa: E402
 from fastapi import APIRouter, Depends, HTTPException
@@ -220,16 +220,25 @@ def _stored_provider_key(user_id: str, provider: str) -> str | None:
         return None
 
 
+_PROVIDER_ENV_KEYS = {
+    "agnes": "AGNES_API_KEY",
+    "ollama-cloud": "OLLAMA_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "gemini": "GOOGLE_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "together": "TOGETHER_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+_ALL_KNOWN_PROVIDER_IDS = list(_PROVIDER_ENV_KEYS.keys())
+
+
 def _provider_key_source(provider: str, user_id: str) -> str | None:
     if _stored_provider_key(user_id, provider):
         return "user"
-    env_map = {
-        "agnes": "AGNES_API_KEY",
-        "ollama-cloud": "OLLAMA_API_KEY",
-        "anthropic": "ANTHROPIC_API_KEY",
-        "openai": "OPENAI_API_KEY",
-    }
-    env_key = env_map.get(provider)
+    env_key = _PROVIDER_ENV_KEYS.get(provider)
     if env_key and os.environ.get(env_key):
         return "hosted" if provider == "agnes" else "env"
     if provider == "ollama-cloud" and os.environ.get("OLLAMA_BASE_URL"):
@@ -245,9 +254,10 @@ async def list_available_models(
     from src.sdk.registry import list_models
 
     configured = []
-    for provider in ("agnes", "ollama-cloud", "anthropic", "openai"):
-        if _provider_key_source(provider, user_id):
-            configured.append(provider)
+    # Check all known providers, not just a hardcoded subset
+    for provider_id in _ALL_KNOWN_PROVIDER_IDS:
+        if _provider_key_source(provider_id, user_id):
+            configured.append(provider_id)
 
     models = []
     for provider in configured:
