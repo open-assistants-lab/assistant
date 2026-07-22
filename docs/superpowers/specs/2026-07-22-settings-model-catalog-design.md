@@ -23,12 +23,15 @@ In scope:
 - Compact selectable model rows.
 - Modal API-key unlock flow for locked providers.
 - Keyboard behavior for search, list selection, and modal dismissal.
+- A single canonical backend catalog contract for Settings.
+- Native client storage capable of handling the returned catalog without hard-coded small caps.
 
 Out of scope:
 
 - Redesigning chat, sessions, tools, skills, or subagents.
 - Adding billing/pricing management.
-- Building account login flows beyond API key status already supported by Settings endpoints.
+- Building account login flows beyond API key and environment-key status already supported by
+  Settings endpoints.
 - Client-side request cancellation, since the Native SDK does not currently expose fetch aborts.
 
 ## Layout
@@ -68,9 +71,9 @@ model selection.
 
 ## Ordering
 
-Providers are ranked by configuration status first, then name:
+Providers are ranked by credential status first, then name:
 
-1. Providers with an existing API key, environment key, hosted key, or logged-in account.
+1. Providers with an existing user API key, environment key, or hosted key.
 2. Providers without credentials.
 
 Within each group, providers are sorted by provider display name ascending.
@@ -96,6 +99,12 @@ Search rules:
 Search should be fast enough to feel interactive while typing. If the model catalog becomes large,
 the rendered list should be virtualized or otherwise bounded so filtering does not cause visible
 lag.
+
+For the first implementation, prefer loading the full Settings catalog into the Native client and
+filtering locally. Do not ship the current hard limits of 32 providers, 64 models per provider, or
+128 total models as product behavior. Use dynamic arrays or substantially higher bounded storage
+with explicit truncation UI. If the backend cannot return a full catalog quickly enough, add a
+server-side search API before shipping rather than silently truncating results.
 
 ## Model Row Behavior
 
@@ -141,8 +150,19 @@ Behavior:
 - `Test & Save` first calls `POST /settings/test-key`.
 - If validation succeeds, save the key with `POST /settings/api-keys`.
 - After save succeeds, refresh provider/model state as needed and select the pending model.
+- If the key saves but selecting the pending model fails, keep the key saved, restore the previous
+  selected model, and show a non-blocking model-save error near the catalog header.
 - If validation or saving fails, keep the modal open and show the error inline.
 - While testing or saving, disable modal actions that would submit twice.
+
+Secret handling:
+
+- Never render the raw key outside the focused input.
+- Never log, persist in diagnostics, or include the key in screenshots/test artifacts.
+- Clear `key_input`, `pending_provider_id`, `pending_model_id`, and `pending_model_name` on `Esc`,
+  `Cancel`, and successful completion.
+- If the Native SDK cannot mask text input yet, display obscured characters only and track native
+  password-input support as a separate SDK follow-up before broad release.
 
 Environment-configured providers do not show remove-key behavior. They are ranked as configured and
 their models can be selected, but their credentials cannot be deleted from the UI.
@@ -160,6 +180,17 @@ Required keyboard behavior:
 - Esc clears search when no modal is open and search has text.
 - Esc closes Settings when no modal is open and search is empty.
 - Esc closes the API-key modal when it is open.
+
+Focus rules:
+
+- Provider headers are not focusable; only model rows are focusable.
+- Opening Settings focuses the search field and sets the active row to the first visible model.
+- Changing search resets the active row to the first visible model and scrolls it into view.
+- Arrow navigation wraps only if the existing app pattern supports wrapping; otherwise it clamps at
+  the first and last visible rows.
+- Opening the API-key modal moves focus to the key input.
+- Closing the modal returns focus to search and preserves the active row for the pending model if it
+  is still visible.
 
 Arrow-key navigation is part of the target interaction, not a nice-to-have. If Native SDK event
 limitations block it, document the blocker in the implementation notes and keep search focus plus
@@ -190,6 +221,11 @@ SettingsState
   model_save_error
 ```
 
+The existing fixed-size Native settings arrays must not silently truncate the catalog. Use dynamic
+storage for provider/model data where possible. If bounded arrays are required by the Native SDK
+architecture, the UI must expose truncation explicitly with a message that explains the limit and the
+backend/client work needed to remove it.
+
 Provider fields:
 
 ```text
@@ -216,18 +252,57 @@ separate expanded/collapsed provider-card state.
 
 ## Backend Expectations
 
-The existing endpoints are sufficient if they return complete provider/model metadata:
+Settings should use one canonical catalog endpoint. Reusing `GET /models?user_id=X` is acceptable,
+but its contract must be explicit for Settings and must not conflict with any other health or model
+listing endpoint.
+
+Required Settings catalog response:
+
+```json
+{
+  "providers": [
+    {
+      "id": "agnes",
+      "name": "Agnes",
+      "key_source": "env",
+      "has_key": true,
+      "models": [
+        {
+          "id": "agnes:agnes-2.0-flash",
+          "name": "Agnes 2.0 Flash",
+          "provider": "agnes",
+          "provider_display": "Agnes",
+          "key_source": "env"
+        }
+      ]
+    }
+  ]
+}
+```
+
+`key_source` values are:
+
+- `hosted`: available through the app without user-managed credentials.
+- `user`: stored user API key.
+- `env`: configured outside the UI through environment/deployment settings.
+- `none`: no usable credentials.
+
+The endpoint must include unconfigured providers and their known models so locked rows can be shown
+and unlocked from the catalog. If a provider is known but model metadata is unavailable, include the
+provider with an empty model list and let the UI show `No models available` under that provider.
+
+Other existing Settings endpoints remain:
 
 - `GET /settings?user_id=X` returns default model and provider key status.
-- `GET /models?user_id=X` returns model id, model name, provider id/display name, and key source.
+- `GET /models?user_id=X` or an equivalent Settings catalog endpoint returns the canonical catalog
+  response above.
 - `POST /settings/test-key` validates a proposed provider key.
 - `POST /settings/api-keys` stores a validated user key.
 - `PATCH /settings` saves the selected default model.
 
-The model listing should include all known providers/models that the app can offer, not just the
-providers currently configured with keys. If the full models.dev catalog is too large to ship to the
-Native client all at once, the backend should still preserve the same ordering/filtering semantics
-through pagination or server-side search.
+If a server-side search fallback is needed, define it before implementation with query parameters,
+response shape, total counts, and ordering guarantees. Do not mix client-side truncation with search,
+because that makes provider/model discovery unreliable.
 
 ## Error States
 
@@ -239,6 +314,9 @@ through pagination or server-side search.
 - API key save failure: keep modal open and show the returned error.
 - Model save failure: restore previous selection and show a non-blocking error near the catalog
   header.
+- Current model missing from catalog: show `Current: <model id> (not in catalog)` and let the user
+  select any available model to recover. Do not clear the existing setting until a replacement model
+  is successfully saved.
 
 ## Acceptance Criteria
 
@@ -253,6 +331,8 @@ through pagination or server-side search.
 - The UI remains compact and usable with many models.
 - Keyboard basics work: search typing, modal Enter/Esc, and row navigation unless blocked by a
   documented Native SDK event limitation.
+- The catalog is not silently truncated by existing Native provider/model array limits.
+- The Settings catalog endpoint has one documented response contract used by the Native client.
 
 ## Verification
 
