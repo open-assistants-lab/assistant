@@ -76,9 +76,11 @@ Providers are ranked by credential status first, then name:
 1. Providers with an existing user API key, environment key, or hosted key.
 2. Providers without credentials.
 
-Within each group, providers are sorted by provider display name ascending.
+Within each group, providers are sorted by normalized provider display name ascending. Normalization
+is ASCII case-insensitive for v1.
 
-Models inside each provider are sorted by model display name ascending.
+Models inside each provider are sorted by normalized model display name ascending. Normalization is
+ASCII case-insensitive for v1.
 
 This keeps immediately usable models at the top while preserving predictable alphabetical ordering
 for the rest of the catalog.
@@ -100,11 +102,11 @@ Search should be fast enough to feel interactive while typing. If the model cata
 the rendered list should be virtualized or otherwise bounded so filtering does not cause visible
 lag.
 
-For the first implementation, prefer loading the full Settings catalog into the Native client and
-filtering locally. Do not ship the current hard limits of 32 providers, 64 models per provider, or
-128 total models as product behavior. Use dynamic arrays or substantially higher bounded storage
-with explicit truncation UI. If the backend cannot return a full catalog quickly enough, add a
-server-side search API before shipping rather than silently truncating results.
+For the first implementation, load the full Settings catalog into the Native client and filter
+locally. Do not ship the current hard limits of 32 providers, 64 models per provider, or 128 total
+models as product behavior. The minimum supported catalog size for v1 is 128 providers and 8,192
+models total. If bounded storage is still used, reaching the bound must show an explicit truncation
+message and must be treated as a bug to fix before broad release.
 
 ## Model Row Behavior
 
@@ -149,11 +151,16 @@ Behavior:
 - `Enter` in the key field triggers `Test & Save`.
 - `Test & Save` first calls `POST /settings/test-key`.
 - If validation succeeds, save the key with `POST /settings/api-keys`.
-- After save succeeds, refresh provider/model state as needed and select the pending model.
+- After save succeeds, update the provider's `key_source` to `user`, move it into the configured
+  provider rank group, unlock every model row for that provider, preserve the current search text,
+  and select the pending model.
 - If the key saves but selecting the pending model fails, keep the key saved, restore the previous
   selected model, and show a non-blocking model-save error near the catalog header.
 - If validation or saving fails, keep the modal open and show the error inline.
 - While testing or saving, disable modal actions that would submit twice.
+
+All Settings requests must use JSON serialization or explicit JSON string escaping. Do not build
+request bodies for `api_key` or `default_model` with raw string interpolation.
 
 Secret handling:
 
@@ -193,8 +200,8 @@ Focus rules:
   is still visible.
 
 Arrow-key navigation is part of the target interaction, not a nice-to-have. If Native SDK event
-limitations block it, document the blocker in the implementation notes and keep search focus plus
-modal Enter/Esc working in the first pass.
+limitations block it, create a tracked follow-up and keep search focus plus modal Enter/Esc working
+in the first pass. Mouse-only model selection is not acceptable for this redesign.
 
 ## Data Model
 
@@ -221,10 +228,10 @@ SettingsState
   model_save_error
 ```
 
-The existing fixed-size Native settings arrays must not silently truncate the catalog. Use dynamic
-storage for provider/model data where possible. If bounded arrays are required by the Native SDK
-architecture, the UI must expose truncation explicitly with a message that explains the limit and the
-backend/client work needed to remove it.
+The existing fixed-size Native settings arrays must not silently truncate the catalog. Prefer dynamic
+storage for provider/model data. If bounded arrays are required by the Native SDK architecture, they
+must meet the v1 minimum of 128 providers and 8,192 total models, and the UI must expose truncation
+explicitly with a message that explains the limit.
 
 Provider fields:
 
@@ -252,9 +259,12 @@ separate expanded/collapsed provider-card state.
 
 ## Backend Expectations
 
-Settings should use one canonical catalog endpoint. Reusing `GET /models?user_id=X` is acceptable,
-but its contract must be explicit for Settings and must not conflict with any other health or model
-listing endpoint.
+Settings must use a dedicated canonical catalog endpoint:
+
+- `GET /settings/model-catalog?user_id=X`
+
+Do not reuse `/models` for this feature. The app currently has multiple `/models` handlers with
+different contracts, so a Settings-specific endpoint avoids route and response ambiguity.
 
 Required Settings catalog response:
 
@@ -287,15 +297,36 @@ Required Settings catalog response:
 - `env`: configured outside the UI through environment/deployment settings.
 - `none`: no usable credentials.
 
+`key_source` must be derived by one shared backend helper used by both `GET /settings` and
+`GET /settings/model-catalog`. The helper should classify providers in this order:
+
+1. `hosted` when the deployment intentionally exposes a backend-managed shared provider key to this
+   user experience.
+2. `user` when the current user has a stored API key.
+3. `env` when the provider is configured by environment/deployment settings but is not exposed as
+   hosted.
+4. `none` otherwise.
+
+If Agnes or another provider is backed by an environment key but presented as the built-in hosted
+experience, the helper must consistently return `hosted` in both Settings responses.
+
 The endpoint must include unconfigured providers and their known models so locked rows can be shown
 and unlocked from the catalog. If a provider is known but model metadata is unavailable, include the
 provider with an empty model list and let the UI show `No models available` under that provider.
 
+Provider/model source of truth:
+
+- Include providers that the app can validate, store, and select through the current provider factory
+  and Settings API.
+- Include each provider's known models from the model registry or provider-specific curated list.
+- Exclude providers that cannot be validated or selected by this app yet.
+- If product wants to show unsupported models.dev providers later, add an explicit `unsupported`
+  state and non-actionable rows in a separate spec.
+
 Other existing Settings endpoints remain:
 
 - `GET /settings?user_id=X` returns default model and provider key status.
-- `GET /models?user_id=X` or an equivalent Settings catalog endpoint returns the canonical catalog
-  response above.
+- `GET /settings/model-catalog?user_id=X` returns the canonical catalog response above.
 - `POST /settings/test-key` validates a proposed provider key.
 - `POST /settings/api-keys` stores a validated user key.
 - `PATCH /settings` saves the selected default model.
@@ -321,6 +352,10 @@ because that makes provider/model discovery unreliable.
 ## Acceptance Criteria
 
 - Settings shows one long provider-grouped model catalog, not provider cards.
+- Locked-provider key entry is a centered modal layered over Settings, not inline provider-card
+  expansion.
+- Opening the modal transfers focus to the key input; closing it restores focus according to the
+  focus rules above.
 - Providers with credentials appear before providers without credentials.
 - Providers and models sort alphabetically inside their rank groups.
 - Search filters by provider and model name case-insensitively.
@@ -329,8 +364,9 @@ because that makes provider/model discovery unreliable.
 - Successful key test/save selects the originally clicked model automatically.
 - Failed key test/save leaves the modal open with an error.
 - The UI remains compact and usable with many models.
-- Keyboard basics work: search typing, modal Enter/Esc, and row navigation unless blocked by a
-  documented Native SDK event limitation.
+- Keyboard basics work: search typing, modal Enter/Esc, and row navigation. If Native SDK event
+  limitations block row navigation, the implementation must include a tracked follow-up and still
+  support search focus plus modal Enter/Esc.
 - The catalog is not silently truncated by existing Native provider/model array limits.
 - The Settings catalog endpoint has one documented response contract used by the Native client.
 
