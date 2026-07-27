@@ -153,3 +153,29 @@ def test_grader_response_consistency_validator():
             "result": "needs_revision", "explanation": "ok",
             "criteria": [{"name": "x", "passed": True}],
         })
+
+
+@pytest.mark.asyncio
+async def test_rubric_sends_score_to_langfuse_when_enabled(monkeypatch):
+    from src.sdk.langfuse_tracer import LangfuseTracer
+
+    score_calls = []
+
+    def fake_score_current_trace(name, value, data_type="BOOLEAN", comment=""):
+        score_calls.append({"name": name, "value": value, "data_type": data_type, "comment": comment})
+
+    monkeypatch.setattr(LangfuseTracer, "is_enabled", lambda: True)
+    monkeypatch.setattr(LangfuseTracer, "score_current_trace", fake_score_current_trace)
+
+    provider = FakeGraderProvider(json.dumps({
+        "result": "satisfied", "explanation": "ok",
+        "criteria": [{"name": "lines", "passed": True}]
+    }))
+    mw = RubricMiddleware(grader_provider=provider)
+    state = _make_state(rubric="- Three lines")
+    await mw.aafter_agent(state)
+
+    assert len(score_calls) == 1
+    assert score_calls[0]["name"] == "rubric_satisfied"
+    assert score_calls[0]["value"] == 1.0
+    assert score_calls[0]["data_type"] == "BOOLEAN"

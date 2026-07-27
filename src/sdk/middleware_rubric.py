@@ -197,6 +197,20 @@ class RubricMiddleware(Middleware):
         self._emit_end(state, grading_run_id, iteration, evaluation)
         self._fire_callback(evaluation)
 
+        # Send score to Langfuse if enabled
+        try:
+            from src.sdk.langfuse_tracer import LangfuseTracer
+
+            if LangfuseTracer.is_enabled():
+                LangfuseTracer.score_current_trace(
+                    name=f"rubric_{evaluation['result']}",
+                    value=1.0 if evaluation["result"] == "satisfied" else 0.0,
+                    data_type="BOOLEAN",
+                    comment=evaluation["explanation"],
+                )
+        except Exception:
+            pass
+
         state.extra["_rubric_iterations"] = iteration + 1
         state.extra["_rubric_status"] = evaluation["result"]
         evals = state.extra.get("_rubric_evaluations", [])
