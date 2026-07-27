@@ -31,7 +31,7 @@ def memory_profile(
     """
     core = _get_core(user_id, workspace_id)
     cutoff = (datetime.now(UTC) - timedelta(days=7)).isoformat()
-    results = core.get_observations(ts_after=cutoff, limit=50, session_id=workspace_id)
+    results = core.get_observations(ts_after=cutoff, limit=50)
 
     if not results:
         return "No observations available. Try message_search to find specific facts from conversation history."

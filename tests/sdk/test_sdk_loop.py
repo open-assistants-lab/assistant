@@ -682,6 +682,24 @@ class TestAgentLoopHITL:
         result = await loop.run([Message.user("Audit log")])
         assert len(result) >= 3
 
+    def test_call_scoped_approval_matches_args_across_retry_call_id_once(self):
+        destructive_delete = ToolDefinition(
+            name="files_delete",
+            description="Delete a file",
+            parameters={"type": "object", "properties": {"path": {"type": "string"}}},
+            annotations=ToolAnnotations(destructive=True),
+            function=lambda **kw: "deleted",
+        )
+        loop = AgentLoop(provider=MockProvider(), tools=[destructive_delete])
+        original = ToolCall(id="call-1", name="files_delete", arguments={"path": "/one"})
+        retry = ToolCall(id="call-2", name="files_delete", arguments={"path": "/one"})
+        subsequent = ToolCall(id="call-3", name="files_delete", arguments={"path": "/one"})
+
+        loop.approve_tool_call(original)
+
+        assert loop._should_interrupt(retry) is False
+        assert loop._should_interrupt(subsequent) is True
+
 
 class TestAgentLoopRunSingle:
     """Single LLM call (no tool loop)."""

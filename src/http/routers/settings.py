@@ -54,6 +54,12 @@ def _write_settings(user_id: str, data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data, indent=2))
 
 
+def _reset_user_loops(user_id: str) -> None:
+    from src.sdk.runner import reset_user_sdk_loops
+
+    reset_user_sdk_loops(user_id, reason="settings_changed")
+
+
 _KNOWN_PROVIDERS = [
     {"id": "agnes", "name": "Agnes"},
     {"id": "openai", "name": "OpenAI"},
@@ -117,6 +123,7 @@ async def update_settings(
     if body.default_model is not None:
         data["default_model"] = body.default_model
     _write_settings(user_id, data)
+    _reset_user_loops(user_id)
     return {"status": "updated"}
 
 
@@ -137,6 +144,7 @@ async def set_api_key(
     data = _read_settings(user_id)
     data.setdefault("provider_keys", {})[body.provider] = body.api_key
     _write_settings(user_id, data)
+    _reset_user_loops(user_id)
     return {"status": "stored", "provider": body.provider}
 
 
@@ -201,4 +209,5 @@ async def delete_api_key(
     data = _read_settings(user_id)
     data.get("provider_keys", {}).pop(provider, None)
     _write_settings(user_id, data)
+    _reset_user_loops(user_id)
     return {"status": "removed", "provider": provider}

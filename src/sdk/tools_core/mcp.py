@@ -47,7 +47,7 @@ mcp_list = ToolDefinition(
 )
 
 
-async def _mcp_reload(user_id: str = "") -> str:
+async def _mcp_reload(user_id: str = "", session_id: str = "") -> str:
     if not user_id:
         return "Error: user_id is required."
 
@@ -58,10 +58,12 @@ async def _mcp_reload(user_id: str = "") -> str:
     result = await manager.reload()
 
     try:
+        from src.sdk.capabilities import load_user_capabilities, resource_enabled
+        from src.sdk.loop import get_current_agent_loop
         from src.sdk.runner import get_user_loop
         from src.sdk.tools_core.mcp_bridge import MCPToolBridge
 
-        loop = get_user_loop(user_id)
+        loop = get_current_agent_loop() or get_user_loop(user_id, session_id=session_id or None)
         if loop is None:
             return f"{result} (no active conversation — tools will be picked up next conversation)"
 
@@ -79,14 +81,17 @@ async def _mcp_reload(user_id: str = "") -> str:
             loop.unregister_tool(name)
         bridge._tool_to_server = {}
 
-        mcp_count = await bridge.discover()
+        await bridge.discover()
+        caps = load_user_capabilities(user_id)
         new_names: set[str] = set()
         for td in bridge.get_tool_definitions():
+            if not resource_enabled(caps, "tools", td.name):
+                continue
             loop.register_tool(td)
             new_names.add(td.name)
 
         removed = old_names - new_names
-        parts = [f"{result} ({mcp_count} MCP tools registered)"]
+        parts = [f"{result} ({len(new_names)} MCP tools registered)"]
         if removed:
             parts.append(f"removed {len(removed)} stale tools")
         return " — ".join(parts)
@@ -101,12 +106,14 @@ mcp_reload = ToolDefinition(
     description=(
         "Reload all MCP servers from configuration file.\n\n"
         "Use this when you've modified .mcp.json and want to apply changes.\n\n"
-        "Args:\n    user_id: User identifier (REQUIRED)"
+        "Args:\n    user_id: User identifier (REQUIRED)\n"
+        "    session_id: Optional chat session identifier"
     ),
     parameters={
         "type": "object",
         "properties": {
             "user_id": {"type": "string", "default": "", "title": "User Id"},
+            "session_id": {"type": "string", "default": "", "title": "Session Id"},
         },
     },
     annotations=ToolAnnotations(title="Reload MCP Servers"),

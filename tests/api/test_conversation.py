@@ -1,5 +1,730 @@
 """Contract tests for conversation endpoints."""
 
+import pytest
+
+
+class FakeConversation:
+    def __init__(self):
+        self.messages = []
+
+    def add_message(self, *args, **kwargs):
+        self.messages.append((args, kwargs))
+        return "msg-1"
+
+    def get_messages_by_session_id(self, *args, **kwargs):
+        return []
+
+
+class TestToolMessagePersistence:
+    def test_persist_tool_messages_uses_session_id(self):
+        from src.http.routers.conversation import _persist_tool_messages
+
+        calls = []
+
+        class FakeConversation:
+            def add_message(self, *args, **kwargs):
+                calls.append((args, kwargs))
+
+        _persist_tool_messages(
+            FakeConversation(),
+            [{"tool": "message_search", "stage": "end", "call_id": "call-1", "output": "found"}],
+            session_id="chat-1",
+        )
+
+        assert calls == [
+            (
+                ("tool", "found"),
+                {
+                    "metadata": {"tool_name": "message_search", "tool_call_id": "call-1"},
+                    "session_id": "chat-1",
+                },
+            )
+        ]
+
+
+class TestMessageSessionPropagation:
+    @pytest.mark.asyncio
+    async def test_verbose_message_passes_session_id_to_stream_runner(self, monkeypatch):
+        from src.http.models import MessageRequest
+        from src.http.routers import conversation as conversation_router
+        from src.sdk.messages import StreamChunk
+
+        captured = {}
+
+        class FakeConversation:
+            def add_message(self, *args, **kwargs):
+                return "msg-1"
+
+            def get_messages_by_session_id(self, *args, **kwargs):
+                return []
+
+        async def fake_run_sdk_agent_stream(**kwargs):
+            captured.update(kwargs)
+            yield StreamChunk.done()
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda user_id: FakeConversation())
+        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+
+        await conversation_router.handle_message(
+            MessageRequest(message="hello", user_id="test_user", session_id="chat-1", verbose=True),
+            None,
+        )
+
+        assert captured["session_id"] == "chat-1"
+
+    @pytest.mark.asyncio
+    async def test_cancel_without_session_id_resets_default_session_only(self, monkeypatch):
+        from src.http.routers import conversation as conversation_router
+
+        calls = []
+
+        def fake_reset_sdk_loop(user_id, workspace_id="personal", session_id=None):
+            calls.append((user_id, workspace_id, session_id))
+
+        monkeypatch.setattr(conversation_router, "reset_sdk_loop", fake_reset_sdk_loop)
+
+        result = await conversation_router.cancel_message(conversation_router.CancelRequest(user_id="u"))
+
+        assert result == {"status": "cancelled"}
+        assert calls == [("u", "personal", "default")]
+
+
+class TestTitleGeneration:
+    @pytest.mark.asyncio
+    async def test_summarize_title_passes_user_id_to_provider_factory(self, monkeypatch):
+        from src.http.routers import conversation as conversation_router
+        from src.sdk.messages import Message
+
+        captured = {}
+
+        class FakeProvider:
+            async def chat(self, **kwargs):
+                return Message.assistant("Project Planning")
+
+        def fake_create_model_from_config(model, **kwargs):
+            captured["model"] = model
+            captured.update(kwargs)
+            return FakeProvider()
+
+        monkeypatch.setattr(
+            "src.sdk.providers.factory.create_model_from_config",
+            fake_create_model_from_config,
+        )
+
+        title = await conversation_router._summarize_title(
+            "Plan the project", "Here is the plan", user_id="title_user"
+        )
+
+        assert title == "Project Planning"
+        assert captured["user_id"] == "title_user"
+
+
+class TestStreamEdgeCases:
+    @pytest.mark.asyncio
+    async def test_stream_message_accepts_legacy_only_alias_chunks(self, monkeypatch):
+        from src.http.models import MessageRequest
+        from src.http.routers import conversation as conversation_router
+        from src.sdk.messages import StreamChunk
+
+        store = FakeConversation()
+
+        async def fake_stream(**kwargs):
+            yield StreamChunk.ai_token("Hello")
+            yield StreamChunk.reasoning("Think")
+            yield StreamChunk.tool_start("email_list", "call_1")
+            yield StreamChunk.tool_result_event("email_list", "call_1", "result")
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
+
+        response = await conversation_router.message_stream(
+            MessageRequest(message="List emails", user_id="u")
+        )
+        chunks = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk)
+
+        output = "".join(chunks)
+        assert '"content": "Hello"' in output
+        assert '"content": "Think"' in output
+        assert '"tool": "email_list"' in output
+        assert [(args, kwargs) for args, kwargs in store.messages if args[0] in {"assistant", "reasoning"}] == [
+            (("reasoning", "Think"), {"metadata": {}, "session_id": "default"}),
+            (("assistant", "Hello"), {"metadata": {"stream": True}, "session_id": "default"}),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_verbose_stream_error_returns_error_without_success_fallback(self, monkeypatch):
+        from src.http.models import MessageRequest
+        from src.http.routers import conversation as conversation_router
+        from src.sdk.messages import StreamChunk
+
+        store = FakeConversation()
+
+        async def fake_stream(**kwargs):
+            yield StreamChunk.error("boom")
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
+
+        result = await conversation_router.handle_message(
+            MessageRequest(message="fail", user_id="u", verbose=True)
+        )
+
+        assert result.response == ""
+        assert result.error == "boom"
+        assert [args for args, _ in store.messages if args[0] == "assistant"] == []
+
+    @pytest.mark.asyncio
+    async def test_sse_interrupt_persists_partial_state_without_success_fallback(self, monkeypatch):
+        from src.http.models import MessageRequest
+        from src.http.routers import conversation as conversation_router
+        from src.sdk.messages import StreamChunk
+
+        store = FakeConversation()
+
+        async def fake_stream(**kwargs):
+            yield StreamChunk.text_delta("partial")
+            yield StreamChunk.reasoning_delta("thinking")
+            yield StreamChunk.tool_input_start("time_get", "call-1")
+            yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
+            yield StreamChunk.interrupt("files_delete", "call-2", {"path": "x"})
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
+
+        response = await conversation_router.message_stream(MessageRequest(message="go", user_id="u"))
+        async for _ in response.body_iterator:
+            pass
+
+        assert ("u:default") in conversation_router._pending_interrupts
+        assert [(args, kwargs) for args, kwargs in store.messages if args[0] != "user"] == [
+            (
+                ("tool", "noon"),
+                {
+                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1"},
+                    "session_id": "default",
+                },
+            ),
+            (("reasoning", "thinking"), {"metadata": {}, "session_id": "default"}),
+            (("assistant", "partial"), {"metadata": {"stream": True}, "session_id": "default"}),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_sse_pending_interrupt_stores_and_reuses_runtime_context(self, monkeypatch):
+        from src.http.models import MessageRequest
+        from src.http.routers import conversation as conversation_router
+        from src.sdk.messages import StreamChunk
+
+        class FakeLoop:
+            def approve_tool_call(self, tool_call):
+                pass
+
+        store = FakeConversation()
+        captured_get_loop = {}
+        captured_streams = []
+
+        async def fake_initial_stream(**kwargs):
+            yield StreamChunk.interrupt("files_delete", "call-1", {"path": "x"})
+
+        async def fake_approve_stream(**kwargs):
+            captured_streams.append(kwargs)
+            yield StreamChunk.done("approved")
+
+        async def fake_get_sdk_loop(*args, **kwargs):
+            captured_get_loop.update(kwargs)
+            return FakeLoop()
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_initial_stream)
+
+        response = await conversation_router.message_stream(
+            MessageRequest(
+                message="go",
+                user_id="u",
+                session_id="chat-1",
+                model="openai:gpt-4.1",
+                provider_keys={"openai": "key"},
+            )
+        )
+        async for _ in response.body_iterator:
+            pass
+
+        assert conversation_router._pending_interrupts["u:chat-1"] == {
+            "tool": "files_delete",
+            "call_id": "call-1",
+            "args": {"path": "x"},
+            "model": "openai:gpt-4.1",
+            "provider_keys": {"openai": "key"},
+            "session_id": "chat-1",
+        }
+
+        monkeypatch.setattr(conversation_router, "get_sdk_loop", fake_get_sdk_loop)
+        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_approve_stream)
+
+        approve_response = await conversation_router.approve_tool(
+            conversation_router.ApproveRequest(user_id="u", call_id="call-1", session_id="chat-1")
+        )
+        async for _ in approve_response.body_iterator:
+            pass
+
+        assert captured_get_loop["model"] == "openai:gpt-4.1"
+        assert captured_get_loop["provider_keys"] == {"openai": "key"}
+        assert captured_get_loop["session_id"] == "chat-1"
+        assert captured_streams[0]["model"] == "openai:gpt-4.1"
+        assert captured_streams[0]["provider_keys"] == {"openai": "key"}
+        assert captured_streams[0]["session_id"] == "chat-1"
+
+    @pytest.mark.asyncio
+    async def test_sse_approval_uses_pending_context_over_request_override(self, monkeypatch):
+        from src.http.routers import conversation as conversation_router
+        from src.sdk.messages import StreamChunk
+
+        class FakeLoop:
+            def approve_tool_call(self, tool_call):
+                pass
+
+        store = FakeConversation()
+        captured_get_loop = {}
+        captured_streams = []
+        conversation_router._pending_interrupts["u:chat-1"] = {
+            "tool": "files_delete",
+            "call_id": "call-1",
+            "args": {"path": "x"},
+            "model": "openai:gpt-4.1",
+            "provider_keys": {"openai": "original"},
+            "session_id": "chat-1",
+        }
+
+        async def fake_get_sdk_loop(*args, **kwargs):
+            captured_get_loop.update(kwargs)
+            return FakeLoop()
+
+        async def fake_stream(**kwargs):
+            captured_streams.append(kwargs)
+            yield StreamChunk.done("approved")
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "get_sdk_loop", fake_get_sdk_loop)
+        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
+
+        response = await conversation_router.approve_tool(
+            conversation_router.ApproveRequest(
+                user_id="u",
+                call_id="call-1",
+                session_id="chat-1",
+                model="anthropic:claude-sonnet-4",
+                provider_keys={"anthropic": "override"},
+            )
+        )
+        async for _ in response.body_iterator:
+            pass
+
+        assert captured_get_loop["model"] == "openai:gpt-4.1"
+        assert captured_get_loop["provider_keys"] == {"openai": "original"}
+        assert captured_get_loop["session_id"] == "chat-1"
+        assert captured_streams[0]["model"] == "openai:gpt-4.1"
+        assert captured_streams[0]["provider_keys"] == {"openai": "original"}
+        assert captured_streams[0]["session_id"] == "chat-1"
+
+    @pytest.mark.asyncio
+    async def test_sse_error_persists_partial_state_without_success_fallback(self, monkeypatch):
+        from src.http.models import MessageRequest
+        from src.http.routers import conversation as conversation_router
+        from src.sdk.messages import StreamChunk
+
+        store = FakeConversation()
+
+        async def fake_stream(**kwargs):
+            yield StreamChunk.text_delta("partial")
+            yield StreamChunk.reasoning_delta("thinking")
+            yield StreamChunk.tool_input_start("time_get", "call-1")
+            yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
+            yield StreamChunk.error("boom")
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
+
+        response = await conversation_router.message_stream(MessageRequest(message="go", user_id="u"))
+        async for _ in response.body_iterator:
+            pass
+
+        assert [(args, kwargs) for args, kwargs in store.messages if args[0] != "user"] == [
+            (
+                ("tool", "noon"),
+                {
+                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1"},
+                    "session_id": "default",
+                },
+            ),
+            (("reasoning", "thinking"), {"metadata": {}, "session_id": "default"}),
+            (("assistant", "partial"), {"metadata": {"stream": True}, "session_id": "default"}),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_sse_cancel_persists_partial_state_without_success_fallback(self, monkeypatch):
+        from src.http.models import MessageRequest
+        from src.http.routers import conversation as conversation_router
+        from src.sdk.messages import StreamChunk
+
+        store = FakeConversation()
+
+        async def fake_stream(**kwargs):
+            yield StreamChunk.text_delta("partial")
+            yield StreamChunk.reasoning_delta("thinking")
+            yield StreamChunk.tool_input_start("time_get", "call-1")
+            yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
+            conversation_router._cancel_flags["u:default"] = True
+            yield StreamChunk.text_delta("ignored")
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
+
+        response = await conversation_router.message_stream(MessageRequest(message="go", user_id="u"))
+        async for _ in response.body_iterator:
+            pass
+
+        assert [(args, kwargs) for args, kwargs in store.messages if args[0] != "user"] == [
+            (
+                ("tool", "noon"),
+                {
+                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1"},
+                    "session_id": "default",
+                },
+            ),
+            (("reasoning", "thinking"), {"metadata": {}, "session_id": "default"}),
+            (("assistant", "partial"), {"metadata": {"stream": True}, "session_id": "default"}),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_sse_cancel_disconnect_does_not_duplicate_partial_state(self, monkeypatch):
+        from src.http.models import MessageRequest
+        from src.http.routers import conversation as conversation_router
+        from src.sdk.messages import StreamChunk
+
+        store = FakeConversation()
+
+        async def fake_stream(**kwargs):
+            yield StreamChunk.text_delta("partial")
+            conversation_router._cancel_flags["u:default"] = True
+            yield StreamChunk.text_delta("ignored")
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
+
+        response = await conversation_router.message_stream(MessageRequest(message="go", user_id="u"))
+        iterator = response.body_iterator.__aiter__()
+        async for chunk in iterator:
+            if "cancelled" in chunk:
+                await iterator.aclose()
+                break
+
+        assistant_messages = [args for args, _ in store.messages if args[0] == "assistant"]
+        assert assistant_messages == [("assistant", "partial")]
+
+    @pytest.mark.asyncio
+    async def test_approve_stream_persists_tool_result_with_session_id(self, monkeypatch):
+        from src.http.routers import conversation as conversation_router
+        from src.sdk.messages import StreamChunk
+
+        class FakeLoop:
+            def __init__(self):
+                self.approved = []
+
+            def approve_tool_call(self, tool_call):
+                self.approved.append(tool_call)
+
+        store = FakeConversation()
+        conversation_router._pending_interrupts["u:default"] = {"tool": "time_get", "call_id": "call-1"}
+
+        async def fake_get_sdk_loop(*args, **kwargs):
+            return FakeLoop()
+
+        async def fake_stream(**kwargs):
+            yield StreamChunk.tool_input_start("time_get", "call-1")
+            yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
+            yield StreamChunk.done()
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "get_sdk_loop", fake_get_sdk_loop)
+        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
+
+        response = await conversation_router.approve_tool(
+            conversation_router.ApproveRequest(user_id="u", call_id="call-1")
+        )
+        async for _ in response.body_iterator:
+            pass
+
+        assert [(args, kwargs) for args, kwargs in store.messages if args[0] == "tool"] == [
+            (
+                ("tool", "noon"),
+                {
+                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1"},
+                    "session_id": "default",
+                },
+            )
+        ]
+
+    @pytest.mark.asyncio
+    async def test_approve_rejects_mismatched_call_id_without_approving(self, monkeypatch):
+        from fastapi import HTTPException
+
+        from src.http.routers import conversation as conversation_router
+
+        class FakeLoop:
+            def __init__(self):
+                self.approved = []
+
+            def approve_tool_call(self, tool_call):
+                self.approved.append(tool_call)
+
+        loop = FakeLoop()
+        conversation_router._pending_interrupts["u:default"] = {
+            "tool": "time_get",
+            "call_id": "call-1",
+            "args": {},
+        }
+
+        async def fake_get_sdk_loop(*args, **kwargs):
+            return loop
+
+        monkeypatch.setattr(conversation_router, "get_sdk_loop", fake_get_sdk_loop)
+
+        with pytest.raises(HTTPException) as exc:
+            await conversation_router.approve_tool(
+                conversation_router.ApproveRequest(user_id="u", call_id="stale")
+            )
+
+        assert exc.value.status_code == 409
+        assert loop.approved == []
+        assert conversation_router._pending_interrupts["u:default"]["call_id"] == "call-1"
+
+    @pytest.mark.asyncio
+    async def test_reject_rejects_mismatched_call_id(self):
+        from fastapi import HTTPException
+
+        from src.http.routers import conversation as conversation_router
+
+        conversation_router._pending_interrupts["u:default"] = {"tool": "time_get", "call_id": "call-1"}
+
+        with pytest.raises(HTTPException) as exc:
+            await conversation_router.reject_tool(
+                conversation_router.RejectRequest(user_id="u", call_id="stale")
+            )
+
+        assert exc.value.status_code == 409
+        assert conversation_router._pending_interrupts["u:default"]["call_id"] == "call-1"
+
+    @pytest.mark.asyncio
+    async def test_approve_stream_error_persists_collected_tool_result(self, monkeypatch):
+        from src.http.routers import conversation as conversation_router
+        from src.sdk.messages import StreamChunk
+
+        class FakeLoop:
+            def __init__(self):
+                self.approved = []
+
+            def approve_tool_call(self, tool_call):
+                self.approved.append(tool_call)
+
+        store = FakeConversation()
+        conversation_router._pending_interrupts["u:default"] = {"tool": "time_get", "call_id": "call-1"}
+
+        async def fake_get_sdk_loop(*args, **kwargs):
+            return FakeLoop()
+
+        async def fake_stream(**kwargs):
+            yield StreamChunk.tool_input_start("time_get", "call-1")
+            yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
+            yield StreamChunk.error("boom")
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "get_sdk_loop", fake_get_sdk_loop)
+        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
+
+        response = await conversation_router.approve_tool(
+            conversation_router.ApproveRequest(user_id="u", call_id="call-1")
+        )
+        async for _ in response.body_iterator:
+            pass
+
+        assert [(args, kwargs) for args, kwargs in store.messages if args[0] == "tool"] == [
+            (
+                ("tool", "noon"),
+                {
+                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1"},
+                    "session_id": "default",
+                },
+            )
+        ]
+
+    @pytest.mark.asyncio
+    async def test_approve_stream_cancel_persists_partial_state(self, monkeypatch):
+        from src.http.routers import conversation as conversation_router
+        from src.sdk.messages import StreamChunk
+
+        class FakeLoop:
+            def __init__(self):
+                self.approved = []
+
+            def approve_tool_call(self, tool_call):
+                self.approved.append(tool_call)
+
+        store = FakeConversation()
+        conversation_router._pending_interrupts["u:default"] = {
+            "tool": "time_get",
+            "call_id": "call-1",
+            "args": {},
+        }
+
+        async def fake_get_sdk_loop(*args, **kwargs):
+            return FakeLoop()
+
+        async def fake_stream(**kwargs):
+            yield StreamChunk.text_delta("partial")
+            yield StreamChunk.reasoning_delta("thinking")
+            yield StreamChunk.tool_input_start("time_get", "call-1")
+            yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
+            conversation_router._cancel_flags["u:default"] = True
+            yield StreamChunk.text_delta("ignored")
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "get_sdk_loop", fake_get_sdk_loop)
+        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
+
+        response = await conversation_router.approve_tool(
+            conversation_router.ApproveRequest(user_id="u", call_id="call-1")
+        )
+        async for _ in response.body_iterator:
+            pass
+
+        assert [(args, kwargs) for args, kwargs in store.messages if args[0] != "user"] == [
+            (
+                ("tool", "noon"),
+                {
+                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1"},
+                    "session_id": "default",
+                },
+            ),
+            (("reasoning", "thinking"), {"metadata": {}, "session_id": "default"}),
+            (("assistant", "partial"), {"metadata": {"stream": True}, "session_id": "default"}),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_approve_stream_disconnect_persists_partial_state(self, monkeypatch):
+        from src.http.routers import conversation as conversation_router
+        from src.sdk.messages import StreamChunk
+
+        class FakeLoop:
+            def approve_tool_call(self, tool_call):
+                pass
+
+        store = FakeConversation()
+        conversation_router._pending_interrupts["u:default"] = {
+            "tool": "time_get",
+            "call_id": "call-1",
+            "args": {},
+        }
+
+        async def fake_get_sdk_loop(*args, **kwargs):
+            return FakeLoop()
+
+        async def fake_stream(**kwargs):
+            yield StreamChunk.text_delta("partial")
+            yield StreamChunk.reasoning_delta("thinking")
+            yield StreamChunk.tool_input_start("time_get", "call-1")
+            yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
+            yield StreamChunk.text_delta("more")
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "get_sdk_loop", fake_get_sdk_loop)
+        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
+
+        response = await conversation_router.approve_tool(
+            conversation_router.ApproveRequest(user_id="u", call_id="call-1")
+        )
+        iterator = response.body_iterator.__aiter__()
+        async for chunk in iterator:
+            if '"result": "noon"' in chunk:
+                await iterator.aclose()
+                break
+
+        assert [(args, kwargs) for args, kwargs in store.messages if args[0] != "user"] == [
+            (
+                ("tool", "noon"),
+                {
+                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1"},
+                    "session_id": "default",
+                },
+            ),
+            (("reasoning", "thinking"), {"metadata": {}, "session_id": "default"}),
+            (("assistant", "partial"), {"metadata": {"stream": True}, "session_id": "default"}),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_stream_disconnect_after_normal_persist_does_not_duplicate_messages(self, monkeypatch):
+        from src.http.models import MessageRequest
+        from src.http.routers import conversation as conversation_router
+        from src.sdk.messages import StreamChunk
+
+        store = FakeConversation()
+
+        async def fake_stream(**kwargs):
+            yield StreamChunk.text_delta("```html:canvas\n<div>hi</div>\n```\nDone")
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
+
+        response = await conversation_router.message_stream(MessageRequest(message="go", user_id="u"))
+        iterator = response.body_iterator.__aiter__()
+        async for chunk in iterator:
+            if "canvas_update" in chunk:
+                await iterator.aclose()
+                break
+
+        assistant_messages = [args for args, _ in store.messages if args[0] == "assistant"]
+        assert len(assistant_messages) == 1
+
+    @pytest.mark.asyncio
+    async def test_reject_uses_default_session_key_when_session_absent(self):
+        from src.http.routers import conversation as conversation_router
+
+        conversation_router._pending_interrupts["u:default"] = {"tool": "files_delete"}
+
+        result = await conversation_router.reject_tool(
+            conversation_router.RejectRequest(user_id="u", call_id="call-1")
+        )
+
+        assert result == {"status": "rejected", "tool": "files_delete"}
+
+    @pytest.mark.asyncio
+    async def test_non_verbose_message_passes_session_id_to_runner(self, monkeypatch):
+        from src.http.models import MessageRequest
+        from src.http.routers import conversation as conversation_router
+
+        captured = {}
+
+        class FakeConversation:
+            def add_message(self, *args, **kwargs):
+                return "msg-1"
+
+            def get_messages_by_session_id(self, *args, **kwargs):
+                return []
+
+        async def fake_run_sdk_agent(**kwargs):
+            captured.update(kwargs)
+            return []
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda user_id: FakeConversation())
+        monkeypatch.setattr(conversation_router, "run_sdk_agent", fake_run_sdk_agent)
+
+        await conversation_router.handle_message(
+            MessageRequest(message="hello", user_id="test_user", session_id="chat-1"),
+            None,
+        )
+
+        assert captured["session_id"] == "chat-1"
+
 
 class TestGetConversation:
     """Tests for GET /conversation."""
@@ -29,12 +754,17 @@ class TestGetConversation:
             assert "content" in msg
             assert msg["role"] in ("user", "assistant", "tool", "summary")
 
-    def test_get_conversation_filters_workspace_before_limit(self, client, test_user_id):
+    def test_get_conversation_ignores_workspace_id_compatibility(self, client, test_user_id):
         from src.storage.messages import get_message_store
 
         test_store = get_message_store(test_user_id, "test")
         test_store.clear()
-        test_store.add_message("user", "test workspace message", metadata={"workspace_id": "test"})
+        test_store.add_message(
+            "user",
+            "test workspace message",
+            metadata={"workspace_id": "test"},
+            session_id="default",
+        )
 
         r = client.get(
             "/conversation",

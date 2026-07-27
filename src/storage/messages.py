@@ -18,6 +18,8 @@ from coremem.types import SearchResult as _CoreMemResult
 
 from src.storage.paths import get_paths
 
+USER_LEVEL_CONTEXT = "user"
+
 
 @dataclass
 class Message:
@@ -52,15 +54,14 @@ class MessageStore:
 
     def __init__(self, user_id: str, base_dir: Path | str | None = None, workspace_id: str = "personal"):
         self.user_id = user_id
-        self.workspace_id = workspace_id
+        self.workspace_id = USER_LEVEL_CONTEXT
+        root_path: Path | None = None
         if base_dir is not None:
             base_path = Path(base_dir)
         else:
             paths = get_paths(user_id, workspace_id=workspace_id)
-            if workspace_id == "personal":
-                base_path = paths.conversation_dir()
-            else:
-                base_path = paths.workspace_conversation_path().parent
+            base_path = paths.conversation_dir()
+            root_path = paths.root
         base_path.mkdir(parents=True, exist_ok=True)
 
         # Migrate id column BEFORE MemoryCore initializes HybridDB+FTS triggers
@@ -73,8 +74,11 @@ class MessageStore:
             path=str(base_path),
             enable_observations=True,
             enable_reflections=True,
-            observation_kwargs={"session_id": workspace_id},
+            observation_kwargs={"session_id": USER_LEVEL_CONTEXT},
         )
+
+        if root_path is not None:
+            self._migrate_workspace_conversations(user_id, root_path, base_path)
 
         try:
             with self._core.db._connect() as cur:
@@ -236,6 +240,119 @@ class MessageStore:
 
         sentinel.touch()
 
+    @staticmethod
+    def _migrate_workspace_conversations(user_id: str, root_path: Path, base_path: Path) -> None:
+        """Import legacy per-workspace conversation DBs into the user-level DB.
+
+        Old runtime storage used Workspaces/{workspace_id}/conversation.app.db.
+        The user-level store now owns Conversation/app.db; repeated startup is
+        safe because imported message ids are stable and source-prefixed.
+        """
+        workspaces_dir = root_path / "Workspaces"
+        if not workspaces_dir.exists():
+            return
+
+        target_db = base_path / "app.db"
+        if not target_db.exists():
+            return
+
+        legacy_dbs = sorted(workspaces_dir.glob("*/conversation.app.db"))
+        for legacy_db in legacy_dbs:
+            try:
+                MessageStore._import_workspace_conversation_db(
+                    user_id=user_id,
+                    workspace_id=legacy_db.parent.name,
+                    source_db=legacy_db,
+                    target_db=target_db,
+                )
+            except Exception:
+                pass
+
+    @staticmethod
+    def _import_workspace_conversation_db(
+        user_id: str, workspace_id: str, source_db: Path, target_db: Path
+    ) -> None:
+        src = sqlite3.connect(str(source_db))
+        dst = sqlite3.connect(str(target_db))
+        try:
+            tables = [
+                r[0]
+                for r in src.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            ]
+            if "messages" not in tables:
+                return
+
+            source_columns = {
+                row[1] for row in src.execute("PRAGMA table_info('messages')").fetchall()
+            }
+            if not {"id", "ts", "role"}.issubset(source_columns):
+                return
+
+            select_columns = [
+                "id",
+                "ts",
+                "role",
+                "content" if "content" in source_columns else "'' AS content",
+                "metadata" if "metadata" in source_columns else "'{}' AS metadata",
+                "session_id" if "session_id" in source_columns else "'' AS session_id",
+                "user_id" if "user_id" in source_columns else "'' AS user_id",
+                "agent_id" if "agent_id" in source_columns else "'' AS agent_id",
+            ]
+            rows = src.execute(f"SELECT {', '.join(select_columns)} FROM messages").fetchall()
+            for msg_id, ts, role, content, metadata, session_id, row_user_id, agent_id in rows:
+                row_user_id = row_user_id or ""
+                if row_user_id:
+                    if row_user_id != user_id:
+                        continue
+                elif user_id != "default_user":
+                    continue
+                old_id = str(msg_id)
+                old_session_id = session_id or "default"
+                imported_id = f"legacyws:{workspace_id}:{old_id}"
+                imported_session_id = f"legacy-{workspace_id}-{old_session_id}"
+                imported_metadata = MessageStore._legacy_import_metadata(
+                    metadata=metadata,
+                    workspace_id=workspace_id,
+                    legacy_id=old_id,
+                    legacy_session_id=old_session_id,
+                )
+                dst.execute(
+                    "INSERT OR IGNORE INTO messages "
+                    "(id, ts, role, content, metadata, session_id, user_id, agent_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        imported_id,
+                        ts,
+                        role,
+                        content or "",
+                        imported_metadata,
+                        imported_session_id,
+                        row_user_id or user_id,
+                        agent_id or "",
+                    ),
+                )
+            dst.commit()
+        finally:
+            src.close()
+            dst.close()
+
+    @staticmethod
+    def _legacy_import_metadata(
+        metadata: str | None, workspace_id: str, legacy_id: str, legacy_session_id: str
+    ) -> str:
+        try:
+            parsed = json.loads(metadata) if metadata else {}
+            if not isinstance(parsed, dict):
+                parsed = {"legacy_metadata": parsed}
+        except (json.JSONDecodeError, TypeError):
+            parsed = {"legacy_metadata": metadata}
+        parsed["legacy_id"] = legacy_id
+        parsed["source_id"] = legacy_id
+        parsed["legacy_workspace_id"] = workspace_id
+        parsed["legacy_session_id"] = legacy_session_id
+        parsed["legacy_source"] = "workspace_conversation"
+        return json.dumps(parsed)
+
     def add_message(
         self, role: str, content: str, metadata: dict[str, Any] | None = None, session_id: str | None = None
     ) -> str:
@@ -364,7 +481,7 @@ class MessageStore:
     def get_recent_messages_for_workspace(
         self, workspace_id: str = "personal", count: int = 100
     ) -> list[Message]:
-        memories = self._core.fetch(limit=count, metadata={"workspace_id": workspace_id})
+        memories = self._core.fetch(limit=count)
         return [self._to_msg(m) for m in reversed(memories)]
 
     def get_messages_with_summary(self, limit: int = 50, workspace_id: str | None = None) -> list[Message]:
@@ -372,9 +489,9 @@ class MessageStore:
             return []
         summaries = self._core.fetch(limit=1, role="summary")
         if not summaries:
-            memories = self._core.fetch(limit=limit, metadata={"workspace_id": workspace_id}) if workspace_id else self._core.fetch(limit=limit)
+            memories = self._core.fetch(limit=limit)
             return [self._to_msg(m) for m in reversed(memories)]
-        non_summaries = self._core.fetch(limit=limit, metadata={"workspace_id": workspace_id}) if workspace_id else self._core.fetch(limit=limit)
+        non_summaries = self._core.fetch(limit=limit)
         non_summaries = [m for m in non_summaries if m.role != "summary"]
         result: list[Message] = [self._to_msg(summaries[0])]
         result += [self._to_msg(m) for m in non_summaries]
@@ -466,7 +583,7 @@ _stores: dict[str, MessageStore] = {}
 
 
 def get_message_store(user_id: str = "default_user", workspace_id: str = "personal") -> MessageStore:
-    key = f"{user_id}:{workspace_id}:msgstore"
+    key = f"{user_id}:msgstore"
     if key not in _stores:
         _stores[key] = MessageStore(user_id, workspace_id=workspace_id)
     return _stores[key]
@@ -474,5 +591,5 @@ def get_message_store(user_id: str = "default_user", workspace_id: str = "person
 
 def clear_message_store(user_id: str, workspace_id: str) -> None:
     """Evict a MessageStore from the cache (e.g. after workspace deletion)."""
-    key = f"{user_id}:{workspace_id}:msgstore"
+    key = f"{user_id}:msgstore"
     _stores.pop(key, None)

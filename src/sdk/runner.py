@@ -25,6 +25,7 @@ from typing import Any, cast
 
 from src.app_logging import get_logger
 from src.config import get_settings
+from src.sdk.capabilities import load_user_capabilities, resource_enabled
 from src.sdk.loop import AgentLoop
 from src.sdk.messages import Message, StreamChunk
 from src.sdk.middleware_summarization import SummarizationMiddleware
@@ -43,16 +44,36 @@ _loop_lock = asyncio.Lock()
 _user_loops: dict[str, AgentLoop] = {}
 
 
-def register_user_loop(user_id: str, loop: AgentLoop) -> None:
-    _user_loops[user_id] = loop
+def _active_loop_key(user_id: str, session_id: str | None = None) -> str:
+    return f"{user_id}:session:{session_id or 'default'}"
 
 
-def unregister_user_loop(user_id: str) -> None:
-    _user_loops.pop(user_id, None)
+def register_user_loop(user_id: str, loop: AgentLoop, session_id: str | None = None) -> None:
+    _user_loops[_active_loop_key(user_id, session_id)] = loop
 
 
-def get_user_loop(user_id: str) -> AgentLoop | None:
-    return _user_loops.get(user_id)
+def unregister_user_loop(
+    user_id: str, loop: AgentLoop | None = None, session_id: str | None = None
+) -> None:
+    key = _active_loop_key(user_id, session_id)
+    if loop is not None and _user_loops.get(key) is not loop:
+        return
+    _user_loops.pop(key, None)
+
+
+def get_user_loop(user_id: str, session_id: str | None = None) -> AgentLoop | None:
+    if session_id is not None:
+        return _user_loops.get(_active_loop_key(user_id, session_id))
+    default_loop = _user_loops.get(_active_loop_key(user_id))
+    if default_loop is not None:
+        return default_loop
+    prefix = f"{user_id}:session:"
+    matches = [loop for key, loop in _user_loops.items() if key.startswith(prefix)]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        return None
+    return None
 
 
 def _loop_cache_key(
@@ -62,9 +83,8 @@ def _loop_cache_key(
     provider_keys: dict[str, str] | None = None,
     session_id: str | None = None,
 ) -> str:
-    key = f"{user_id}:{workspace_id}:{model or 'default'}"
-    if session_id:
-        key = f"{key}:session:{session_id}"
+    del workspace_id  # Compatibility-only; loop state is bounded by user session.
+    key = f"{user_id}:model:{model or 'default'}:session:{session_id or 'default'}"
     if provider_keys:
         encoded = json.dumps(provider_keys, sort_keys=True, separators=(",", ":"))
         key_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
@@ -115,12 +135,11 @@ def _ensure_prompt_seeded(user_id: str) -> None:
 
 
 def _get_system_prompt(user_id: str, workspace_id: str | None = None) -> str:
-    w_id = workspace_id or "personal"
+    del workspace_id
 
     _ensure_prompt_seeded(user_id)
     user_prompt_context = _get_user_prompt_context(user_id)
-    skills_context = _get_skills_context(user_id, w_id)
-    workspace_context = _get_workspace_context(workspace_id)
+    skills_context = _get_skills_context(user_id)
     connector_context = _get_connector_context(user_id)
 
     memory_context = """\
@@ -137,7 +156,6 @@ Rule: When the user asks about past conversations, search first — don't answer
     sections = [
         user_prompt_context,
         skills_context,
-        workspace_context,
         connector_context,
         memory_context,
     ]
@@ -166,6 +184,23 @@ def _get_workspace_context(workspace_id: str | None) -> str:
 SKILL_DESC_BUDGET = 1536
 
 
+def _load_user_capabilities(user_id: str) -> dict[str, Any]:
+    try:
+        return load_user_capabilities(user_id)
+    except Exception:
+        return {"tools": {}, "skills": {}, "subagents": {}}
+
+
+def _resource_enabled(caps: dict[str, Any], section: str, name: str) -> bool:
+    return resource_enabled(caps, section, name)
+
+
+def _tool_name(tool_def: Any) -> str:
+    if isinstance(tool_def, dict):
+        return str(tool_def.get("name", ""))
+    return str(getattr(tool_def, "name", ""))
+
+
 def _get_skills_context(user_id: str, workspace_id: str = "personal") -> str:
     """Build a concise skills reference for the system prompt.
 
@@ -175,29 +210,21 @@ def _get_skills_context(user_id: str, workspace_id: str = "personal") -> str:
     try:
         from src.skills.registry import get_skill_registry
 
-        registry = get_skill_registry(user_id=user_id, workspace_id=workspace_id)
+        registry = get_skill_registry(user_id=user_id)
         skills = registry.get_all_skills()
         if not skills:
             return ""
 
-        # Filter by item_scopes (All / Selected / None)
-        from src.sdk.item_scopes import ItemScopeDB
         from src.storage.paths import get_paths as _get_paths
 
         paths = _get_paths(user_id, workspace_id=workspace_id)
-        scope_db = ItemScopeDB(paths.base)
-        excluded = scope_db.get_excluded_names(user_id, "skill")
-
-        skills = [
-            s for s in skills
-            if s.get("name") not in excluded
-        ]
-
+        caps = _load_user_capabilities(user_id)
         visible_skills = [
             s
             for s in skills
             if str(s.get("metadata", {}).get("disable_model_invocation", "")).lower()
             not in ("true", "1", "yes")
+            and _resource_enabled(caps, "skills", s.get("name", ""))
         ]
         if not visible_skills:
             return ""
@@ -277,34 +304,24 @@ async def create_sdk_loop(user_id: str, workspace_id: str = "personal", model: s
     """Create an AgentLoop for a user with all wiring."""
     import time
 
+    del workspace_id
+    runtime_workspace_id = "personal"
     _seed_default_workspace()
     t0 = time.monotonic()
     settings = get_settings()
-    model_str: str = cast(str, model or getattr(settings.agent, "model", "ollama:minimax-m2.5"))
 
-    provider = create_model_from_config(model_str, provider_keys=provider_keys)
+    provider = create_model_from_config(model, provider_keys=provider_keys, user_id=user_id)
+    model_str: str = cast(
+        str,
+        getattr(provider, "model", None)
+        or model
+        or getattr(settings.agent, "model", "ollama:minimax-m2.5"),
+    )
     t1 = time.monotonic()
 
-    tools = get_native_tools()
+    caps = _load_user_capabilities(user_id)
+    tools = [td for td in get_native_tools() if _resource_enabled(caps, "tools", td.name)]
 
-    # Filter tools by per-workspace scope via item_scopes table
-    from src.sdk.item_scopes import ItemScopeDB
-    from src.storage.paths import get_paths as _get_paths
-
-    paths = _get_paths(user_id, workspace_id=workspace_id)
-    scope_db = ItemScopeDB(paths.base)
-    excluded = scope_db.get_excluded_names(user_id, "tool")
-    scoped_available = scope_db.get_available_names(user_id, "tool", workspace_id)
-
-    def _tool_available_by_default(t: Any) -> bool:
-        return True  # scope=all for unconfigured tools
-
-    tools = [
-        t for t in tools
-        if t.name not in excluded and (
-            t.name in scoped_available or _tool_available_by_default(t)
-        )
-    ]
     t2 = time.monotonic()
 
     mcp_tools: list[Any] = []
@@ -315,7 +332,11 @@ async def create_sdk_loop(user_id: str, workspace_id: str = "personal", model: s
         mcp_bridge = MCPToolBridge(user_id=user_id)
         mcp_count = await mcp_bridge.discover()
         if mcp_count > 0:
-            mcp_tools = mcp_bridge.get_tool_definitions()
+            mcp_tools = [
+                td
+                for td in mcp_bridge.get_tool_definitions()
+                if _resource_enabled(caps, "tools", td.name)
+            ]
             logger.info("sdk_runner.mcp_tools", {"count": mcp_count}, user_id=user_id)
     except Exception as e:
         logger.warning("sdk_runner.mcp_failed", {"error": str(e)}, user_id=user_id)
@@ -327,7 +348,11 @@ async def create_sdk_loop(user_id: str, workspace_id: str = "personal", model: s
 
         connectkit_bridge = ConnectKitBridge(user_id=user_id)
         await connectkit_bridge.discover()
-        connector_tools = connectkit_bridge.get_tool_definitions()
+        connector_tools = [
+            td
+            for td in connectkit_bridge.get_tool_definitions()
+            if _resource_enabled(caps, "tools", _tool_name(td))
+        ]
         if connector_tools:
             logger.info(
                 "sdk_runner.connector_tools",
@@ -339,7 +364,9 @@ async def create_sdk_loop(user_id: str, workspace_id: str = "personal", model: s
             "sdk_runner.connector_failed", {"error": str(e)}, user_id=user_id
         )
 
-    connectkit_tool_defs = _connector_dicts_to_defs(connector_tools)
+    connectkit_tool_defs = [
+        td for td in _connector_dicts_to_defs(connector_tools) if _resource_enabled(caps, "tools", td.name)
+    ]
     all_tools = tools + mcp_tools + connectkit_tool_defs
     t3 = time.monotonic()
 
@@ -359,20 +386,26 @@ async def create_sdk_loop(user_id: str, workspace_id: str = "personal", model: s
         if is_core_tool(td.name) or td.name in CORE_TOOL_NAMES:
             core_tool_defs.append(td)
 
-    # Always include tool_search and tool_reload
-    core_tool_defs.append(tool_search)
-    core_tool_defs.append(tool_reload)
+    if _resource_enabled(caps, "tools", tool_search.name):
+        core_tool_defs.append(tool_search)
+    if _resource_enabled(caps, "tools", tool_reload.name):
+        core_tool_defs.append(tool_reload)
 
-    paths = _get_paths(user_id, workspace_id=workspace_id)
+    from src.storage.paths import get_paths as _get_paths
+
+    paths = _get_paths(user_id, workspace_id=runtime_workspace_id)
     user_tools_dir = paths.user_tools_dir()
-    workspace_tools_dir = paths.workspace_tools_dir() if workspace_id else None
+    workspace_tools_dir = None
     mcp_config = paths.user_mcp_config()
 
     idx = get_or_create_index(
         user_tools_dir, workspace_tools_dir, mcp_config,
-        user_id=user_id, workspace_id=workspace_id,
+        user_id=user_id, workspace_id=runtime_workspace_id,
         connectkit_bridge=connectkit_bridge,
     )
+
+    if hasattr(idx, "clear"):
+        idx.clear()
 
     if idx.count() == 0:
         # Index native tools
@@ -381,9 +414,9 @@ async def create_sdk_loop(user_id: str, workspace_id: str = "personal", model: s
                 idx.index_tool(td, tool_type="native", namespace="native")
 
         # Index custom (TOOL.md) tools
-        from src.sdk.tools_custom import find_tool_file, get_custom_tools, load_tool_meta
-        for td in get_custom_tools(user_id=user_id, workspace_id=workspace_id):
-            if not is_core_tool(td.name):
+        from src.sdk.tools_custom import find_tool_file, load_tool_meta, scan_tools_dir
+        for td in scan_tools_dir(user_tools_dir):
+            if not is_core_tool(td.name) and _resource_enabled(caps, "tools", td.name):
                 tool_file = find_tool_file(td.name, user_tools_dir, workspace_tools_dir)
                 reconstruct_data = {"command": "", "install": [], "tool_dir": ""}
                 if tool_file:
@@ -423,7 +456,7 @@ async def create_sdk_loop(user_id: str, workspace_id: str = "personal", model: s
 
         async def _persist_summary(content: str) -> None:
             try:
-                store = get_message_store(user_id, workspace_id)
+                store = get_message_store(user_id)
                 store.add_summary_message(content)
                 logger.info(
                     "summarization.persisted",
@@ -451,10 +484,10 @@ async def create_sdk_loop(user_id: str, workspace_id: str = "personal", model: s
     loop = AgentLoop(
         provider=provider,
         tools=core_tool_defs,
-        system_prompt=_get_system_prompt(user_id, workspace_id),
+        system_prompt=_get_system_prompt(user_id),
         middlewares=middlewares,
         user_id=user_id,
-        workspace_id=workspace_id,
+        workspace_id=runtime_workspace_id,
     )
 
     loop._tool_index = idx
@@ -581,14 +614,17 @@ def _messages_from_conversation(messages: list[Any]) -> list[Message]:
             pending_reasoning = None
             last_assistant_had_tool_calls = False
         elif role == "tool":
-            if not last_assistant_had_tool_calls:
-                # Skip orphan tool result — no preceding tool_calls to attach to
-                continue
             meta = getattr(m, "metadata", {}) or {}
             tool_name = meta.get("tool_name") or meta.get("tool") or "unknown"
             tool_call_id = meta.get("tool_call_id") or meta.get("call_id") or ""
-            sdk_messages.append(Message.tool_result(tool_call_id, content=str(content or ""), name=tool_name))
+            if last_assistant_had_tool_calls:
+                sdk_messages.append(
+                    Message.tool_result(tool_call_id, content=str(content or ""), name=tool_name)
+                )
+            else:
+                sdk_messages.append(Message.user(f"[TOOL RESULT: {tool_name}]\n{content}"))
             pending_reasoning = None
+            last_assistant_had_tool_calls = False
         elif role == "reasoning":
             pending_reasoning = content or None
         else:
@@ -622,12 +658,12 @@ async def run_sdk_agent(
         Final message list from the agent.
     """
     loop = await get_sdk_loop(user_id, workspace_id, model=model, provider_keys=provider_keys, session_id=session_id)
-    register_user_loop(user_id, loop)
+    register_user_loop(user_id, loop, session_id=session_id)
     try:
         result = await loop.run(messages)
         return result
     finally:
-        unregister_user_loop(user_id)
+        unregister_user_loop(user_id, loop, session_id=session_id)
 
 
 async def run_sdk_agent_stream(
@@ -641,7 +677,7 @@ async def run_sdk_agent_stream(
 ) -> Any:
     loop = await get_sdk_loop(user_id, workspace_id, model=model, provider_keys=provider_keys, session_id=session_id)
     loop.cancel_event = cancel_event
-    register_user_loop(user_id, loop)
+    register_user_loop(user_id, loop, session_id=session_id)
 
     try:
         async for chunk in loop.run_stream(messages):
@@ -650,37 +686,58 @@ async def run_sdk_agent_stream(
         logger.error("sdk_runner.stream_error", {"error": str(e)}, user_id=user_id)
         yield StreamChunk.error(message=str(e))
     finally:
-        unregister_user_loop(user_id)
+        unregister_user_loop(user_id, loop, session_id=session_id)
 
 
 def reset_sdk_loop(
     user_id: str = "default_user",
     workspace_id: str = "personal",
     session_id: str | None = None,
-) -> None:
-    """Reset the SDK agent loop for a user+workspace (and optionally a specific session).
+) -> int:
+    """Reset cached SDK agent loops for a user and optionally a specific session.
 
-    When session_id is given, only that session's cached loop is removed — other
-    concurrently running sessions for the same user are left untouched.
+    workspace_id is compatibility-only. When session_id is given, only that
+    session's cached loops are removed; when omitted, all cached loops for the
+    user are removed.
     """
+    del workspace_id
+    removed = 0
+    cache_prefix = f"{user_id}:"
     if session_id:
-        cache_key = _loop_cache_key(user_id, workspace_id, model=None, session_id=session_id)
-        _loop_cache.pop(cache_key, None)
+        for cache_key in list(_loop_cache):
+            if not cache_key.startswith(cache_prefix) or ":session:" not in cache_key:
+                continue
+            key_session = cache_key.split(":session:", 1)[1].split(":keys:", 1)[0]
+            if key_session == session_id:
+                del _loop_cache[cache_key]
+                removed += 1
     else:
-        cache_prefix = f"{user_id}:{workspace_id}:"
         for cache_key in list(_loop_cache):
             if cache_key.startswith(cache_prefix):
                 del _loop_cache[cache_key]
-    logger.info("sdk_runner.loop_reset", {"user_id": user_id, "workspace_id": workspace_id, "session_id": session_id}, user_id=user_id)
+                removed += 1
+    logger.info(
+        "sdk_runner.loop_reset",
+        {"user_id": user_id, "session_id": session_id, "removed": removed},
+        user_id=user_id,
+    )
+    return removed
 
 
-def reset_user_sdk_loops(user_id: str) -> None:
-    """Reset all cached SDK agent loops for a user across workspaces."""
+def reset_user_sdk_loops(user_id: str, reason: str | None = None) -> int:
+    """Reset all cached SDK agent loops for a user."""
+    removed = 0
     cache_prefix = f"{user_id}:"
     for cache_key in list(_loop_cache):
         if cache_key.startswith(cache_prefix):
             del _loop_cache[cache_key]
-    logger.info("sdk_runner.user_loops_reset", {"user_id": user_id}, user_id=user_id)
+            removed += 1
+    logger.info(
+        "sdk_runner.user_loops_reset",
+        {"user_id": user_id, "reason": reason, "removed": removed},
+        user_id=user_id,
+    )
+    return removed
 
 
 def reset_all_sdk_loops() -> None:

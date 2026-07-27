@@ -397,7 +397,7 @@ class TestWorkQueueDB:
         assert running[0]["id"] == t1
 
     @pytest.mark.asyncio
-    async def test_get_task_is_scoped_to_user_and_workspace(self, mock_paths, profile):
+    async def test_get_task_is_user_level_across_workspace_ids(self, mock_paths, profile):
         from src.sdk.work_queue import WorkQueueDB
 
         db = WorkQueueDB("test_user", workspace_id="personal")
@@ -407,7 +407,7 @@ class TestWorkQueueDB:
             task_id = await db.insert_task("test_agent", "task", profile)
 
             assert await db.get_task(task_id) is not None
-            assert await other_workspace.get_task(task_id) is None
+            assert await other_workspace.get_task(task_id) is not None
             assert await other_user.get_task(task_id) is None
         finally:
             await db.close()
@@ -415,7 +415,7 @@ class TestWorkQueueDB:
             await other_user.close()
 
     @pytest.mark.asyncio
-    async def test_check_progress_is_scoped_to_user_and_workspace(self, mock_paths, profile):
+    async def test_check_progress_is_user_level_across_workspace_ids(self, mock_paths, profile):
         from src.sdk.subagent_models import TaskStatus
         from src.sdk.work_queue import WorkQueueDB
 
@@ -441,14 +441,120 @@ class TestWorkQueueDB:
                 parent_id="shared", status=TaskStatus.RUNNING
             )
 
-            assert {t["id"] for t in all_tasks} == {own_id}
-            assert {t["id"] for t in parent_tasks} == {own_id}
-            assert {t["id"] for t in status_tasks} == {own_id}
-            assert {t["id"] for t in parent_status_tasks} == {own_id}
+            assert {t["id"] for t in all_tasks} == {own_id, other_workspace_id}
+            assert {t["id"] for t in parent_tasks} == {own_id, other_workspace_id}
+            assert {t["id"] for t in status_tasks} == {own_id, other_workspace_id}
+            assert {t["id"] for t in parent_status_tasks} == {own_id, other_workspace_id}
         finally:
             await db.close()
             await other_workspace.close()
             await other_user.close()
+
+    @pytest.mark.asyncio
+    async def test_legacy_workspace_rows_are_visible_to_user_level_reads(self, mock_paths, profile):
+        from src.sdk.subagent_models import TaskStatus
+        from src.sdk.work_queue import WorkQueueDB
+
+        db = WorkQueueDB("test_user", workspace_id="user")
+        other_user = WorkQueueDB("other_user", workspace_id="user")
+        try:
+            conn = await db._get_db()
+            await conn.execute(
+                """INSERT INTO work_queue
+                (id, user_id, workspace_id, agent_name, task, status, progress, config,
+                 instructions, cancel_requested, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "legacy-personal",
+                    "test_user",
+                    "personal",
+                    "test_agent",
+                    "legacy personal task",
+                    TaskStatus.RUNNING.value,
+                    "{}",
+                    profile.model_dump_json(),
+                    "[]",
+                    0,
+                    "2026-01-01T00:00:00Z",
+                    "2026-01-01T00:00:00Z",
+                ),
+            )
+            await conn.execute(
+                """INSERT INTO work_queue
+                (id, user_id, workspace_id, agent_name, task, status, progress, config,
+                 instructions, cancel_requested, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "legacy-project",
+                    "test_user",
+                    "project-x",
+                    "test_agent",
+                    "legacy project task",
+                    TaskStatus.PENDING.value,
+                    "{}",
+                    profile.model_dump_json(),
+                    "[]",
+                    0,
+                    "2026-01-01T00:00:01Z",
+                    "2026-01-01T00:00:01Z",
+                ),
+            )
+            await conn.commit()
+
+            assert await db.get_task("legacy-personal") is not None
+            assert await other_user.get_task("legacy-personal") is None
+            assert {task["id"] for task in await db.check_progress()} >= {
+                "legacy-personal",
+                "legacy-project",
+            }
+            assert {task["id"] for task in await db.check_progress(status=TaskStatus.RUNNING)} == {
+                "legacy-personal"
+            }
+        finally:
+            await db.close()
+            await other_user.close()
+
+    @pytest.mark.asyncio
+    async def test_legacy_workspace_rows_are_cancelled_by_user_level_agent_cancel(
+        self, mock_paths, profile
+    ):
+        from src.sdk.subagent_models import TaskStatus
+        from src.sdk.work_queue import WorkQueueDB
+
+        db = WorkQueueDB("test_user", workspace_id="user")
+        try:
+            conn = await db._get_db()
+            for task_id, workspace_id, status in [
+                ("legacy-pending", "personal", TaskStatus.PENDING.value),
+                ("legacy-running", "project-x", TaskStatus.RUNNING.value),
+            ]:
+                await conn.execute(
+                    """INSERT INTO work_queue
+                    (id, user_id, workspace_id, agent_name, task, status, progress, config,
+                     instructions, cancel_requested, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        task_id,
+                        "test_user",
+                        workspace_id,
+                        "test_agent",
+                        "legacy task",
+                        status,
+                        "{}",
+                        profile.model_dump_json(),
+                        "[]",
+                        0,
+                        "2026-01-01T00:00:00Z",
+                        "2026-01-01T00:00:00Z",
+                    ),
+                )
+            await conn.commit()
+
+            assert await db.request_cancel_active_tasks_for_agent("test_agent") == 2
+            assert (await db.get_task("legacy-pending"))["status"] == TaskStatus.CANCELLED.value
+            assert (await db.get_task("legacy-running"))["status"] == TaskStatus.CANCELLING.value
+        finally:
+            await db.close()
 
     @pytest.mark.asyncio
     async def test_get_result(self, db, profile):
@@ -695,6 +801,36 @@ class TestSubagentCoordinator:
         assert "message_search" in names
         assert "skill_delete" not in names
 
+    def test_build_tools_filters_user_disabled_tools(self, mock_paths, monkeypatch):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import _build_tools_for_subagent
+
+        class FakeTool:
+            def __init__(self, name: str):
+                self.name = name
+
+        (mock_paths.root / "capabilities.yaml").write_text(
+            "tools:\n  time_get: false\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "src.sdk.capabilities.user_capabilities_root", lambda user_id: mock_paths.root
+        )
+        tools = [FakeTool("time_get"), FakeTool("message_search")]
+
+        with patch("src.sdk.native_tools.get_native_tools", return_value=tools):
+            names = {
+                tool.name
+                for tool in _build_tools_for_subagent(
+                    AgentProfile(name="a", tools=["time_get", "message_search"]),
+                    user_id="test_user",
+                )
+            }
+
+        assert "time_get" not in names
+        assert "message_search" in names
+
     def test_validate_agent_def_rejects_denied_memory_tool(self):
         from agentprofile.models import AgentProfile
 
@@ -763,7 +899,7 @@ class TestSubagentCoordinator:
         assert "SECRET FULL SKILL CONTENT" not in prompt
 
     @pytest.mark.asyncio
-    async def test_run_loop_passes_provider_options_and_workspace_to_agent_loop(self, mock_paths):
+    async def test_run_loop_passes_provider_options_and_user_workspace_to_agent_loop(self, mock_paths):
         from agentprofile.models import AgentProfile
 
         from src.sdk.coordinator import SubagentCoordinator
@@ -771,6 +907,7 @@ class TestSubagentCoordinator:
 
         captured_run_config = None
         captured_workspace_id = None
+        captured_provider_args = None
 
         class FakeAgentLoop:
             def __init__(self, **kwargs):
@@ -785,7 +922,12 @@ class TestSubagentCoordinator:
         profile = AgentProfile(name="researcher", provider_options=provider_options)
         coord = SubagentCoordinator("test_user", workspace_id="sales")
 
-        with patch("src.sdk.providers.factory.create_model_from_config", return_value=object()):
+        def fake_create_model_from_config(*args, **kwargs):
+            nonlocal captured_provider_args
+            captured_provider_args = (args, kwargs)
+            return object()
+
+        with patch("src.sdk.providers.factory.create_model_from_config", fake_create_model_from_config):
             with patch("src.sdk.coordinator._build_tools_for_subagent", return_value=[]):
                 with patch("src.sdk.coordinator._build_system_prompt", return_value="system"):
                     with patch("src.sdk.loop.AgentLoop", FakeAgentLoop):
@@ -793,7 +935,9 @@ class TestSubagentCoordinator:
 
         assert captured_run_config is not None
         assert captured_run_config.provider_options == provider_options
-        assert captured_workspace_id == "sales"
+        assert captured_workspace_id == "user"
+        assert captured_provider_args is not None
+        assert captured_provider_args[1] == {"user_id": "test_user"}
 
     @pytest.mark.asyncio
     async def test_start_returns_before_runner_finishes(self, mock_paths, profile, monkeypatch):
@@ -1014,11 +1158,27 @@ class TestSubagentCoordinator:
         profile = AgentProfile(name="writer", description="Report writer", tools=["time_get"])
         await coord.create(profile)
 
-        profile_path = mock_paths.workspace_subagents_dir() / "writer" / "PROFILE.md"
+        profile_path = mock_paths.user_subagents_dir() / "writer" / "PROFILE.md"
         assert profile_path.exists()
         loaded = load_profile(str(profile_path))
         assert loaded.name == "writer"
         assert loaded.tools == ["time_get"]
+
+    @pytest.mark.asyncio
+    async def test_definitions_are_user_level_across_workspace_ids(self, mock_paths):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import SubagentCoordinator
+
+        alpha = SubagentCoordinator("test_user", workspace_id="alpha")
+        beta = SubagentCoordinator("test_user", workspace_id="beta")
+        await alpha.create(AgentProfile(name="shared", description="Shared agent"))
+
+        assert alpha.base_path == mock_paths.user_subagents_dir()
+        assert beta.base_path == mock_paths.user_subagents_dir()
+        loaded = beta.load_def("shared")
+        assert loaded is not None
+        assert loaded.description == "Shared agent"
 
     @pytest.mark.asyncio
     async def test_update(self, mock_paths):
@@ -1060,6 +1220,175 @@ class TestSubagentCoordinator:
         names = {d.name for d in defs}
         assert "a1" in names
         assert "a2" in names
+
+    @pytest.mark.asyncio
+    async def test_list_defs_with_scope_ignores_item_scopes(self, mock_paths):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import SubagentCoordinator
+
+        coord = SubagentCoordinator("test_user", workspace_id="ws1")
+        await coord.create(AgentProfile(name="a1", description="Agent 1"))
+
+        defs = await coord.list_defs_with_scope()
+
+        assert [profile.name for profile, _scope in defs] == ["a1"]
+
+    @pytest.mark.asyncio
+    async def test_list_defs_includes_disabled_subagents_for_management(self, mock_paths, monkeypatch):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import SubagentCoordinator
+
+        (mock_paths.root / "capabilities.yaml").write_text(
+            "subagents:\n  disabled-agent: false\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "src.sdk.capabilities.user_capabilities_root", lambda user_id: mock_paths.root
+        )
+        coord = SubagentCoordinator("test_user", workspace_id="ws1")
+        await coord.create(AgentProfile(name="enabled-agent", description="Enabled"))
+        await coord.create(AgentProfile(name="disabled-agent", description="Disabled"))
+
+        defs = await coord.list_defs()
+        scoped_defs = await coord.list_defs_with_scope()
+
+        assert {profile.name for profile in defs} == {"enabled-agent", "disabled-agent"}
+        assert {profile.name for profile, _scope in scoped_defs} == {
+            "enabled-agent",
+            "disabled-agent",
+        }
+
+    @pytest.mark.asyncio
+    async def test_start_rejects_disabled_subagent(self, mock_paths, monkeypatch):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import SubagentCoordinator
+
+        (mock_paths.root / "capabilities.yaml").write_text(
+            "subagents:\n  disabled-agent: false\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "src.sdk.capabilities.user_capabilities_root", lambda user_id: mock_paths.root
+        )
+        coord = SubagentCoordinator("test_user", workspace_id="ws1")
+        await coord.create(AgentProfile(name="disabled-agent", description="Disabled"))
+
+        with pytest.raises(ValueError, match="disabled"):
+            await coord.start("disabled-agent", "do work")
+
+    @pytest.mark.asyncio
+    async def test_invoke_rejects_disabled_subagent(self, mock_paths, monkeypatch):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import SubagentCoordinator
+
+        (mock_paths.root / "capabilities.yaml").write_text(
+            "subagents:\n  disabled-agent: false\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "src.sdk.capabilities.user_capabilities_root", lambda user_id: mock_paths.root
+        )
+        coord = SubagentCoordinator("test_user", workspace_id="ws1")
+        await coord.create(AgentProfile(name="disabled-agent", description="Disabled"))
+
+        with pytest.raises(ValueError, match="disabled"):
+            await coord.invoke("disabled-agent", "do work")
+
+    @pytest.mark.asyncio
+    async def test_delegate_rejects_disabled_subagent(self, mock_paths, monkeypatch):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import SubagentCoordinator
+
+        (mock_paths.root / "capabilities.yaml").write_text(
+            "subagents:\n  disabled-agent: false\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "src.sdk.capabilities.user_capabilities_root", lambda user_id: mock_paths.root
+        )
+        coord = SubagentCoordinator("test_user", workspace_id="ws1")
+        await coord.create(AgentProfile(name="disabled-agent", description="Disabled"))
+
+        with pytest.raises(ValueError, match="disabled"):
+            await coord.delegate("disabled-agent", "do work")
+
+    def test_build_system_prompt_omits_disabled_profile_skills(self, mock_paths, monkeypatch):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import _build_system_prompt
+
+        class FakeRegistry:
+            def get_skill(self, name: str):
+                return {"name": name, "description": f"{name} description"}
+
+        (mock_paths.root / "capabilities.yaml").write_text(
+            "skills:\n  disabled-skill: false\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "src.sdk.capabilities.user_capabilities_root", lambda user_id: mock_paths.root
+        )
+        monkeypatch.setattr("src.skills.registry.get_skill_registry", lambda **kwargs: FakeRegistry())
+
+        prompt = _build_system_prompt(
+            AgentProfile(
+                name="worker",
+                description="Worker",
+                skills=["enabled-skill", "disabled-skill"],
+            ),
+            user_id="test_user",
+        )
+
+        assert "enabled-skill" in prompt
+        assert "disabled-skill" not in prompt
+
+    def test_get_coordinator_is_cached_by_user_id_only(self, mock_paths):
+        from src.sdk import coordinator as coordinator_module
+
+        coordinator_module._coordinators.clear()
+
+        sales = coordinator_module.get_coordinator("test_user", workspace_id="sales")
+        support = coordinator_module.get_coordinator("test_user", workspace_id="support")
+
+        assert sales is support
+        assert sales.workspace_id == "user"
+        assert support.workspace_id == "user"
+
+    @pytest.mark.asyncio
+    async def test_work_queue_is_user_level_across_workspace_ids(self, mock_paths):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.work_queue import _db_cache
+
+        _db_cache.clear()
+        sales = SubagentCoordinator("test_user", workspace_id="sales")
+        support = SubagentCoordinator("test_user", workspace_id="support")
+        profile = AgentProfile(name="a1", description="Agent 1")
+
+        sales_db = await sales._get_db()
+        task_id = await sales_db.insert_task("a1", "task", profile)
+        support_db = await support._get_db()
+
+        assert support_db is sales_db
+        assert await support_db.get_task(task_id) is not None
+
+    @pytest.mark.asyncio
+    async def test_get_work_queue_is_cached_by_user_id_only(self, mock_paths):
+        from src.sdk.work_queue import _db_cache, get_work_queue
+
+        _db_cache.clear()
+
+        sales = await get_work_queue("test_user", workspace_id="sales")
+        support = await get_work_queue("test_user", workspace_id="support")
+
+        assert sales is support
+        assert set(_db_cache) == {"test_user"}
 
     @pytest.mark.asyncio
     async def test_delete(self, mock_paths):
@@ -1277,7 +1606,7 @@ class TestStaleJobRecovery:
         stale_time = (datetime.now(UTC) - timedelta(seconds=600)).isoformat()
         await db.execute(
             "INSERT INTO work_queue (id, user_id, workspace_id, agent_name, task, status, heartbeat_at, created_at, updated_at) "
-            "VALUES ('stale-job', 'test_user', 'test_ws', 'helper', 'do thing', 'running', ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            "VALUES ('stale-job', 'test_user', 'user', 'helper', 'do thing', 'running', ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
             (stale_time,)
         )
         await db.commit()

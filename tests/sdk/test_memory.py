@@ -19,6 +19,8 @@ class TestMemoryProfile:
             result = memory_profile.invoke({"user_id": TEST_USER})
 
         assert "No observations available" in result
+        mock_core.get_observations.assert_called_once()
+        assert "session_id" not in mock_core.get_observations.call_args.kwargs
 
     def test_memory_profile_with_observations(self):
         from src.sdk.tools_core.memory import memory_profile
@@ -40,6 +42,8 @@ class TestMemoryProfile:
         assert "Name is Alice" in result
         assert "Works at TechCorp" in result
         assert "Working Memory" in result
+        mock_core.get_observations.assert_called_once()
+        assert "session_id" not in mock_core.get_observations.call_args.kwargs
 
 
 class TestMemoryReflection:

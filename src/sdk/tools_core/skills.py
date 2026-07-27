@@ -9,7 +9,7 @@ Design:
   2. When a task matches a skill's description, call skills_load(name).
   3. After creating/editing/deleting a SKILL.md file via files_* tools,
      call skills_reload() to refresh the catalog.
-  4. Both tools respect item_scopes (All / Selected / None) per workspace.
+  4. Skill availability is user-level; workspace_id is accepted for compatibility.
 """
 
 from __future__ import annotations
@@ -17,33 +17,26 @@ from __future__ import annotations
 from typing import Any
 
 from src.app_logging import get_logger
+from src.sdk.capabilities import load_user_capabilities, resource_enabled
 from src.sdk.tools import ToolAnnotations, tool
 from src.skills.registry import get_skill_registry
-from src.storage.paths import get_paths
 
 logger = get_logger()
 
 
-def _is_available(name: str, user_id: str, workspace_id: str) -> tuple[bool, str]:
-    """Check item_scopes: returns (available, reason)."""
-    try:
-        from src.sdk.item_scopes import ItemScopeDB
-
-        paths = get_paths(user_id, workspace_id=workspace_id)
-        scope_db = ItemScopeDB(paths.base)
-        excluded = scope_db.get_excluded_names(user_id, "skill")
-        if name in excluded:
-            return False, f"Skill '{name}' is disabled (scope=none)."
-        scoped = scope_db.get(user_id, "skill", name)
-        if scoped and scoped.scope == "selected" and workspace_id not in scoped.workspace_ids:
-            return False, f"Skill '{name}' is not enabled for this workspace (scope=selected)."
-    except Exception:
-        pass
-    return True, ""
-
-
 def _get_registry(user_id: str, workspace_id: str = "personal") -> Any:
-    return get_skill_registry(user_id=user_id, workspace_id=workspace_id)
+    return get_skill_registry(user_id=user_id)
+
+
+def _load_user_caps(user_id: str) -> dict[str, Any]:
+    try:
+        return load_user_capabilities(user_id)
+    except Exception:
+        return {"tools": {}, "skills": {}, "subagents": {}}
+
+
+def _skill_enabled(caps: dict[str, Any], name: str) -> bool:
+    return resource_enabled(caps, "skills", name)
 
 
 @tool
@@ -70,14 +63,16 @@ def skills_load(
     except Exception as exc:
         return str(exc)
 
-    available, reason = _is_available(name, user_id, workspace_id)
-    if not available:
-        return reason
-
+    caps = _load_user_caps(user_id)
     skill = registry.get_skill(name)
     if not skill:
-        available_names = [s["name"] for s in registry.get_all_skills()]
+        available_names = [
+            s["name"] for s in registry.get_all_skills() if _skill_enabled(caps, s["name"])
+        ]
         return f"Skill '{name}' not found. Available skills: {', '.join(available_names) or 'none'}."
+
+    if not _skill_enabled(caps, name):
+        return f"Skill '{name}' is disabled."
 
     parts = [
         f"<skill_content name=\"{skill.get('name', name)}\">",
@@ -128,20 +123,13 @@ def skills_reload(
     except Exception as exc:
         return str(exc)
 
-    skills = registry.get_all_skills()
+    caps = _load_user_caps(user_id)
+    skills = [s for s in registry.get_all_skills() if _skill_enabled(caps, s.get("name", ""))]
     if not skills:
         return "No skills available."
 
-    # Filter by item_scopes for this workspace
-    available_skills = []
-    for s in skills:
-        name = s.get("name", "")
-        avail, _ = _is_available(name, user_id, workspace_id)
-        if avail:
-            available_skills.append(s)
-
     parts: list[str] = []
-    for s in available_skills:
+    for s in skills:
         name = s.get("name", "")
         desc = s.get("description", "") or ""
         loaded = " [loaded]" if name in registry.get_loaded_skills() else ""

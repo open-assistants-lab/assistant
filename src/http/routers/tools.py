@@ -1,19 +1,17 @@
-"""Tools API — list tools with metadata, toggle enabled per scope."""
+"""Tools API — list tools with metadata, toggle user-level enabled state."""
 
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from src.sdk.item_scopes import ItemScopeDB, ScopeKind
+from src.sdk.capabilities import load_user_capabilities, resource_enabled, save_user_capabilities
 from src.sdk.native_tools import get_tool_category
-from src.storage.paths import _validate_path_id, get_paths
+from src.storage.paths import _validate_path_id
 
 router = APIRouter(prefix="/tools", tags=["tools"])
 
 
-def _get_scope_db(user_id: str) -> ItemScopeDB:
-    paths = get_paths(user_id)
-    return ItemScopeDB(paths.base)
+ScopeKind = str
 
 
 def _get_registry() -> list[Any]:
@@ -23,28 +21,28 @@ def _get_registry() -> list[Any]:
     return get_native_tools()
 
 
-def _resolve_scope(
-    scope_db: ItemScopeDB,
-    user_id: str,
-    resource_name: str,
-) -> tuple[ScopeKind, list[str]]:
-    """Return (scope, workspace_ids) for a tool, falling back to 'all'."""
-    row = scope_db.get(user_id, "tool", resource_name)
-    if row:
-        return row.scope, row.workspace_ids
-    return "all", []
+def _load_user_caps(user_id: str) -> dict[str, Any]:
+    return load_user_capabilities(user_id)
 
 
-def _is_enabled(
-    scope: ScopeKind,
-    workspace_ids: list[str],
-    workspace_id: str,
-) -> bool:
-    if scope == "all":
-        return True
-    if scope == "selected":
-        return workspace_id in workspace_ids
-    return False
+def _save_user_enabled(user_id: str, section: str, name: str, enabled: bool) -> None:
+    caps = load_user_capabilities(user_id)
+    caps.setdefault(section, {})[name] = enabled
+    save_user_capabilities(user_id, caps)
+
+
+def _scope_response(enabled: bool) -> tuple[ScopeKind, list[str]]:
+    return ("all" if enabled else "none", [])
+
+
+def _tool_enabled(caps: dict[str, Any], name: str) -> bool:
+    return resource_enabled(caps, "tools", name)
+
+
+def _reset_user_loops(user_id: str) -> None:
+    from src.sdk.runner import reset_user_sdk_loops
+
+    reset_user_sdk_loops(user_id)
 
 
 @router.get("")
@@ -56,11 +54,9 @@ async def list_tools(
     _validate_path_id(workspace_id, "workspace_id")
 
     registry = _get_registry()
-    scope_db = _get_scope_db(user_id)
-    all_scoped = scope_db.get_all_scoped(user_id, "tool")
+    caps = _load_user_caps(user_id)
 
     tools_list = []
-    categories_enabled: dict[str, dict[str, Any]] = {}
 
     for tool in registry:
         annotations = (
@@ -68,16 +64,8 @@ async def list_tools(
         )
         category = get_tool_category(tool.name)
 
-        if tool.name in all_scoped:
-            item_scope = all_scoped[tool.name]
-            scope: ScopeKind = item_scope.scope
-            workspace_ids = item_scope.workspace_ids
-            enabled = _is_enabled(scope, workspace_ids, workspace_id)
-        else:
-            # Not configured yet — default to scope=all (available everywhere)
-            scope = "all"
-            workspace_ids = []
-            enabled = True
+        enabled = _tool_enabled(caps, tool.name)
+        scope, workspace_ids = _scope_response(enabled)
 
         tools_list.append(
             {
@@ -93,29 +81,15 @@ async def list_tools(
             }
         )
 
-        if category not in categories_enabled:
-            cat_tools = [t for t in registry if get_tool_category(t.name) == category]
-            cat_enabled_count = sum(
-                1 for t in cat_tools
-                if next(
-                    (ti["enabled"] for ti in tools_list if ti["name"] == t.name),
-                    True,
-                )
-            )
-            categories_enabled[category] = {
-                "count": len(cat_tools),
-                "enabled": cat_enabled_count,
-            }
+    categories_enabled: dict[str, dict[str, Any]] = {}
+    for tool_info in tools_list:
+        category = tool_info["category"]
+        categories_enabled.setdefault(category, {"count": 0, "enabled": 0})
+        categories_enabled[category]["count"] += 1
+        if tool_info["enabled"]:
+            categories_enabled[category]["enabled"] += 1
 
     return {"tools": tools_list, "categories": categories_enabled}
-
-
-def _tool_default(annotations: dict[str, Any]) -> bool:
-    """Derive default enabled state from tool annotations."""
-    destructive = annotations.get("destructive", False)
-    if destructive:
-        return False
-    return True
 
 
 @router.get("/{name}")
@@ -136,9 +110,9 @@ async def get_tool(
                 if hasattr(tool, "annotations")
                 else {}
             )
-            scope_db = _get_scope_db(user_id)
-            scope, wids = _resolve_scope(scope_db, user_id, tool.name)
-            enabled = _is_enabled(scope, wids, workspace_id)
+            caps = _load_user_caps(user_id)
+            enabled = _tool_enabled(caps, tool.name)
+            scope, wids = _scope_response(enabled)
             return {
                 "name": tool.name,
                 "description": tool.description,
@@ -164,12 +138,12 @@ async def toggle_tool(
     """Set a tool's scope.
 
     New body (preferred):
-      {"scope": "all"|"selected"|"none", "workspace_ids": ["w1","w2"]}
+      {"scope": "all"|"none"}
 
     Old body (backward compat):
       {"enabled": true/false}
-      → enabled=true converts to scope="selected" for current workspace
-      → enabled=false converts to scope="selected" + remove current workspace
+      → enabled=true converts to scope="all"
+      → enabled=false converts to scope="none"
     """
     _validate_path_id(user_id, "user_id")
     _validate_path_id(workspace_id, "workspace_id")
@@ -178,8 +152,6 @@ async def toggle_tool(
     if not any(t.name == name for t in registry):
         raise HTTPException(status_code=404, detail=f"Tool not found: {name}")
 
-    scope_db = _get_scope_db(user_id)
-
     if "scope" in body:
         new_scope: ScopeKind = body["scope"]
         if new_scope not in ("all", "selected", "none"):
@@ -187,40 +159,33 @@ async def toggle_tool(
                 status_code=400,
                 detail="scope must be 'all', 'selected', or 'none'",
             )
-        wids: list[str] = body.get("workspace_ids", [])
-        scope_db.set(user_id, "tool", name, new_scope, wids)
-        enabled = _is_enabled(new_scope, wids, workspace_id)
-        from src.sdk.runner import reset_sdk_loop
-        reset_sdk_loop(user_id, workspace_id)
+        if new_scope == "selected":
+            raise HTTPException(
+                status_code=400,
+                detail="workspace-selected scope is no longer supported; use 'all' or 'none'",
+            )
+        enabled = new_scope != "none"
+        _save_user_enabled(user_id, "tools", name, enabled)
+        scope, wids = _scope_response(enabled)
+        _reset_user_loops(user_id)
         return {
             "name": name,
             "enabled": enabled,
-            "scope": new_scope,
+            "scope": scope,
             "workspace_ids": wids,
         }
 
     if "enabled" in body:
-        # Backward compat: old format
+        if not isinstance(body["enabled"], bool):
+            raise HTTPException(status_code=400, detail="enabled must be a boolean")
         enabled_val = body["enabled"]
-        current = scope_db.get(user_id, "tool", name)
-        if current and current.scope == "selected":
-            wids = list(current.workspace_ids)
-        else:
-            wids = []
-        if enabled_val:
-            if workspace_id not in wids:
-                wids.append(workspace_id)
-        else:
-            if workspace_id in wids:
-                wids.remove(workspace_id)
-        new_scope = "selected" if wids else "none"
-        scope_db.set(user_id, "tool", name, new_scope, wids)
-        from src.sdk.runner import reset_sdk_loop
-        reset_sdk_loop(user_id, workspace_id)
+        _save_user_enabled(user_id, "tools", name, enabled_val)
+        scope, wids = _scope_response(enabled_val)
+        _reset_user_loops(user_id)
         return {
             "name": name,
             "enabled": enabled_val,
-            "scope": new_scope,
+            "scope": scope,
             "workspace_ids": wids,
         }
 

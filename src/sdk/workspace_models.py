@@ -78,18 +78,20 @@ def _config_path(workspace_id: str, base_path: Path) -> Path:
     return base_path / workspace_id / "workspace.yaml"
 
 
-def save_workspace(ws: Workspace, base_path: Path | None = None) -> None:
+def save_workspace(ws: Workspace, base_path: Path | None = None, user_id: str | None = None) -> None:
     if base_path is None:
-        base_path = _default_workspaces_dir()
+        base_path = _default_workspaces_dir(user_id=user_id)
     cfg = _config_path(ws.id, base_path)
     cfg.parent.mkdir(parents=True, exist_ok=True)
     ws.updated_at = datetime.now(UTC).isoformat()
     cfg.write_text(yaml.dump(ws.to_dict()), encoding="utf-8")
 
 
-def load_workspace(workspace_id: str, base_path: Path | None = None) -> Workspace | None:
+def load_workspace(
+    workspace_id: str, base_path: Path | None = None, user_id: str | None = None
+) -> Workspace | None:
     if base_path is None:
-        base_path = _default_workspaces_dir()
+        base_path = _default_workspaces_dir(user_id=user_id)
     cfg = _config_path(workspace_id, base_path)
     if not cfg.exists():
         return None
@@ -99,9 +101,9 @@ def load_workspace(workspace_id: str, base_path: Path | None = None) -> Workspac
     return Workspace.from_dict(data)
 
 
-def list_workspaces(base_path: Path | None = None) -> list[Workspace]:
+def list_workspaces(base_path: Path | None = None, user_id: str | None = None) -> list[Workspace]:
     if base_path is None:
-        base_path = _default_workspaces_dir()
+        base_path = _default_workspaces_dir(user_id=user_id)
     if not base_path.exists():
         return []
     results = []
@@ -115,15 +117,17 @@ def list_workspaces(base_path: Path | None = None) -> list[Workspace]:
     return results
 
 
-def delete_workspace(workspace_id: str, base_path: Path | None = None) -> None:
+def delete_workspace(
+    workspace_id: str, base_path: Path | None = None, user_id: str | None = None
+) -> None:
     if base_path is None:
-        base_path = _default_workspaces_dir()
+        base_path = _default_workspaces_dir(user_id=user_id)
     ws_dir = base_path / workspace_id
     if ws_dir.exists():
         shutil.rmtree(ws_dir)
 
 
-def _default_workspaces_dir() -> Path:
+def _default_workspaces_dir(user_id: str | None = None) -> Path:
     from src.storage.paths import DataPaths
 
-    return DataPaths().root / "Workspaces"
+    return DataPaths(user_id=user_id).user_dir / "Workspaces"

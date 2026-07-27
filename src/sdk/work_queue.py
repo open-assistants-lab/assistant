@@ -21,6 +21,8 @@ from src.storage.paths import get_paths
 
 logger = get_logger()
 
+USER_LEVEL_WORKSPACE_ID = "user"
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS work_queue (
     id TEXT PRIMARY KEY,
@@ -64,7 +66,8 @@ class WorkQueueDB:
 
     def __init__(self, user_id: str, workspace_id: str = "personal"):
         self.user_id = user_id
-        self.workspace_id = workspace_id
+        self.requested_workspace_id = workspace_id
+        self.workspace_id = USER_LEVEL_WORKSPACE_ID
         self._db: aiosqlite.Connection | None = None
         self._db_path = str(get_paths(user_id).work_queue_db())
         self._init_lock = asyncio.Lock()
@@ -142,8 +145,8 @@ class WorkQueueDB:
         db = await self._get_db()
         now = _now()
         cursor = await db.execute(
-            "UPDATE work_queue SET status = ?, updated_at = ? WHERE id = ?",
-            (status.value, now, task_id),
+            "UPDATE work_queue SET status = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            (status.value, now, task_id, self.user_id),
         )
         await db.commit()
         return cursor.rowcount > 0
@@ -155,8 +158,8 @@ class WorkQueueDB:
             """UPDATE work_queue
             SET status = ?, started_at = COALESCE(started_at, ?),
                 heartbeat_at = COALESCE(heartbeat_at, ?), updated_at = ?
-            WHERE id = ?""",
-            (TaskStatus.RUNNING.value, now, now, now, task_id),
+            WHERE id = ? AND user_id = ?""",
+            (TaskStatus.RUNNING.value, now, now, now, task_id, self.user_id),
         )
         await db.commit()
         return cursor.rowcount > 0
@@ -168,7 +171,7 @@ class WorkQueueDB:
             """UPDATE work_queue
             SET status = ?, claimed_by = ?, claimed_at = ?, heartbeat_at = ?,
                 started_at = COALESCE(started_at, ?), updated_at = ?
-            WHERE id = ? AND status = ?""",
+            WHERE id = ? AND user_id = ? AND status = ?""",
             (
                 TaskStatus.RUNNING.value,
                 worker_id,
@@ -177,6 +180,7 @@ class WorkQueueDB:
                 now,
                 now,
                 task_id,
+                self.user_id,
                 TaskStatus.PENDING.value,
             ),
         )
@@ -189,11 +193,12 @@ class WorkQueueDB:
         cursor = await db.execute(
             """UPDATE work_queue
             SET heartbeat_at = ?, updated_at = ?
-            WHERE id = ? AND claimed_by = ? AND status IN (?, ?)""",
+            WHERE id = ? AND user_id = ? AND claimed_by = ? AND status IN (?, ?)""",
             (
                 now,
                 now,
                 task_id,
+                self.user_id,
                 worker_id,
                 TaskStatus.RUNNING.value,
                 TaskStatus.CANCELLING.value,
@@ -208,13 +213,14 @@ class WorkQueueDB:
         cursor = await db.execute(
             """UPDATE work_queue
             SET status = ?, result = ?, completed_at = ?, updated_at = ?
-            WHERE id = ? AND status IN (?, ?) AND cancel_requested = 0""",
+            WHERE id = ? AND user_id = ? AND status IN (?, ?) AND cancel_requested = 0""",
             (
                 TaskStatus.COMPLETED.value,
                 result.model_dump_json(),
                 now,
                 now,
                 task_id,
+                self.user_id,
                 TaskStatus.PENDING.value,
                 TaskStatus.RUNNING.value,
             ),
@@ -231,7 +237,7 @@ class WorkQueueDB:
         cursor = await db.execute(
             """UPDATE work_queue
             SET status = ?, result = ?, error = ?, completed_at = ?, updated_at = ?
-            WHERE id = ? AND status IN (?, ?) AND cancel_requested = 0""",
+            WHERE id = ? AND user_id = ? AND status IN (?, ?) AND cancel_requested = 0""",
             (
                 TaskStatus.FAILED.value,
                 result.model_dump_json(),
@@ -239,6 +245,7 @@ class WorkQueueDB:
                 now,
                 now,
                 task_id,
+                self.user_id,
                 TaskStatus.PENDING.value,
                 TaskStatus.RUNNING.value,
             ),
@@ -255,8 +262,8 @@ class WorkQueueDB:
         cursor = await db.execute(
             """UPDATE work_queue
             SET status = ?, result = ?, cancel_requested = 1, completed_at = ?, updated_at = ?
-            WHERE id = ?""",
-            (TaskStatus.CANCELLED.value, result.model_dump_json(), now, now, task_id),
+            WHERE id = ? AND user_id = ?""",
+            (TaskStatus.CANCELLED.value, result.model_dump_json(), now, now, task_id, self.user_id),
         )
         await db.commit()
         return cursor.rowcount > 0
@@ -288,8 +295,8 @@ class WorkQueueDB:
     async def get_task(self, task_id: str) -> dict[str, Any] | None:
         db = await self._get_db()
         cursor = await db.execute(
-            "SELECT * FROM work_queue WHERE id = ? AND user_id = ? AND workspace_id = ?",
-            (task_id, self.user_id, self.workspace_id),
+            "SELECT * FROM work_queue WHERE id = ? AND user_id = ?",
+            (task_id, self.user_id),
         )
         row = await cursor.fetchone()
         if row is None:
@@ -300,8 +307,8 @@ class WorkQueueDB:
         db = await self._get_db()
         now = _now()
         cursor = await db.execute(
-            "UPDATE work_queue SET progress = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(progress, ensure_ascii=True), now, task_id),
+            "UPDATE work_queue SET progress = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            (json.dumps(progress, ensure_ascii=True), now, task_id, self.user_id),
         )
         await db.commit()
         return cursor.rowcount > 0
@@ -315,8 +322,8 @@ class WorkQueueDB:
         instructions = json.loads(row.get("instructions") or "[]")
         instructions.append({"added_at": now, "message": message})
         cursor = await db.execute(
-            "UPDATE work_queue SET instructions = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(instructions, ensure_ascii=True), now, task_id),
+            "UPDATE work_queue SET instructions = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            (json.dumps(instructions, ensure_ascii=True), now, task_id, self.user_id),
         )
         await db.commit()
         return cursor.rowcount > 0
@@ -329,8 +336,8 @@ class WorkQueueDB:
             SET cancel_requested = 1,
                 status = CASE WHEN status = ? THEN ? ELSE status END,
                 updated_at = ?
-            WHERE id = ?""",
-            (TaskStatus.RUNNING.value, TaskStatus.CANCELLING.value, now, task_id),
+            WHERE id = ? AND user_id = ?""",
+            (TaskStatus.RUNNING.value, TaskStatus.CANCELLING.value, now, task_id, self.user_id),
         )
         await db.commit()
         return cursor.rowcount > 0
@@ -344,7 +351,7 @@ class WorkQueueDB:
             """UPDATE work_queue
             SET status = ?, result = ?, error = ?, cancel_requested = 1,
                 completed_at = ?, updated_at = ?
-            WHERE user_id = ? AND workspace_id = ? AND agent_name = ? AND status = ?""",
+            WHERE user_id = ? AND agent_name = ? AND status = ?""",
             (
                 TaskStatus.CANCELLED.value,
                 result.model_dump_json(),
@@ -352,7 +359,6 @@ class WorkQueueDB:
                 now,
                 now,
                 self.user_id,
-                self.workspace_id,
                 agent_name,
                 TaskStatus.PENDING.value,
             ),
@@ -360,12 +366,11 @@ class WorkQueueDB:
         active_cursor = await db.execute(
             """UPDATE work_queue
             SET cancel_requested = 1, status = ?, updated_at = ?
-            WHERE user_id = ? AND workspace_id = ? AND agent_name = ? AND status IN (?, ?)""",
+            WHERE user_id = ? AND agent_name = ? AND status IN (?, ?)""",
             (
                 TaskStatus.CANCELLING.value,
                 now,
                 self.user_id,
-                self.workspace_id,
                 agent_name,
                 TaskStatus.RUNNING.value,
                 TaskStatus.CANCELLING.value,
@@ -390,33 +395,33 @@ class WorkQueueDB:
             cursor = await db.execute(
                 """SELECT id, agent_name, task, status, progress, error, created_at, updated_at
                 FROM work_queue
-                WHERE user_id = ? AND workspace_id = ? AND parent_id = ? AND status = ?
+                WHERE user_id = ? AND parent_id = ? AND status = ?
                 ORDER BY created_at""",
-                (self.user_id, self.workspace_id, parent_id, status.value),
+                (self.user_id, parent_id, status.value),
             )
         elif parent_id is not None:
             cursor = await db.execute(
                 """SELECT id, agent_name, task, status, progress, error, created_at, updated_at
                 FROM work_queue
-                WHERE user_id = ? AND workspace_id = ? AND parent_id = ?
+                WHERE user_id = ? AND parent_id = ?
                 ORDER BY created_at""",
-                (self.user_id, self.workspace_id, parent_id),
+                (self.user_id, parent_id),
             )
         elif status is not None:
             cursor = await db.execute(
                 """SELECT id, agent_name, task, status, progress, error, created_at, updated_at
                 FROM work_queue
-                WHERE user_id = ? AND workspace_id = ? AND status = ?
+                WHERE user_id = ? AND status = ?
                 ORDER BY created_at""",
-                (self.user_id, self.workspace_id, status.value),
+                (self.user_id, status.value),
             )
         else:
             cursor = await db.execute(
                 """SELECT id, agent_name, task, status, progress, error, created_at, updated_at
                 FROM work_queue
-                WHERE user_id = ? AND workspace_id = ?
+                WHERE user_id = ?
                 ORDER BY created_at""",
-                (self.user_id, self.workspace_id),
+                (self.user_id,),
             )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
@@ -439,7 +444,7 @@ _db_cache: dict[str, WorkQueueDB] = {}
 
 
 async def get_work_queue(user_id: str, workspace_id: str = "personal") -> WorkQueueDB:
-    key = f"{user_id}:{workspace_id}"
+    key = user_id
     if key not in _db_cache:
         _db_cache[key] = WorkQueueDB(user_id, workspace_id)
     return _db_cache[key]

@@ -44,7 +44,7 @@ def validate_agent_profile(
     try:
         from src.skills.registry import get_skill_registry
 
-        skill_registry = get_skill_registry(user_id=user_id, workspace_id=workspace_id)
+        skill_registry = get_skill_registry(user_id=user_id)
         for skill_name in profile.skills:
             if skill_registry.get_skill(skill_name) is None:
                 errors.append(f"Unknown skill: {skill_name}")

@@ -142,22 +142,19 @@ class TestWorkspaceDataPaths:
         dp = DataPaths(workspace_id="personal")
         d = dp.workspace_files_dir()
         assert d.name == "Files"
-        assert "Workspaces" in str(d)
-        assert "personal" in str(d)
+        assert d == dp.files_dir()
 
     def test_workspace_memory_dir(self):
         from src.storage.paths import DataPaths
         dp = DataPaths(workspace_id="q2-planning")
         d = dp.workspace_memory_dir()
-        assert d.name == "Memory"
-        assert "Workspaces" in str(d)
+        assert d == dp.user_memory_dir()
 
     def test_workspace_conversation_path(self):
         from src.storage.paths import DataPaths
         dp = DataPaths(workspace_id="test")
         p = dp.workspace_conversation_path()
-        assert p.name == "conversation.app.db"
-        assert "Workspaces" in str(p)
+        assert p == dp.conversation_dir() / "app.db"
 
     def test_workspace_subagents_dir(self):
         from src.storage.paths import DataPaths
@@ -222,6 +219,11 @@ class TestWorkspaceTools:
                     instructions="Be helpful",
                 )
                 assert "Test Project" in result or "test-project" in result
+                assert "legacy organizational" in result.lower()
+                assert "user-level" in result.lower()
+                assert "session-separated" in result.lower()
+                assert "own files" not in workspace_create.description.lower()
+                assert "Files:" not in result
 
     def test_workspace_list_returns_names(self):
         from src.sdk.tools_core.workspace import workspace_create, workspace_list
@@ -233,6 +235,8 @@ class TestWorkspaceTools:
                 result = self._invoke(workspace_list)
                 assert "Alpha" in result
                 assert "Beta" in result
+                assert "legacy organizational" in result.lower()
+                assert "user-level" in result.lower()
 
     def test_workspace_switch_updates_current(self):
         from src.sdk.tools_core.workspace import (
@@ -260,6 +264,8 @@ class TestWorkspaceTools:
                 self._invoke(workspace_switch, name="Current Test", user_id="u1")
                 result = self._invoke(workspace_current, user_id="u1")
                 assert "Current Test" in result
+                assert "legacy organizational" in result.lower()
+                assert "user-level" in result.lower()
 
     def test_workspace_delete_removes(self):
         from src.sdk.tools_core.workspace import (
@@ -272,8 +278,11 @@ class TestWorkspaceTools:
             with mock.patch("src.sdk.workspace_models._default_workspaces_dir", return_value=Path(tmpdir)):
                 self._invoke(workspace_create, name="DeleteMe")
                 assert "DeleteMe" in self._invoke(workspace_list)
-                self._invoke(workspace_delete, name="DeleteMe")
+                result = self._invoke(workspace_delete, name="DeleteMe")
                 assert "DeleteMe" not in self._invoke(workspace_list)
+                assert "metadata" in result.lower()
+                assert "user-level data was not deleted" in result.lower()
+                assert "all its data" not in workspace_delete.description.lower()
 
     def test_workspace_switch_to_nonexistent_errors(self):
         from src.sdk.tools_core.workspace import workspace_switch

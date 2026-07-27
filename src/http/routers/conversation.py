@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 import asyncio
 import json
 import os
@@ -17,8 +18,14 @@ from pydantic import BaseModel
 
 from src.app_logging import get_logger, timer
 from src.http.auth import require_auth
+from src.http.conversation_persistence import (
+    persist_assistant_message,
+    persist_reasoning_message,
+    persist_tool_message,
+)
 from src.http.models import MessageRequest, MessageResponse
-from src.sdk.messages import Message
+from src.http.stream_adapter import adapt_stream_chunk
+from src.sdk.messages import Message, ToolCall
 from src.sdk.runner import (
     _messages_from_conversation,
     get_sdk_loop,
@@ -134,18 +141,53 @@ def _strip_canvas_fences(text: str) -> str:
     return text.strip()
 
 
-def _persist_tool_messages(conversation: Any, tool_events: list[dict[str, Any]]) -> None:
+def _persist_tool_messages(
+    conversation: Any, tool_events: list[dict[str, Any]], session_id: str
+) -> None:
+    seen_call_ids: set[str] = set()
     for event in tool_events:
         output = event.get("output")
+        call_id = event.get("call_id") or event.get("tool_call_id") or ""
         if event.get("stage") != "end" or not output:
             continue
-        conversation.add_message(
-            "tool",
+        if call_id in seen_call_ids:
+            continue
+        seen_call_ids.add(call_id)
+        persist_tool_message(
+            conversation,
             str(output),
-            metadata={
-                "tool_name": event.get("tool") or event.get("tool_name") or "unknown",
-                "tool_call_id": event.get("call_id") or event.get("tool_call_id") or "",
-            },
+            session_id=session_id,
+            tool_name=event.get("tool") or event.get("tool_name") or "unknown",
+            tool_call_id=call_id,
+        )
+
+
+def _persist_collected_stream_state(
+    conversation: Any,
+    *,
+    session_id: str,
+    ai_content_parts: list[str],
+    reasoning_parts: list[str],
+    tool_metadata_list: list[dict[str, Any]],
+    tool_results: dict[str, str],
+) -> None:
+    for tm in tool_metadata_list:
+        call_id = tm.get("tool_call_id", "")
+        output = tool_results.get(call_id, "")
+        if output:
+            persist_tool_message(
+                conversation,
+                output,
+                session_id=session_id,
+                tool_name=tm.get("tool_name", "unknown"),
+                tool_call_id=call_id,
+            )
+    if reasoning_parts:
+        persist_reasoning_message(conversation, "".join(reasoning_parts), session_id=session_id)
+    response = "".join(ai_content_parts).strip()
+    if response:
+        persist_assistant_message(
+            conversation, response, metadata={"stream": True}, session_id=session_id
         )
 
 
@@ -287,7 +329,9 @@ class TitleRequest(BaseModel):
     session_id: str
 
 
-async def _summarize_title(user_msg: str, assistant_msg: str) -> str | None:
+async def _summarize_title(
+    user_msg: str, assistant_msg: str, user_id: str = "default_user"
+) -> str | None:
     """Generate a 3-5 word title via a simple provider.chat() call."""
     from src.config import get_settings
     from src.sdk.messages import Message
@@ -295,7 +339,7 @@ async def _summarize_title(user_msg: str, assistant_msg: str) -> str | None:
 
     settings = get_settings()
     model = settings.agent.title_model or settings.agent.model
-    provider = create_model_from_config(model)
+    provider = create_model_from_config(model, user_id=user_id)
 
     prompt = (
         "Summarize the following conversation in 3-5 words. "
@@ -315,7 +359,8 @@ async def _summarize_title(user_msg: str, assistant_msg: str) -> str | None:
         )
         content_preview = response.content[:80] if len(response.content) > 80 else response.content
         logger.info("title_gen_response", {"content": content_preview})
-        title = response.content.strip().strip('"').strip("'").strip()
+        raw_title = response.content if isinstance(response.content, str) else str(response.content)
+        title = raw_title.strip().strip('"').strip("'").strip()
         # Strip trailing punctuation (.,;:!?。)
         while title and title[-1] in ".。,;:!?,;:!?":
             title = title[:-1].strip()
@@ -355,7 +400,7 @@ async def generate_title(req: TitleRequest, _: None = Depends(require_auth)) -> 
 
     assistant_msg = assistant_msg[:500]
 
-    title = await _summarize_title(user_msg, assistant_msg)
+    title = await _summarize_title(user_msg, assistant_msg, user_id=req.user_id)
     if not title:
         raise HTTPException(status_code=500, detail="Title generation failed")
 
@@ -402,6 +447,10 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
         verbose_data: dict[str, Any] | None = None
         tool_events: list[dict[str, Any]] = []
         ai_content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        seen_canonical_text: set[str] = set()
+        seen_canonical_reasoning: set[str] = set()
+        seen_canonical_tool_starts: set[str] = set()
 
         with timer(
             "agent",
@@ -409,46 +458,68 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
             channel="http",
         ):
             if req.verbose:
+                error_content = ""
                 async for chunk in run_sdk_agent_stream(
                     user_id=user_id,
                     messages=sdk_messages,
+                    session_id=session_id,
                     model=req.model,
                     provider_keys=req.provider_keys,
                 ):
-                    if chunk.type == "ai_token" and chunk.content:
-                        ai_content_parts.append(chunk.content)
-                    elif (
-                        chunk.canonical_type == "text_delta"
-                        and chunk.type != "ai_token"
-                        and chunk.content
-                    ):
-                        ai_content_parts.append(chunk.content)
-                    elif chunk.type == "tool_start" and chunk.tool:
+                    event = adapt_stream_chunk(chunk)
+                    is_compat_alias = chunk.type != event.kind
+                    if event.kind == "text_delta" and event.content:
+                        if is_compat_alias and event.content in seen_canonical_text:
+                            continue
+                        ai_content_parts.append(event.content)
+                        if not is_compat_alias:
+                            seen_canonical_text.add(event.content)
+                    elif event.kind == "reasoning_delta" and event.content:
+                        if is_compat_alias and event.content in seen_canonical_reasoning:
+                            continue
+                        reasoning_parts.append(event.content)
+                        if not is_compat_alias:
+                            seen_canonical_reasoning.add(event.content)
+                    elif event.kind == "tool_input_start" and event.tool:
+                        call_id = event.call_id or ""
+                        if is_compat_alias and call_id in seen_canonical_tool_starts:
+                            continue
+                        if not is_compat_alias:
+                            seen_canonical_tool_starts.add(call_id)
                         tool_events.append(
-                            {"tool": chunk.tool, "stage": "start", "call_id": chunk.call_id}
+                            {"tool": event.tool, "stage": "start", "call_id": event.call_id}
                         )
-                    elif chunk.type == "tool_input_start" and chunk.tool:
-                        tool_events.append(
-                            {"tool": chunk.tool, "stage": "start", "call_id": chunk.call_id}
-                        )
-                    elif chunk.type == "tool_end" and chunk.tool:
-                        tool_events.append(
-                            {
-                                "tool": chunk.tool,
-                                "stage": "end",
-                                "call_id": chunk.call_id,
-                                "output": (chunk.result_preview or "")[:2000],
-                            }
-                        )
-                    elif chunk.type == "tool_result" and chunk.tool:
+                    elif event.kind == "tool_result" and event.tool:
                         tool_events.append(
                             {
-                                "tool": chunk.tool,
+                                "tool": event.tool,
                                 "stage": "end",
-                                "call_id": chunk.call_id,
-                                "output": (chunk.result_preview or "")[:2000],
+                                "call_id": event.call_id,
+                                "output": (event.result_preview or "")[:2000],
                             }
                         )
+                    elif event.kind == "error":
+                        error_content = event.content or "Agent error"
+                        break
+
+                if error_content:
+                    _persist_tool_messages(conversation, tool_events, session_id=session_id)
+                    if reasoning_parts:
+                        persist_reasoning_message(
+                            conversation, "".join(reasoning_parts), session_id=session_id
+                        )
+                    if ai_content_parts:
+                        persist_assistant_message(
+                            conversation,
+                            "".join(ai_content_parts).strip(),
+                            metadata={"stream": True},
+                            session_id=session_id,
+                        )
+                    return MessageResponse(
+                        response="",
+                        error=error_content,
+                        verbose_data={"tool_events": tool_events},
+                    )
 
                 verbose_data = {"tool_events": tool_events}
 
@@ -466,10 +537,15 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
                 if not response:
                     response = "Task completed."
 
-                _persist_tool_messages(conversation, tool_events)
+                _persist_tool_messages(conversation, tool_events, session_id=session_id)
+                if reasoning_parts:
+                    persist_reasoning_message(
+                        conversation, "".join(reasoning_parts), session_id=session_id
+                    )
             else:
                 result_messages = await run_sdk_agent(
                     user_id=user_id, messages=sdk_messages,
+                    session_id=session_id,
                     model=req.model, provider_keys=req.provider_keys,
                 )
 
@@ -478,10 +554,12 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
                     if m.role == "tool" and m.content:
                         content = m.content if isinstance(m.content, str) else str(m.content)
                         tool_contents.append(content)
-                        conversation.add_message(
-                            "tool",
+                        persist_tool_message(
+                            conversation,
                             content,
-                            metadata={"tool_name": m.name or "unknown"},
+                            session_id=session_id,
+                            tool_name=m.name or "unknown",
+                            tool_call_id=m.tool_call_id or "",
                         )
 
                 response = ""
@@ -490,6 +568,9 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
                     if m.role == "assistant" and m.content:
                         last_ai = m
                         break
+
+                if last_ai and last_ai.reasoning:
+                    persist_reasoning_message(conversation, last_ai.reasoning, session_id=session_id)
 
                 if (
                     last_ai
@@ -528,7 +609,9 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
         assistant_metadata: dict[str, Any] = {}
         if verbose_data and verbose_data.get("tool_events"):
             assistant_metadata["tool_events"] = verbose_data["tool_events"]
-        conversation.add_message("assistant", response, metadata=assistant_metadata, session_id=session_id)
+        persist_assistant_message(
+            conversation, response, metadata=assistant_metadata, session_id=session_id
+        )
 
         logger.info(
             "agent.response",
@@ -577,9 +660,15 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
 
         async def generate() -> AsyncGenerator[str, None]:
             ai_content_parts: list[str] = []
+            reasoning_parts: list[str] = []
             tool_metadata_list: list[dict[str, Any]] = []
-            tool_results: list[dict[str, Any]] = []
+            tool_results: dict[str, str] = {}
             response = ""
+            aborted = False
+            persisted = False
+            seen_canonical_text: set[str] = set()
+            seen_canonical_reasoning: set[str] = set()
+            seen_canonical_tool_starts: set[str] = set()
 
             try:
                 async for chunk in run_sdk_agent_stream(
@@ -592,79 +681,142 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                 ):
                     # Check cancel flag between chunks (fast path)
                     if _cancel_flags.get(skey, False) or cancel_event.is_set():
+                        _persist_collected_stream_state(
+                            conversation,
+                            session_id=session_id,
+                            ai_content_parts=ai_content_parts,
+                            reasoning_parts=reasoning_parts,
+                            tool_metadata_list=tool_metadata_list,
+                            tool_results=tool_results,
+                        )
+                        persisted = True
+                        aborted = True
                         yield sse("cancelled", {"content": "Cancelled"})
                         break
-                    canonical = chunk.canonical_type
+                    event = adapt_stream_chunk(chunk)
+                    is_compat_alias = chunk.type != event.kind
 
-                    if canonical == "text_delta" and chunk.type != "ai_token" and chunk.content:
-                        ai_content_parts.append(chunk.content)
-                        yield sse("messages", {"content": chunk.content})
+                    if event.kind == "text_delta" and event.content:
+                        if is_compat_alias and event.content in seen_canonical_text:
+                            continue
+                        ai_content_parts.append(event.content)
+                        yield sse("messages", {"content": event.content})
+                        if not is_compat_alias:
+                            seen_canonical_text.add(event.content)
 
-                    elif canonical == "tool_input_start" and chunk.tool:
+                    elif event.kind == "tool_input_start" and event.tool:
+                        call_id = event.call_id or ""
+                        if is_compat_alias and call_id in seen_canonical_tool_starts:
+                            continue
+                        if not is_compat_alias:
+                            seen_canonical_tool_starts.add(call_id)
                         tool_metadata_list.append(
-                            {"tool_name": chunk.tool, "tool_call_id": chunk.call_id or ""}
+                            {"tool_name": event.tool, "tool_call_id": event.call_id or ""}
                         )
                         yield sse("tool_start", {
-                            "tool": chunk.tool,
-                            "call_id": chunk.call_id or "",
-                            "args": chunk.args or {},
+                            "tool": event.tool,
+                            "call_id": event.call_id or "",
+                            "args": event.args or {},
                         })
 
-                    elif canonical == "tool_result" and chunk.tool:
-                        output = (chunk.result_preview or "")[:500]
+                    elif event.kind == "tool_result" and event.tool:
+                        output = (event.result_preview or "")[:500]
                         if output:
-                            tool_results.append(
-                                {"tool_call_id": chunk.call_id or "", "output": output}
-                            )
+                            tool_results[event.call_id or ""] = output
                             yield sse("tool_result", {
-                                "tool": chunk.tool,
-                                "call_id": chunk.call_id or "",
+                                "tool": event.tool,
+                                "call_id": event.call_id or "",
                                 "result": output,
                             })
 
-                    elif canonical == "reasoning_delta" and chunk.content:
-                        yield sse("reasoning", {"content": chunk.content})
+                    elif event.kind == "reasoning_delta" and event.content:
+                        if is_compat_alias and event.content in seen_canonical_reasoning:
+                            continue
+                        reasoning_parts.append(event.content)
+                        yield sse("reasoning", {"content": event.content})
+                        if not is_compat_alias:
+                            seen_canonical_reasoning.add(event.content)
 
-                    elif canonical == "reasoning_start":
+                    elif event.kind == "reasoning_start":
                         pass  # reasoning_start just signals a new reasoning block; the native app creates a bubble on first reasoning delta
 
-                    elif chunk.type == "interrupt":
+                    elif event.kind == "interrupt":
                         _pending_interrupts[skey] = {
-                            "tool": chunk.tool,
-                            "call_id": chunk.call_id,
-                            "args": chunk.args or {},
+                            "tool": event.tool,
+                            "call_id": event.call_id,
+                            "args": event.args or {},
+                            "model": req.model,
+                            "provider_keys": req.provider_keys,
+                            "session_id": session_id,
                         }
                         yield sse("interrupt", {
-                            "tool": chunk.tool,
-                            "call_id": chunk.call_id,
-                            "args": chunk.args,
+                            "tool": event.tool,
+                            "call_id": event.call_id,
+                            "args": event.args,
                         })
+                        _persist_collected_stream_state(
+                            conversation,
+                            session_id=session_id,
+                            ai_content_parts=ai_content_parts,
+                            reasoning_parts=reasoning_parts,
+                            tool_metadata_list=tool_metadata_list,
+                            tool_results=tool_results,
+                        )
+                        persisted = True
+                        aborted = True
+                        break
 
-                    elif chunk.type == "error":
-                        yield sse("error", {"content": chunk.content})
+                    elif event.kind == "error":
+                        _persist_collected_stream_state(
+                            conversation,
+                            session_id=session_id,
+                            ai_content_parts=ai_content_parts,
+                            reasoning_parts=reasoning_parts,
+                            tool_metadata_list=tool_metadata_list,
+                            tool_results=tool_results,
+                        )
+                        persisted = True
+                        aborted = True
+                        yield sse("error", {"content": event.content})
+                        break
 
-                    elif chunk.type == "done" and chunk.content:
+                    elif event.kind == "done" and event.content:
                         # Only emit done content as messages if no streaming text was received
                         if not ai_content_parts:
-                            ai_content_parts.append(chunk.content)
-                            yield sse("messages", {"content": chunk.content})
+                            ai_content_parts.append(event.content)
+                            yield sse("messages", {"content": event.content})
+
+                if aborted:
+                    return
 
                 response = "".join(ai_content_parts) if ai_content_parts else ""
                 if not response and tool_results:
-                    response = "\n".join(result["output"] for result in tool_results)
+                    response = "\n".join(tool_results.values())
                 if not response:
                     response = "Task completed."
 
                 # Store messages immediately — before any yields
                 # (client may disconnect, preventing post-yield storage)
-                result_by_call_id = {
-                    result["tool_call_id"]: result["output"] for result in tool_results
-                }
                 for tm in tool_metadata_list:
-                    output = result_by_call_id.get(tm.get("tool_call_id", ""), "")
-                    conversation.add_message("tool", output, metadata=tm, session_id=session_id)
+                    call_id = tm.get("tool_call_id", "")
+                    output = tool_results.get(call_id, "")
+                    if output:
+                        persist_tool_message(
+                            conversation,
+                            output,
+                            session_id=session_id,
+                            tool_name=tm.get("tool_name", "unknown"),
+                            tool_call_id=call_id,
+                        )
 
-                conversation.add_message("assistant", response.strip(), metadata={"stream": True}, session_id=session_id)
+                if reasoning_parts:
+                    persist_reasoning_message(
+                        conversation, "".join(reasoning_parts), session_id=session_id
+                    )
+                persist_assistant_message(
+                    conversation, response.strip(), metadata={"stream": True}, session_id=session_id
+                )
+                persisted = True
                 logger.info(
                     "agent.response_stored", {"response": response[:80], "session_id": session_id, "user_id": user_id}, user_id=user_id, channel="http"
                 )
@@ -679,18 +831,34 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
 
             except GeneratorExit:
                 # Client disconnected — still store what we have
+                if not persisted:
+                    _persist_collected_stream_state(
+                        conversation,
+                        session_id=session_id,
+                        ai_content_parts=ai_content_parts,
+                        reasoning_parts=reasoning_parts,
+                        tool_metadata_list=tool_metadata_list,
+                        tool_results=tool_results,
+                    )
                 response = "".join(ai_content_parts) if ai_content_parts else ""
                 if response:
-                    conversation.add_message("assistant", response.strip(), metadata={"stream": True}, session_id=session_id)
                     logger.info(
                         "agent.response_stored_disconnect", {"response": response[:80], "session_id": session_id}, user_id=user_id, channel="http"
                     )
                 raise
             except asyncio.CancelledError:
                 # asyncio cancellation — still store what we have
+                if not persisted:
+                    _persist_collected_stream_state(
+                        conversation,
+                        session_id=session_id,
+                        ai_content_parts=ai_content_parts,
+                        reasoning_parts=reasoning_parts,
+                        tool_metadata_list=tool_metadata_list,
+                        tool_results=tool_results,
+                    )
                 response = "".join(ai_content_parts) if ai_content_parts else ""
                 if response:
-                    conversation.add_message("assistant", response.strip(), metadata={"stream": True}, session_id=session_id)
                     logger.info(
                         "agent.response_stored_cancelled", {"response": response[:80], "session_id": session_id}, user_id=user_id, channel="http"
                     )
@@ -741,12 +909,32 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
     session_id = req.session_id or "default"
     skey = _stream_key(req.user_id, session_id)
     pending = _pending_interrupts.pop(skey, None)
+    if not pending and req.session_id is None:
+        prefix = f"{req.user_id}:"
+        matches = [key for key in _pending_interrupts if key.startswith(prefix)]
+        if len(matches) == 1:
+            skey = matches[0]
+            pending = _pending_interrupts.pop(skey)
     if not pending:
         raise HTTPException(status_code=404, detail="No pending tool call to approve")
+    if req.call_id and pending.get("call_id") and pending.get("call_id") != req.call_id:
+        _pending_interrupts[skey] = pending
+        raise HTTPException(status_code=409, detail="Pending tool call does not match call_id")
     tool_name = pending.get("tool", "unknown")
+    session_id = pending.get("session_id") or session_id
+    skey = _stream_key(req.user_id, session_id)
+    model = pending.get("model")
+    provider_keys = pending.get("provider_keys")
 
-    loop = await get_sdk_loop(req.user_id, model=req.model, provider_keys=req.provider_keys, session_id=session_id)
-    loop._approved_tool_names.add(tool_name)
+    loop = await get_sdk_loop(
+        req.user_id,
+        model=model,
+        provider_keys=provider_keys,
+        session_id=session_id,
+    )
+    loop.approve_tool_call(
+        ToolCall(id=pending.get("call_id") or req.call_id, name=tool_name, arguments=pending.get("args") or {})
+    )
 
     conversation = get_message_store(req.user_id)
     cancel_event = asyncio.Event()
@@ -755,6 +943,14 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
 
     async def generate() -> AsyncGenerator[str, None]:
         ai_content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tool_metadata_list: list[dict[str, Any]] = []
+        tool_results: dict[str, str] = {}
+        aborted = False
+        persisted = False
+        seen_canonical_text: set[str] = set()
+        seen_canonical_reasoning: set[str] = set()
+        seen_canonical_tool_starts: set[str] = set()
         try:
             recent = conversation.get_messages_by_session_id(session_id, 50)
             retry_msgs = _messages_from_conversation(recent)
@@ -763,67 +959,159 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
             async for chunk in run_sdk_agent_stream(
                 user_id=req.user_id,
                 messages=retry_msgs,
-                model=req.model,
-                provider_keys=req.provider_keys,
+                model=model,
+                provider_keys=provider_keys,
                 cancel_event=cancel_event,
                 session_id=session_id,
             ):
                 if _cancel_flags.get(skey, False) or cancel_event.is_set():
+                    _persist_collected_stream_state(
+                        conversation,
+                        session_id=session_id,
+                        ai_content_parts=ai_content_parts,
+                        reasoning_parts=reasoning_parts,
+                        tool_metadata_list=tool_metadata_list,
+                        tool_results=tool_results,
+                    )
+                    persisted = True
+                    aborted = True
                     yield sse("cancelled", {"content": "Cancelled"})
                     break
-                canonical = chunk.canonical_type
+                event = adapt_stream_chunk(chunk)
+                is_compat_alias = chunk.type != event.kind
 
-                if canonical == "text_delta" and chunk.type != "ai_token" and chunk.content:
-                    ai_content_parts.append(chunk.content)
-                    yield sse("messages", {"content": chunk.content})
+                if event.kind == "text_delta" and event.content:
+                    if is_compat_alias and event.content in seen_canonical_text:
+                        continue
+                    ai_content_parts.append(event.content)
+                    yield sse("messages", {"content": event.content})
+                    if not is_compat_alias:
+                        seen_canonical_text.add(event.content)
 
-                elif canonical == "tool_input_start" and chunk.tool:
+                elif event.kind == "tool_input_start" and event.tool:
+                    call_id = event.call_id or ""
+                    if is_compat_alias and call_id in seen_canonical_tool_starts:
+                        continue
+                    if not is_compat_alias:
+                        seen_canonical_tool_starts.add(call_id)
+                    tool_metadata_list.append(
+                        {"tool_name": event.tool, "tool_call_id": event.call_id or ""}
+                    )
                     yield sse("tool_start", {
-                        "tool": chunk.tool,
-                        "call_id": chunk.call_id or "",
-                        "args": chunk.args or {},
+                        "tool": event.tool,
+                        "call_id": event.call_id or "",
+                        "args": event.args or {},
                     })
 
-                elif canonical == "tool_result" and chunk.tool:
-                    output = (chunk.result_preview or "")[:500]
+                elif event.kind == "tool_result" and event.tool:
+                    output = (event.result_preview or "")[:500]
                     if output:
+                        tool_results[event.call_id or ""] = output
                         yield sse("tool_result", {
-                            "tool": chunk.tool,
-                            "call_id": chunk.call_id or "",
+                            "tool": event.tool,
+                            "call_id": event.call_id or "",
                             "result": output,
                         })
 
-                elif canonical == "reasoning_delta" and chunk.content:
-                    yield sse("reasoning", {"content": chunk.content})
+                elif event.kind == "reasoning_delta" and event.content:
+                    if is_compat_alias and event.content in seen_canonical_reasoning:
+                        continue
+                    reasoning_parts.append(event.content)
+                    yield sse("reasoning", {"content": event.content})
+                    if not is_compat_alias:
+                        seen_canonical_reasoning.add(event.content)
 
-                elif canonical == "reasoning_start":
+                elif event.kind == "reasoning_start":
                     pass
 
-                elif chunk.type == "interrupt":
+                elif event.kind == "interrupt":
                     _pending_interrupts[skey] = {
-                        "tool": chunk.tool,
-                        "call_id": chunk.call_id,
-                        "args": chunk.args or {},
+                        "tool": event.tool,
+                        "call_id": event.call_id,
+                        "args": event.args or {},
+                        "model": model,
+                        "provider_keys": provider_keys,
+                        "session_id": session_id,
                     }
                     yield sse("interrupt", {
-                        "tool": chunk.tool,
-                        "call_id": chunk.call_id,
-                        "args": chunk.args,
+                        "tool": event.tool,
+                        "call_id": event.call_id,
+                        "args": event.args,
                     })
+                    _persist_collected_stream_state(
+                        conversation,
+                        session_id=session_id,
+                        ai_content_parts=ai_content_parts,
+                        reasoning_parts=reasoning_parts,
+                        tool_metadata_list=tool_metadata_list,
+                        tool_results=tool_results,
+                    )
+                    persisted = True
+                    aborted = True
+                    break
 
-                elif chunk.type == "error":
-                    yield sse("error", {"content": chunk.content})
+                elif event.kind == "error":
+                    _persist_collected_stream_state(
+                        conversation,
+                        session_id=session_id,
+                        ai_content_parts=ai_content_parts,
+                        reasoning_parts=reasoning_parts,
+                        tool_metadata_list=tool_metadata_list,
+                        tool_results=tool_results,
+                    )
+                    persisted = True
+                    aborted = True
+                    yield sse("error", {"content": event.content})
+                    break
 
-                elif chunk.type == "done" and chunk.content:
+                elif event.kind == "done" and event.content:
                     if not ai_content_parts:
-                        ai_content_parts.append(chunk.content)
-                        yield sse("messages", {"content": chunk.content})
+                        ai_content_parts.append(event.content)
+                        yield sse("messages", {"content": event.content})
 
             response = "".join(ai_content_parts) if ai_content_parts else ""
+            if aborted:
+                return
+            for tm in tool_metadata_list:
+                call_id = tm.get("tool_call_id", "")
+                output = tool_results.get(call_id, "")
+                if output:
+                    persist_tool_message(
+                        conversation,
+                        output,
+                        session_id=session_id,
+                        tool_name=tm.get("tool_name", "unknown"),
+                        tool_call_id=call_id,
+                    )
+            if reasoning_parts:
+                persist_reasoning_message(conversation, "".join(reasoning_parts), session_id=session_id)
             if response:
-                conversation.add_message(
-                    "assistant", response, metadata={"stream": True}, session_id=session_id
+                persist_assistant_message(
+                    conversation, response, metadata={"stream": True}, session_id=session_id
                 )
+                persisted = True
+        except GeneratorExit:
+            if not persisted:
+                _persist_collected_stream_state(
+                    conversation,
+                    session_id=session_id,
+                    ai_content_parts=ai_content_parts,
+                    reasoning_parts=reasoning_parts,
+                    tool_metadata_list=tool_metadata_list,
+                    tool_results=tool_results,
+                )
+            raise
+        except asyncio.CancelledError:
+            if not persisted:
+                _persist_collected_stream_state(
+                    conversation,
+                    session_id=session_id,
+                    ai_content_parts=ai_content_parts,
+                    reasoning_parts=reasoning_parts,
+                    tool_metadata_list=tool_metadata_list,
+                    tool_results=tool_results,
+                )
+            raise
         except Exception as e:
             logger.error("approve_stream_error", {"error": str(e)}, user_id=req.user_id, channel="http")
             yield sse("error", {"content": str(e)})
@@ -837,26 +1125,30 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
 @router.post("/message/reject")
 async def reject_tool(req: RejectRequest, _: None = Depends(require_auth)) -> dict[str, Any]:
     """Reject a pending tool call (HITL)."""
-    skey = _stream_key(req.user_id, req.session_id or req.call_id or None)
+    skey = _stream_key(req.user_id, req.session_id or "default")
     pending = _pending_interrupts.pop(skey, None)
     if not pending:
         # Fallback: try user_id-only key for backward compat
         pending = _pending_interrupts.pop(req.user_id, None)
     if not pending:
         raise HTTPException(status_code=404, detail="No pending tool call to reject")
+    if req.call_id and pending.get("call_id") and pending.get("call_id") != req.call_id:
+        _pending_interrupts[skey] = pending
+        raise HTTPException(status_code=409, detail="Pending tool call does not match call_id")
     return {"status": "rejected", "tool": pending.get("tool", "unknown")}
 
 
 @router.post("/message/cancel")
 async def cancel_message(req: CancelRequest, _: None = Depends(require_auth)) -> dict[str, Any]:
     """Cancel the current agent execution for a session."""
-    skey = _stream_key(req.user_id, req.session_id)
+    session_id = req.session_id or "default"
+    skey = _stream_key(req.user_id, session_id)
     _cancel_flags[skey] = True
     # Signal the active stream to break
     event = _active_streams.get(skey)
     if event:
         event.set()
-    reset_sdk_loop(req.user_id, session_id=req.session_id)
+    reset_sdk_loop(req.user_id, session_id=session_id)
     return {"status": "cancelled"}
 
 

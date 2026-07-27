@@ -1,4 +1,4 @@
-"""Skills API endpoints — user-level only, scoped via item_scopes."""
+"""Skills API endpoints — user-level only."""
 
 import shutil
 from pathlib import Path
@@ -8,14 +8,15 @@ import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from src.sdk.item_scopes import ItemScopeDB, ScopeKind
+from src.sdk.capabilities import load_user_capabilities, resource_enabled, save_user_capabilities
 from src.skills.models import _is_valid_skill_name, parse_skill_file
 from src.skills.registry import get_skill_registry
 from src.storage.paths import DEFAULT_USER_ID, _validate_path_id, get_paths
 
 router = APIRouter(prefix="/skills", tags=["skills"])
 
-SkillScope = str  # "all" | "selected" | "none" (from item_scopes)
+SkillScope = str  # compatibility: "all" | "selected" | "none"
+ScopeKind = str
 
 
 class SkillCreateRequest(BaseModel):
@@ -37,6 +38,7 @@ class SkillSummary(BaseModel):
     scope: str = "all"
     workspace_id: str | None = None
     workspace_ids: list[str] = Field(default_factory=list)
+    enabled: bool = True
     is_loaded: bool = False
     disable_model_invocation: bool = False
 
@@ -75,7 +77,26 @@ def _validate_user_id(user_id: str) -> None:
 
 def _reset_user_loops(user_id: str) -> None:
     from src.sdk.runner import reset_user_sdk_loops
+
     reset_user_sdk_loops(user_id)
+
+
+def _load_user_caps(user_id: str) -> dict[str, Any]:
+    return load_user_capabilities(user_id)
+
+
+def _save_user_enabled(user_id: str, section: str, name: str, enabled: bool) -> None:
+    caps = load_user_capabilities(user_id)
+    caps.setdefault(section, {})[name] = enabled
+    save_user_capabilities(user_id, caps)
+
+
+def _scope_response(enabled: bool) -> tuple[SkillScope, list[str]]:
+    return ("all" if enabled else "none", [])
+
+
+def _resource_enabled(caps: dict[str, Any], section: str, name: str) -> bool:
+    return resource_enabled(caps, section, name)
 
 
 def _skill_dir(user_id: str) -> Path:
@@ -126,19 +147,30 @@ def _get_registry(user_id: str, workspace_id: str) -> Any:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-def _to_summary(skill: dict[str, Any] | Any, loaded_names: set[str]) -> SkillSummary:
+def _to_summary(
+    skill: dict[str, Any] | Any,
+    loaded_names: set[str],
+    enabled: bool = True,
+) -> SkillSummary:
     metadata = skill.get("metadata", {})
+    scope, workspace_ids = _scope_response(enabled)
     return SkillSummary(
         name=skill["name"],
         description=skill.get("description", ""),
-        scope="all",
+        scope=scope,
+        workspace_ids=workspace_ids,
+        enabled=enabled,
         is_loaded=skill["name"] in loaded_names,
         disable_model_invocation=metadata.get("disable_model_invocation", False) is True,
     )
 
 
-def _to_detail(skill: dict[str, Any] | Any, loaded_names: set[str]) -> SkillDetail:
-    summary = _to_summary(skill, loaded_names)
+def _to_detail(
+    skill: dict[str, Any] | Any,
+    loaded_names: set[str],
+    enabled: bool = True,
+) -> SkillDetail:
+    summary = _to_summary(skill, loaded_names, enabled)
     frontmatter = {
         "name": skill["name"],
         "description": skill.get("description", ""),
@@ -164,18 +196,12 @@ async def list_skills(user_id: str = "default_user", workspace_id: str = "person
     _validate_workspace_id(workspace_id)
     registry = _get_registry(user_id, workspace_id)
     loaded_names = set(registry.get_loaded_skills())
-    paths = get_paths(user_id)
-    scope_db = ItemScopeDB(paths.base)
-    all_scoped = scope_db.get_all_scoped(user_id, "skill")
+    caps = _load_user_caps(user_id)
 
     summaries = []
     for skill in registry.get_all_skills():
         name = skill["name"]
-        summary = _to_summary(skill, loaded_names)
-        if name in all_scoped:
-            item = all_scoped[name]
-            summary.scope = item.scope
-            summary.workspace_ids = item.workspace_ids
+        summary = _to_summary(skill, loaded_names, _resource_enabled(caps, "skills", name))
         summaries.append(summary)
 
     return SkillListResponse(skills=summaries)
@@ -194,7 +220,9 @@ async def get_skill(
     skill = registry.get_skill(skill_name)
     if not skill:
         raise HTTPException(status_code=404, detail="Skill not found")
-    return _to_detail(skill, set(registry.get_loaded_skills()))
+    caps = _load_user_caps(user_id)
+    enabled = _resource_enabled(caps, "skills", skill_name)
+    return _to_detail(skill, set(registry.get_loaded_skills()), enabled=enabled)
 
 
 @router.post("", response_model=SkillDetail)
@@ -225,7 +253,12 @@ async def create_skill(
     skill = parse_skill_file(skill_file)
     if not skill:
         raise HTTPException(status_code=500, detail="Skill could not be loaded")
-    return _to_detail(skill, set(_get_registry(user_id, workspace_id).get_loaded_skills()))
+    enabled = _resource_enabled(_load_user_caps(user_id), "skills", request.name)
+    return _to_detail(
+        skill,
+        set(_get_registry(user_id, workspace_id).get_loaded_skills()),
+        enabled=enabled,
+    )
 
 
 @router.put("/{skill_name}", response_model=SkillDetail)
@@ -258,7 +291,12 @@ async def update_skill(
     skill = parse_skill_file(skill_file)
     if not skill:
         raise HTTPException(status_code=500, detail="Skill could not be loaded")
-    return _to_detail(skill, set(_get_registry(user_id, workspace_id).get_loaded_skills()))
+    enabled = _resource_enabled(_load_user_caps(user_id), "skills", skill_name)
+    return _to_detail(
+        skill,
+        set(_get_registry(user_id, workspace_id).get_loaded_skills()),
+        enabled=enabled,
+    )
 
 
 @router.delete("/{skill_name}")
@@ -293,8 +331,18 @@ async def set_skill_scope(
     scope: ScopeKind = body.get("scope", "all")
     if scope not in ("all", "selected", "none"):
         raise HTTPException(status_code=400, detail="scope must be all, selected, or none")
-    wids = body.get("workspace_ids", [])
-    paths = get_paths(user_id)
-    scope_db = ItemScopeDB(paths.base)
-    scope_db.set(user_id, "skill", skill_name, scope, wids)
-    return {"name": skill_name, "scope": scope, "workspace_ids": wids}
+    if scope == "selected":
+        raise HTTPException(
+            status_code=400,
+            detail="workspace-selected scope is no longer supported; use 'all' or 'none'",
+        )
+    if "enabled" in body:
+        if not isinstance(body["enabled"], bool):
+            raise HTTPException(status_code=400, detail="enabled must be a boolean")
+        enabled = body["enabled"]
+    else:
+        enabled = scope != "none"
+    _save_user_enabled(user_id, "skills", skill_name, enabled)
+    _reset_user_loops(user_id)
+    response_scope, wids = _scope_response(enabled)
+    return {"name": skill_name, "scope": response_scope, "workspace_ids": wids}

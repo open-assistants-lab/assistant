@@ -1,4 +1,4 @@
-"""Workspace-aware skills API tests."""
+"""Skills API tests."""
 
 import warnings
 from pathlib import Path
@@ -23,6 +23,10 @@ class TempPaths:
     def workspace_skills_dir(self) -> Path:
         self._workspace_skills.mkdir(parents=True, exist_ok=True)
         return self._workspace_skills
+
+    @property
+    def root(self) -> Path:
+        return self.base
 
 
 def write_skill(
@@ -74,10 +78,9 @@ def skill_api_tmp(tmp_path, monkeypatch):
     return user_root, workspace_root
 
 
-def test_list_returns_user_and_workspace_skills_with_scope_fields(client, skill_api_tmp):
-    user_root, workspace_root = skill_api_tmp
+def test_list_returns_user_skills_with_scope_fields(client, skill_api_tmp):
+    user_root, _ = skill_api_tmp
     write_skill(user_root, "user-skill", "User skill")
-    write_skill(workspace_root, "workspace-skill", "Workspace skill")
 
     r = client.get("/skills", params={"user_id": "u1", "workspace_id": "ws1"})
 
@@ -89,17 +92,96 @@ def test_list_returns_user_and_workspace_skills_with_scope_fields(client, skill_
         "scope": "all",
         "workspace_id": None,
         "workspace_ids": [],
+        "enabled": True,
         "is_loaded": False,
         "disable_model_invocation": True,
     }
-    assert skills["workspace-skill"]["scope"] == "all"
-    assert skills["workspace-skill"]["workspace_id"] is None
     assert "is_system" not in skills["user-skill"]
 
 
+def test_skill_scope_selected_is_rejected_without_broadening_access(
+    client, skill_api_tmp
+):
+    user_root, _ = skill_api_tmp
+    write_skill(user_root, "selected-skill", "Selected skill")
+
+    response = client.patch(
+        "/skills/selected-skill/scope",
+        params={"user_id": "u1"},
+        json={"scope": "selected", "workspace_ids": ["ws1"]},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "workspace-selected scope is no longer supported; use 'all' or 'none'"
+    )
+
+    list_response = client.get(
+        "/skills",
+        params={"user_id": "u1", "workspace_id": "other-workspace"},
+    )
+    skills = {skill["name"]: skill for skill in list_response.json()["skills"]}
+    assert skills["selected-skill"]["scope"] == "all"
+    assert skills["selected-skill"]["workspace_ids"] == []
+
+
+def test_skill_detail_returns_disabled_scope_from_user_capabilities(client, skill_api_tmp):
+    user_root, _ = skill_api_tmp
+    write_skill(user_root, "disabled-skill", "Disabled skill")
+
+    disable_response = client.patch(
+        "/skills/disabled-skill/scope",
+        params={"user_id": "u1"},
+        json={"scope": "none"},
+    )
+    assert disable_response.status_code == 200
+
+    detail_response = client.get(
+        "/skills/disabled-skill",
+        params={"user_id": "u1", "workspace_id": "ignored-workspace"},
+    )
+
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+    assert detail["scope"] == "none"
+    assert detail["workspace_ids"] == []
+    assert detail["enabled"] is False
+
+
+def test_skill_enabled_legacy_payload_rejects_non_bool(client, skill_api_tmp):
+    user_root, _ = skill_api_tmp
+    write_skill(user_root, "enabled-string-skill", "Enabled string")
+
+    response = client.patch(
+        "/skills/enabled-string-skill/scope",
+        params={"user_id": "u1"},
+        json={"enabled": "false"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "enabled must be a boolean"
+
+
+def test_skills_router_imports_without_item_scopes(monkeypatch):
+    import builtins
+    import importlib
+
+    original_import = builtins.__import__
+
+    def blocked_import(name, *args, **kwargs):
+        if name == "src.sdk.item_scopes":
+            raise AssertionError("skills router must not import item_scopes")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked_import)
+
+    module = importlib.import_module("src.http.routers.skills")
+    importlib.reload(module)
+
+
 def test_detail_returns_full_content_and_metadata(client, skill_api_tmp):
-    _, workspace_root = skill_api_tmp
-    write_skill(workspace_root, "detail-skill", "Detail skill", "Detailed instructions")
+    user_root, _ = skill_api_tmp
+    write_skill(user_root, "detail-skill", "Detail skill", "Detailed instructions")
 
     r = client.get(
         "/skills/detail-skill",
@@ -110,14 +192,14 @@ def test_detail_returns_full_content_and_metadata(client, skill_api_tmp):
     assert r.status_code == 200
     assert data["name"] == "detail-skill"
     assert "Detailed instructions" in data["content"]
-    assert data["metadata"]["scope"] == "workspace"
+    assert data["metadata"]["scope"] == "user"
     assert data["disable_model_invocation"] is True
 
 
 def test_detail_includes_supported_frontmatter_fields(client, skill_api_tmp):
-    _, workspace_root = skill_api_tmp
+    user_root, _ = skill_api_tmp
     write_skill(
-        workspace_root,
+        user_root,
         "detail-frontmatter",
         "Detail frontmatter",
         "Detailed instructions",
@@ -164,6 +246,32 @@ def test_create_workspace_skill_writes_to_user_scope(client, skill_api_tmp):
     assert data["description"] == "Created skill"
 
 
+def test_create_skill_response_reflects_disabled_capability(client, skill_api_tmp):
+    user_root, _ = skill_api_tmp
+    disable_response = client.patch(
+        "/capabilities",
+        params={"user_id": "u1", "workspace_id": "ignored"},
+        json={"skills": {"created-disabled": False}},
+    )
+    assert disable_response.status_code == 200
+
+    r = client.post(
+        "/skills",
+        json={
+            "name": "created-disabled",
+            "description": "Created disabled",
+            "content": "# Created\n\nInstructions",
+            "scope": "workspace",
+        },
+        params={"user_id": "u1", "workspace_id": "ws1"},
+    )
+
+    assert r.status_code == 200
+    assert (user_root / "created-disabled" / "SKILL.md").exists()
+    assert r.json()["enabled"] is False
+    assert r.json()["scope"] == "none"
+
+
 def test_create_skill_resets_user_loops(client, skill_api_tmp, monkeypatch):
     from src.sdk import runner
 
@@ -202,6 +310,27 @@ def test_update_skill_content_updates_file_and_returns_detail(client, skill_api_
     assert data["disable_model_invocation"] is True
     assert "New content" in data["content"]
     assert "New content" in (user_root / "update-skill" / "SKILL.md").read_text()
+
+
+def test_update_skill_response_reflects_disabled_capability(client, skill_api_tmp):
+    user_root, _ = skill_api_tmp
+    write_skill(user_root, "update-disabled", "Original", "Old content")
+    disable_response = client.patch(
+        "/capabilities",
+        params={"user_id": "u1", "workspace_id": "ignored"},
+        json={"skills": {"update-disabled": False}},
+    )
+    assert disable_response.status_code == 200
+
+    r = client.put(
+        "/skills/update-disabled",
+        json={"content": "# Updated\n\nNew content", "scope": "workspace"},
+        params={"user_id": "u1", "workspace_id": "ws1"},
+    )
+
+    assert r.status_code == 200
+    assert r.json()["enabled"] is False
+    assert r.json()["scope"] == "none"
 
 
 def test_update_skill_resets_user_loops(client, skill_api_tmp, monkeypatch):

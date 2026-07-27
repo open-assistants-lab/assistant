@@ -123,71 +123,76 @@ class DataPaths:
         """Team root (solo mode always returns None)."""
         return None
 
-    # -- User-scoped methods (all under root/) --
+    # -- User-scoped methods --
 
     def user_skills_dir(self) -> Path:
-        p = self.root / "Skills"
+        p = self.user_dir / "Skills"
         p.mkdir(parents=True, exist_ok=True)
         return p
 
     def user_subagents_dir(self) -> Path:
-        p = self.root / "Subagents"
+        p = self.user_dir / "Subagents"
         p.mkdir(parents=True, exist_ok=True)
         return p
 
     def user_tools_dir(self) -> Path:
-        p = self.root / "Tools"
+        p = self.user_dir / "Tools"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def files_dir(self) -> Path:
+        p = self.user_dir / "Files"
         p.mkdir(parents=True, exist_ok=True)
         return p
 
     def user_prompt_path(self) -> Path:
-        return self.root / "AGENTS.md"
+        return self.user_dir / "AGENTS.md"
 
     def email_dir(self) -> Path:
-        p = self.root / "Email"
+        p = self.user_dir / "Email"
         p.mkdir(parents=True, exist_ok=True)
         return p
 
     def gmail_cache_dir(self) -> Path:
-        p = self.root / "Email" / "gmail_cache"
+        p = self.user_dir / "Email" / "gmail_cache"
         p.mkdir(parents=True, exist_ok=True)
         return p
 
     def contacts_dir(self) -> Path:
-        p = self.root / "Contacts"
+        p = self.user_dir / "Contacts"
         p.mkdir(parents=True, exist_ok=True)
         return p
 
     def todos_dir(self) -> Path:
-        p = self.root / "Todos"
+        p = self.user_dir / "Todos"
         p.mkdir(parents=True, exist_ok=True)
         return p
 
     def conversation_dir(self) -> Path:
-        p = self.root / "Conversation"
+        p = self.user_dir / "Conversation"
         p.mkdir(parents=True, exist_ok=True)
         return p
 
     def user_memory_dir(self) -> Path:
-        p = self.root / "Memory" / "global"
+        p = self.user_dir / "Memory" / "global"
         p.mkdir(parents=True, exist_ok=True)
         return p
 
     def user_apps_dir(self) -> Path:
-        p = self.root / "Apps"
+        p = self.user_dir / "Apps"
         p.mkdir(parents=True, exist_ok=True)
         return p
 
     def user_mcp_config(self) -> Path:
-        return self.root / ".mcp.json"
+        return self.user_dir / ".mcp.json"
 
     def research_dir(self) -> Path:
-        p = self.root / "Research" / self.user_id / self.workspace_id
+        p = self.user_dir / "Research" / self.workspace_id
         p.mkdir(parents=True, exist_ok=True)
         return p
 
     def companion_dir(self) -> Path:
-        p = self.root / "Companion"
+        p = self.user_dir / "Companion"
         p.mkdir(parents=True, exist_ok=True)
         return p
 
@@ -197,41 +202,31 @@ class DataPaths:
     def companion_memory_db(self) -> Path:
         return self.companion_dir() / "memory.db"
 
-    # -- Workspace-scoped methods (all under root/Workspaces/{workspace_id}/) --
+    # -- Workspace compatibility methods (runtime storage is user-scoped) --
 
     def workspace_skills_dir(self) -> Path:
-        p = self.root / "Workspaces" / self.workspace_id / "Skills"
-        p.mkdir(parents=True, exist_ok=True)
-        return p
+        return self.user_skills_dir()
 
     def workspace_subagents_dir(self) -> Path:
-        p = self.root / "Workspaces" / self.workspace_id / "Subagents"
-        p.mkdir(parents=True, exist_ok=True)
-        return p
+        return self.user_subagents_dir()
 
     def workspace_tools_dir(self) -> Path:
-        p = self.root / "Workspaces" / self.workspace_id / "Tools"
-        p.mkdir(parents=True, exist_ok=True)
-        return p
+        return self.user_tools_dir()
 
     def workspace_files_dir(self) -> Path:
-        p = self.root / "Workspaces" / self.workspace_id / "Files"
-        p.mkdir(parents=True, exist_ok=True)
-        return p
+        return self.files_dir()
 
     def workspace_memory_dir(self) -> Path:
-        p = self.root / "Workspaces" / self.workspace_id / "Memory"
-        p.mkdir(parents=True, exist_ok=True)
-        return p
+        return self.user_memory_dir()
 
     def workspace_conversation_path(self) -> Path:
-        return self.root / "Workspaces" / self.workspace_id / "conversation.app.db"
+        return self.conversation_dir() / "app.db"
 
     def workspace_cache(self) -> Path:
-        return self.root / "Workspaces" / self.workspace_id / ".file_cache.json"
+        return self.user_dir / ".file_cache.json"
 
     def versions_dir(self) -> Path:
-        p = self.root / "Workspaces" / self.workspace_id / ".versions"
+        p = self.user_dir / ".versions"
         p.mkdir(parents=True, exist_ok=True)
         return p
 
@@ -359,7 +354,11 @@ class DataPaths:
     @property
     def user_dir(self) -> Path:
         """Root of user data."""
-        return self.root
+        if self.user_id == DEFAULT_USER_ID:
+            return self.root
+        p = self.root / "Users" / self.user_id
+        p.mkdir(parents=True, exist_ok=True)
+        return p
 
     # -- Templates --
 

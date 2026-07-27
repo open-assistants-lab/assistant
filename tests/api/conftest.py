@@ -1,6 +1,7 @@
 """Shared fixtures for API contract tests."""
 
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -52,15 +53,17 @@ def client(app):
 
 
 @pytest.fixture
-def test_user_id():
+def test_user_id(request):
     """Return a unique test user ID."""
-    return f"test_api_{os.getpid()}"
+    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", request.node.name)
+    return f"test_api_{os.getpid()}_{safe_name}"
 
 
 @pytest.fixture
-def test_user_id_2():
+def test_user_id_2(request):
     """Return a second test user ID for isolation tests."""
-    return f"test_api_2_{os.getpid()}"
+    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", request.node.name)
+    return f"test_api_2_{os.getpid()}_{safe_name}"
 
 
 @pytest.fixture

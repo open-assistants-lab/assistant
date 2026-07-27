@@ -1,4 +1,4 @@
-"""Subagent management API for Flutter client - workspace-scoped."""
+"""Subagent management API for Flutter client."""
 
 from __future__ import annotations
 
@@ -9,11 +9,12 @@ from agentprofile.models import AgentProfile
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, ValidationError
 
-from src.sdk.item_scopes import ItemScopeDB, ScopeKind
+from src.sdk.capabilities import load_user_capabilities, resource_enabled, save_user_capabilities
 from src.sdk.subagent_models import TaskStatus
-from src.storage.paths import get_paths
 
 router = APIRouter(prefix="/subagents", tags=["subagents"])
+
+ScopeKind = str
 
 
 class SubagentCreateRequest(BaseModel):
@@ -82,6 +83,30 @@ def _validate_context_ids(user_id: str, workspace_id: str) -> None:
         raise HTTPException(status_code=422, detail=str(e)) from e
 
 
+def _load_user_caps(user_id: str) -> dict[str, Any]:
+    return load_user_capabilities(user_id)
+
+
+def _save_user_enabled(user_id: str, section: str, name: str, enabled: bool) -> None:
+    caps = load_user_capabilities(user_id)
+    caps.setdefault(section, {})[name] = enabled
+    save_user_capabilities(user_id, caps)
+
+
+def _scope_response(enabled: bool) -> tuple[ScopeKind, list[str]]:
+    return ("all" if enabled else "none", [])
+
+
+def _resource_enabled(caps: dict[str, Any], section: str, name: str) -> bool:
+    return resource_enabled(caps, section, name)
+
+
+def _reset_user_loops(user_id: str) -> None:
+    from src.sdk.runner import reset_user_sdk_loops
+
+    reset_user_sdk_loops(user_id)
+
+
 @router.get("")
 async def list_subagents(
     user_id: str = Query("default_user"),
@@ -91,16 +116,7 @@ async def list_subagents(
     _validate_context_ids(user_id, workspace_id)
     coordinator = get_coordinator(user_id, workspace_id)
     scoped_defs = await coordinator.list_defs_with_scope()
-
-    paths = get_paths(user_id)
-    scope_db = ItemScopeDB(paths.base)
-    all_scoped = scope_db.get_all_scoped(user_id, "subagent")
-
-    def resolve(name: str, default_scope: str) -> tuple[str, list[str]]:
-        if name in all_scoped:
-            item = all_scoped[name]
-            return item.scope, item.workspace_ids
-        return ("all", [])
+    caps = _load_user_caps(user_id)
 
     return {
         "agents": [
@@ -117,11 +133,13 @@ async def list_subagents(
                 "provider_options": d.provider_options,
                 "output_schema": d.output_schema_def,
                 "handoff_instructions": d.handoff_instructions,
+                "enabled": enabled,
                 "scope": scp,
                 "workspace_ids": wids,
             }
-            for d, scope in scoped_defs
-            for scp, wids in [resolve(d.name, scope)]
+            for d, _ignored_scope in scoped_defs
+            for enabled in [_resource_enabled(caps, "subagents", d.name)]
+            for scp, wids in [_scope_response(enabled)]
         ]
     }
 
@@ -312,12 +330,21 @@ async def set_subagent_scope(
     body: dict[str, Any],
     user_id: str = Query("default_user"),
 ) -> dict[str, Any]:
-    """Set scope via item_scopes."""
     scope: ScopeKind = body.get("scope", "all")
     if scope not in ("all", "selected", "none"):
         raise HTTPException(status_code=400, detail="scope must be all, selected, or none")
-    wids = body.get("workspace_ids", [])
-    paths = get_paths(user_id)
-    scope_db = ItemScopeDB(paths.base)
-    scope_db.set(user_id, "subagent", name, scope, wids)
-    return {"name": name, "scope": scope, "workspace_ids": wids}
+    if scope == "selected":
+        raise HTTPException(
+            status_code=400,
+            detail="workspace-selected scope is no longer supported; use 'all' or 'none'",
+        )
+    if "enabled" in body:
+        if not isinstance(body["enabled"], bool):
+            raise HTTPException(status_code=400, detail="enabled must be a boolean")
+        enabled = body["enabled"]
+    else:
+        enabled = scope != "none"
+    _save_user_enabled(user_id, "subagents", name, enabled)
+    _reset_user_loops(user_id)
+    response_scope, wids = _scope_response(enabled)
+    return {"name": name, "scope": response_scope, "workspace_ids": wids}

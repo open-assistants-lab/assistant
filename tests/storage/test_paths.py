@@ -38,9 +38,19 @@ def test_workspace_dir_accepts_normal_workspace_ids(monkeypatch, tmp_path):
 
         workspace_dir = paths.workspace_skills_dir().parent
 
-
-        assert workspace_dir == tmp_path / "Assistant" / "Workspaces" / workspace_id
+        assert workspace_dir == tmp_path / "Assistant"
         assert workspace_dir.exists()
+
+
+def test_workspace_path_helpers_are_user_level_aliases(tmp_path):
+    paths = DataPaths(ea_root=str(tmp_path / "data"), workspace_id="project-x")
+
+    assert paths.workspace_files_dir() == paths.files_dir()
+    assert paths.workspace_skills_dir() == paths.user_skills_dir()
+    assert paths.workspace_subagents_dir() == paths.user_subagents_dir()
+    assert paths.workspace_memory_dir() == paths.user_memory_dir()
+    assert paths.versions_dir() == paths.root / ".versions"
+    assert paths.workspace_conversation_path() == paths.conversation_dir() / "app.db"
 
 
 def test_user_dir_rejects_traversal_user_id(tmp_path):
@@ -56,5 +66,21 @@ def test_user_dir_accepts_normal_user_ids(tmp_path):
 
         user_dir = paths.user_dir
 
-        assert user_dir == tmp_path / "data"
+        expected = tmp_path / "data"
+        if user_id != "default_user":
+            expected = expected / "Users" / user_id
+        assert user_dir == expected
         assert user_dir.exists()
+
+
+def test_user_scoped_dirs_are_distinct_per_user(tmp_path):
+    alice = DataPaths(ea_root=str(tmp_path / "data"), user_id="alice_test")
+    bob = DataPaths(ea_root=str(tmp_path / "data"), user_id="bob_test")
+
+    assert alice.files_dir() != bob.files_dir()
+    assert alice.user_skills_dir() != bob.user_skills_dir()
+    assert alice.user_subagents_dir() != bob.user_subagents_dir()
+    assert alice.conversation_dir() != bob.conversation_dir()
+
+    assert alice.files_dir() == tmp_path / "data" / "Users" / "alice_test" / "Files"
+    assert bob.files_dir() == tmp_path / "data" / "Users" / "bob_test" / "Files"

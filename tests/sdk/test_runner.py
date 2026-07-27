@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -69,7 +70,7 @@ async def test_create_sdk_loop_wires_on_summarize():
 
         assert result is not None, "Summarization should have triggered"
 
-        mock_get_store.assert_called_with("test_user", "personal")
+        mock_get_store.assert_called_with("test_user")
         mock_store.add_summary_message.assert_called_once()
         call_arg = mock_store.add_summary_message.call_args[0][0]
         assert "test summary of the conversation" in call_arg
@@ -104,6 +105,55 @@ async def test_create_sdk_loop_no_on_summarize_when_disabled():
                 break
 
         assert summarization_mw is None
+
+
+@pytest.mark.asyncio
+async def test_create_sdk_loop_passes_user_id_to_provider_factory():
+    """Implicit model lets provider factory use stored per-user default model."""
+    from src.sdk.runner import create_sdk_loop
+
+    with (
+        patch("src.sdk.runner.get_settings") as mock_settings,
+        patch("src.sdk.runner.create_model_from_config") as mock_create_provider,
+        patch("src.sdk.runner.get_native_tools", return_value=[]),
+        patch("src.sdk.runner._seed_default_workspace"),
+        patch("src.sdk.runner._get_system_prompt", return_value="You are a test assistant."),
+    ):
+        settings = mock_settings.return_value
+        settings.memory.summarization.enabled = False
+        settings.agent.model = "openai:gpt-4.1"
+        mock_provider = AsyncMock()
+        mock_provider.model = "openai:gpt-4.1"
+        mock_create_provider.return_value = mock_provider
+
+        await create_sdk_loop(user_id="test_user")
+
+    mock_create_provider.assert_called_once_with(None, provider_keys=None, user_id="test_user")
+
+
+@pytest.mark.asyncio
+async def test_create_sdk_loop_passes_explicit_model_to_provider_factory():
+    from src.sdk.runner import create_sdk_loop
+
+    with (
+        patch("src.sdk.runner.get_settings") as mock_settings,
+        patch("src.sdk.runner.create_model_from_config") as mock_create_provider,
+        patch("src.sdk.runner.get_native_tools", return_value=[]),
+        patch("src.sdk.runner._seed_default_workspace"),
+        patch("src.sdk.runner._get_system_prompt", return_value="You are a test assistant."),
+    ):
+        settings = mock_settings.return_value
+        settings.memory.summarization.enabled = False
+        settings.agent.model = "ollama:fallback"
+        mock_provider = AsyncMock()
+        mock_provider.model = "openai:gpt-4.1"
+        mock_create_provider.return_value = mock_provider
+
+        await create_sdk_loop(user_id="test_user", model="openai:gpt-4.1")
+
+    mock_create_provider.assert_called_once_with(
+        "openai:gpt-4.1", provider_keys=None, user_id="test_user"
+    )
 
 
 @pytest.mark.asyncio
@@ -177,3 +227,471 @@ async def test_run_sdk_agent_stream_triggers_summarization():
             "add_summary_message should have been called when summarization triggered"
         )
 
+
+class _ItemScopesImported(BaseException):
+    pass
+
+
+@pytest.mark.asyncio
+async def test_create_sdk_loop_does_not_import_item_scopes(monkeypatch):
+    """Runtime loop construction must not depend on workspace item scopes."""
+    from src.sdk.runner import create_sdk_loop
+    from src.sdk.tools import ToolDefinition
+
+    real_import = builtins.__import__
+
+    def blocked_import(name, *args, **kwargs):
+        if name == "src.sdk.item_scopes":
+            raise _ItemScopesImported(name)
+        return real_import(name, *args, **kwargs)
+
+    class FakeIndex:
+        def count(self):
+            return 1
+
+        def index_tool(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(builtins, "__import__", blocked_import)
+
+    with (
+        patch("src.sdk.runner.get_settings") as mock_settings,
+        patch("src.sdk.runner.create_model_from_config") as mock_create_provider,
+        patch(
+            "src.sdk.runner.get_native_tools",
+            return_value=[
+                ToolDefinition(name="demo_tool", description="Demo", parameters={}, function=lambda: "ok")
+            ],
+        ),
+        patch("src.sdk.runner._seed_default_workspace"),
+        patch("src.sdk.runner._get_system_prompt", return_value="You are test assistant."),
+        patch("src.sdk.tool_index.get_or_create_index", return_value=FakeIndex()),
+    ):
+        settings = mock_settings.return_value
+        settings.memory.summarization.enabled = False
+        settings.agent.model = "ollama:test-model"
+        mock_provider = AsyncMock()
+        mock_provider.model = "ollama:test-model"
+        mock_create_provider.return_value = mock_provider
+
+        loop = await create_sdk_loop(user_id="test_user", workspace_id="disabled_workspace")
+
+    assert loop is not None
+
+
+def test_skills_context_ignores_item_scopes(monkeypatch, tmp_path):
+    """Prompt skill catalog is user-level and must not import item scopes."""
+    from src.sdk import runner
+
+    real_import = builtins.__import__
+
+    def blocked_import(name, *args, **kwargs):
+        if name == "src.sdk.item_scopes":
+            raise _ItemScopesImported(name)
+        return real_import(name, *args, **kwargs)
+
+    class FakeRegistry:
+        def get_all_skills(self):
+            return [{"name": "helper", "description": "Helps", "metadata": {}}]
+
+        def get_load_count(self, name: str) -> int:
+            return 0
+
+    class FakePaths:
+        base = tmp_path
+
+        def user_skills_dir(self):
+            return tmp_path / "skills"
+
+        def user_subagents_dir(self):
+            return tmp_path / "subagents"
+
+    monkeypatch.setattr(builtins, "__import__", blocked_import)
+    monkeypatch.setattr("src.skills.registry.get_skill_registry", lambda **kwargs: FakeRegistry())
+    monkeypatch.setattr("src.storage.paths.get_paths", lambda *args, **kwargs: FakePaths())
+
+    context = runner._get_skills_context("test_user", "disabled_workspace")
+
+    assert "helper" in context
+
+
+def test_reset_sdk_loop_with_session_removes_all_model_and_key_variants():
+    from src.sdk import runner
+
+    runner._loop_cache.clear()
+    runner._loop_cache[runner._loop_cache_key("u", "personal", None, None, "chat-1")] = "default"
+    runner._loop_cache[runner._loop_cache_key("u", "workspace-a", "model-a", None, "chat-1")] = "model"
+    runner._loop_cache[
+        runner._loop_cache_key("u", "workspace-b", "model-a", {"openai": "key"}, "chat-1")
+    ] = "keys"
+    runner._loop_cache[runner._loop_cache_key("u", "personal", "model-a", None, "chat-2")] = "other"
+    runner._loop_cache[runner._loop_cache_key("other", "personal", "model-a", None, "chat-1")] = "other-user"
+
+    removed = runner.reset_sdk_loop("u", workspace_id="ignored-workspace", session_id="chat-1")
+
+    assert removed == 3
+    assert list(runner._loop_cache.values()) == ["other", "other-user"]
+
+
+def test_reset_sdk_loop_with_session_matches_exact_session_segment():
+    from src.sdk import runner
+
+    runner._loop_cache.clear()
+    runner._loop_cache[runner._loop_cache_key("u", "personal", "model-a", None, "chat")] = "chat"
+    runner._loop_cache[runner._loop_cache_key("u", "personal", "model-a", None, "chat-1")] = "chat-1"
+    runner._loop_cache[
+        runner._loop_cache_key("u", "personal", "model-a", {"openai": "key"}, "chat")
+    ] = "chat-keys"
+
+    removed = runner.reset_sdk_loop("u", session_id="chat")
+
+    assert removed == 2
+    assert list(runner._loop_cache.values()) == ["chat-1"]
+
+
+def test_loop_cache_key_ignores_workspace_but_keeps_session_model_and_provider_keys():
+    from src.sdk import runner
+
+    personal_key = runner._loop_cache_key(
+        "u", "personal", "model-a", {"openai": "key"}, "chat-1"
+    )
+    workspace_key = runner._loop_cache_key(
+        "u", "other-workspace", "model-a", {"openai": "key"}, "chat-1"
+    )
+
+    assert workspace_key == personal_key
+    assert runner._loop_cache_key("u", "personal", None, None, "chat-1") != personal_key
+    assert runner._loop_cache_key("u", "personal", "model-a", None, "chat-1") != personal_key
+    assert runner._loop_cache_key("u", "personal", "model-a", {"openai": "other"}, "chat-1") != personal_key
+    assert runner._loop_cache_key("u", "personal", "model-a", {"openai": "key"}, "chat-2") != personal_key
+
+
+def test_reset_sdk_loop_without_session_removes_all_user_sessions():
+    from src.sdk import runner
+
+    runner._loop_cache.clear()
+    runner._loop_cache[runner._loop_cache_key("u", "personal", None, None, "default")] = "default"
+    runner._loop_cache[runner._loop_cache_key("u", "workspace-a", "model-a", None, "chat-1")] = "chat-1"
+    runner._loop_cache[runner._loop_cache_key("u", "workspace-b", "model-b", None, "chat-2")] = "chat-2"
+    runner._loop_cache[runner._loop_cache_key("other", "personal", None, None, "default")] = "other-user"
+
+    removed = runner.reset_sdk_loop("u", workspace_id="ignored-workspace")
+
+    assert removed == 3
+    assert list(runner._loop_cache.values()) == ["other-user"]
+
+
+def test_active_loop_registry_is_session_aware():
+    from src.sdk import runner
+
+    loop_1 = object()
+    loop_2 = object()
+    runner._user_loops.clear()
+
+    runner.register_user_loop("u", loop_1, session_id="chat-1")
+    runner.register_user_loop("u", loop_2, session_id="chat-2")
+
+    assert runner.get_user_loop("u", session_id="chat-1") is loop_1
+    assert runner.get_user_loop("u", session_id="chat-2") is loop_2
+
+    runner.unregister_user_loop("u", session_id="chat-1")
+
+    assert runner.get_user_loop("u", session_id="chat-1") is None
+    assert runner.get_user_loop("u", session_id="chat-2") is loop_2
+
+
+def test_unregister_user_loop_does_not_remove_newer_registered_loop():
+    from src.sdk import runner
+
+    old_loop = object()
+    new_loop = object()
+    runner._user_loops.clear()
+
+    runner.register_user_loop("u", old_loop, session_id="chat-1")
+    runner.register_user_loop("u", new_loop, session_id="chat-1")
+    runner.unregister_user_loop("u", old_loop, session_id="chat-1")
+
+    assert runner.get_user_loop("u", session_id="chat-1") is new_loop
+
+
+def test_default_active_loop_does_not_clobber_named_sessions():
+    from src.sdk import runner
+
+    default_loop = object()
+    session_loop = object()
+    runner._user_loops.clear()
+
+    runner.register_user_loop("u", default_loop, session_id="default")
+    runner.register_user_loop("u", session_loop, session_id="chat-1")
+
+    assert runner.get_user_loop("u", session_id="default") is default_loop
+    assert runner.get_user_loop("u", session_id="chat-1") is session_loop
+
+    runner.unregister_user_loop("u", session_id="default")
+
+    assert runner.get_user_loop("u", session_id="default") is None
+    assert runner.get_user_loop("u", session_id="chat-1") is session_loop
+
+    runner.unregister_user_loop("u", session_id="chat-1")
+
+    assert runner.get_user_loop("u", session_id="chat-1") is None
+
+
+def test_get_user_loop_without_session_does_not_choose_among_multiple_sessions():
+    from src.sdk import runner
+
+    runner._user_loops.clear()
+
+    runner.register_user_loop("u", object(), session_id="chat-1")
+    runner.register_user_loop("u", object(), session_id="chat-2")
+
+    assert runner.get_user_loop("u") is None
+
+
+def test_skills_context_excludes_user_disabled_skills(monkeypatch, tmp_path):
+    from src.sdk import runner
+
+    class FakeRegistry:
+        def get_all_skills(self):
+            return [
+                {"name": "enabled-helper", "description": "Enabled", "metadata": {}},
+                {"name": "disabled-helper", "description": "Disabled", "metadata": {}},
+            ]
+
+        def get_load_count(self, name: str) -> int:
+            return 0
+
+    class FakePaths:
+        @property
+        def root(self):
+            return tmp_path
+
+        def user_skills_dir(self):
+            return tmp_path / "skills"
+
+        def user_subagents_dir(self):
+            return tmp_path / "subagents"
+
+    (tmp_path / "capabilities.yaml").write_text(
+        "skills:\n  disabled-helper: false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("src.sdk.capabilities.user_capabilities_root", lambda user_id: tmp_path)
+    monkeypatch.setattr("src.skills.registry.get_skill_registry", lambda **kwargs: FakeRegistry())
+    monkeypatch.setattr("src.storage.paths.get_paths", lambda *args, **kwargs: FakePaths())
+
+    context = runner._get_skills_context("test_user", "ignored-workspace")
+
+    assert "enabled-helper" in context
+    assert "disabled-helper" not in context
+
+
+@pytest.mark.asyncio
+async def test_create_sdk_loop_excludes_disabled_tools_from_core_and_index(monkeypatch, tmp_path):
+    from src.sdk.runner import create_sdk_loop
+    from src.sdk.tools import ToolDefinition
+
+    class FakePaths:
+        @property
+        def root(self):
+            return tmp_path
+
+        def user_tools_dir(self):
+            return tmp_path / "Tools"
+
+        def workspace_tools_dir(self):
+            return tmp_path / "Workspaces" / "ignored" / "Tools"
+
+        def user_mcp_config(self):
+            return tmp_path / ".mcp.json"
+
+    class FakeIndex:
+        def __init__(self):
+            self.indexed = []
+
+        def count(self):
+            return 0
+
+        def index_tool(self, td, *args, **kwargs):
+            self.indexed.append(td.name)
+
+    fake_index = FakeIndex()
+    (tmp_path / "capabilities.yaml").write_text(
+        "tools:\n  time_get: false\n  shell_execute: false\n  custom_disabled: false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("src.sdk.capabilities.user_capabilities_root", lambda user_id: tmp_path)
+
+    with (
+        patch("src.sdk.runner.get_settings") as mock_settings,
+        patch("src.sdk.runner.create_model_from_config") as mock_create_provider,
+        patch(
+            "src.sdk.runner.get_native_tools",
+            return_value=[
+                ToolDefinition(name="time_get", description="Time", parameters={}, function=lambda: "ok"),
+                ToolDefinition(name="shell_execute", description="Shell", parameters={}, function=lambda: "ok"),
+            ],
+        ),
+        patch("src.sdk.runner._seed_default_workspace"),
+        patch("src.sdk.runner._get_system_prompt", return_value="You are test assistant."),
+        patch("src.storage.paths.get_paths", return_value=FakePaths()),
+        patch("src.sdk.tool_index.get_or_create_index", return_value=fake_index),
+        patch(
+            "src.sdk.tools_custom.scan_tools_dir",
+            return_value=[ToolDefinition(name="custom_disabled", description="Custom", parameters={})],
+        ),
+    ):
+        settings = mock_settings.return_value
+        settings.memory.summarization.enabled = False
+        settings.agent.model = "ollama:test-model"
+        mock_provider = AsyncMock()
+        mock_provider.model = "ollama:test-model"
+        mock_create_provider.return_value = mock_provider
+
+        loop = await create_sdk_loop(user_id="test_user", workspace_id="ignored-workspace")
+
+    registered_names = set(loop._registry.list_names())
+    assert "shell_execute" not in registered_names
+    assert "time_get" not in fake_index.indexed
+    assert "custom_disabled" not in fake_index.indexed
+
+
+@pytest.mark.asyncio
+async def test_create_sdk_loop_rebuilds_tool_index_when_capabilities_change(monkeypatch, tmp_path):
+    from src.sdk.runner import create_sdk_loop
+    from src.sdk.tools import ToolDefinition
+
+    class FakePaths:
+        @property
+        def root(self):
+            return tmp_path
+
+        def user_tools_dir(self):
+            return tmp_path / "Tools"
+
+        def workspace_tools_dir(self):
+            return tmp_path / "Workspaces" / "ignored" / "Tools"
+
+        def user_mcp_config(self):
+            return tmp_path / ".mcp.json"
+
+    class FakeIndex:
+        def __init__(self):
+            self.indexed = []
+            self.cleared = False
+
+        def count(self):
+            return 1 if not self.cleared else 0
+
+        def clear(self):
+            self.cleared = True
+
+        def index_tool(self, td, *args, **kwargs):
+            self.indexed.append(td.name)
+
+    fake_index = FakeIndex()
+    monkeypatch.setattr("src.sdk.capabilities.user_capabilities_root", lambda user_id: tmp_path)
+
+    with (
+        patch("src.sdk.runner.get_settings") as mock_settings,
+        patch("src.sdk.runner.create_model_from_config") as mock_create_provider,
+        patch(
+            "src.sdk.runner.get_native_tools",
+            return_value=[
+                ToolDefinition(name="demo_lookup", description="Lookup", parameters={}, function=lambda: "ok"),
+            ],
+        ),
+        patch("src.sdk.runner._seed_default_workspace"),
+        patch("src.sdk.runner._get_system_prompt", return_value="You are test assistant."),
+        patch("src.storage.paths.get_paths", return_value=FakePaths()),
+        patch("src.sdk.tool_index.get_or_create_index", return_value=fake_index),
+    ):
+        settings = mock_settings.return_value
+        settings.memory.summarization.enabled = False
+        settings.agent.model = "ollama:test-model"
+        mock_provider = AsyncMock()
+        mock_provider.model = "ollama:test-model"
+        mock_create_provider.return_value = mock_provider
+
+        await create_sdk_loop(user_id="test_user", workspace_id="ignored-workspace")
+
+    assert fake_index.cleared is True
+    assert "demo_lookup" in fake_index.indexed
+
+
+def test_tool_reload_filters_disabled_mcp_and_connector_tools(monkeypatch, tmp_path):
+    from src.sdk.loop import AgentLoop, _current_agent_loop
+    from src.sdk.tool_index import ToolIndex
+    from src.sdk.tools import ToolDefinition
+    from src.sdk.tools_core.tool_reload import tool_reload
+
+    class FakeProvider:
+        provider_id = "fake"
+
+        async def chat(self, messages, tools=None, model=None, **kwargs):
+            return Message.assistant("")
+
+        def get_model_info(self, model=None):
+            from src.sdk.providers.base import ModelInfo
+
+            return ModelInfo(id=model or "fake", provider_id="fake")
+
+        def count_tokens(self, messages):
+            return 0
+
+    class FakeMCPBridge:
+        def get_tool_definitions(self):
+            return [ToolDefinition(name="mcp__server__disabled", description="Disabled MCP")]
+
+    class FakeConnectorBridge:
+        def get_tool_definitions(self):
+            return [
+                {
+                    "name": "connector__disabled",
+                    "description": "Disabled connector",
+                    "annotations": {"read_only": True, "destructive": False},
+                    "function": lambda **kwargs: "ok",
+                }
+            ]
+
+    class FakePaths:
+        def user_tools_dir(self):
+            path = tmp_path / "Tools"
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+
+        def workspace_tools_dir(self):
+            path = tmp_path / "WorkspaceTools"
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+
+        def user_mcp_config(self):
+            return tmp_path / ".mcp.json"
+
+    (tmp_path / "capabilities.yaml").write_text(
+        "tools:\n  mcp__server__disabled: false\n  connector__disabled: false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("src.sdk.capabilities.user_capabilities_root", lambda user_id: tmp_path)
+    monkeypatch.setattr("src.storage.paths.get_paths", lambda **kwargs: FakePaths())
+    monkeypatch.setattr("src.sdk.tools_custom.get_custom_tools", lambda **kwargs: [])
+
+    idx = ToolIndex(tmp_path / "idx")
+    loop = AgentLoop(provider=FakeProvider(), tools=[])
+    loop.user_id = "test_user"
+    loop.workspace_id = "personal"
+    loop._tool_index = idx
+    loop._mcp_bridge = FakeMCPBridge()
+    loop._connectkit_bridge = FakeConnectorBridge()
+    token = _current_agent_loop.set(loop)
+    try:
+        result = tool_reload.invoke({})
+        names = idx.list_all_names()
+    finally:
+        _current_agent_loop.reset(token)
+        idx.close()
+
+    assert "0 MCP" in result
+    assert "0 connector" in result
+    assert "mcp__server__disabled" not in names
+    assert "connector__disabled" not in names

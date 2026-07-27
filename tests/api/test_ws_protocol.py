@@ -1,6 +1,12 @@
 """Contract tests for WebSocket protocol messages."""
 
+import json
+from types import SimpleNamespace
 
+import pytest
+from starlette.websockets import WebSocketDisconnect
+
+from src.http.routers import ws as ws_router
 from src.http.ws_protocol import (
     AiTokenMessage,
     ApproveMessage,
@@ -35,6 +41,10 @@ class TestClientMessages:
     def test_user_message_verbose(self):
         msg = UserMessage(content="Hello", verbose=True)
         assert msg.verbose is True
+
+    def test_user_message_accepts_session_id(self):
+        msg = UserMessage(content="Hello", session_id="chat-123")
+        assert msg.session_id == "chat-123"
 
     def test_approve_message(self):
         msg = ApproveMessage(call_id="call_123")
@@ -127,10 +137,11 @@ class TestParseClientMessage:
     """Tests for parsing client messages from raw dicts."""
 
     def test_parse_user_message(self):
-        data = {"type": "user_message", "content": "Hi", "user_id": "bob"}
+        data = {"type": "user_message", "content": "Hi", "user_id": "bob", "session_id": "chat-1"}
         msg = parse_client_message(data)
         assert isinstance(msg, UserMessage)
         assert msg.content == "Hi"
+        assert msg.session_id == "chat-1"
 
     def test_parse_approve_message(self):
         data = {"type": "approve", "call_id": "call_1"}
@@ -221,3 +232,954 @@ class TestMessageSerialization:
         restored = DoneMessage(**json_data)
         assert restored.response == "Complete"
         assert len(restored.tool_calls) == 1
+
+
+class TestWebSocketPersistence:
+    @pytest.mark.asyncio
+    async def test_run_agent_stream_accepts_legacy_only_alias_chunks(self, monkeypatch):
+        from src.sdk.messages import StreamChunk
+
+        class FakeConversation:
+            def __init__(self):
+                self.calls = []
+
+            def add_message(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return "msg-1"
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.sent = []
+
+            async def send_json(self, payload):
+                self.sent.append(payload)
+
+        async def fake_run_sdk_agent_stream(**kwargs):
+            yield StreamChunk.ai_token("Hello")
+            yield StreamChunk.reasoning("Think")
+            yield StreamChunk.tool_start("email_list", "call-1")
+            yield StreamChunk.tool_result_event("email_list", "call-1", "result")
+            yield StreamChunk.done()
+
+        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+        conversation = FakeConversation()
+        websocket = FakeWebSocket()
+
+        await ws_router._run_agent_stream(websocket, "test_user", [], conversation, session_id="chat-1")
+
+        assert any(m.get("type") == "ai_token" and m.get("content") == "Hello" for m in websocket.sent)
+        assert any(m.get("type") == "reasoning" and m.get("content") == "Think" for m in websocket.sent)
+        assert any(m.get("type") == "tool_start" and m.get("tool") == "email_list" for m in websocket.sent)
+        assert [(args, kwargs) for args, kwargs in conversation.calls if args[0] in {"assistant", "reasoning"}] == [
+            (("reasoning", "Think"), {"metadata": {}, "session_id": "chat-1"}),
+            (("assistant", "Hello"), {"metadata": {"stream": True}, "session_id": "chat-1"}),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_run_agent_stream_cancelled_error_persists_partial_state(self, monkeypatch):
+        import asyncio
+
+        from src.sdk.messages import StreamChunk
+
+        class FakeConversation:
+            def __init__(self):
+                self.calls = []
+
+            def add_message(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return "msg-1"
+
+        class FakeWebSocket:
+            async def send_json(self, payload):
+                pass
+
+        async def fake_run_sdk_agent_stream(**kwargs):
+            yield StreamChunk.text_delta("partial")
+            yield StreamChunk.reasoning_delta("thinking")
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+        conversation = FakeConversation()
+
+        with pytest.raises(asyncio.CancelledError):
+            await ws_router._run_agent_stream(FakeWebSocket(), "test_user", [], conversation, session_id="chat-1")
+
+        assert conversation.calls == [
+            (("reasoning", "thinking"), {"metadata": {}, "session_id": "chat-1"}),
+            (("assistant", "partial"), {"metadata": {"stream": True}, "session_id": "chat-1"}),
+        ]
+
+    def test_user_message_uses_session_id_not_workspace_metadata(self):
+        calls = []
+
+        class FakeConversation:
+            def add_message(self, *args, **kwargs):
+                calls.append((args, kwargs))
+                return "msg-1"
+
+        ws_router._persist_ws_conversation_message(
+            FakeConversation(), "user", "hello", session_id="chat-1"
+        )
+
+        assert calls == [(('user', 'hello'), {'metadata': {}, 'session_id': 'chat-1'})]
+
+    def test_resolve_session_uses_client_session_id(self):
+        msg = UserMessage(content="hello", session_id="client-chat")
+
+        assert ws_router._resolve_ws_session_id(msg, "generated") == "client-chat"
+
+    def test_resolve_session_uses_generated_fallback_when_absent(self):
+        msg = UserMessage(content="hello")
+
+        assert ws_router._resolve_ws_session_id(msg, "generated") == "generated"
+
+    @pytest.mark.asyncio
+    async def test_run_agent_stream_passes_session_id_to_sdk_stream(self, monkeypatch):
+        captured = {}
+
+        async def fake_run_sdk_agent_stream(**kwargs):
+            captured.update(kwargs)
+            if False:
+                yield None
+
+        class FakeWebSocket:
+            async def send_json(self, payload):
+                pass
+
+        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+
+        await ws_router._run_agent_stream(
+            FakeWebSocket(),
+            "test_user",
+            [],
+            object(),
+            session_id="chat-1",
+            workspace_id="project",
+        )
+
+        assert captured["session_id"] == "chat-1"
+
+    @pytest.mark.asyncio
+    async def test_run_agent_stream_passes_cancel_event_to_sdk_stream(self, monkeypatch):
+        import asyncio
+
+        captured = {}
+
+        async def fake_run_sdk_agent_stream(**kwargs):
+            captured.update(kwargs)
+            if False:
+                yield None
+
+        class FakeWebSocket:
+            async def send_json(self, payload):
+                pass
+
+        cancel_event = asyncio.Event()
+        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+
+        await ws_router._run_agent_stream(
+            FakeWebSocket(),
+            "test_user",
+            [],
+            object(),
+            session_id="chat-1",
+            cancel_event=cancel_event,
+        )
+
+        assert captured["cancel_event"] is cancel_event
+
+    @pytest.mark.asyncio
+    async def test_run_agent_stream_ignores_tool_end_when_tool_result_arrives(self, monkeypatch):
+        from src.sdk.messages import StreamChunk
+
+        class FakeConversation:
+            def __init__(self):
+                self.calls = []
+
+            def add_message(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return "msg-1"
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.sent = []
+
+            async def send_json(self, payload):
+                self.sent.append(payload)
+
+        async def fake_run_sdk_agent_stream(**kwargs):
+            yield StreamChunk.tool_input_start("email_list", "call-1")
+            yield StreamChunk.tool_end("email_list", "call-1", "legacy")
+            yield StreamChunk.tool_result_event("email_list", "call-1", "canonical")
+            yield StreamChunk.done()
+
+        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+
+        conversation = FakeConversation()
+        websocket = FakeWebSocket()
+        await ws_router._run_agent_stream(
+            websocket,
+            "test_user",
+            [],
+            conversation,
+            session_id="chat-1",
+        )
+
+        tool_result_payloads = [m for m in websocket.sent if m.get("type") == "tool_result"]
+        assert [m["result_preview"] for m in tool_result_payloads] == ["canonical"]
+        assert [(args, kwargs) for args, kwargs in conversation.calls if args[0] == "tool"] == [
+            (
+                ("tool", "canonical"),
+                {
+                    "metadata": {"tool_name": "email_list", "tool_call_id": "call-1"},
+                    "session_id": "chat-1",
+                },
+            )
+        ]
+
+    @pytest.mark.asyncio
+    async def test_run_agent_stream_persists_partial_state_on_interrupt(self, monkeypatch):
+        from src.sdk.messages import StreamChunk
+
+        class FakeConversation:
+            def __init__(self):
+                self.calls = []
+
+            def add_message(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return "msg-1"
+
+        class FakeWebSocket:
+            async def send_json(self, payload):
+                pass
+
+        async def fake_run_sdk_agent_stream(**kwargs):
+            yield StreamChunk.text_delta("partial")
+            yield StreamChunk.reasoning_delta("thinking")
+            yield StreamChunk.tool_input_start("time_get", "call-1")
+            yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
+            yield StreamChunk.interrupt("files_delete", "call-2", {"path": "x"})
+
+        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+
+        conversation = FakeConversation()
+        pending = [None]
+        await ws_router._run_agent_stream(
+            FakeWebSocket(), "test_user", [], conversation, session_id="chat-1", pending_ref=pending
+        )
+
+        assert pending[0] == {
+            "tool": "files_delete",
+            "call_id": "call-2",
+            "args": {"path": "x"},
+            "model": None,
+            "provider_keys": None,
+            "session_id": "chat-1",
+        }
+        assert [(args, kwargs) for args, kwargs in conversation.calls] == [
+            (
+                ("tool", "noon"),
+                {
+                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1"},
+                    "session_id": "chat-1",
+                },
+            ),
+            (("reasoning", "thinking"), {"metadata": {}, "session_id": "chat-1"}),
+            (("assistant", "partial"), {"metadata": {"stream": True}, "session_id": "chat-1"}),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_run_agent_stream_done_uses_done_content_when_no_text_delta(self, monkeypatch):
+        from src.sdk.messages import StreamChunk
+
+        class FakeConversation:
+            def __init__(self):
+                self.calls = []
+
+            def add_message(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return "msg-1"
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.sent = []
+
+            async def send_json(self, payload):
+                self.sent.append(payload)
+
+        async def fake_run_sdk_agent_stream(**kwargs):
+            yield StreamChunk.done("final answer")
+
+        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+
+        conversation = FakeConversation()
+        websocket = FakeWebSocket()
+        await ws_router._run_agent_stream(websocket, "test_user", [], conversation, session_id="chat-1")
+
+        assert [(args, kwargs) for args, kwargs in conversation.calls if args[0] == "assistant"] == [
+            (("assistant", "final answer"), {"metadata": {"stream": True}, "session_id": "chat-1"})
+        ]
+        assert [m for m in websocket.sent if m.get("type") == "done"][0]["response"] == "final answer"
+
+    @pytest.mark.asyncio
+    async def test_run_agent_stream_skips_empty_tool_results(self, monkeypatch):
+        from src.sdk.messages import StreamChunk
+
+        class FakeConversation:
+            def __init__(self):
+                self.calls = []
+
+            def add_message(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return "msg-1"
+
+        class FakeWebSocket:
+            async def send_json(self, payload):
+                pass
+
+        async def fake_run_sdk_agent_stream(**kwargs):
+            yield StreamChunk.tool_input_start("time_get", "call-1")
+            yield StreamChunk.tool_result_event("time_get", "call-1", "")
+            yield StreamChunk.done()
+
+        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+
+        conversation = FakeConversation()
+        await ws_router._run_agent_stream(FakeWebSocket(), "test_user", [], conversation, session_id="chat-1")
+
+        assert [args for args, _ in conversation.calls if args[0] == "tool"] == []
+
+    @pytest.mark.asyncio
+    async def test_run_agent_stream_persists_partial_state_on_stream_error(self, monkeypatch):
+        from src.sdk.messages import StreamChunk
+
+        class FakeConversation:
+            def __init__(self):
+                self.calls = []
+
+            def add_message(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return "msg-1"
+
+        class FakeWebSocket:
+            async def send_json(self, payload):
+                pass
+
+        async def fake_run_sdk_agent_stream(**kwargs):
+            yield StreamChunk.text_delta("partial")
+            yield StreamChunk.reasoning_delta("thinking")
+            raise RuntimeError("stream lost")
+
+        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+
+        conversation = FakeConversation()
+        await ws_router._run_agent_stream(FakeWebSocket(), "test_user", [], conversation, session_id="chat-1")
+
+        assert [(args, kwargs) for args, kwargs in conversation.calls] == [
+            (("reasoning", "thinking"), {"metadata": {}, "session_id": "chat-1"}),
+            (("assistant", "partial"), {"metadata": {"stream": True}, "session_id": "chat-1"}),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_ws_approval_get_sdk_loop_receives_session_id(self, monkeypatch):
+        captured_calls = []
+        stream_calls = 0
+
+        class FakeLoop:
+            def __init__(self):
+                self.approved = []
+
+            def approve_tool_call(self, tool_call):
+                self.approved.append(tool_call)
+
+        class FakeConversation:
+            def add_message(self, *args, **kwargs):
+                return "msg-1"
+
+            def get_messages_by_session_id(self, session_id, limit):
+                return []
+
+        class FakeWebSocket:
+            client = None
+
+            def __init__(self):
+                self.messages = [
+                    json.dumps(
+                        {
+                            "type": "user_message",
+                            "content": "delete it",
+                            "user_id": "test_user",
+                            "workspace_id": "project",
+                            "session_id": "chat-1",
+                        }
+                    ),
+                    json.dumps({"type": "approve", "call_id": "call-1"}),
+                ]
+                self.sent = []
+
+            async def accept(self):
+                pass
+
+            async def receive_text(self):
+                if not self.messages:
+                    raise WebSocketDisconnect()
+                return self.messages.pop(0)
+
+            async def send_json(self, payload):
+                self.sent.append(payload)
+
+        async def fake_run_agent_stream(*args, **kwargs):
+            nonlocal stream_calls
+            stream_calls += 1
+            pending_ref = kwargs["pending_ref"]
+            if stream_calls == 1:
+                pending_ref[0] = {"tool": "files_delete", "call_id": "call-1"}
+
+        async def fake_get_sdk_loop(*args, **kwargs):
+            captured_calls.append((args, kwargs))
+            return FakeLoop()
+
+        monkeypatch.setattr(
+            ws_router,
+            "get_settings",
+            lambda: SimpleNamespace(auth=SimpleNamespace(api_key="", solo_bypass=True)),
+        )
+        monkeypatch.setattr(ws_router, "get_message_store", lambda *args, **kwargs: FakeConversation())
+        monkeypatch.setattr(ws_router, "_run_agent_stream", fake_run_agent_stream)
+        monkeypatch.setattr(ws_router, "get_sdk_loop", fake_get_sdk_loop)
+
+        await ws_router.ws_conversation(FakeWebSocket())
+
+        assert captured_calls
+        assert captured_calls[0][1]["session_id"] == "chat-1"
+
+    @pytest.mark.asyncio
+    async def test_ws_cancel_sets_running_stream_cancel_event(self, monkeypatch):
+        captured = {}
+
+        class FakeConversation:
+            def add_message(self, *args, **kwargs):
+                return "msg-1"
+
+            def get_messages_by_session_id(self, session_id, limit):
+                return []
+
+        class FakeWebSocket:
+            client = None
+
+            def __init__(self):
+                self.messages = [
+                    json.dumps({"type": "user_message", "content": "run", "user_id": "test_user"}),
+                    json.dumps({"type": "cancel"}),
+                ]
+                self.sent = []
+
+            async def accept(self):
+                pass
+
+            async def receive_text(self):
+                if not self.messages:
+                    raise WebSocketDisconnect()
+                return self.messages.pop(0)
+
+            async def send_json(self, payload):
+                self.sent.append(payload)
+
+        async def fake_run_agent_stream(*args, **kwargs):
+            cancel_event = kwargs["cancel_event"]
+            captured["cancel_event"] = cancel_event
+            await cancel_event.wait()
+
+        monkeypatch.setattr(
+            ws_router,
+            "get_settings",
+            lambda: SimpleNamespace(auth=SimpleNamespace(api_key="", solo_bypass=True)),
+        )
+        monkeypatch.setattr(ws_router, "get_message_store", lambda *args, **kwargs: FakeConversation())
+        monkeypatch.setattr(ws_router, "_run_agent_stream", fake_run_agent_stream)
+
+        websocket = FakeWebSocket()
+        await ws_router.ws_conversation(websocket)
+
+        assert captured["cancel_event"].is_set()
+        assert any(m.get("type") == "done" and m.get("response") == "Cancelled" for m in websocket.sent)
+
+    @pytest.mark.asyncio
+    async def test_ws_cancel_actively_cancels_running_stream_task(self, monkeypatch):
+        import asyncio
+
+        captured = {}
+        stream_started = asyncio.Event()
+
+        class FakeConversation:
+            def add_message(self, *args, **kwargs):
+                return "msg-1"
+
+            def get_messages_by_session_id(self, session_id, limit):
+                return []
+
+        class FakeWebSocket:
+            client = None
+
+            def __init__(self):
+                self.messages = [
+                    json.dumps({"type": "user_message", "content": "run", "user_id": "test_user"}),
+                    json.dumps({"type": "cancel"}),
+                ]
+                self.sent = []
+
+            async def accept(self):
+                pass
+
+            async def receive_text(self):
+                if not self.messages:
+                    raise WebSocketDisconnect()
+                if len(self.messages) == 1:
+                    await stream_started.wait()
+                return self.messages.pop(0)
+
+            async def send_json(self, payload):
+                self.sent.append(payload)
+
+        async def fake_run_agent_stream(*args, **kwargs):
+            captured["cancel_event"] = kwargs["cancel_event"]
+            stream_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                captured["task_cancelled"] = True
+                raise
+
+        monkeypatch.setattr(
+            ws_router,
+            "get_settings",
+            lambda: SimpleNamespace(auth=SimpleNamespace(api_key="", solo_bypass=True)),
+        )
+        monkeypatch.setattr(ws_router, "get_message_store", lambda *args, **kwargs: FakeConversation())
+        monkeypatch.setattr(ws_router, "_run_agent_stream", fake_run_agent_stream)
+
+        websocket = FakeWebSocket()
+        await ws_router.ws_conversation(websocket)
+
+        assert captured["cancel_event"].is_set()
+        assert captured["task_cancelled"] is True
+        done_messages = [m for m in websocket.sent if m.get("type") == "done"]
+        assert len(done_messages) == 1
+        assert done_messages[0]["response"] == "Cancelled"
+
+    @pytest.mark.asyncio
+    async def test_run_agent_stream_suppresses_done_after_cancel_event(self, monkeypatch):
+        import asyncio
+
+        from src.sdk.messages import StreamChunk
+
+        class FakeConversation:
+            def __init__(self):
+                self.calls = []
+
+            def add_message(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return "msg-1"
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.sent = []
+
+            async def send_json(self, payload):
+                self.sent.append(payload)
+
+        async def fake_run_sdk_agent_stream(**kwargs):
+            yield StreamChunk.text_delta("partial")
+            kwargs["cancel_event"].set()
+            yield StreamChunk.done("normal done")
+
+        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+        websocket = FakeWebSocket()
+        conversation = FakeConversation()
+        await ws_router._run_agent_stream(
+            websocket,
+            "test_user",
+            [],
+            conversation,
+            session_id="chat-1",
+            cancel_event=asyncio.Event(),
+        )
+
+        assert [m for m in websocket.sent if m.get("type") == "done"] == []
+        assert [args for args, _ in conversation.calls if args[0] == "assistant"] == [
+            ("assistant", "partial")
+        ]
+
+    @pytest.mark.asyncio
+    async def test_ws_interrupt_remembers_model_provider_keys_and_session_for_approval(self, monkeypatch):
+        from src.sdk.messages import StreamChunk
+
+        class FakeConversation:
+            def __init__(self):
+                self.calls = []
+
+            def add_message(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return "msg-1"
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.sent = []
+
+            async def send_json(self, payload):
+                self.sent.append(payload)
+
+        pending = [None]
+
+        async def fake_run_sdk_agent_stream(**kwargs):
+            yield StreamChunk.interrupt("files_delete", "call-1", {"path": "x"})
+
+        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+
+        await ws_router._run_agent_stream(
+            FakeWebSocket(),
+            "u",
+            [],
+            FakeConversation(),
+            session_id="chat-1",
+            pending_ref=pending,
+            model="openai:gpt-4.1",
+            provider_keys={"openai": "key"},
+        )
+
+        assert pending[0] == {
+            "tool": "files_delete",
+            "call_id": "call-1",
+            "args": {"path": "x"},
+            "model": "openai:gpt-4.1",
+            "provider_keys": {"openai": "key"},
+            "session_id": "chat-1",
+        }
+
+    def test_ws_pending_runtime_context_prefers_pending_over_override(self):
+        pending = {
+            "model": "openai:gpt-4.1",
+            "provider_keys": {"openai": "original"},
+            "session_id": "chat-1",
+        }
+
+        result = ws_router._pending_runtime_context(
+            pending,
+            session_id="chat-2",
+            model="anthropic:claude-sonnet-4",
+            provider_keys={"anthropic": "override"},
+        )
+
+        assert result == ("chat-1", "openai:gpt-4.1", {"openai": "original"})
+
+    @pytest.mark.asyncio
+    async def test_ws_pending_loop_handles_edit_and_approve(self, monkeypatch):
+        stream_calls = 0
+
+        class FakeLoop:
+            def __init__(self):
+                self.approved = []
+
+            def approve_tool_call(self, tool_call):
+                self.approved.append(tool_call)
+
+        class FakeConversation:
+            def add_message(self, *args, **kwargs):
+                return "msg-1"
+
+            def get_messages_by_session_id(self, session_id, limit):
+                return []
+
+        class FakeWebSocket:
+            client = None
+
+            def __init__(self):
+                self.messages = [
+                    json.dumps({"type": "user_message", "content": "delete", "user_id": "test_user"}),
+                    json.dumps(
+                        {
+                            "type": "edit_and_approve",
+                            "call_id": "call-1",
+                            "edited_args": {"path": "/edited"},
+                        }
+                    ),
+                ]
+                self.sent = []
+
+            async def accept(self):
+                pass
+
+            async def receive_text(self):
+                if not self.messages:
+                    raise WebSocketDisconnect()
+                return self.messages.pop(0)
+
+            async def send_json(self, payload):
+                self.sent.append(payload)
+
+        async def fake_run_agent_stream(*args, **kwargs):
+            nonlocal stream_calls
+            stream_calls += 1
+            if stream_calls == 1:
+                kwargs["pending_ref"][0] = {
+                    "tool": "files_delete",
+                    "call_id": "call-1",
+                    "args": {"path": "/old"},
+                }
+
+        loop = FakeLoop()
+
+        async def fake_get_sdk_loop(*args, **kwargs):
+            return loop
+
+        monkeypatch.setattr(
+            ws_router,
+            "get_settings",
+            lambda: SimpleNamespace(auth=SimpleNamespace(api_key="", solo_bypass=True)),
+        )
+        monkeypatch.setattr(ws_router, "get_message_store", lambda *args, **kwargs: FakeConversation())
+        monkeypatch.setattr(ws_router, "_run_agent_stream", fake_run_agent_stream)
+        monkeypatch.setattr(ws_router, "get_sdk_loop", fake_get_sdk_loop)
+
+        await ws_router.ws_conversation(FakeWebSocket())
+
+        assert stream_calls == 2
+        assert loop.approved[0].arguments == {"path": "/edited"}
+
+    @pytest.mark.asyncio
+    async def test_ws_approval_rejects_mismatched_call_id(self, monkeypatch):
+        class FakeLoop:
+            def __init__(self):
+                self.approved = []
+
+            def approve_tool_call(self, tool_call):
+                self.approved.append(tool_call)
+
+        class FakeConversation:
+            def add_message(self, *args, **kwargs):
+                return "msg-1"
+
+            def get_messages_by_session_id(self, session_id, limit):
+                return []
+
+        class FakeWebSocket:
+            client = None
+
+            def __init__(self):
+                self.messages = [
+                    json.dumps({"type": "user_message", "content": "delete", "user_id": "test_user"}),
+                    json.dumps({"type": "approve", "call_id": "stale"}),
+                ]
+                self.sent = []
+
+            async def accept(self):
+                pass
+
+            async def receive_text(self):
+                if not self.messages:
+                    raise WebSocketDisconnect()
+                return self.messages.pop(0)
+
+            async def send_json(self, payload):
+                self.sent.append(payload)
+
+        async def fake_run_agent_stream(*args, **kwargs):
+            kwargs["pending_ref"][0] = {"tool": "files_delete", "call_id": "call-1", "args": {}}
+
+        loop = FakeLoop()
+
+        async def fake_get_sdk_loop(*args, **kwargs):
+            return loop
+
+        monkeypatch.setattr(
+            ws_router,
+            "get_settings",
+            lambda: SimpleNamespace(auth=SimpleNamespace(api_key="", solo_bypass=True)),
+        )
+        monkeypatch.setattr(ws_router, "get_message_store", lambda *args, **kwargs: FakeConversation())
+        monkeypatch.setattr(ws_router, "_run_agent_stream", fake_run_agent_stream)
+        monkeypatch.setattr(ws_router, "get_sdk_loop", fake_get_sdk_loop)
+
+        await ws_router.ws_conversation(FakeWebSocket())
+
+        assert loop.approved == []
+
+    @pytest.mark.asyncio
+    async def test_ws_approve_without_pending_sends_no_pending_error(self, monkeypatch):
+        class FakeWebSocket:
+            client = None
+
+            def __init__(self):
+                self.messages = [json.dumps({"type": "approve", "call_id": "call-1"})]
+                self.sent = []
+
+            async def accept(self):
+                pass
+
+            async def receive_text(self):
+                if not self.messages:
+                    raise WebSocketDisconnect()
+                return self.messages.pop(0)
+
+            async def send_json(self, payload):
+                self.sent.append(payload)
+
+        monkeypatch.setattr(
+            ws_router,
+            "get_settings",
+            lambda: SimpleNamespace(auth=SimpleNamespace(api_key="", solo_bypass=True)),
+        )
+
+        websocket = FakeWebSocket()
+        await ws_router.ws_conversation(websocket)
+
+        assert websocket.sent == [
+            {
+                "type": "error",
+                "message": "No pending tool call to approve",
+                "code": "NO_PENDING_INTERRUPT",
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_run_agent_stream_persists_partial_state_on_cancel_event(self, monkeypatch):
+        import asyncio
+
+        from src.sdk.messages import StreamChunk
+
+        class FakeConversation:
+            def __init__(self):
+                self.calls = []
+
+            def add_message(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return "msg-1"
+
+        class FakeWebSocket:
+            async def send_json(self, payload):
+                pass
+
+        async def fake_run_sdk_agent_stream(**kwargs):
+            yield StreamChunk.text_delta("partial")
+            yield StreamChunk.reasoning_delta("thinking")
+            yield StreamChunk.tool_input_start("time_get", "call-1")
+            yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
+            kwargs["cancel_event"].set()
+            yield StreamChunk.done("normal done")
+
+        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+        conversation = FakeConversation()
+        await ws_router._run_agent_stream(
+            FakeWebSocket(),
+            "test_user",
+            [],
+            conversation,
+            session_id="chat-1",
+            cancel_event=asyncio.Event(),
+        )
+
+        assert conversation.calls == [
+            (
+                ("tool", "noon"),
+                {
+                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1"},
+                    "session_id": "chat-1",
+                },
+            ),
+            (("reasoning", "thinking"), {"metadata": {}, "session_id": "chat-1"}),
+            (("assistant", "partial"), {"metadata": {"stream": True}, "session_id": "chat-1"}),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_run_agent_stream_send_done_failure_does_not_duplicate_persistence(self, monkeypatch):
+        from src.sdk.messages import StreamChunk
+
+        class FakeConversation:
+            def __init__(self):
+                self.calls = []
+
+            def add_message(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return "msg-1"
+
+        class FakeWebSocket:
+            async def send_json(self, payload):
+                if payload.get("type") == "done":
+                    raise RuntimeError("send failed")
+
+        async def fake_run_sdk_agent_stream(**kwargs):
+            yield StreamChunk.text_delta("final")
+            yield StreamChunk.reasoning_delta("thinking")
+            yield StreamChunk.tool_input_start("time_get", "call-1")
+            yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
+            yield StreamChunk.done()
+
+        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+        conversation = FakeConversation()
+
+        await ws_router._run_agent_stream(
+            FakeWebSocket(), "test_user", [], conversation, session_id="chat-1"
+        )
+
+        assert conversation.calls == [
+            (
+                ("tool", "noon"),
+                {
+                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1"},
+                    "session_id": "chat-1",
+                },
+            ),
+            (("reasoning", "thinking"), {"metadata": {}, "session_id": "chat-1"}),
+            (("assistant", "final"), {"metadata": {"stream": True}, "session_id": "chat-1"}),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_ws_disconnect_cancels_running_stream_task(self, monkeypatch):
+        captured = {}
+
+        class FakeConversation:
+            def add_message(self, *args, **kwargs):
+                return "msg-1"
+
+            def get_messages_by_session_id(self, session_id, limit):
+                return []
+
+        class FakeWebSocket:
+            client = None
+
+            def __init__(self):
+                self.messages = [
+                    json.dumps({"type": "user_message", "content": "run", "user_id": "test_user"}),
+                ]
+
+            async def accept(self):
+                pass
+
+            async def receive_text(self):
+                if self.messages:
+                    return self.messages.pop(0)
+                raise WebSocketDisconnect()
+
+            async def send_json(self, payload):
+                pass
+
+        async def fake_run_agent_stream(*args, **kwargs):
+            cancel_event = kwargs["cancel_event"]
+            captured["cancel_event"] = cancel_event
+            try:
+                await cancel_event.wait()
+            finally:
+                captured["cleaned_up"] = True
+
+        monkeypatch.setattr(
+            ws_router,
+            "get_settings",
+            lambda: SimpleNamespace(auth=SimpleNamespace(api_key="", solo_bypass=True)),
+        )
+        monkeypatch.setattr(ws_router, "get_message_store", lambda *args, **kwargs: FakeConversation())
+        monkeypatch.setattr(ws_router, "_run_agent_stream", fake_run_agent_stream)
+
+        await ws_router.ws_conversation(FakeWebSocket())
+
+        assert captured["cancel_event"].is_set()
+        assert captured["cleaned_up"] is True

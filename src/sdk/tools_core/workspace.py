@@ -1,4 +1,4 @@
-"""Workspace tools — agent-facing CRUD for project workspaces."""
+"""Workspace tools — legacy organizational metadata for compatibility."""
 
 from __future__ import annotations
 
@@ -30,15 +30,16 @@ def workspace_create(
     description: str = "",
     instructions: str = "",
 ) -> str:
-    """Create a new workspace (project). Each workspace has its own files, conversations, memory, and subagents.
+    """Create legacy workspace metadata for organizing prompts/configuration.
 
-    Use this when the user wants to start a new project or organize work by topic.
-    The workspace will be available for switching via workspace_switch.
+    Workspaces no longer isolate runtime data. Files, memory, skills, subagents,
+    and tool availability are user-level. Chat separation is handled by session_id.
+    workspace_id remains as legacy organizational/configuration metadata.
 
     Args:
         name: Display name for the workspace (e.g. "Q2 Planning")
-        description: Short description of the workspace purpose
-        instructions: Custom AI instructions for this workspace (e.g. "Respond as a PM. Use AEST timezone.")
+        description: Short organizational description
+        instructions: Optional prompt/configuration notes associated with this workspace ID
     """
     ws = Workspace.from_name(name)
     ws.description = description
@@ -56,19 +57,24 @@ def workspace_create(
 
     return (
         f"Workspace '{ws.name}' (id: {ws.id}) created.\n"
-        f"Files: ~/Assistant/Workspaces/{ws.id}/files/\n"
-        f"Use workspace_switch('{ws.id}') to start working in it."
+        "This is legacy organizational metadata only: user data is user-level, "
+        "and chats are session-separated by session_id.\n"
+        "It does not create isolated files, conversations, memory, skills, or subagents.\n"
+        f"Use workspace_switch('{ws.id}') to apply its optional instructions/configuration."
     )
 
 
 @tool
 def workspace_list() -> str:
-    """List all workspaces with their names, descriptions, and instruction summaries."""
+    """List legacy organizational workspaces and instruction summaries."""
     workspaces = _list_ws()
     if not workspaces:
         return "No workspaces found. Create one with workspace_create(name)."
 
-    lines = ["Available workspaces:"]
+    lines = [
+        "Available workspaces (legacy organizational metadata).",
+        "User data is user-level; chats are separated by session_id.",
+    ]
     for ws in workspaces:
         desc = ws.description[:60] + "..." if len(ws.description) > 60 else ws.description
         inst = (
@@ -86,7 +92,7 @@ def workspace_list() -> str:
 
 @tool
 def workspace_switch(name: str, user_id: str = "default_user") -> str:
-    """Switch to a different workspace."""
+    """Switch legacy workspace context for optional instructions/configuration."""
     ws_id = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
     ws = load_workspace(ws_id)
     if ws is None:
@@ -100,13 +106,11 @@ def workspace_switch(name: str, user_id: str = "default_user") -> str:
 
     _CURRENT_WORKSPACES[user_id] = ws.id
 
-    try:
-        from src.sdk.runner import reset_sdk_loop
-        reset_sdk_loop(user_id, ws.id)
-    except Exception:
-        pass
-
-    info = f"Switched to workspace: {ws.name}"
+    info = (
+        f"Switched to workspace: {ws.name}\n"
+        "Note: workspace_id is legacy organizational metadata. User data remains "
+        "user-level, and chats are session-separated by session_id."
+    )
     if ws.prompt:
         info += f"\nInstructions: {ws.prompt}"
     return info
@@ -114,13 +118,19 @@ def workspace_switch(name: str, user_id: str = "default_user") -> str:
 
 @tool
 def workspace_current(user_id: str = "default_user") -> str:
-    """Get the current workspace name, description, and instructions."""
+    """Get current legacy workspace metadata and instructions."""
     ws_id = _get_current_workspace(user_id)
     ws = load_workspace(ws_id)
     if ws is None:
-        return "Current workspace: Personal (default)"
+        return (
+            "Current workspace: Personal (default)\n"
+            "Workspace IDs are legacy organizational metadata. User data is user-level; "
+            "chats are session-separated by session_id."
+        )
     return (
         f"Current workspace: {ws.name} (id: {ws.id})\n"
+        "Workspace ID is legacy organizational metadata. User data is user-level; "
+        "chats are session-separated by session_id.\n"
         f"Description: {ws.description or '(none)'}\n"
         f"Instructions: {ws.prompt or '(none)'}"
     )
@@ -128,7 +138,10 @@ def workspace_current(user_id: str = "default_user") -> str:
 
 @tool
 def workspace_delete(name: str) -> str:
-    """Delete a workspace and all its data (files, conversations, memory). Cannot be undone.
+    """Delete legacy workspace metadata only.
+
+    This does not delete files, conversations, memory, skills, subagents, or other
+    user-level data. Chat separation is handled by session_id.
 
     Args:
         name: Workspace name or ID to delete
@@ -147,4 +160,7 @@ def workspace_delete(name: str) -> str:
         return "Cannot delete the default Personal workspace."
 
     _delete_ws(ws.id)
-    return f"Workspace '{ws.name}' deleted."
+    return (
+        f"Workspace metadata for '{ws.name}' deleted. "
+        "User-level data was not deleted."
+    )

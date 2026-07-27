@@ -20,6 +20,7 @@ from agentprofile.parser import dumps_profile
 from src.app_logging import get_logger
 from src.config import get_settings
 from src.sdk.agent_validation import _is_denied_memory_tool, validate_agent_def
+from src.sdk.capabilities import load_user_capabilities, resource_enabled
 from src.sdk.messages import Message
 from src.sdk.subagent_context import SubagentCancelledError, SubagentContext
 from src.sdk.subagent_models import (
@@ -27,7 +28,7 @@ from src.sdk.subagent_models import (
     TaskCancelledError,
     TaskStatus,
 )
-from src.sdk.work_queue import WorkQueueDB, get_work_queue
+from src.sdk.work_queue import USER_LEVEL_WORKSPACE_ID, WorkQueueDB, get_work_queue
 from src.storage import paths as _paths
 
 # Alias: used by callers (e.g. tests) that patch src.sdk.coordinator.get_paths
@@ -43,7 +44,18 @@ OPTIONAL_SKILL_LOAD_TOOL = "skills_load"
 DENIED_SKILL_MANAGEMENT_TOOLS = {"skill_delete", "skill_update"}
 
 
-def _build_tools_for_subagent(profile: AgentProfile) -> list[Any]:
+def _load_user_caps(user_id: str) -> dict[str, Any]:
+    try:
+        return load_user_capabilities(user_id)
+    except Exception:
+        return {"tools": {}, "skills": {}, "subagents": {}}
+
+
+def _subagent_enabled(user_id: str, name: str) -> bool:
+    return resource_enabled(_load_user_caps(user_id), "subagents", name)
+
+
+def _build_tools_for_subagent(profile: AgentProfile, user_id: str | None = None) -> list[Any]:
     """Build the filtered tool list for a subagent."""
     from src.sdk.native_tools import get_native_tools
 
@@ -61,6 +73,13 @@ def _build_tools_for_subagent(profile: AgentProfile) -> list[Any]:
     final.update(MANDATORY_SUBAGENT_TOOLS)
     if profile.skills:
         final.add(OPTIONAL_SKILL_LOAD_TOOL)
+
+    if user_id:
+        disabled_tools = {
+            name for name, enabled in _load_user_caps(user_id).get("tools", {}).items()
+            if not resource_enabled(_load_user_caps(user_id), "tools", name)
+        }
+        final.difference_update(disabled_tools)
 
     return [tool_map[n] for n in sorted(final) if n in tool_map]
 
@@ -82,9 +101,12 @@ def _build_system_prompt(
         try:
             from src.skills.registry import get_skill_registry
 
-            sr = get_skill_registry(user_id=user_id, workspace_id=workspace_id)
+            sr = get_skill_registry(user_id=user_id)
+            caps = _load_user_caps(user_id)
             skill_entries = []
             for skill_name in profile.skills:
+                if not resource_enabled(caps, "skills", skill_name):
+                    continue
                 skill = sr.get_skill(skill_name)
                 if skill:
                     desc = skill.get("description", "")
@@ -120,9 +142,10 @@ class SubagentCoordinator:
 
     def __init__(self, user_id: str, workspace_id: str = "personal"):
         self.user_id = user_id
-        self.workspace_id = workspace_id
+        self.requested_workspace_id = workspace_id
+        self.workspace_id = USER_LEVEL_WORKSPACE_ID
         self.settings = get_settings()
-        self.base_path = _paths.get_paths(user_id=self.user_id, workspace_id=self.workspace_id).workspace_subagents_dir()
+        self.base_path = get_paths(user_id=self.user_id).user_subagents_dir()
         self.base_path.mkdir(parents=True, exist_ok=True)
         self._db: WorkQueueDB | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
@@ -145,7 +168,7 @@ class SubagentCoordinator:
 
     async def _get_db(self) -> WorkQueueDB:
         if self._db is None:
-            self._db = await get_work_queue(self.user_id, self.workspace_id)
+            self._db = await get_work_queue(self.user_id, USER_LEVEL_WORKSPACE_ID)
             if self._recovery_task is None:
                 self._recovery_task = asyncio.create_task(self._recover_stale_jobs())
         return self._db
@@ -233,6 +256,9 @@ class SubagentCoordinator:
         result output. Kept for backward compatibility but delegates should use
         delegate() for new code.
         """
+        if not _subagent_enabled(self.user_id, agent_name):
+            raise ValueError(f"Subagent '{agent_name}' is disabled.")
+
         profile = self.load_def(agent_name)
         if profile is None:
             raise ValueError(f"Subagent '{agent_name}' not found. Create it first with subagent_create.")
@@ -284,6 +310,9 @@ class SubagentCoordinator:
 
         The effective timeout is min(timeout_seconds, profile.timeout_seconds).
         """
+        if not _subagent_enabled(self.user_id, agent_name):
+            raise ValueError(f"Subagent '{agent_name}' is disabled.")
+
         profile = self.load_def(agent_name)
         if profile is None:
             raise ValueError(
@@ -346,6 +375,9 @@ class SubagentCoordinator:
         task: str,
         parent_id: str | None = None,
     ) -> str:
+        if not _subagent_enabled(self.user_id, agent_name):
+            raise ValueError(f"Subagent '{agent_name}' is disabled.")
+
         profile = self.load_def(agent_name)
         if profile is None:
             raise ValueError(f"Subagent '{agent_name}' not found. Create it first with subagent_create.")
@@ -455,9 +487,9 @@ class SubagentCoordinator:
         from src.sdk.providers.factory import create_model_from_config
 
         model_str = profile.model or self.settings.agent.model
-        provider = create_model_from_config(model_str)
+        provider = create_model_from_config(model_str, user_id=self.user_id)
 
-        tools = _build_tools_for_subagent(profile)
+        tools = _build_tools_for_subagent(profile, user_id=self.user_id)
         system_prompt = _build_system_prompt(profile, self.user_id, self.workspace_id)
 
         run_config = RunConfig(
@@ -576,7 +608,7 @@ class SubagentCoordinator:
         return defs
 
     async def list_defs_with_scope(self) -> list[tuple[AgentProfile, str]]:
-        """Return agent defs from user-level dir, filtered by item_scopes."""
+        """Return agent defs from the user-level subagents directory."""
         scoped: list[tuple[AgentProfile, str]] = []
 
         if self.base_path.exists():
@@ -586,27 +618,7 @@ class SubagentCoordinator:
                     if profile:
                         scoped.append((profile, "user"))
 
-        # 3. Filter by item_scopes (All / Selected / None)
-        try:
-            from src.sdk.item_scopes import ItemScopeDB
-
-            paths = _paths.get_paths(user_id=self.user_id)
-            scope_db = ItemScopeDB(paths.base)
-            all_scoped = scope_db.get_all_scoped(self.user_id, "subagent")
-        except Exception:
-            all_scoped = {}
-
-        filtered: list[tuple[AgentProfile, str]] = []
-        for profile, file_scope in scoped:
-            if profile.name in all_scoped:
-                item = all_scoped[profile.name]
-                if item.scope == "none":
-                    continue
-                if item.scope == "selected" and self.workspace_id not in item.workspace_ids:
-                    continue
-            filtered.append((profile, file_scope))
-
-        return filtered
+        return scoped
 
     def load_def(self, name: str) -> AgentProfile | None:
         profile_path = self.base_path / name / "PROFILE.md"
@@ -631,7 +643,7 @@ _coordinators: dict[str, SubagentCoordinator] = {}
 
 
 def get_coordinator(user_id: str, workspace_id: str = "personal") -> SubagentCoordinator:
-    key = f"{user_id}:{workspace_id}"
+    key = user_id
     if key not in _coordinators:
         _coordinators[key] = SubagentCoordinator(user_id, workspace_id)
     return _coordinators[key]

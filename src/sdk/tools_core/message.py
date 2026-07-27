@@ -3,7 +3,7 @@
 import os
 import re
 from datetime import date, timedelta
-from typing import Any
+from typing import Any, cast
 
 from coremem.query import expand_queries
 
@@ -78,10 +78,10 @@ def _list_workspace_ids(user_id: str) -> list[str]:
 
 
 def _fetch_session_ids(conversation: Any, msg_ids: list[str]) -> dict[str, str]:
-    """Batch-lookup session_ids from message metadata.
+    """Batch-lookup session_ids from the messages table.
 
-    Extracts session_id from the metadata JSON column.
-    Falls back to grouping by (role, date) for messages without session data.
+    Uses the session_id column as the source of truth and falls back to
+    metadata JSON for older rows.
     """
     import json as _json
 
@@ -89,24 +89,45 @@ def _fetch_session_ids(conversation: Any, msg_ids: list[str]) -> dict[str, str]:
     if not msg_ids:
         return result
 
-    try:
-        conn = conversation._connect()
-        try:
-            placeholders = ",".join("?" * len(msg_ids))
-            rows = conn.execute(
-                f"SELECT id, metadata FROM messages WHERE id IN ({placeholders})",
+    def _query(cursor: Any) -> list[Any]:
+        placeholders = ",".join("?" * len(msg_ids))
+        columns = {row[1] for row in cursor.execute("PRAGMA table_info('messages')").fetchall()}
+        session_expr = "session_id" if "session_id" in columns else "'' AS session_id"
+        return cast(
+            list[Any],
+            cursor.execute(
+                f"SELECT id, metadata, {session_expr} FROM messages WHERE id IN ({placeholders})",
                 tuple(msg_ids),
-            ).fetchall()
-        finally:
-            conn.close()
-    except Exception:
-        return result
+            ).fetchall(),
+        )
+
+    rows: list[Any]
+    if hasattr(conversation, "_connect"):
+        try:
+            conn = conversation._connect()
+            try:
+                rows = _query(conn)
+            finally:
+                conn.close()
+        except Exception:
+            return result
+    else:
+        core = getattr(conversation, "core", None)
+        db = getattr(core, "db", None)
+        connect = getattr(db, "_connect", None)
+        if connect is None:
+            return result
+        try:
+            with connect() as cursor:
+                rows = _query(cursor)
+        except Exception:
+            return result
 
     for row in rows:
         msg_id = row[0]
         raw = row[1] or ""
-        sid = ""
-        if raw:
+        sid = row[2] or ""
+        if not sid and raw:
             try:
                 meta = _json.loads(raw)
                 sid = meta.get("session_id", "")
@@ -181,7 +202,7 @@ def message_history(
                 if conversation.count_messages() == 0:
                     return (
                         "No persisted messages found. Conversation history has not been persisted "
-                        f"for workspace '{workspace_id}'."
+                        "for this user in the conversation store or session context."
                     )
                 return f"No messages found for {date_str}"
 
@@ -200,7 +221,7 @@ def message_history(
         if conversation.count_messages() == 0:
             return (
                 "No persisted messages found. Conversation history has not been persisted "
-                f"for workspace '{workspace_id}'."
+                "for this user in the conversation store or session context."
             )
         return f"No messages in the last {days} days."
 
@@ -257,7 +278,7 @@ def message_search(
     is_counting = query.lower().startswith("how many") or "total" in query.lower()
     effective_limit = max(limit, 30 if is_counting else 10)
 
-    all_results = core.search_enhanced(query, limit=effective_limit, metadata={"workspace_id": workspace_id})
+    all_results = core.search_enhanced(query, limit=effective_limit)
 
     # Deduplicate by session
     query_words = set(query.lower().split())
@@ -367,7 +388,7 @@ def message_count(
     all_results: list[SearchResult] = []
 
     for q in queries:
-        results = conversation.search_hybrid(q, limit=search_limit, metadata={"workspace_id": workspace_id})
+        results = conversation.search_hybrid(q, limit=search_limit)
         for r in results:
             if r.id not in seen_ids:
                 seen_ids.add(r.id)
@@ -486,7 +507,7 @@ def message_timeline(
     """
     core = _get_message_core(user_id, workspace_id)
 
-    results = core.search_enhanced(query, limit=limit, metadata={"workspace_id": workspace_id})
+    results = core.search_enhanced(query, limit=limit)
 
     seen_sessions: set[str] = set()
     timeline: list[tuple[str, str, str]] = []  # (date, session_id, snippet)

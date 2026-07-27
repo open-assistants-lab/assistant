@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from src.sdk.capabilities import load_user_capabilities, resource_enabled
 from src.sdk.loop import get_current_agent_loop
 from src.sdk.tool_index import (
     ToolIndex,
@@ -65,8 +66,10 @@ def tool_reload() -> str:
         from src.sdk.tools_custom import find_tool_file, get_custom_tools, load_tool_meta
 
         custom_count = 0
-        for td in get_custom_tools(user_id=loop.user_id or "default_user", workspace_id=loop.workspace_id or "personal"):
-            if not is_core_tool(td.name):
+        user_id = loop.user_id or "default_user"
+        caps = load_user_capabilities(user_id)
+        for td in get_custom_tools(user_id=user_id, workspace_id=loop.workspace_id or "personal"):
+            if not is_core_tool(td.name) and resource_enabled(caps, "tools", td.name):
                 tool_file = find_tool_file(td.name, user_tools_dir, workspace_tools_dir)
                 reconstruct_data = {"command": "", "install": [], "tool_dir": ""}
                 if tool_file:
@@ -85,7 +88,7 @@ def tool_reload() -> str:
         mcp_count = 0
         if mcp_bridge:
             for td in mcp_bridge.get_tool_definitions():
-                if not is_core_tool(td.name):
+                if not is_core_tool(td.name) and resource_enabled(caps, "tools", td.name):
                     parts = td.name.split("__", 2)
                     server_name = parts[1] if len(parts) == 3 else ""
                     reconstruct = {"server_name": server_name, "mcp_tool_name": td.name}
@@ -99,7 +102,7 @@ def tool_reload() -> str:
             all_tool_dicts = connectkit_bridge.get_tool_definitions()
             converted = _connector_dicts_to_defs(all_tool_dicts)
             for td in converted:
-                if not is_core_tool(td.name):
+                if not is_core_tool(td.name) and resource_enabled(caps, "tools", td.name):
                     namespace = td.name.split("__")[0] if "__" in td.name else "connector"
                     reconstruct = {"namespace": namespace, "tool_name": td.name}
                     loop._tool_index.index_tool(td, tool_type="connector", namespace=namespace, reconstruct=reconstruct)

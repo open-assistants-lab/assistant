@@ -195,7 +195,15 @@ class AgentLoop:
             self._handoff_tool_names.add(h.tool_name)
 
         self._approved_tools: set[tuple[str, str]] = set()
+        self._approved_tool_calls: set[tuple[str, str, str]] = set()
         self._approved_tool_names: set[str] = set()
+
+    def _tool_args_key(self, tc: ToolCall) -> str:
+        return json.dumps(tc.arguments or {}, sort_keys=True)
+
+    def approve_tool_call(self, tc: ToolCall) -> None:
+        self._approved_tool_calls.add((tc.id, tc.name, self._tool_args_key(tc)))
+        self._approved_tools.add((tc.name, self._tool_args_key(tc)))
 
     def register_tool(self, tool_def: ToolDefinition) -> None:
         if self._registry.has(tool_def.name):
@@ -212,7 +220,9 @@ class AgentLoop:
     def _should_interrupt(self, tc: ToolCall) -> bool:
         tool_def = self._registry.get(tc.name)
         if tool_def and tool_def.annotations.destructive and not tool_def.annotations.read_only:
-            if tc.name in self._approved_tool_names:
+            call_key = (tc.id, tc.name, self._tool_args_key(tc))
+            if call_key in self._approved_tool_calls:
+                self._approved_tool_calls.discard(call_key)
                 return False
             if tc.arguments:
                 args_key = (tc.name, json.dumps(tc.arguments, sort_keys=True))

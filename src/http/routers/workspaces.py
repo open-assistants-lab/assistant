@@ -5,6 +5,7 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
+from src.sdk.runner import reset_user_sdk_loops
 from src.sdk.workspace_models import (
     Workspace,
     list_workspaces,
@@ -34,7 +35,7 @@ class UpdateWorkspaceRequest(BaseModel):
 
 @router.get("")
 async def get_workspaces(user_id: str = "default_user") -> dict[str, Any]:
-    workspaces = list_workspaces()
+    workspaces = list_workspaces(user_id=user_id)
     return {
         "workspaces": [
             {
@@ -50,7 +51,9 @@ async def get_workspaces(user_id: str = "default_user") -> dict[str, Any]:
 
 
 @router.post("")
-async def create_workspace(req: CreateWorkspaceRequest) -> dict[str, Any]:
+async def create_workspace(
+    req: CreateWorkspaceRequest, user_id: str = "default_user"
+) -> dict[str, Any]:
     ws = Workspace.from_name(req.name)
     ws.description = req.description
     ws.prompt = req.prompt
@@ -58,19 +61,21 @@ async def create_workspace(req: CreateWorkspaceRequest) -> dict[str, Any]:
         ws.model_override = req.model_override
 
     from src.storage.paths import DataPaths
-    dp = DataPaths(workspace_id=ws.id)
+    dp = DataPaths(user_id=user_id, workspace_id=ws.id)
     dp.workspace_files_dir()
     dp.workspace_memory_dir()
     dp.workspace_subagents_dir()
     dp.workspace_skills_dir()
 
-    save_workspace(ws)
+    save_workspace(ws, user_id=user_id)
     return {"id": ws.id, "name": ws.name, "model_override": ws.model_override}
 
 
 @router.patch("/{workspace_id}")
-async def update_workspace(workspace_id: str, req: UpdateWorkspaceRequest) -> dict[str, Any] | tuple[dict[str, Any], int]:
-    ws = load_workspace(workspace_id)
+async def update_workspace(
+    workspace_id: str, req: UpdateWorkspaceRequest, user_id: str = "default_user"
+) -> dict[str, Any] | tuple[dict[str, Any], int]:
+    ws = load_workspace(workspace_id, user_id=user_id)
     if ws is None:
         return {"error": "Workspace not found"}, 404
 
@@ -83,20 +88,17 @@ async def update_workspace(workspace_id: str, req: UpdateWorkspaceRequest) -> di
     if "model_override" in req.model_fields_set:
         ws.model_override = req.model_override
 
-    save_workspace(ws)
+    save_workspace(ws, user_id=user_id)
+    reset_user_sdk_loops(user_id, reason=f"workspace_updated:{workspace_id}")
     return ws.to_dict()
 
 
 @router.delete("/{workspace_id}")
 async def delete_workspace_endpoint(workspace_id: str, user_id: str = "default_user") -> dict[str, Any] | tuple[dict[str, Any], int]:
-    ws = load_workspace(workspace_id)
+    ws = load_workspace(workspace_id, user_id=user_id)
     if ws is None or ws.id == "personal":
         return {"error": "Cannot delete"}, 400
 
-    from src.storage.messages import clear_message_store, get_message_store
-    store = get_message_store(user_id, workspace_id)
-    _ = store.delete_messages_for_workspace(ws.id)
-    clear_message_store(user_id, workspace_id)
-
-    _delete_ws(ws.id)
+    _delete_ws(ws.id, user_id=user_id)
+    reset_user_sdk_loops(user_id, reason=f"workspace_deleted:{workspace_id}")
     return {"status": "deleted", "messages_deleted": 0}

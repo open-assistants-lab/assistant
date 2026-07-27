@@ -1,21 +1,18 @@
-"""Workspace isolation integration tests.
+"""Workspace compatibility integration tests.
 
-Verifies that workspaces are truly isolated:
-1. Conversation history between workspaces doesn't leak
-2. Memory stores use separate paths per workspace
-3. Subagent definitions are scoped per workspace
+Runtime data is user-level. workspace_id remains accepted as a compatibility
+parameter, while session_id separates chat history.
 """
 
 from __future__ import annotations
 
 import tempfile
-from pathlib import Path
 
 import pytest
 
 
-def test_conversation_store_uses_different_paths_per_workspace():
-    """MessageStore with different workspace_ids should have different base paths."""
+def test_conversation_store_respects_explicit_base_dir():
+    """Explicit base_dir still creates separate stores for tests and tools."""
     from src.storage.messages import MessageStore
 
     with tempfile.TemporaryDirectory() as d:
@@ -32,8 +29,8 @@ def test_conversation_store_uses_different_paths_per_workspace():
         assert len(msgs_b) == 0
 
 
-def test_conversation_workspace_isolation():
-    """Messages in workspace A do not appear in workspace B conversation."""
+def test_conversation_base_dir_isolation():
+    """Messages in one explicit base_dir do not appear in another."""
     from src.storage.messages import MessageStore
 
     with tempfile.TemporaryDirectory() as d:
@@ -52,8 +49,8 @@ def test_conversation_workspace_isolation():
         assert not any("Q2 Planning" in str(m.content) for m in msgs_b)
 
 
-def test_conversation_messages_dont_leak_on_write():
-    """Writing to workspace A's store does not affect workspace B's store."""
+def test_conversation_messages_dont_leak_between_explicit_base_dirs():
+    """Writing to one explicit base_dir does not affect another."""
     from src.storage.messages import MessageStore
 
     with tempfile.TemporaryDirectory() as d:
@@ -71,8 +68,8 @@ def test_conversation_messages_dont_leak_on_write():
         assert "Melbourne" not in str(msgs_b[0].content)
 
 
-def test_memory_stores_have_different_paths():
-    """MemoryStore with different workspace_ids should use different dirs."""
+def test_memory_paths_ignore_workspace_id():
+    """Memory paths are user-level compatibility aliases."""
     from src.storage.paths import DataPaths
 
     paths_a = DataPaths(user_id="test_user", workspace_id="ws-a")
@@ -81,27 +78,32 @@ def test_memory_stores_have_different_paths():
     mem_a = paths_a.workspace_memory_dir()
     mem_b = paths_b.workspace_memory_dir()
 
-    assert "ws-a" in str(mem_a)
-    assert "ws-b" in str(mem_b)
-    assert mem_a != mem_b
+    assert mem_a == paths_a.user_memory_dir()
+    assert mem_b == paths_b.user_memory_dir()
+    assert mem_a == mem_b
 
 
 def test_memory_stores_are_per_user(tmp_path, monkeypatch):
-    """MessageStore instances are per-user per-workspace."""
-    monkeypatch.setenv("DEPLOYMENT_EA_ROOT", str(tmp_path))
+    """MessageStore instances are per-user, not per-workspace."""
+    import src.storage.messages as messages_storage
     from src.storage.messages import get_message_store
+    from src.storage.paths import DataPaths
+
+    messages_storage._stores.clear()
+    paths = DataPaths(ea_root=str(tmp_path), user_id="test_user")
+    monkeypatch.setattr(messages_storage, "get_paths", lambda user_id, workspace_id=None: paths)
 
     store_a = get_message_store("test_user", workspace_id="ws-a")
     store_b = get_message_store("test_user", workspace_id="ws-b")
 
     assert store_a.user_id == "test_user"
     assert store_b.user_id == "test_user"
-    # Each workspace has its own isolated store
-    assert store_a is not store_b
+    assert store_a is store_b
+    assert store_a.workspace_id == "user"
 
 
-def test_file_paths_per_workspace():
-    """Workspace file directories are isolated."""
+def test_file_paths_ignore_workspace_id():
+    """Workspace file paths are user-level compatibility aliases."""
     from src.storage.paths import DataPaths
 
     paths_a = DataPaths(user_id="test_user", workspace_id="project-alpha")
@@ -110,14 +112,14 @@ def test_file_paths_per_workspace():
     files_a = paths_a.workspace_files_dir()
     files_b = paths_b.workspace_files_dir()
 
-    assert "project-alpha" in str(files_a)
-    assert "project-beta" in str(files_b)
-    assert files_a != files_b
+    assert files_a == paths_a.files_dir()
+    assert files_b == paths_b.files_dir()
+    assert files_a == files_b
 
 
 @pytest.mark.asyncio
-async def test_subagent_isolation_between_workspaces():
-    """Subagents created in workspace A are not visible in workspace B."""
+async def test_subagents_are_user_level_across_workspaces():
+    """Subagents created with one workspace_id are visible with another."""
     import tempfile
     from unittest.mock import patch
 
@@ -155,12 +157,12 @@ async def test_subagent_isolation_between_workspaces():
             defs_b = await coord_b.list_defs()
 
             assert any(d.name == "writer" for d in defs_a), "writer should appear in ws-a"
-            assert not any(d.name == "writer" for d in defs_b), "writer should NOT leak to ws-b"
+            assert any(d.name == "writer" for d in defs_b), "writer should be user-level"
 
 
 @pytest.mark.asyncio
-async def test_same_name_subagent_in_different_workspaces():
-    """Same subagent name can exist independently in different workspaces."""
+async def test_same_name_subagent_across_workspaces_updates_user_level_definition():
+    """Same subagent name across workspace_ids refers to one user-level definition."""
     import tempfile
     from unittest.mock import patch
 
@@ -208,15 +210,15 @@ async def test_same_name_subagent_in_different_workspaces():
 
             assert loaded_a is not None
             assert loaded_b is not None
-            assert loaded_a.description != loaded_b.description
-            assert loaded_a.model != loaded_b.model
-            assert "memory_search" in (loaded_a.tools or [])
+            assert loaded_a.description == loaded_b.description == "Research for project beta"
+            assert loaded_a.model == loaded_b.model == "anthropic:claude-sonnet-4-20250514"
+            assert "memory_search" not in (loaded_a.tools or [])
             assert "memory_search" not in (loaded_b.tools or [])
 
 
 @pytest.mark.asyncio
-async def test_subagent_delete_in_one_workspace_does_not_affect_other():
-    """Deleting a subagent in workspace A leaves workspace B's subagent intact."""
+async def test_subagent_delete_through_one_workspace_removes_user_level_definition():
+    """Deleting a subagent path through one workspace_id removes the shared definition."""
     import tempfile
     from unittest.mock import patch
 
@@ -247,19 +249,23 @@ async def test_subagent_delete_in_one_workspace_does_not_affect_other():
             await coord_a.create(agent)
             await coord_b.create(agent)
 
-            # Delete only from ws-a
+            # Both coordinators point at the same user-level subagent directory.
             import shutil
             shutil.rmtree(coord_a.base_path / "shared")
 
             assert coord_a.load_def("shared") is None
-            assert coord_b.load_def("shared") is not None
-            assert coord_b.load_def("shared").name == "shared"
+            assert coord_b.load_def("shared") is None
 
 
-def test_get_paths_with_workspace_defaults_to_personal():
-    """Calling get_paths without workspace_id should default to personal."""
+def test_get_paths_workspace_helpers_default_to_user_level():
+    """Calling DataPaths without workspace_id still returns user-level aliases."""
     from src.storage.paths import DataPaths
 
     dp = DataPaths(user_id="test_user")
     files = dp.workspace_files_dir()
-    assert "personal" in str(files) or Path.home().as_posix() in str(dp.workspace_base())
+    assert files == dp.files_dir()
+    assert dp.workspace_memory_dir() == dp.user_memory_dir()
+    assert dp.workspace_skills_dir() == dp.user_skills_dir()
+    assert dp.workspace_subagents_dir() == dp.user_subagents_dir()
+    assert dp.versions_dir() == dp.user_dir / ".versions"
+    assert dp.workspace_conversation_path() == dp.conversation_dir() / "app.db"

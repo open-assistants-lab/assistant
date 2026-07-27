@@ -1,4 +1,4 @@
-"""Tests for workspace-aware skill registry."""
+"""Tests for user-level skill registry."""
 
 import tempfile
 from pathlib import Path
@@ -6,8 +6,8 @@ from pathlib import Path
 from src.skills.registry import SkillRegistry, get_skill_registry, reset_skill_registries
 
 
-def test_registry_workspace_override_user_by_name():
-    """Workspace skill with same name overrides user skill."""
+def test_registry_ignores_workspace_skill_with_same_name():
+    """Workspace skill directories are compatibility-only at runtime."""
     with tempfile.TemporaryDirectory() as user_d, tempfile.TemporaryDirectory() as ws_d:
         usp = Path(user_d) / "greeting" / "SKILL.md"
         usp.parent.mkdir(parents=True)
@@ -35,13 +35,13 @@ Say hello from workspace scope.""")
         assert len([s for s in skills if s["name"] == "greeting"]) == 1
 
         greeting = next(s for s in skills if s["name"] == "greeting")
-        assert "workspace scope" in greeting["content"]
-        assert greeting["description"] == "Workspace-level greeting skill"
-        assert greeting.get("metadata", {}).get("scope") == "workspace"
+        assert "user scope" in greeting["content"]
+        assert greeting["description"] == "User-level greeting skill"
+        assert greeting.get("metadata", {}).get("scope") == "user"
 
 
-def test_registry_scope_fields_populated():
-    """User skills get scope=user, workspace skills get scope=workspace."""
+def test_registry_loads_only_user_skills():
+    """Only user skills are runtime-loadable; workspace dirs are ignored."""
     with tempfile.TemporaryDirectory() as user_d, tempfile.TemporaryDirectory() as ws_d:
         (Path(user_d) / "alpha").mkdir(parents=True)
         (Path(user_d) / "alpha" / "SKILL.md").write_text("""---
@@ -61,14 +61,13 @@ Content B""")
         skills = registry.get_all_skills()
 
         alpha = next(s for s in skills if s["name"] == "alpha")
-        beta = next(s for s in skills if s["name"] == "beta")
-
         assert alpha.get("metadata", {}).get("scope") == "user"
-        assert beta.get("metadata", {}).get("scope") == "workspace"
+        assert "beta" not in {s["name"] for s in skills}
+        assert registry.get_skill("beta") is None
 
 
-def test_get_skill_registry_cached_by_user_and_workspace():
-    """Factory caches per (user_id, workspace_id)."""
+def test_get_skill_registry_cached_by_user():
+    """Factory caches per user; workspace_id is compatibility-only."""
     reset_skill_registries()
     r1 = get_skill_registry(user_id="alice", workspace_id="personal")
     r2 = get_skill_registry(user_id="alice", workspace_id="personal")
@@ -76,12 +75,12 @@ def test_get_skill_registry_cached_by_user_and_workspace():
     r4 = get_skill_registry(user_id="bob", workspace_id="personal")
 
     assert r1 is r2
-    assert r1 is not r3
+    assert r1 is r3
     assert r1 is not r4
 
 
-def test_get_skill_registry_uses_tuple_cache_keys():
-    """Factory cache keys keep user/workspace identity structurally separate."""
+def test_get_skill_registry_uses_user_cache_keys():
+    """Factory cache keys are user IDs only."""
     from src.skills import registry as skills_registry
 
     reset_skill_registries()
@@ -90,7 +89,7 @@ def test_get_skill_registry_uses_tuple_cache_keys():
     r2 = get_skill_registry(user_id="a-b", workspace_id="personal")
 
     assert r1 is not r2
-    assert set(skills_registry._registries) == {("a", "b"), ("a-b", "personal")}
+    assert set(skills_registry._registries) == {"a", "a-b"}
 
 
 def test_seeded_skill_deleted_after_reload_is_not_reseeded(tmp_path, monkeypatch):
