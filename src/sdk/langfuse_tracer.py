@@ -1,0 +1,390 @@
+"""Langfuse tracer — wraps runtime functions for Langfuse observability.
+
+When enabled (via LANGFUSE_ENABLED=true + credentials), wraps:
+- LLM provider chat()/chat_stream() as Langfuse generations
+- AgentLoop run()/run_stream() as trace roots with user_id/session_id
+- Tool execution as Langfuse spans
+- Middleware hooks as Langfuse spans
+- Rubric verdicts as Langfuse scores
+
+When disabled, all methods are no-ops with zero overhead.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from src.app_logging import get_logger
+
+logger = get_logger()
+
+
+class LangfuseTracer:
+    """Wraps runtime functions with Langfuse tracing."""
+
+    _client: Any | None = None  # langfuse.Langfuse singleton
+
+    @classmethod
+    def init(cls, public_key: str, secret_key: str, host: str) -> None:
+        """Initialize Langfuse client. Called once on startup."""
+        try:
+            from langfuse import Langfuse
+
+            cls._client = Langfuse(
+                public_key=public_key,
+                secret_key=secret_key,
+                base_url=host,
+            )
+            logger.info("langfuse.initialized", {"host": host})
+        except Exception as e:
+            logger.warning("langfuse.init_failed", {"error": str(e)})
+            cls._client = None
+
+    @classmethod
+    def is_enabled(cls) -> bool:
+        """Check if Langfuse tracing is active."""
+        return cls._client is not None
+
+    @classmethod
+    def _get_client(cls) -> Any | None:
+        """Get the Langfuse client, or None if not enabled."""
+        if cls._client is None:
+            return None
+        try:
+            from langfuse import get_client
+
+            return get_client()
+        except Exception:
+            return cls._client
+
+    @classmethod
+    def wrap_provider(cls, provider: Any) -> Any:
+        """Wrap provider.chat() and chat_stream() with Langfuse generation spans."""
+        if not cls.is_enabled():
+            return provider
+
+        original_chat = provider.chat
+        original_chat_stream = provider.chat_stream
+        provider_class = type(provider).__name__
+
+        async def traced_chat(messages, tools=None, model=None, provider_options=None, **kwargs):
+            client = cls._get_client()
+            if client is None:
+                return await original_chat(
+                    messages, tools=tools, model=model, provider_options=provider_options, **kwargs
+                )
+
+            model_name = model or getattr(provider, "model", "unknown")
+            with client.start_as_current_observation(
+                as_type="generation", name=f"{provider_class}_{model_name}", model=model_name
+            ) as gen:
+                try:
+                    gen.update(
+                        input=[m.model_dump() if hasattr(m, "model_dump") else str(m) for m in messages]
+                    )
+                except Exception:
+                    pass
+                response = await original_chat(
+                    messages, tools=tools, model=model, provider_options=provider_options, **kwargs
+                )
+                try:
+                    gen.update(
+                        output=response.model_dump() if hasattr(response, "model_dump") else str(response)
+                    )
+                    if hasattr(response, "usage") and response.usage:
+                        u = response.usage
+                        gen.update(
+                            usage_details={
+                                "input": u.input_tokens,
+                                "output": u.output_tokens,
+                                "reasoning": u.reasoning_tokens,
+                            }
+                        )
+                except Exception:
+                    pass
+                return response
+
+        def traced_chat_stream(messages, tools=None, model=None, provider_options=None, **kwargs):
+            client = cls._get_client()
+            if client is None:
+                return original_chat_stream(
+                    messages, tools=tools, model=model, provider_options=provider_options, **kwargs
+                )
+
+            model_name = model or getattr(provider, "model", "unknown")
+            gen = client.start_observation(name=f"{provider_class}_{model_name}", as_type="generation")
+            try:
+                gen.update(
+                    input=[m.model_dump() if hasattr(m, "model_dump") else str(m) for m in messages]
+                )
+            except Exception:
+                pass
+
+            async def wrapping_generator():
+                accumulated_usage = {"input": 0, "output": 0, "reasoning": 0}
+                try:
+                    async for chunk in original_chat_stream(
+                        messages, tools=tools, model=model, provider_options=provider_options, **kwargs
+                    ):
+                        if chunk.type == "usage" and chunk.usage:
+                            accumulated_usage["input"] += chunk.usage.input_tokens
+                            accumulated_usage["output"] += chunk.usage.output_tokens
+                            accumulated_usage["reasoning"] += chunk.usage.reasoning_tokens
+                        yield chunk
+                    try:
+                        gen.update(usage_details=accumulated_usage)
+                    except Exception:
+                        pass
+                finally:
+                    gen.end()
+
+            return wrapping_generator()
+
+        provider.chat = traced_chat
+        provider.chat_stream = traced_chat_stream
+        return provider
+
+    @classmethod
+    def wrap_loop(cls, loop: Any, user_id: str, session_id: str) -> Any:
+        """Wrap AgentLoop.run()/run_stream() with trace context + middleware/tool spans."""
+        if not cls.is_enabled():
+            return loop
+
+        original_run = loop.run
+        original_run_stream = loop.run_stream
+
+        async def traced_run(messages):
+            client = cls._get_client()
+            if client is None:
+                return await original_run(messages)
+
+            from langfuse import propagate_attributes
+
+            with client.start_as_current_observation(as_type="span", name="agent_run") as trace:
+                with propagate_attributes(
+                    user_id=user_id,
+                    session_id=session_id,
+                    tags=["agent"],
+                ):
+                    try:
+                        trace.update(
+                            input=[
+                                m.model_dump() if hasattr(m, "model_dump") else str(m)
+                                for m in messages[:5]
+                            ]
+                        )
+                    except Exception:
+                        pass
+                    result = await original_run(messages)
+                    if result:
+                        last = result[-1]
+                        if last.role == "assistant":
+                            content = (
+                                last.content if isinstance(last.content, str) else str(last.content)
+                            )
+                            try:
+                                trace.update(output=content[:500])
+                            except Exception:
+                                pass
+                    return result
+
+        async def traced_run_stream(messages):
+            client = cls._get_client()
+            if client is None:
+                async for chunk in original_run_stream(messages):
+                    yield chunk
+                return
+
+            span = client.start_observation(name="agent_run", as_type="span")
+            try:
+                span.update(
+                    input=[
+                        m.model_dump() if hasattr(m, "model_dump") else str(m)
+                        for m in messages[:5]
+                    ]
+                )
+            except Exception:
+                pass
+
+            try:
+                from langfuse import propagate_attributes
+
+                with propagate_attributes(user_id=user_id, session_id=session_id, tags=["agent"]):
+                    async for chunk in original_run_stream(messages):
+                        yield chunk
+            finally:
+                if loop.state and loop.state.messages:
+                    last = loop.state.messages[-1]
+                    if last.role == "assistant":
+                        content = (
+                            last.content if isinstance(last.content, str) else str(last.content)
+                        )
+                        try:
+                            span.update(output=content[:500])
+                        except Exception:
+                            pass
+                span.end()
+
+        loop.run = traced_run
+        loop.run_stream = traced_run_stream
+
+        # Wrap tool execution
+        cls._wrap_tool_execution(loop)
+        # Wrap middleware hooks
+        cls._wrap_middleware_hooks(loop)
+
+        return loop
+
+    @classmethod
+    def _wrap_tool_execution(cls, loop: Any) -> None:
+        """Wrap _execute_single_tool and _execute_tool_batch with spans."""
+        client = cls._get_client()
+        if client is None:
+            return
+
+        if hasattr(loop, "_execute_single_tool"):
+            original = loop._execute_single_tool
+
+            async def traced(tc, state):
+                with client.start_as_current_observation(as_type="span", name=f"tool:{tc.name}") as span:
+                    try:
+                        span.update(input=tc.arguments)
+                    except Exception:
+                        pass
+                    msg_count = len(state.messages)
+                    await original(tc, state)
+                    if len(state.messages) > msg_count:
+                        last_msg = state.messages[-1]
+                        if last_msg.role == "tool":
+                            content = (
+                                last_msg.content
+                                if isinstance(last_msg.content, str)
+                                else str(last_msg.content)
+                            )
+                            try:
+                                span.update(
+                                    output=content[:1000],
+                                    metadata={"is_error": "error" in content.lower()},
+                                )
+                            except Exception:
+                                pass
+
+            loop._execute_single_tool = traced
+
+        if hasattr(loop, "_execute_single_tool_streaming"):
+            original_stream = loop._execute_single_tool_streaming
+
+            async def traced_stream(tc, state):
+                with client.start_as_current_observation(as_type="span", name=f"tool:{tc.name}") as span:
+                    try:
+                        span.update(input=tc.arguments)
+                    except Exception:
+                        pass
+                    async for chunk in original_stream(tc, state):
+                        yield chunk
+
+            loop._execute_single_tool_streaming = traced_stream
+
+        if hasattr(loop, "_execute_tool_batch"):
+            original_batch = loop._execute_tool_batch
+
+            async def traced_batch(tool_calls, state):
+                with client.start_as_current_observation(as_type="span", name="tool:batch") as span:
+                    try:
+                        span.update(
+                            input={
+                                "tool_count": len(tool_calls),
+                                "tools": [tc.name for tc in tool_calls],
+                            }
+                        )
+                    except Exception:
+                        pass
+                    msg_count = len(state.messages)
+                    await original_batch(tool_calls, state)
+                    new_msgs = state.messages[msg_count:]
+                    if new_msgs:
+                        try:
+                            span.update(output={"result_count": len(new_msgs)})
+                        except Exception:
+                            pass
+
+            loop._execute_tool_batch = traced_batch
+
+        if hasattr(loop, "_execute_tool_batch_streaming"):
+            original_batch_stream = loop._execute_tool_batch_streaming
+
+            async def traced_batch_stream(tool_calls, state):
+                with client.start_as_current_observation(as_type="span", name="tool:batch") as span:
+                    try:
+                        span.update(
+                            input={
+                                "tool_count": len(tool_calls),
+                                "tools": [tc.name for tc in tool_calls],
+                            }
+                        )
+                    except Exception:
+                        pass
+                    async for chunk in original_batch_stream(tool_calls, state):
+                        yield chunk
+
+            loop._execute_tool_batch_streaming = traced_batch_stream
+
+    @classmethod
+    def _wrap_middleware_hooks(cls, loop: Any) -> None:
+        """Wrap _run_hooks to create per-middleware spans."""
+        client = cls._get_client()
+        if client is None:
+            return
+
+        from src.sdk.state import AgentState
+
+        async def traced_run_hooks(hook_name: str, state: AgentState) -> None:
+            for mw in loop.middlewares:
+                with client.start_as_current_observation(
+                    as_type="span", name=f"middleware:{mw.name}.{hook_name}"
+                ) as span:
+                    method = getattr(mw, hook_name, None)
+                    if method is None:
+                        continue
+                    try:
+                        updates = await method(state)
+                        loop._apply_updates(state, updates)
+                        if updates:
+                            try:
+                                span.update(output={"updates": updates})
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        try:
+                            span.update(metadata={"error": str(e)})
+                        except Exception:
+                            pass
+                        logger.warning(f"{hook_name} error in {mw.name}", exc_info=True)
+
+        loop._run_hooks = traced_run_hooks
+
+    @classmethod
+    def score_current_trace(
+        cls, name: str, value: float, data_type: str = "BOOLEAN", comment: str = ""
+    ) -> None:
+        """Attach a score to the current trace."""
+        client = cls._get_client()
+        if client is None:
+            return
+        try:
+            client.score_current_trace(
+                name=name, value=value, data_type=data_type, comment=comment
+            )
+        except Exception as e:
+            logger.warning("langfuse.score_failed", {"error": str(e)})
+
+    @classmethod
+    def flush(cls) -> None:
+        """Flush pending events to Langfuse."""
+        client = cls._get_client()
+        if client is None:
+            return
+        try:
+            client.flush()
+        except Exception:
+            pass
