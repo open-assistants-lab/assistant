@@ -50,10 +50,12 @@ class AnalysisJob:
         analysis_provider: Any,
         mode: str = "human_review",
         auto_apply_risk_threshold: str = "low",
+        eval_suite: list[dict] | None = None,
     ) -> None:
         self._provider = analysis_provider
         self._mode = mode
         self._auto_apply_risk_threshold = auto_apply_risk_threshold
+        self._eval_suite = eval_suite or []
 
     async def run(
         self,
@@ -133,3 +135,44 @@ class AnalysisJob:
     def _risk_at_or_below(self, risk: str, threshold: str) -> bool:
         order = {"low": 0, "medium": 1, "high": 2}
         return order.get(risk, 3) <= order.get(threshold, 0)
+
+    async def apply_suggestion(
+        self, suggestion_id: str, store: LoopEngineeringDB
+    ) -> bool:
+        """Apply a suggestion. In auto-apply mode, runs eval suite first.
+
+        TODO: Actually apply the change (edit prompt, update tool description, etc.).
+        For now, just marks status as 'applied'.
+        """
+        import time
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+        if self._mode == "auto_apply" and self._eval_suite:
+            eval_passed = await self._run_eval_suite()
+            if not eval_passed:
+                await store.update_suggestion_status(suggestion_id, "rolled_back", now)
+                return False
+
+        return await store.update_suggestion_status(suggestion_id, "applied", now)
+
+    async def rollback_suggestion(
+        self, suggestion_id: str, store: LoopEngineeringDB
+    ) -> bool:
+        """Rollback a previously applied suggestion.
+
+        TODO: Actually revert the change.
+        For now, just marks status as 'rolled_back'.
+        """
+        import time
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        return await store.update_suggestion_status(suggestion_id, "rolled_back", now)
+
+    async def _run_eval_suite(self) -> bool:
+        """Run eval test cases. Returns True if all pass.
+
+        TODO: Implement actual eval execution.
+        For now, returns True (eval gate is a no-op until eval suite is implemented).
+        """
+        if not self._eval_suite:
+            return True
+        return True

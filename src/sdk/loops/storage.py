@@ -174,15 +174,15 @@ class LoopEngineeringDB:
     ) -> list[ImprovementSuggestion]:
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
-            query = "SELECT * FROM improvement_suggestions"
+            query = "SELECT s.* FROM improvement_suggestions s"
             params: list[Any] = []
             conditions: list[str] = []
             if status:
-                conditions.append("status = ?")
+                conditions.append("s.status = ?")
                 params.append(status)
             if conditions:
                 query += " WHERE " + " AND ".join(conditions)
-            query += " ORDER BY created_at DESC"
+            query += " ORDER BY s.created_at DESC"
             cursor = await db.execute(query, params)
             rows = await cursor.fetchall()
             return [self._row_to_suggestion(row) for row in rows]

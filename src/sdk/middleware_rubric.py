@@ -107,7 +107,8 @@ def _build_grader_transcript(messages: list[Message]) -> str:
 
     tail = messages[-MAX_TRANSCRIPT_MESSAGES:]
     selected: list[Message] = []
-    if first_user is not None and first_user not in tail:
+    tail_ids = {id(m) for m in tail}
+    if first_user is not None and id(first_user) not in tail_ids:
         selected.append(first_user)
     selected.extend(tail)
 
