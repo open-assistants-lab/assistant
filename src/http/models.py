@@ -5,6 +5,10 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class VerificationRequest(BaseModel):
+    rubric: str | None = None
+
+
 class MessageRequest(BaseModel):
     message: str
     model: str | None = None
@@ -12,6 +16,13 @@ class MessageRequest(BaseModel):
     session_id: str | None = None
     verbose: bool = False
     provider_keys: dict[str, str] | None = None
+    verification: VerificationRequest | None = None
+
+
+class VerificationVerdict(BaseModel):
+    status: str | None = None
+    iterations: int = 0
+    evaluations: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class MessageResponse(BaseModel):
@@ -19,6 +30,7 @@ class MessageResponse(BaseModel):
     error: str | None = None
     verbose_data: dict[str, Any] | None = None
     tool_calls: list[dict[str, Any]] | None = Field(default=None)
+    verification: VerificationVerdict | None = None
 
 
 class MemorySearchRequest(BaseModel):

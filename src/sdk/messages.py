@@ -212,6 +212,8 @@ StreamEventType = Literal[
     "reasoning",
     "tool_result",
     "usage",
+    "rubric_evaluation_start",
+    "rubric_evaluation_end",
 ]
 
 _COMPAT_ALIAS_MAP: dict[str, str] = {

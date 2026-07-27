@@ -23,7 +23,7 @@ from src.http.conversation_persistence import (
     persist_reasoning_message,
     persist_tool_message,
 )
-from src.http.models import MessageRequest, MessageResponse
+from src.http.models import MessageRequest, MessageResponse, VerificationVerdict
 from src.http.stream_adapter import adapt_stream_chunk
 from src.sdk.messages import Message, ToolCall
 from src.sdk.runner import (
@@ -440,6 +440,16 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
         session_id = req.session_id or "default"
         conversation.add_message("user", req.message, metadata={}, session_id=session_id)
 
+        # Resolve rubric for verification
+        rubric = None
+        if req.verification and req.verification.rubric:
+            rubric = req.verification.rubric
+        else:
+            from src.config import get_settings
+            settings = get_settings()
+            if settings.verification.enabled and settings.verification.default_rubric:
+                rubric = settings.verification.default_rubric
+
         recent_messages = conversation.get_messages_by_session_id(session_id, 50)
         sdk_messages = _messages_from_conversation(recent_messages)
 
@@ -465,6 +475,7 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
                     session_id=session_id,
                     model=req.model,
                     provider_keys=req.provider_keys,
+                    rubric=rubric,
                 ):
                     event = adapt_stream_chunk(chunk)
                     is_compat_alias = chunk.type != event.kind
@@ -547,6 +558,7 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
                     user_id=user_id, messages=sdk_messages,
                     session_id=session_id,
                     model=req.model, provider_keys=req.provider_keys,
+                    rubric=rubric,
                 )
 
                 tool_contents = []
@@ -624,10 +636,24 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
             verbose_data = {}
         verbose_data["canvas_blocks"] = canvas_blocks
 
+        # Extract verification verdict from loop state
+        verification_verdict = None
+        from src.sdk.runner import get_user_loop
+        loop = get_user_loop(user_id, session_id=session_id)
+        if loop and hasattr(loop, "state") and loop.state:
+            status = loop.state.extra.get("_rubric_status")
+            if status:
+                verification_verdict = VerificationVerdict(
+                    status=status,
+                    iterations=loop.state.extra.get("_rubric_iterations", 0),
+                    evaluations=loop.state.extra.get("_rubric_evaluations", []),
+                )
+
         return MessageResponse(
             response=response,
             verbose_data=verbose_data,
             tool_calls=tool_calls_list,
+            verification=verification_verdict,
         )
 
     except Exception as e:

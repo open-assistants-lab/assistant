@@ -479,6 +479,31 @@ async def create_sdk_loop(user_id: str, workspace_id: str = "personal", model: s
             )
         )
 
+    # Verification (rubric) middleware
+    verification_config = settings.verification
+    if verification_config.enabled is True:
+        from src.sdk.middleware_rubric import RubricMiddleware
+
+        grader_model = verification_config.grader_model or model_str
+        grader_provider = create_model_from_config(
+            grader_model, provider_keys=provider_keys, user_id=user_id
+        )
+
+        grader_tool_defs: list[Any] = []
+        if verification_config.grader_tools:
+            native_by_name = {td.name: td for td in get_native_tools()}
+            for tool_name in verification_config.grader_tools:
+                if tool_name in native_by_name:
+                    grader_tool_defs.append(native_by_name[tool_name])
+
+        rubric_mw = RubricMiddleware(
+            grader_provider=grader_provider,
+            system_prompt=verification_config.grader_system_prompt or None,
+            grader_tools=grader_tool_defs or None,
+            max_iterations=verification_config.max_iterations,
+        )
+        middlewares.append(rubric_mw)
+
     t4 = time.monotonic()
 
     loop = AgentLoop(
@@ -643,6 +668,7 @@ async def run_sdk_agent(
     model: str | None = None,
     provider_keys: dict[str, str] | None = None,
     session_id: str | None = None,
+    rubric: str | None = None,
 ) -> list[Message]:
     """Run the SDK agent loop to completion.
 
@@ -653,16 +679,19 @@ async def run_sdk_agent(
         model: Optional model override.
         provider_keys: Optional per-provider API keys from frontend.
         session_id: Optional session ID for per-session loop isolation.
+        rubric: Optional rubric for verification (overrides user default).
 
     Returns:
         Final message list from the agent.
     """
     loop = await get_sdk_loop(user_id, workspace_id, model=model, provider_keys=provider_keys, session_id=session_id)
     register_user_loop(user_id, loop, session_id=session_id)
+    loop.rubric = rubric
     try:
         result = await loop.run(messages)
         return result
     finally:
+        loop.rubric = None
         unregister_user_loop(user_id, loop, session_id=session_id)
 
 
@@ -674,9 +703,11 @@ async def run_sdk_agent_stream(
     provider_keys: dict[str, str] | None = None,
     cancel_event: asyncio.Event | None = None,
     session_id: str | None = None,
+    rubric: str | None = None,
 ) -> Any:
     loop = await get_sdk_loop(user_id, workspace_id, model=model, provider_keys=provider_keys, session_id=session_id)
     loop.cancel_event = cancel_event
+    loop.rubric = rubric
     register_user_loop(user_id, loop, session_id=session_id)
 
     try:

@@ -79,6 +79,19 @@ class SummarizationConfig(_BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SUMMARY_")
 
 
+class VerificationConfig(_BaseSettings):
+    """Verification (rubric middleware) configuration."""
+
+    enabled: bool = False
+    default_rubric: str = ""
+    grader_model: str = Field(default="", description="Model for grading (empty = use agent model)")
+    grader_system_prompt: str = ""
+    grader_tools: list[str] = Field(default_factory=list, description="Tool names the grader may call")
+    max_iterations: int = 3
+
+    model_config = SettingsConfigDict(env_prefix="VERIFICATION_")
+
+
 class MemoryConfig(_BaseSettings):
     """Memory configuration."""
 
@@ -237,6 +250,7 @@ class AppConfig(_BaseSettings):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     deployment: DeploymentConfig = Field(default_factory=DeploymentConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    verification: VerificationConfig = Field(default_factory=VerificationConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     cli: CliConfig = Field(default_factory=CliConfig)
