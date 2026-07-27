@@ -10,7 +10,7 @@ uv run assistant http
 
 - Auth: Disabled (localhost-only, no API key needed)
 - Data path: `data/users/default_user/`
-- Flutter client connects to: `http://localhost:8080`
+- Client connects to: `http://localhost:8080`
 
 ---
 
@@ -30,7 +30,7 @@ echo "Your API key: $EA_API_KEY"  # Save this!
 uv run assistant http --host 0.0.0.0
 ```
 
-3. **On phone (Flutter app):**
+3. **On phone/client:**
 - Settings → Connection → Host: `<desktop-tailscale-ip>:8080`
 - Enter the API key from step 2
 - Connect
@@ -126,7 +126,7 @@ volumes:
 ALICE_KEY=abc123 BOB_KEY=xyz789 CF_TOKEN=... docker compose up -d
 ```
 
-6. **Each user connects Flutter to their subdomain** (e.g., `alice.myea.com`) with their API key.
+6. **Each user connects to their subdomain** (e.g., `alice.myea.com`) with their API key.
 
 **Adding users:** Add a new service block + Caddy entry. Each user gets isolated data via Docker volumes.
 

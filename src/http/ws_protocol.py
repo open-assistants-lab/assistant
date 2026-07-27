@@ -2,7 +2,7 @@
 
 This module defines the bidirectional message protocol for the
 /ws/conversation endpoint. It serves as the contract between
-the frontend (Flutter, HTML test harness) and the backend.
+the frontend (web client, HTML test harness) and the backend.
 
 The protocol is designed to be:
 - Simple: JSON messages, typed, no binary frames
@@ -268,7 +268,7 @@ class SkillsLoadMessage(BaseModel):
 
 
 class CanvasUpdateMessage(BaseModel):
-    """Agent-generated HTML canvas update for the Flutter Canvas tab."""
+    """Agent-generated HTML canvas update for the canvas tab."""
 
     type: str = "canvas_update"
     surface_id: str

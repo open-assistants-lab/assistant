@@ -3,14 +3,7 @@
 [![Download DMG](https://img.shields.io/badge/download-macOS-brightgreen?logo=apple)](https://github.com/your-org/assistant/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-Your personal AI assistant that runs on your machine. Chat, email, tasks, research, files — all through a desktop app, powered by your choice of LLM (OpenAI, Anthropic, Ollama, Gemini).
-
-<!-- TODO: Add screenshot of Flutter chat interface -->
-
-## Download
-
-- **[macOS DMG (Apple Silicon)](https://github.com/your-org/assistant/releases/latest)** — download, open, and you're set.
-- **Windows / Linux** — coming soon.
+Your personal AI assistant that runs on your machine. Chat, email, tasks, research, files — all through an HTTP API, powered by your choice of LLM (OpenAI, Anthropic, Ollama, Gemini).
 
 ## Features
 
@@ -61,17 +54,14 @@ uv run ruff check src/
 uv run mypy src/
 ```
 
-### Build the DMG
+### Build
 
-```bash
-./flutter_app/build_macos.sh
-```
+Not applicable — this is the backend/API repo. Run with `uv run assistant http`.
 
 ### Architecture
 
 - **Agent**: Custom SDK `AgentLoop` (ReAct) with tool calling
-- **Frontend**: Flutter desktop app (thin client, WebSocket to backend)
-- **Backend**: Python FastAPI server, embedded in the `.app` bundle via PyInstaller
+- **Backend**: Python FastAPI server (REST + SSE + WebSocket)
 - **Storage**: SQLite for messages, contacts, todos, email. ChromaDB for vector search.
 - **LLM Providers**: OpenAI, Anthropic, Gemini, Ollama (local & cloud)
 

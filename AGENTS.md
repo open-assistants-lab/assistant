@@ -119,12 +119,6 @@ def find_item(name: Optional[str]) -> Item | None:
 - **Constants**: `UPPER_SNAKE_CASE` (e.g., `MAX_RETRIES`, `DEFAULT_TIMEOUT`)
 - **Private members**: `_leading_underscore` (e.g., `_internal_state`)
 
-### Flutter Icons
-- Always use **Material Symbols** (`Symbols.xxx` from `package:material_symbols_icons/symbols.dart`) — never `Icons.xxx` from Material Icons
-- Drop style suffixes (`_outlined`, `_rounded`, `_sharp`) — Material Symbols uses outlined as default
-- Special mappings: `warning_amber` → `warning`, `radio_button_off` → `radio_button_unchecked`
-- For clean imports, `export 'package:material_symbols_icons/symbols.dart'` is re-exported via `app_theme.dart`
-
 ### Tool Naming Pattern
 All tools must follow `category_{verb}` pattern:
 ```python
@@ -442,19 +436,6 @@ assistant/
 │       ├── middleware.py         # SkillMiddleware
 │       ├── registry.py           # SkillRegistry
 │       └── tools.py             # skills_list, skills_load
-├── flutter_app/                 # Flutter desktop app
-│   └── lib/
-│       ├── core/layout/         # Desktop layout + sidebar
-│       ├── core/router/         # GoRouter navigation
-│       ├── features/
-│       │   ├── tools/           # ToolsPanel, ToolsProvider, workspace tab
-│       │   ├── skills/          # Skills panel
-│       │   ├── subagents/       # Subagents panel
-│       │   ├── workspace/       # Workspace panel (files + skills + subagents + tools tabs)
-│       │   └── ...
-│       ├── providers/           # Riverpod providers
-│       ├── theme/               # Design tokens + app theme
-│       └── widgets/             # Reusable widgets (ScopeSwitcher, etc.)
 ├── tests/
 │   ├── sdk/                     # ★ SDK unit tests (800+ tests)
 │   │   ├── test_messages.py, test_tools.py, test_registry.py
@@ -476,7 +457,6 @@ assistant/
         │   └── 2026-06-01-unified-capabilities-agent-profile-design.md
         └── plans/                # Implementation plans
             ├── 2026-06-01-unified-capabilities-agent-profile-backend.md
-            └── 2026-06-01-flutter-tools-skills-subagents-panels.md
 ```
 
 ---
@@ -518,7 +498,7 @@ assistant/
 | **9** | 🔲 Future | — | Extract & Open Source SDK |
 | **10.2** | ✅ Done | +20 | MCP Tool Bridge |
 | **11** | ✅ Done | +38 | Subagent V1 (work_queue, coordinator, middlewares, 8 tools) |
-| **12** | ✅ Done | — | Unified Capabilities, AgentProfile, OSS repos, Flutter tools UI |
+| **12** | ✅ Done | — | Unified Capabilities, AgentProfile, OSS repos |
 | **13** | ✅ Done | ~943 SDK+unit | Skills/subagents scoping UI, ScopePicker, API CRUD, workspace isolation |
 
 ### Subagent V1 Architecture
