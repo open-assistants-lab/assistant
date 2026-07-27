@@ -695,3 +695,36 @@ def test_tool_reload_filters_disabled_mcp_and_connector_tools(monkeypatch, tmp_p
     assert "0 connector" in result
     assert "mcp__server__disabled" not in names
     assert "connector__disabled" not in names
+
+
+@pytest.mark.asyncio
+async def test_runner_wraps_loop_with_langfuse(monkeypatch):
+    monkeypatch.setenv("LANGFUSE_ENABLED", "true")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+    monkeypatch.setenv("LANGFUSE_HOST", "http://localhost:3000")
+
+    import src.config.settings as _cfg
+    _cfg._config = None
+
+    from src.sdk.langfuse_tracer import LangfuseTracer
+    LangfuseTracer._client = None
+
+    wrap_calls = []
+    original_wrap = LangfuseTracer.wrap_loop
+
+    def tracking_wrap(loop, user_id, session_id):
+        wrap_calls.append({"user_id": user_id, "session_id": session_id})
+        return original_wrap(loop, user_id, session_id)
+
+    monkeypatch.setattr(LangfuseTracer, "wrap_loop", tracking_wrap)
+
+    from src.sdk.runner import create_sdk_loop
+    await create_sdk_loop("lf_test_user", model="ollama-cloud:test-model")
+
+    assert LangfuseTracer.is_enabled() is True
+    assert len(wrap_calls) == 1
+    assert wrap_calls[0]["user_id"] == "lf_test_user"
+
+    LangfuseTracer._client = None
+    _cfg._config = None

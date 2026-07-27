@@ -103,17 +103,6 @@ class HillClimbingConfig(_BaseSettings):
     model_config = SettingsConfigDict(env_prefix="HILL_CLIMBING_")
 
 
-class LangfuseConfig(_BaseSettings):
-    """Langfuse observability configuration."""
-
-    enabled: bool = False
-    public_key: str = ""
-    secret_key: str = ""
-    host: str = "http://localhost:3000"
-
-    model_config = SettingsConfigDict(env_prefix="LANGFUSE_")
-
-
 class MemoryConfig(_BaseSettings):
     """Memory configuration."""
 
@@ -149,7 +138,6 @@ class ObservabilityConfig(_BaseSettings):
     """Observability configuration."""
 
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
-    langfuse: LangfuseConfig = Field(default_factory=LangfuseConfig)
 
 
 class AuthConfig(_BaseSettings):

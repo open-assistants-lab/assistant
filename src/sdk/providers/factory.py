@@ -259,10 +259,30 @@ def create_model_from_config(
         elif resolved_key:
             provider_type = getattr(registry_provider, 'provider_type', 'openai-compatible')
             base_url = getattr(registry_provider, 'base_url', None)
-            return create_provider(provider_type, model=model_name, api_key=resolved_key, base_url=base_url)
-        return registry_provider
+            provider = create_provider(provider_type, model=model_name, api_key=resolved_key, base_url=base_url)
+        else:
+            provider = registry_provider
+    else:
+        provider = create_provider(provider_type, model=model_name, api_key=resolved_key)
 
-    return create_provider(provider_type, model=model_name, api_key=resolved_key)
+    # Wrap with Langfuse if enabled
+    lf_settings = get_settings()
+    if (
+        lf_settings.langfuse.enabled
+        and lf_settings.langfuse.public_key
+        and lf_settings.langfuse.secret_key
+    ):
+        from src.sdk.langfuse_tracer import LangfuseTracer
+        if not LangfuseTracer.is_enabled():
+            LangfuseTracer.init(
+                public_key=lf_settings.langfuse.public_key,
+                secret_key=lf_settings.langfuse.secret_key,
+                host=lf_settings.langfuse.host,
+            )
+        if LangfuseTracer.is_enabled():
+            provider = LangfuseTracer.wrap_provider(provider)
+
+    return provider
 
 
 def _parse_model_string(model_str: str) -> tuple[str, str]:

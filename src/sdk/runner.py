@@ -558,6 +558,24 @@ async def create_sdk_loop(user_id: str, workspace_id: str = "personal", model: s
         user_id=user_id,
     )
 
+    # Wrap with Langfuse if enabled
+    lf_settings = get_settings()
+    if (
+        lf_settings.langfuse.enabled
+        and lf_settings.langfuse.public_key
+        and lf_settings.langfuse.secret_key
+    ):
+        from src.sdk.langfuse_tracer import LangfuseTracer
+
+        if not LangfuseTracer.is_enabled():
+            LangfuseTracer.init(
+                public_key=lf_settings.langfuse.public_key,
+                secret_key=lf_settings.langfuse.secret_key,
+                host=lf_settings.langfuse.host,
+            )
+        if LangfuseTracer.is_enabled():
+            loop = LangfuseTracer.wrap_loop(loop, user_id=user_id, session_id="default")
+
     return loop
 
 
@@ -691,6 +709,10 @@ async def run_sdk_agent(
         result = await loop.run(messages)
         # Persist RunOutcome for loop 4 (hill-climbing)
         await _persist_run_outcome(user_id, session_id, result, loop, "manual")
+        # Flush Langfuse traces if enabled
+        from src.sdk.langfuse_tracer import LangfuseTracer
+
+        LangfuseTracer.flush()
         return result
     finally:
         # Store verification verdict on loop before unregister so router can read it
@@ -731,6 +753,10 @@ async def run_sdk_agent_stream(
         # Persist RunOutcome for loop 4 (hill-climbing)
         if hasattr(loop, "state") and loop.state:
             await _persist_run_outcome(user_id, session_id, loop.state.messages, loop, "manual")
+        # Flush Langfuse traces if enabled
+        from src.sdk.langfuse_tracer import LangfuseTracer
+
+        LangfuseTracer.flush()
         unregister_user_loop(user_id, loop, session_id=session_id)
 
 

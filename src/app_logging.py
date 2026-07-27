@@ -57,7 +57,7 @@ class Logger:
     def _init_langfuse(self) -> None:
         """Initialize Langfuse with callback handler."""
         settings = get_settings()
-        config = settings.observability.langfuse
+        config = settings.langfuse
 
         if not config.enabled:
             return
