@@ -1,4 +1,4 @@
-"""Tests for companion V1: CompanionDB, CompanionScheduler, HTTP endpoints."""
+"""Tests for scheduler V1: SchedulerDB, AgentScheduler, HTTP endpoints."""
 
 from __future__ import annotations
 
@@ -23,15 +23,15 @@ def mock_paths(tmp_dir):
     from src.storage.paths import DataPaths
 
     mock_dp = DataPaths(data_path=tmp_dir, user_id="test_user", ea_root=tmp_dir)
-    with patch("src.sdk.tools_core.companion_db.get_paths", return_value=mock_dp):
+    with patch("src.sdk.tools_core.agent_scheduler_db.get_paths", return_value=mock_dp):
         yield mock_dp
 
 
-class TestCompanionNotificationDB:
+class TestSchedulerNotificationDB:
     async def test_insert_and_list(self, mock_paths):
-        from src.sdk.tools_core.companion_db import CompanionNotificationDB
+        from src.sdk.tools_core.agent_scheduler_db import SchedulerNotificationDB
 
-        db = CompanionNotificationDB("test_user")
+        db = SchedulerNotificationDB("test_user")
         try:
             nid = await db.insert("Good morning!", "checkin", None)
             assert nid
@@ -46,9 +46,9 @@ class TestCompanionNotificationDB:
             await db.close()
 
     async def test_insert_with_workspace(self, mock_paths):
-        from src.sdk.tools_core.companion_db import CompanionNotificationDB
+        from src.sdk.tools_core.agent_scheduler_db import SchedulerNotificationDB
 
-        db = CompanionNotificationDB("test_user")
+        db = SchedulerNotificationDB("test_user")
         try:
             await db.insert("3 overdue tasks", "deadline", "q2-planning")
             notifs = await db.list(limit=50)
@@ -58,9 +58,9 @@ class TestCompanionNotificationDB:
             await db.close()
 
     async def test_dismiss(self, mock_paths):
-        from src.sdk.tools_core.companion_db import CompanionNotificationDB
+        from src.sdk.tools_core.agent_scheduler_db import SchedulerNotificationDB
 
-        db = CompanionNotificationDB("test_user")
+        db = SchedulerNotificationDB("test_user")
         try:
             nid = await db.insert("Test notification", "general", None)
             ok = await db.dismiss(nid)
@@ -76,9 +76,9 @@ class TestCompanionNotificationDB:
             await db.close()
 
     async def test_dismiss_nonexistent(self, mock_paths):
-        from src.sdk.tools_core.companion_db import CompanionNotificationDB
+        from src.sdk.tools_core.agent_scheduler_db import SchedulerNotificationDB
 
-        db = CompanionNotificationDB("test_user")
+        db = SchedulerNotificationDB("test_user")
         try:
             ok = await db.dismiss("nonexistent-id")
             assert not ok
@@ -86,9 +86,9 @@ class TestCompanionNotificationDB:
             await db.close()
 
     async def test_recent_messages(self, mock_paths):
-        from src.sdk.tools_core.companion_db import CompanionNotificationDB
+        from src.sdk.tools_core.agent_scheduler_db import SchedulerNotificationDB
 
-        db = CompanionNotificationDB("test_user")
+        db = SchedulerNotificationDB("test_user")
         try:
             await db.insert("First", "checkin", None)
             await db.insert("Second", "general", None)
@@ -101,9 +101,9 @@ class TestCompanionNotificationDB:
             await db.close()
 
     async def test_last_check_time(self, mock_paths):
-        from src.sdk.tools_core.companion_db import CompanionNotificationDB
+        from src.sdk.tools_core.agent_scheduler_db import SchedulerNotificationDB
 
-        db = CompanionNotificationDB("test_user")
+        db = SchedulerNotificationDB("test_user")
         try:
             assert (await db.last_check_time()) == "never"
             await db.insert("Test", "checkin", None)
@@ -113,9 +113,9 @@ class TestCompanionNotificationDB:
             await db.close()
 
     async def test_dismissal_streak(self, mock_paths):
-        from src.sdk.tools_core.companion_db import CompanionNotificationDB
+        from src.sdk.tools_core.agent_scheduler_db import SchedulerNotificationDB
 
-        db = CompanionNotificationDB("test_user")
+        db = SchedulerNotificationDB("test_user")
         try:
             assert (await db.dismissal_streak()) == 0
 
@@ -132,11 +132,11 @@ class TestCompanionNotificationDB:
             await db.close()
 
 
-class TestCompanionMemoryDB:
+class TestSchedulerMemoryDB:
     async def test_list_empty(self, mock_paths):
-        from src.sdk.tools_core.companion_db import CompanionMemoryDB
+        from src.sdk.tools_core.agent_scheduler_db import SchedulerMemoryDB
 
-        db = CompanionMemoryDB("test_user")
+        db = SchedulerMemoryDB("test_user")
         try:
             facts = await db.get_all()
             assert facts == {}
@@ -147,9 +147,9 @@ class TestCompanionMemoryDB:
             await db.close()
 
     async def test_delete(self, mock_paths):
-        from src.sdk.tools_core.companion_db import CompanionMemoryDB
+        from src.sdk.tools_core.agent_scheduler_db import SchedulerMemoryDB
 
-        db = CompanionMemoryDB("test_user")
+        db = SchedulerMemoryDB("test_user")
         try:
             ok = await db.delete(99999)
             assert not ok
@@ -157,86 +157,86 @@ class TestCompanionMemoryDB:
             await db.close()
 
 
-class TestCompanionScheduler:
+class TestAgentScheduler:
     async def test_categorize_general(self):
-        from src.sdk.companion_scheduler import CompanionScheduler
+        from src.sdk.agent_scheduler import AgentScheduler
 
-        cat, ws = CompanionScheduler._categorize("Your Pipeline is looking green today.")
+        cat, ws = AgentScheduler._categorize("Your Pipeline is looking green today.")
         assert cat == "general"
         assert ws is None
 
     async def test_categorize_checkin(self):
-        from src.sdk.companion_scheduler import CompanionScheduler
+        from src.sdk.agent_scheduler import AgentScheduler
 
-        cat, ws = CompanionScheduler._categorize("Good morning! How are you today?")
+        cat, ws = AgentScheduler._categorize("Good morning! How are you today?")
         assert cat == "checkin"
         assert ws is None
 
     async def test_categorize_urgent(self):
-        from src.sdk.companion_scheduler import CompanionScheduler
+        from src.sdk.agent_scheduler import AgentScheduler
 
-        cat, ws = CompanionScheduler._categorize("URGENT: Server down in production!")
+        cat, ws = AgentScheduler._categorize("URGENT: Server down in production!")
         assert cat == "urgent"
         assert ws is None
 
     async def test_categorize_deadline(self):
-        from src.sdk.companion_scheduler import CompanionScheduler
+        from src.sdk.agent_scheduler import AgentScheduler
 
-        cat, ws = CompanionScheduler._categorize("You have 3 overdue tasks due today.")
+        cat, ws = AgentScheduler._categorize("You have 3 overdue tasks due today.")
         assert cat == "deadline"
         assert ws is None
 
     async def test_categorize_email(self):
-        from src.sdk.companion_scheduler import CompanionScheduler
+        from src.sdk.agent_scheduler import AgentScheduler
 
-        cat, ws = CompanionScheduler._categorize("New email from Sarah about the budget.")
+        cat, ws = AgentScheduler._categorize("New email from Sarah about the budget.")
         assert cat == "email"
         assert ws is None
 
     async def test_extract_response(self):
-        from src.sdk.companion_scheduler import CompanionScheduler
+        from src.sdk.agent_scheduler import AgentScheduler
         from src.sdk.messages import Message
 
         result = [Message.user("ctx"), Message.assistant("Hello there!")]
-        text = CompanionScheduler._extract_response(result)
+        text = AgentScheduler._extract_response(result)
         assert "Hello" in text
 
     async def test_extract_response_skip(self):
-        from src.sdk.companion_scheduler import CompanionScheduler
+        from src.sdk.agent_scheduler import AgentScheduler
         from src.sdk.messages import Message
 
         result = [Message.user("ctx"), Message.assistant("[SKIP]")]
-        text = CompanionScheduler._extract_response(result)
+        text = AgentScheduler._extract_response(result)
         assert text == "[SKIP]"
 
     async def test_extract_response_empty(self):
-        from src.sdk.companion_scheduler import CompanionScheduler
+        from src.sdk.agent_scheduler import AgentScheduler
         from src.sdk.messages import Message
 
         result = [Message.assistant("")]
-        text = CompanionScheduler._extract_response(result)
+        text = AgentScheduler._extract_response(result)
         assert text == ""
 
     async def test_next_interval_default(self, tmp_dir):
         from src.storage.paths import DataPaths
 
         mock_dp = DataPaths(data_path=tmp_dir, user_id="test_user", ea_root=tmp_dir)
-        with patch("src.sdk.tools_core.companion_db.get_paths", return_value=mock_dp):
-            from src.sdk.companion_scheduler import CompanionScheduler
+        with patch("src.sdk.tools_core.agent_scheduler_db.get_paths", return_value=mock_dp):
+            from src.sdk.agent_scheduler import AgentScheduler
 
-            scheduler = CompanionScheduler("test_user")
+            scheduler = AgentScheduler("test_user")
             interval = await scheduler._next_interval()
             assert interval == 15
 
     async def test_time_of_day(self):
-        from src.sdk.companion_scheduler import _time_of_day
+        from src.sdk.agent_scheduler import _time_of_day
 
         assert _time_of_day(8) == "morning"
         assert _time_of_day(14) == "afternoon"
         assert _time_of_day(20) == "evening"
 
     async def test_relative_time(self):
-        from src.sdk.companion_scheduler import _relative_time
+        from src.sdk.agent_scheduler import _relative_time
 
         now = datetime.now(UTC).replace(tzinfo=None)
         assert _relative_time(now) in ("just now",) or "ago" in _relative_time(now)

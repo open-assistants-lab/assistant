@@ -5,8 +5,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from src.app_logging import get_logger
-from src.sdk.companion_scheduler import get_companion_scheduler
-from src.sdk.tools_core.companion_db import CompanionMemoryDB, CompanionNotificationDB
+from src.sdk.agent_scheduler import get_agent_scheduler
+from src.sdk.tools_core.agent_scheduler_db import SchedulerMemoryDB, SchedulerNotificationDB
 
 router = APIRouter(prefix="/companion", tags=["companion"])
 logger = get_logger()
@@ -18,7 +18,7 @@ async def list_notifications(
     limit: int = Query(50, ge=1, le=200),
     include_dismissed: bool = Query(False),
 ) -> dict[str, Any]:
-    db = CompanionNotificationDB(user_id)
+    db = SchedulerNotificationDB(user_id)
     try:
         notifs = await db.list(limit=limit, include_dismissed=include_dismissed)
         return {"notifications": notifs}
@@ -31,7 +31,7 @@ async def dismiss_notification(
     notif_id: str,
     user_id: str = Query("default_user"),
 ) -> dict[str, Any]:
-    db = CompanionNotificationDB(user_id)
+    db = SchedulerNotificationDB(user_id)
     try:
         ok = await db.dismiss(notif_id)
         if not ok:
@@ -43,21 +43,21 @@ async def dismiss_notification(
 
 @router.post("/pause")
 async def pause_companion(user_id: str = Query("default_user")) -> dict[str, Any]:
-    scheduler = get_companion_scheduler(user_id)
+    scheduler = get_agent_scheduler(user_id)
     await scheduler.pause()
     return {"status": "paused"}
 
 
 @router.post("/resume")
 async def resume_companion(user_id: str = Query("default_user")) -> dict[str, Any]:
-    scheduler = get_companion_scheduler(user_id)
+    scheduler = get_agent_scheduler(user_id)
     await scheduler.resume()
     return {"status": "resumed"}
 
 
 @router.get("/status")
 async def companion_status(user_id: str = Query("default_user")) -> dict[str, Any]:
-    scheduler = get_companion_scheduler(user_id)
+    scheduler = get_agent_scheduler(user_id)
     return {
         "running": scheduler.is_running,
         "paused": scheduler.is_paused,
@@ -67,7 +67,7 @@ async def companion_status(user_id: str = Query("default_user")) -> dict[str, An
 
 @router.get("/memory")
 async def list_companion_memory(user_id: str = Query("default_user")) -> dict[str, Any]:
-    db = CompanionMemoryDB(user_id)
+    db = SchedulerMemoryDB(user_id)
     try:
         facts = await db.list_all()
         return {"facts": facts}
@@ -80,7 +80,7 @@ async def delete_companion_memory(
     mem_id: int,
     user_id: str = Query("default_user"),
 ) -> dict[str, Any]:
-    db = CompanionMemoryDB(user_id)
+    db = SchedulerMemoryDB(user_id)
     try:
         ok = await db.delete(mem_id)
         if not ok:

@@ -1,4 +1,4 @@
-"""Companion database — notification store + personality memory for companion V1.
+"""Scheduler database — notification store + personality memory for agent scheduler.
 
 Uses aiosqlite for async access. Per-user database at data/users/{user_id}/companion/.
 """
@@ -57,7 +57,7 @@ def _notif_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
-class CompanionNotificationDB:
+class SchedulerNotificationDB:
     """Async SQLite notification store for companion nudges."""
 
     def __init__(self, user_id: str):
@@ -160,7 +160,7 @@ class CompanionNotificationDB:
         return streak
 
 
-class CompanionMemoryDB:
+class SchedulerMemoryDB:
     """Async SQLite store for companion personality facts."""
 
     def __init__(self, user_id: str):

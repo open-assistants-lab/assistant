@@ -1,4 +1,4 @@
-"""Companion scheduler — user-global background loop for proactive check-ins.
+"""Agent scheduler — user-global background loop for proactive check-ins.
 
 V1: No tool calls. Pre-computed context across all workspaces.
 LLM decides: nudge with 1-2 sentences, or skip ([SKIP]).
@@ -13,7 +13,7 @@ from src.app_logging import get_logger
 from src.sdk.loop import AgentLoop, RunConfig
 from src.sdk.messages import Message
 from src.sdk.providers.factory import create_model_from_config
-from src.sdk.tools_core.companion_db import CompanionMemoryDB, CompanionNotificationDB
+from src.sdk.tools_core.agent_scheduler_db import SchedulerMemoryDB, SchedulerNotificationDB
 from src.sdk.workspace_models import list_workspaces
 
 logger = get_logger()
@@ -58,8 +58,8 @@ def _time_of_day(hour: int) -> str:
         return "evening"
 
 
-class CompanionScheduler:
-    """Per-user background scheduler for companion check-ins."""
+class AgentScheduler:
+    """Per-user background scheduler for proactive check-ins."""
 
     def __init__(self, user_id: str):
         self.user_id = user_id
@@ -68,8 +68,8 @@ class CompanionScheduler:
         self._stopped = False
         self._error_count = 0
         self._last_check: str | None = None
-        self._db = CompanionNotificationDB(user_id)
-        self._memory_db = CompanionMemoryDB(user_id)
+        self._db = SchedulerNotificationDB(user_id)
+        self._memory_db = SchedulerMemoryDB(user_id)
         self._loop: AgentLoop | None = None
 
     @property
@@ -299,10 +299,10 @@ def _relative_time(ts: datetime | str) -> str:
     return f"{days}d ago"
 
 
-_companion_schedulers: dict[str, CompanionScheduler] = {}
+_agent_schedulers: dict[str, AgentScheduler] = {}
 
 
-def get_companion_scheduler(user_id: str) -> CompanionScheduler:
-    if user_id not in _companion_schedulers:
-        _companion_schedulers[user_id] = CompanionScheduler(user_id)
-    return _companion_schedulers[user_id]
+def get_agent_scheduler(user_id: str) -> AgentScheduler:
+    if user_id not in _agent_schedulers:
+        _agent_schedulers[user_id] = AgentScheduler(user_id)
+    return _agent_schedulers[user_id]
