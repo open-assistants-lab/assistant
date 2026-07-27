@@ -67,6 +67,32 @@ async def reject_suggestion(
     return {"status": "rejected" if success else "not_found"}
 
 
+@router.post("/improvements/analyze")
+async def analyze_outcomes(
+    user_id: str = Query("default_user"),
+) -> dict:
+    """Trigger analysis job manually to propose improvements."""
+    from src.config import get_settings
+    from src.sdk.loops.improvement import AnalysisJob
+    from src.sdk.providers.factory import create_model_from_config
+
+    settings = get_settings()
+    db = LoopEngineeringDB(get_loop_engineering_db_path(user_id))
+    await db.init()
+
+    analysis_model = settings.hill_climbing.analysis_model or settings.agent.model
+    provider = create_model_from_config(analysis_model, user_id=user_id)
+
+    job = AnalysisJob(
+        analysis_provider=provider,
+        mode=settings.hill_climbing.mode,
+        auto_apply_risk_threshold=settings.hill_climbing.auto_apply_risk_threshold,
+    )
+
+    suggestions = await job.run(user_id, outcome_store=db, suggestion_store=db)
+    return {"suggestions": [s.__dict__ for s in suggestions]}
+
+
 @router.get("/run-outcomes")
 async def list_run_outcomes(
     user_id: str = Query("default_user"),

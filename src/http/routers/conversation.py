@@ -17,6 +17,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from src.app_logging import get_logger, timer
+from src.config import get_settings
 from src.http.auth import require_auth
 from src.http.conversation_persistence import (
     persist_assistant_message,
@@ -333,7 +334,6 @@ async def _summarize_title(
     user_msg: str, assistant_msg: str, user_id: str = "default_user"
 ) -> str | None:
     """Generate a 3-5 word title via a simple provider.chat() call."""
-    from src.config import get_settings
     from src.sdk.messages import Message
     from src.sdk.providers.factory import create_model_from_config
 
@@ -445,7 +445,6 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
         if req.verification and req.verification.rubric:
             rubric = req.verification.rubric
         else:
-            from src.config import get_settings
             settings = get_settings()
             if settings.verification.enabled and settings.verification.default_rubric:
                 rubric = settings.verification.default_rubric
@@ -676,6 +675,15 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
         cancel_event = asyncio.Event()
         _active_streams[skey] = cancel_event
 
+        # Resolve rubric for verification
+        stream_rubric = None
+        if req.verification and req.verification.rubric:
+            stream_rubric = req.verification.rubric
+        else:
+            stream_settings = get_settings()
+            if stream_settings.verification.enabled and stream_settings.verification.default_rubric:
+                stream_rubric = stream_settings.verification.default_rubric
+
         recent_messages = conversation.get_messages_by_session_id(session_id, 50)
         sdk_messages = _messages_from_conversation(recent_messages)
 
@@ -701,6 +709,7 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                     provider_keys=req.provider_keys,
                     cancel_event=cancel_event,
                     session_id=session_id,
+                    rubric=stream_rubric,
                 ):
                     # Check cancel flag between chunks (fast path)
                     if _cancel_flags.get(skey, False) or cancel_event.is_set():

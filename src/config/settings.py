@@ -92,6 +92,17 @@ class VerificationConfig(_BaseSettings):
     model_config = SettingsConfigDict(env_prefix="VERIFICATION_")
 
 
+class HillClimbingConfig(_BaseSettings):
+    """Hill-climbing (loop 4) configuration."""
+
+    mode: str = "human_review"  # "human_review" | "auto_apply"
+    auto_apply_risk_threshold: str = "low"  # "low" | "medium" | "high"
+    analysis_model: str = Field(default="", description="Model for analysis LLM (empty = use agent model)")
+    eval_enabled: bool = True
+
+    model_config = SettingsConfigDict(env_prefix="HILL_CLIMBING_")
+
+
 class MemoryConfig(_BaseSettings):
     """Memory configuration."""
 
@@ -251,6 +262,7 @@ class AppConfig(_BaseSettings):
     deployment: DeploymentConfig = Field(default_factory=DeploymentConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
+    hill_climbing: HillClimbingConfig = Field(default_factory=HillClimbingConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     cli: CliConfig = Field(default_factory=CliConfig)

@@ -17,6 +17,7 @@ from src.http.routers import (
     conversation_router,
     email_router,
     health_router,
+    improvements_router,
     memories_router,
     skills_router,
     subagents_router,
@@ -24,7 +25,6 @@ from src.http.routers import (
     tools_router,
     user_prompt_router,
     webhooks_router,
-    improvements_router,
     workspace_router,
     workspaces_router,
 )

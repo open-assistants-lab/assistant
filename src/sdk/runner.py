@@ -728,6 +728,9 @@ async def run_sdk_agent_stream(
         logger.error("sdk_runner.stream_error", {"error": str(e)}, user_id=user_id)
         yield StreamChunk.error(message=str(e))
     finally:
+        # Persist RunOutcome for loop 4 (hill-climbing)
+        if hasattr(loop, "state") and loop.state:
+            await _persist_run_outcome(user_id, session_id, loop.state.messages, loop, "manual")
         unregister_user_loop(user_id, loop, session_id=session_id)
 
 

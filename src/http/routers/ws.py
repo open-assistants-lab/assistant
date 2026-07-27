@@ -93,6 +93,7 @@ async def _run_agent_stream(
     model: str | None = None,
     provider_keys: dict[str, str] | None = None,
     cancel_event: asyncio.Event | None = None,
+    rubric: str | None = None,
 ) -> None:
     """Run the agent streaming loop and handle all chunk types."""
     import uuid as _uuid
@@ -120,6 +121,7 @@ async def _run_agent_stream(
             model=model,
             provider_keys=provider_keys,
             cancel_event=cancel_event,
+            rubric=rubric,
         ):
             if cancel_event is not None and cancel_event.is_set():
                 if not persisted:
@@ -664,6 +666,13 @@ async def ws_conversation(websocket: WebSocket) -> None:
                 channel="ws",
             )
 
+            # Resolve rubric for verification
+            ws_rubric = None
+            ws_settings = get_settings()
+            ws_verification = getattr(ws_settings, "verification", None)
+            if ws_verification and getattr(ws_verification, "enabled", False) and getattr(ws_verification, "default_rubric", ""):
+                ws_rubric = ws_verification.default_rubric
+
             cancel_event = asyncio.Event()
             deferred_control: str | None = None
             stream_cancelled = False
@@ -673,6 +682,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     pending_ref=pending_container, workspace_id=workspace_id,
                     model=msg_model, provider_keys=msg_provider_keys,
                     cancel_event=cancel_event,
+                    rubric=ws_rubric,
                 )
             )
             while not stream_task.done():
