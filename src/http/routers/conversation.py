@@ -636,18 +636,15 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
             verbose_data = {}
         verbose_data["canvas_blocks"] = canvas_blocks
 
-        # Extract verification verdict from loop state
+        # Extract verification verdict from cached loop
         verification_verdict = None
-        from src.sdk.runner import get_user_loop
-        loop = get_user_loop(user_id, session_id=session_id)
-        if loop and hasattr(loop, "state") and loop.state:
-            status = loop.state.extra.get("_rubric_status")
-            if status:
-                verification_verdict = VerificationVerdict(
-                    status=status,
-                    iterations=loop.state.extra.get("_rubric_iterations", 0),
-                    evaluations=loop.state.extra.get("_rubric_evaluations", []),
-                )
+        from src.sdk.runner import _loop_cache, _loop_cache_key
+        cache_key = _loop_cache_key(user_id, "personal", req.model, req.provider_keys, session_id)
+        cached_loop = _loop_cache.get(cache_key)
+        if cached_loop and hasattr(cached_loop, "_verification_verdict"):
+            verdict_data = cached_loop._verification_verdict
+            if verdict_data:
+                verification_verdict = VerificationVerdict(**verdict_data)
 
         return MessageResponse(
             response=response,

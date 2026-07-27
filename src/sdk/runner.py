@@ -691,6 +691,15 @@ async def run_sdk_agent(
         result = await loop.run(messages)
         return result
     finally:
+        # Store verification verdict on loop before unregister so router can read it
+        if loop.state and loop.state.extra.get("_rubric_status"):
+            loop._verification_verdict = {
+                "status": loop.state.extra.get("_rubric_status"),
+                "iterations": loop.state.extra.get("_rubric_iterations", 0),
+                "evaluations": loop.state.extra.get("_rubric_evaluations", []),
+            }
+        else:
+            loop._verification_verdict = None
         loop.rubric = None
         unregister_user_loop(user_id, loop, session_id=session_id)
 
