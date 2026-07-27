@@ -1,6 +1,7 @@
 """Tests for TriggerRegistry and AgentEvent."""
 
 import pytest
+
 from src.sdk.loops.events import AgentEvent, TriggerRegistry
 
 

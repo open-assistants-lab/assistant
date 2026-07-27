@@ -1,7 +1,8 @@
 """Tests for RunOutcome and ImprovementSuggestion storage."""
 
+
 import pytest
-from pathlib import Path
+
 from src.sdk.loops.storage import LoopEngineeringDB, RunOutcome
 
 

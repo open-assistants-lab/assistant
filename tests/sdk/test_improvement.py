@@ -1,7 +1,9 @@
 """Tests for AnalysisJob."""
 
 import json
+
 import pytest
+
 from src.sdk.loops.improvement import AnalysisJob
 from src.sdk.loops.storage import LoopEngineeringDB, RunOutcome
 from src.sdk.messages import Message
