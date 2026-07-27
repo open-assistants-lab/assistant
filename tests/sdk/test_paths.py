@@ -92,19 +92,27 @@ def test_research_dir():
     assert str(dp.research_dir()) == f"{USER_ROOT}/Research/testws"
 
 
-def test_companion_dir():
+def test_scheduler_dir():
     dp = DataPaths(user_id="tester", ea_root="/tmp/ea-test-root")
-    assert str(dp.companion_dir()) == f"{USER_ROOT}/Companion"
+    assert str(dp.scheduler_dir()) == f"{USER_ROOT}/Scheduler"
 
 
-def test_companion_notifications_db():
+def test_scheduler_notifications_db():
     dp = DataPaths(user_id="tester", ea_root="/tmp/ea-test-root")
-    assert str(dp.companion_notifications_db()) == f"{USER_ROOT}/Companion/notifications.db"
+    assert str(dp.scheduler_notifications_db()) == f"{USER_ROOT}/Scheduler/notifications.db"
 
 
-def test_companion_memory_db():
+def test_scheduler_memory_db():
     dp = DataPaths(user_id="tester", ea_root="/tmp/ea-test-root")
-    assert str(dp.companion_memory_db()) == f"{USER_ROOT}/Companion/memory.db"
+    assert str(dp.scheduler_memory_db()) == f"{USER_ROOT}/Scheduler/memory.db"
+
+
+def test_companion_dir_backward_compat():
+    """Old companion_dir() should still work as alias."""
+    dp = DataPaths(user_id="tester", ea_root="/tmp/ea-test-root")
+    assert dp.companion_dir() == dp.scheduler_dir()
+    assert dp.companion_notifications_db() == dp.scheduler_notifications_db()
+    assert dp.companion_memory_db() == dp.scheduler_memory_db()
 
 
 def test_workspace_skills_dir_uppercase():

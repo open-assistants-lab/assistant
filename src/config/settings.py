@@ -238,8 +238,8 @@ class EmailSyncConfig(_BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EMAIL_SYNC_")
 
 
-class CompanionConfig(_BaseSettings):
-    """Companion V1 configuration."""
+class SchedulerConfig(_BaseSettings):
+    """Agent scheduler configuration."""
 
     enabled: bool = False
 
@@ -272,7 +272,7 @@ class AppConfig(_BaseSettings):
     shell_tool: ShellToolConfig = Field(default_factory=ShellToolConfig)
     email_sync: EmailSyncConfig = Field(default_factory=EmailSyncConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
-    companion: CompanionConfig = Field(default_factory=CompanionConfig)
+    companion: SchedulerConfig = Field(default_factory=SchedulerConfig)
     email: EmailConfig = Field(default_factory=EmailConfig)
     auth: AuthConfig = Field(default_factory=AuthConfig)
 

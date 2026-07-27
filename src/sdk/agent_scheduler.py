@@ -88,7 +88,7 @@ class AgentScheduler:
         self._stopped = False
         self._loop = self._create_loop()
         self._task = asyncio.create_task(self._run())
-        logger.info("companion.started", {}, user_id=self.user_id)
+        logger.info("scheduler.started", {}, user_id=self.user_id)
 
     async def stop(self) -> None:
         self._stopped = True
@@ -100,15 +100,15 @@ class AgentScheduler:
                 pass
         await self._db.close()
         await self._memory_db.close()
-        logger.info("companion.stopped", {}, user_id=self.user_id)
+        logger.info("scheduler.stopped", {}, user_id=self.user_id)
 
     async def pause(self) -> None:
         self._paused = True
-        logger.info("companion.paused", {}, user_id=self.user_id)
+        logger.info("scheduler.paused", {}, user_id=self.user_id)
 
     async def resume(self) -> None:
         self._paused = False
-        logger.info("companion.resumed", {}, user_id=self.user_id)
+        logger.info("scheduler.resumed", {}, user_id=self.user_id)
 
     def _create_loop(self) -> AgentLoop:
         provider = create_model_from_config("ollama:minimax-m2.5")
@@ -133,7 +133,7 @@ class AgentScheduler:
                 except Exception as e:
                     self._error_count += 1
                     logger.error(
-                        "companion.cycle_failed",
+                        "scheduler.cycle_failed",
                         {"error": str(e), "error_count": self._error_count},
                         user_id=self.user_id,
                     )
@@ -249,7 +249,7 @@ def _count_urgent_emails(user_id: str) -> int:
         return unread_count
     except Exception as e:
         logger.warning(
-            "companion.email_count_failed",
+            "scheduler.email_count_failed",
             {"error": str(e)},
             user_id=user_id,
         )
@@ -276,7 +276,7 @@ def _summarize_workspace_activity(workspace_id: str) -> str | None:
         return "; ".join(parts)
     except Exception as e:
         logger.debug(
-            "companion.workspace_activity_failed",
+            "scheduler.workspace_activity_failed",
             {"workspace_id": workspace_id, "error": str(e)},
             user_id="system",
         )

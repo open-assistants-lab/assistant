@@ -12,13 +12,13 @@ from fastapi.responses import JSONResponse
 
 from src.http.routers import (
     capabilities,
-    companion_router,
     contacts_router,
     conversation_router,
     email_router,
     health_router,
     improvements_router,
     memories_router,
+    scheduler_router,
     skills_router,
     subagents_router,
     todos_router,
@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         if _token_refresh_task is not None:
             _token_refresh_task.cancel()
-            get_logger().info("companion.stopped", {}, user_id="system")
+            get_logger().info("scheduler.stopped", {}, user_id="system")
     except Exception:
         pass
 
@@ -128,7 +128,7 @@ async def api_key_auth_middleware(request: Request, call_next: Any) -> Any:
     return await call_next(request)
 
 app.include_router(health_router)
-app.include_router(companion_router)
+app.include_router(scheduler_router)
 app.include_router(conversation_router)
 app.include_router(email_router)
 app.include_router(memories_router)

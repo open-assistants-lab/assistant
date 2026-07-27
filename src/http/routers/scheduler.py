@@ -1,4 +1,4 @@
-"""Companion HTTP endpoints for managing the companion scheduler and notifications."""
+"""Scheduler HTTP endpoints for managing the agent scheduler and notifications."""
 
 from typing import Any
 
@@ -8,7 +8,7 @@ from src.app_logging import get_logger
 from src.sdk.agent_scheduler import get_agent_scheduler
 from src.sdk.tools_core.agent_scheduler_db import SchedulerMemoryDB, SchedulerNotificationDB
 
-router = APIRouter(prefix="/companion", tags=["companion"])
+router = APIRouter(prefix="/scheduler", tags=["scheduler"])
 logger = get_logger()
 
 
@@ -42,21 +42,21 @@ async def dismiss_notification(
 
 
 @router.post("/pause")
-async def pause_companion(user_id: str = Query("default_user")) -> dict[str, Any]:
+async def pause_scheduler(user_id: str = Query("default_user")) -> dict[str, Any]:
     scheduler = get_agent_scheduler(user_id)
     await scheduler.pause()
     return {"status": "paused"}
 
 
 @router.post("/resume")
-async def resume_companion(user_id: str = Query("default_user")) -> dict[str, Any]:
+async def resume_scheduler(user_id: str = Query("default_user")) -> dict[str, Any]:
     scheduler = get_agent_scheduler(user_id)
     await scheduler.resume()
     return {"status": "resumed"}
 
 
 @router.get("/status")
-async def companion_status(user_id: str = Query("default_user")) -> dict[str, Any]:
+async def scheduler_status(user_id: str = Query("default_user")) -> dict[str, Any]:
     scheduler = get_agent_scheduler(user_id)
     return {
         "running": scheduler.is_running,
@@ -66,7 +66,7 @@ async def companion_status(user_id: str = Query("default_user")) -> dict[str, An
 
 
 @router.get("/memory")
-async def list_companion_memory(user_id: str = Query("default_user")) -> dict[str, Any]:
+async def list_scheduler_memory(user_id: str = Query("default_user")) -> dict[str, Any]:
     db = SchedulerMemoryDB(user_id)
     try:
         facts = await db.list_all()
@@ -76,7 +76,7 @@ async def list_companion_memory(user_id: str = Query("default_user")) -> dict[st
 
 
 @router.delete("/memory/{mem_id}")
-async def delete_companion_memory(
+async def delete_scheduler_memory(
     mem_id: int,
     user_id: str = Query("default_user"),
 ) -> dict[str, Any]:

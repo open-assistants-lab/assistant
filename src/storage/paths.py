@@ -191,16 +191,26 @@ class DataPaths:
         p.mkdir(parents=True, exist_ok=True)
         return p
 
-    def companion_dir(self) -> Path:
-        p = self.user_dir / "Companion"
+    def scheduler_dir(self) -> Path:
+        p = self.user_dir / "Scheduler"
         p.mkdir(parents=True, exist_ok=True)
         return p
 
+    def scheduler_notifications_db(self) -> Path:
+        return self.scheduler_dir() / "notifications.db"
+
+    def scheduler_memory_db(self) -> Path:
+        return self.scheduler_dir() / "memory.db"
+
+    # Backward compat aliases
+    def companion_dir(self) -> Path:
+        return self.scheduler_dir()
+
     def companion_notifications_db(self) -> Path:
-        return self.companion_dir() / "notifications.db"
+        return self.scheduler_notifications_db()
 
     def companion_memory_db(self) -> Path:
-        return self.companion_dir() / "memory.db"
+        return self.scheduler_memory_db()
 
     # -- Workspace compatibility methods (runtime storage is user-scoped) --
 

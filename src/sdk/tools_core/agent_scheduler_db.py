@@ -1,6 +1,6 @@
 """Scheduler database — notification store + personality memory for agent scheduler.
 
-Uses aiosqlite for async access. Per-user database at data/users/{user_id}/companion/.
+Uses aiosqlite for async access. Per-user database at data/users/{user_id}/Scheduler/.
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ class SchedulerNotificationDB:
     def __init__(self, user_id: str):
         self.user_id = user_id
         self._db: aiosqlite.Connection | None = None
-        self._db_path = str(get_paths(user_id).companion_notifications_db())
+        self._db_path = str(get_paths(user_id).scheduler_notifications_db())
 
     async def _get_db(self) -> aiosqlite.Connection:
         if self._db is None:
@@ -94,7 +94,7 @@ class SchedulerNotificationDB:
         )
         await db.commit()
         logger.info(
-            "companion.notification_inserted",
+            "scheduler.notification_inserted",
             {"id": notif_id, "category": category, "workspace_id": workspace_id or "none"},
             user_id=self.user_id,
         )
@@ -127,7 +127,7 @@ class SchedulerNotificationDB:
         await db.commit()
         updated = cursor.rowcount > 0
         if updated:
-            logger.info("companion.notification_dismissed", {"id": notif_id}, user_id=self.user_id)
+            logger.info("scheduler.notification_dismissed", {"id": notif_id}, user_id=self.user_id)
         return updated
 
     async def recent_messages(self, count: int = 3) -> str:
@@ -166,7 +166,7 @@ class SchedulerMemoryDB:
     def __init__(self, user_id: str):
         self.user_id = user_id
         self._db: aiosqlite.Connection | None = None
-        self._db_path = str(get_paths(user_id).companion_memory_db())
+        self._db_path = str(get_paths(user_id).scheduler_memory_db())
 
     async def _get_db(self) -> aiosqlite.Connection:
         if self._db is None:

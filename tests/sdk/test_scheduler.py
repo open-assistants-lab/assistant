@@ -1,4 +1,4 @@
-"""Tests for scheduler V1: SchedulerDB, AgentScheduler, HTTP endpoints."""
+"""Tests for scheduler: SchedulerDB, AgentScheduler, HTTP endpoints."""
 
 from __future__ import annotations
 
@@ -247,10 +247,10 @@ class TestAgentScheduler:
 
 
 class TestDataPaths:
-    def test_companion_paths(self, tmp_dir):
+    def test_scheduler_paths(self, tmp_dir):
         from src.storage.paths import DataPaths
 
         dp = DataPaths(data_path=tmp_dir, user_id="test_user")
-        assert dp.companion_dir().exists()
-        assert dp.companion_notifications_db().parent.exists()
-        assert dp.companion_memory_db().parent.exists()
+        assert dp.scheduler_dir().exists()
+        assert dp.scheduler_notifications_db().parent.exists()
+        assert dp.scheduler_memory_db().parent.exists()

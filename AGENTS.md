@@ -200,7 +200,7 @@ The codebase has a **custom agent SDK** (`src/sdk/`) that replaces LangChain/Lan
 | `middleware_instruction.py` | 62 | `InstructionMiddleware` — cancel signal, course-correction injection |
 | `runner.py` | 537 | `create_sdk_loop`, `run_sdk_agent` — capabilities-filtered tool registration |
 | `workspace_models.py` | 128 | `Workspace`, workspace-level path models |
-| `companion_scheduler.py` | 308 | Background companion agent scheduling |
+| `agent_scheduler.py` | 308 | Background agent scheduling (proactive check-ins) |
 | `research.py` | 293 | Deep research orchestration |
 | `state.py` | 78 | `AgentState` — simplified agent state |
 | `tools_core/` (32 files) | 8,562 | ★ SDK-native tool implementations (~100 tools) |
@@ -422,7 +422,7 @@ assistant/
 │   │   │   ├── web.py, summarize.py, user_prompt.py, observation.py
 │   │   │   ├── mcp.py, mcp_bridge.py, mcp_manager.py, mcp_config.py
 │   │   │   ├── skills.py, research.py, shell.py, cli_adapter.py
-│   │   │   ├── todos_storage.py, contacts_storage.py, companion_db.py
+│   │   │   ├── todos_storage.py, contacts_storage.py, agent_scheduler_db.py
 │   │   │   ├── email_db.py, email_sync.py
 │   │   └── providers/
 │   │       ├── base.py           # LLMProvider ABC, ModelInfo, ModelCost
