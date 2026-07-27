@@ -240,6 +240,8 @@ http = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "fastapi" },
+    { name = "httpx" },
     { name = "pyinstaller" },
     { name = "types-pyyaml" },
 ]
@@ -296,6 +298,8 @@ provides-extras = ["http", "graph", "dev", "benchmark"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "fastapi", specifier = ">=0.129.0" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "pyinstaller", specifier = ">=6.20.0" },
     { name = "types-pyyaml", specifier = ">=6.0.12.20260518" },
 ]

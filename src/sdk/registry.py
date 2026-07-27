@@ -116,6 +116,7 @@ def _transform_api_data(data: dict[str, Any]) -> tuple[dict[str, ModelInfo], dic
         provider_type = _resolve_provider_type(npm, api_url)
 
         providers[provider_id] = {
+            "id": provider_id,
             "name": provider_data.get("name", provider_id),
             "type": provider_type,
             "npm": npm,

@@ -548,9 +548,10 @@ class TestProviderFactory:
     def test_create_model_from_config_explicit_ollama_cloud(self):
         with patch.dict("os.environ", {"OLLAMA_API_KEY": "test"}):
             p = create_model_from_config("ollama-cloud/minimax-m2.5")
-            # Registry pathway: ollama-cloud type resolves to openai-compatible
-            # Direct create_provider() would return OllamaCloud via _resolve_provider_type
-            assert p is not None
+
+        assert isinstance(p, OllamaCloud)
+        assert p.model == "minimax-m2.5"
+        assert str(p.base_url) == "https://ollama.com"
 
     def test_create_model_from_config_explicit_ollama_cloud_colon_model(self):
         with patch.dict(
@@ -574,7 +575,31 @@ class TestProviderFactory:
     def test_create_provider_from_registry_model_uses_models_dev_provider(self):
         with patch.dict("os.environ", {"OLLAMA_API_KEY": "test"}):
             p = create_provider_from_registry_model("ollama-cloud/minimax-m2.5")
-            assert isinstance(p, OpenAIProvider)
+            assert isinstance(p, OllamaCloud)
+
+    def test_create_model_from_config_models_dev_colon_uses_registry_provider_env(self):
+        with patch.dict("os.environ", {"OPENROUTER_API_KEY": "sk-or-test"}, clear=True):
+            p = create_model_from_config("openrouter:openai/gpt-4o-mini")
+
+        assert isinstance(p, OpenAIProvider)
+        assert p.provider_id == "openrouter"
+        assert p.model == "openai/gpt-4o-mini"
+
+    def test_create_model_from_config_models_dev_slash_preserves_provider_identity(self):
+        with patch.dict("os.environ", {"OPENROUTER_API_KEY": "sk-or-test"}, clear=True):
+            p = create_model_from_config("openrouter/openai/gpt-4o-mini")
+
+        assert isinstance(p, OpenAIProvider)
+        assert p.provider_id == "openrouter"
+        assert p.model == "openai/gpt-4o-mini"
+
+    def test_create_model_from_config_models_dev_xai_uses_registry_env_key(self):
+        with patch.dict("os.environ", {"XAI_API_KEY": "xai-test"}, clear=True):
+            p = create_model_from_config("xai:grok-4")
+
+        assert isinstance(p, OpenAIProvider)
+        assert p.provider_id == "xai"
+        assert p.model == "grok-4"
 
     def test_legacy_native_ollama_cloud_emits_thinking(self):
         p = OllamaCloud(model="minimax-m2.5", api_key="test")

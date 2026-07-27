@@ -118,29 +118,54 @@ def create_provider(
     raise ValueError(f"Unknown provider type: {provider_type}")
 
 
-def create_provider_from_registry_model(model_ref: str) -> LLMProvider | None:
+def _registry_ref_parts(model_ref: str) -> tuple[str, str, str] | None:
+    if ":" in model_ref:
+        provider_id, model_name = model_ref.split(":", 1)
+        provider_id = provider_id.strip()
+        model_name = model_name.strip()
+        if not provider_id or not model_name:
+            return None
+        return provider_id, model_name, f"{provider_id}/{model_name}"
+
+    if "/" in model_ref:
+        provider_id, model_name = model_ref.split("/", 1)
+        provider_id = provider_id.strip()
+        model_name = model_name.strip()
+        if not provider_id or not model_name:
+            return None
+        return provider_id, model_name, model_ref
+
+    return None
+
+
+def create_provider_from_registry_model(
+    model_ref: str, api_key: str | None = None
+) -> LLMProvider | None:
     """Create a provider from an exact models.dev provider/model reference."""
-    if "/" not in model_ref:
+    parts = _registry_ref_parts(model_ref)
+    if parts is None:
         return None
 
-    provider_id, model_name = model_ref.split("/", 1)
+    provider_id, model_name, registry_ref = parts
     from src.sdk.registry import get_model_info, get_provider
 
     provider_info = get_provider(provider_id)
-    model_info = get_model_info(model_ref)
+    model_info = get_model_info(registry_ref)
     if not provider_info or model_info.provider_id != provider_id:
         return None
 
-    provider_type = provider_info.get("type", "openai-compatible")
     base_url = provider_info.get("base_url") or None
     env_keys = provider_info.get("env") or []
-    api_key = None
+    resolved_key = api_key
     for env_key in env_keys:
-        if os.environ.get(env_key):
-            api_key = os.environ[env_key]
+        if not resolved_key and os.environ.get(env_key):
+            resolved_key = os.environ[env_key]
             break
 
-    return create_provider(provider_type, model=model_name, api_key=api_key, base_url=base_url)
+    if provider_id == "ollama-cloud" and base_url and base_url.rstrip("/").endswith("/v1"):
+        base_url = base_url.rstrip("/")[:-3]
+
+    return create_provider(provider_id, model=model_name, api_key=resolved_key, base_url=base_url)
 
 
 def _default_base_url(provider_id: str) -> str:
@@ -227,7 +252,7 @@ def create_model_from_config(
     if not resolved_key:
         resolved_key = _load_stored_key(provider_type, user_id)
 
-    registry_provider = create_provider_from_registry_model(model_str)
+    registry_provider = create_provider_from_registry_model(model_str, api_key=resolved_key)
     if registry_provider is not None:
         if resolved_key and hasattr(registry_provider, '_api_key'):
             registry_provider._api_key = resolved_key

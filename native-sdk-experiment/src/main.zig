@@ -21,14 +21,15 @@ const title_key: u64 = 8;
 const models_key: u64 = 9;
 const settings_key: u64 = 10;
 
-const max_providers = 32;
-const max_provider_models = 64;
+const max_providers = 128;
+const max_provider_models = 512;
 
 const ProviderInfo = struct {
     id: []const u8 = "",
     name: []const u8 = "",
     has_key: bool = false,
     via_env: bool = false,
+    key_source: []const u8 = "none",
     key_input: []const u8 = "",
     key_visible: bool = false,
     adding_key: bool = false,
@@ -38,16 +39,32 @@ const ProviderInfo = struct {
     model_count: usize = 0,
 };
 
+const SettingsSection = enum { providers_models, general };
+
 const SettingsState = struct {
     visible: bool = false,
+    section: SettingsSection = .providers_models,
     loading: bool = false,
     search_text: []const u8 = "",
+    search_selection: canvas.TextSelection = .{ .anchor = 0, .focus = 0 },
+    search_selection_programmatic: bool = false,
+    search_runtime_text_synced: bool = false,
     default_model_id: []const u8 = "",
     providers: [max_providers]ProviderInfo = undefined,
     provider_count: usize = 0,
     selected_model_idx: usize = 0,
     saving_model: bool = false,
     model_error: []const u8 = "",
+    key_modal_visible: bool = false,
+    pending_provider_idx: usize = 0,
+    pending_provider_id: []const u8 = "",
+    pending_model_idx: usize = 0,
+    pending_model_id: []const u8 = "",
+    pending_model_name: []const u8 = "",
+    key_input: []const u8 = "",
+    key_visible: bool = false,
+    key_error: []const u8 = "",
+    key_testing: bool = false,
 };
 
 const ModelOption = struct {
@@ -58,7 +75,8 @@ const ModelOption = struct {
     key_source: []const u8 = "",
 };
 
-const max_models = 128;
+const max_models = 8192;
+const max_visible_settings_rows = 120;
 const first_stream_key: u64 = 100;
 pub const message_list_outer_padding: u32 = 0;
 
@@ -196,6 +214,8 @@ pub const Msg = union(enum) {
     reached_bottom,
     open_settings,
     close_settings,
+    settings_providers_models,
+    settings_general,
     settings_loaded: native_sdk.EffectResponse,
     settings_search: canvas.TextInputEvent,
     select_model: usize,
@@ -274,15 +294,9 @@ pub const Model = struct {
     }
 
     pub fn selectedModelLabel(self: *const Model, allocator: std.mem.Allocator) []const u8 {
-        if (self.available_model_count == 0) return "Agnes · Agnes 2.0 Flash · Hosted";
+        if (self.available_model_count == 0) return "Agnes · Agnes 2.0 Flash";
         const m = self.available_models[self.selected_model_idx];
-        const source_label = if (std.mem.eql(u8, m.key_source, "hosted"))
-            "Hosted"
-        else if (std.mem.eql(u8, m.key_source, "user"))
-            "Your key"
-        else
-            "Env";
-        return std.fmt.allocPrint(allocator, "{s} · {s} · {s}", .{ m.provider_display, m.name, source_label }) catch m.name;
+        return std.fmt.allocPrint(allocator, "{s} · {s}", .{ m.provider_display, m.name }) catch m.name;
     }
 
     pub fn selectedModelIsHosted(self: *const Model) bool {
@@ -554,7 +568,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .cycle_model => {
             if (model.available_model_count > 0) {
-                model.selected_model_idx = (model.selected_model_idx + 1) % model.available_model_count;
+                var attempts: usize = 0;
+                var idx = model.selected_model_idx;
+                while (attempts < model.available_model_count) : (attempts += 1) {
+                    idx = (idx + 1) % model.available_model_count;
+                    if (!std.mem.eql(u8, model.available_models[idx].key_source, "none")) {
+                        model.selected_model_idx = idx;
+                        break;
+                    }
+                }
             }
         },
         .search_input => |event| {
@@ -1010,14 +1032,23 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.next_chat_id = model.chat_count + 100;
         },
         .open_settings => {
+            if (model.settings.visible) {
+                model.settings.visible = false;
+                model.settings.key_modal_visible = false;
+                return;
+            }
             model.settings.visible = true;
             model.settings.loading = true;
             model.settings.provider_count = 0;
+            model.available_model_count = 0;
             model.settings.search_text = "";
             model.settings.model_error = "";
+            model.settings.key_modal_visible = false;
+            model.settings.key_input = "";
+            model.settings.key_error = "";
             fx.fetch(.{
                 .key = settings_key,
-                .url = "http://127.0.0.1:8080/settings?user_id=native_sdk_chat",
+                .url = "http://127.0.0.1:8080/settings/model-catalog?user_id=native_sdk_chat&max_models_per_provider=20&max_providers=64",
                 .method = .GET,
                 .headers = &.{.{ .name = "Accept", .value = "application/json" }},
                 .response = .buffered,
@@ -1027,6 +1058,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .close_settings => {
             model.settings.visible = false;
         },
+        .settings_providers_models => {
+            model.settings.section = .providers_models;
+        },
+        .settings_general => {
+            model.settings.section = .general;
+        },
         .settings_loaded => |response| {
             model.settings.loading = false;
             if (response.outcome != .ok) return;
@@ -1035,84 +1072,126 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
             defer parsed.deinit();
             const root = parsed.value;
-            // Parse default_model
+            // Parse optional default_model. Catalog responses may omit it; use composer selection then.
+            model.settings.default_model_id = model.allocator.dupe(u8, model.selectedModel()) catch "";
             if (root.object.get("default_model")) |dm| {
                 if (dm == .string and dm.string.len > 0) {
                     model.settings.default_model_id = model.allocator.dupe(u8, dm.string) catch "";
                 }
             }
-            // Parse provider_status, build provider list
-            if (root.object.get("provider_status")) |ps| {
+            model.settings.provider_count = 0;
+            model.available_model_count = 0;
+
+            if (root.object.get("providers")) |providers_val| {
+                const providers_arr = switch (providers_val) {
+                    .array => |a| a,
+                    else => return,
+                };
                 var count: usize = 0;
-                var it = ps.object.iterator();
-                while (it.next()) |entry| {
-                    if (count >= max_providers) break;
-                    const pid = entry.key_ptr.*;
-                    const info = entry.value_ptr.*;
+                for (providers_arr.items) |item| {
+                    if (count >= max_providers) {
+                        model.settings.model_error = "Catalog truncated; too many providers";
+                        break;
+                    }
+                    const id_val = item.object.get("id") orelse continue;
+                    const name_val = item.object.get("name") orelse continue;
+                    const pid = switch (id_val) { .string => |s| s, else => continue };
                     if (pid.len == 0) continue;
-                    const name = if (info.object.get("name")) |n| switch (n) {
-                        .string => |s| s,
-                        else => pid,
-                    } else pid;
-                    const has_key = if (info.object.get("has_key")) |h| h.bool else false;
-                    const via_env = if (info.object.get("key_configured_via_env")) |e| e.bool else false;
+                    const name = switch (name_val) { .string => |s| s, else => pid };
+                    const key_source = if (item.object.get("key_source")) |ks| switch (ks) { .string => |s| s, else => "none" } else "none";
+                    const has_key = if (item.object.get("has_key")) |h| h.bool else !std.mem.eql(u8, key_source, "none");
                     model.settings.providers[count] = .{
                         .id = model.allocator.dupe(u8, pid) catch continue,
                         .name = model.allocator.dupe(u8, name) catch continue,
                         .has_key = has_key,
-                        .via_env = via_env,
+                        .via_env = std.mem.eql(u8, key_source, "env") or std.mem.eql(u8, key_source, "hosted"),
+                        .key_source = model.allocator.dupe(u8, key_source) catch "none",
+                        .model_count = 0,
                     };
+                    if (item.object.get("models")) |models_val| {
+                        const models_arr = switch (models_val) { .array => |a| a, else => continue };
+                        for (models_arr.items) |model_item| {
+                            if (model.available_model_count >= max_models) {
+                                model.settings.model_error = "Catalog truncated; narrow search or update the app";
+                                break;
+                            }
+                            const mid_val = model_item.object.get("id") orelse continue;
+                            const mname_val = model_item.object.get("name") orelse continue;
+                            const pd_val = model_item.object.get("provider_display");
+                            const prov_val = model_item.object.get("provider");
+                            const mks_val = model_item.object.get("key_source");
+                            const mid = switch (mid_val) { .string => |s| s, else => continue };
+                            const mname = switch (mname_val) { .string => |s| s, else => continue };
+                            const pd = if (pd_val) |v| switch (v) { .string => |s| s, else => name } else name;
+                            const prov = if (prov_val) |v| switch (v) { .string => |s| s, else => pid } else pid;
+                            const mks = if (mks_val) |v| switch (v) { .string => |s| s, else => key_source } else key_source;
+                            const model_idx = model.available_model_count;
+                            model.available_models[model_idx] = .{
+                                .id = model.allocator.dupe(u8, mid) catch continue,
+                                .name = model.allocator.dupe(u8, mname) catch continue,
+                                .provider = model.allocator.dupe(u8, prov) catch continue,
+                                .provider_display = model.allocator.dupe(u8, pd) catch continue,
+                                .key_source = model.allocator.dupe(u8, mks) catch continue,
+                            };
+                            model.available_model_count += 1;
+                            const p = &model.settings.providers[count];
+                            if (p.model_count < max_provider_models) {
+                                p.model_indices[p.model_count] = model_idx;
+                                p.model_count += 1;
+                            } else {
+                                model.settings.model_error = "Catalog truncated; too many models for one provider";
+                            }
+                        }
+                    }
                     count += 1;
                 }
                 model.settings.provider_count = count;
-            }
-            // Group models by provider
-            for (0..model.settings.provider_count) |pi| {
-                model.settings.providers[pi].model_count = 0;
-            }
-            for (0..model.available_model_count) |mi| {
-                const m = model.available_models[mi];
-                for (0..model.settings.provider_count) |pi| {
-                    if (std.mem.eql(u8, model.settings.providers[pi].id, m.provider)) {
-                        const p = &model.settings.providers[pi];
-                        if (p.model_count < max_provider_models) {
-                            p.model_indices[p.model_count] = mi;
-                            p.model_count += 1;
-                        }
+                for (0..model.available_model_count) |idx| {
+                    if (std.mem.eql(u8, model.available_models[idx].id, model.settings.default_model_id)) {
+                        model.selected_model_idx = idx;
+                        model.settings.selected_model_idx = idx;
                         break;
                     }
                 }
+                sortSettingsProviders(&model.settings);
             }
         },
         .settings_search => |event| {
+            if (model.settings.search_runtime_text_synced and event != .set_selection) {
+                model.settings.search_runtime_text_synced = false;
+                return;
+            }
             const output = model.allocator.alloc(u8, model.settings.search_text.len + 256) catch return;
             const next = (canvas.TextEditState{
                 .text = model.settings.search_text,
-                .selection = .{ .anchor = model.settings.search_text.len, .focus = model.settings.search_text.len },
+                .selection = model.settings.search_selection,
             }).apply(event, output) catch return;
             model.settings.search_text = next.text;
+            model.settings.search_selection = next.selection;
+            model.settings.search_selection_programmatic = (event == .set_selection);
         },
         .select_model => |idx| {
             if (idx >= model.available_model_count or model.settings.saving_model) return;
             const m = model.available_models[idx];
-            const body = std.fmt.allocPrint(
-                model.allocator,
-                "{{\"default_model\":\"{s}\"}}",
-                .{m.id},
-            ) catch return;
-            model.settings.saving_model = true;
-            model.settings.selected_model_idx = idx;
-            model.settings.model_error = "";
-            const fetch_key = model.allocFetchKey();
-            fx.fetch(.{
-                .key = fetch_key,
-                .url = "http://127.0.0.1:8080/settings?user_id=native_sdk_chat",
-                .method = .PATCH,
-                .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
-                .body = body,
-                .response = .buffered,
-                .on_response = Effects.responseMsg(.model_selected),
-            });
+            if (std.mem.eql(u8, m.key_source, "none")) {
+                model.settings.key_modal_visible = true;
+                model.settings.pending_model_idx = idx;
+                model.settings.pending_model_id = model.allocator.dupe(u8, m.id) catch "";
+                model.settings.pending_model_name = model.allocator.dupe(u8, m.name) catch "";
+                model.settings.pending_provider_id = model.allocator.dupe(u8, m.provider) catch "";
+                model.settings.key_input = "";
+                model.settings.key_visible = false;
+                model.settings.key_error = "";
+                model.settings.key_testing = false;
+                for (0..model.settings.provider_count) |pi| {
+                    if (std.mem.eql(u8, model.settings.providers[pi].id, m.provider)) {
+                        model.settings.pending_provider_idx = pi;
+                        break;
+                    }
+                }
+                return;
+            }
+            saveSettingsModel(model, fx, idx);
         },
         .model_selected => |response| {
             model.settings.saving_model = false;
@@ -1139,8 +1218,23 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.settings.providers[idx].key_visible = false;
                 model.settings.providers[idx].test_error = "";
             }
+            model.settings.key_modal_visible = false;
+            model.settings.key_input = "";
+            model.settings.key_error = "";
+            model.settings.pending_provider_id = "";
+            model.settings.pending_model_id = "";
+            model.settings.pending_model_name = "";
         },
         .add_key_input => |event| {
+            if (model.settings.key_modal_visible) {
+                const output = model.allocator.alloc(u8, model.settings.key_input.len + 256) catch return;
+                const next = (canvas.TextEditState{
+                    .text = model.settings.key_input,
+                    .selection = .{ .anchor = model.settings.key_input.len, .focus = model.settings.key_input.len },
+                }).apply(event, output) catch return;
+                model.settings.key_input = next.text;
+                return;
+            }
             for (0..model.settings.provider_count) |i| {
                 if (model.settings.providers[i].adding_key) {
                     const p = &model.settings.providers[i];
@@ -1155,20 +1249,35 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
         },
         .toggle_key_visibility => |idx| {
+            if (model.settings.key_modal_visible) {
+                model.settings.key_visible = !model.settings.key_visible;
+                return;
+            }
             if (idx < model.settings.provider_count) {
                 model.settings.providers[idx].key_visible = !model.settings.providers[idx].key_visible;
             }
         },
         .add_key_submit => |idx| {
-            if (idx >= model.settings.provider_count) return;
-            const p = &model.settings.providers[idx];
-            if (p.key_input.len == 0) return;
-            p.testing = true;
-            p.test_error = "";
+            const modal = model.settings.key_modal_visible;
+            if (!modal and idx >= model.settings.provider_count) return;
+            if (modal and model.settings.key_testing) return;
+            if (!modal and model.settings.providers[idx].testing) return;
+            const provider_id = if (modal) model.settings.pending_provider_id else model.settings.providers[idx].id;
+            const api_key = if (modal) model.settings.key_input else model.settings.providers[idx].key_input;
+            if (api_key.len == 0) return;
+            if (modal) {
+                model.settings.key_testing = true;
+                model.settings.key_error = "";
+            } else {
+                model.settings.providers[idx].testing = true;
+                model.settings.providers[idx].test_error = "";
+            }
+            const escaped_provider = escapeJsonString(model.allocator, provider_id) catch return;
+            const escaped_key = escapeJsonString(model.allocator, api_key) catch return;
             const body = std.fmt.allocPrint(
                 model.allocator,
                 "{{\"provider\":\"{s}\",\"api_key\":\"{s}\"}}",
-                .{ p.id, p.key_input },
+                .{ escaped_provider, escaped_key },
             ) catch return;
             const fetch_key = model.allocFetchKey();
             fx.fetch(.{
@@ -1182,7 +1291,21 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             });
         },
         .key_tested => |response| {
-            if (response.outcome != .ok) return;
+            if (response.outcome != .ok) {
+                if (model.settings.key_modal_visible and model.settings.key_testing) {
+                    model.settings.key_testing = false;
+                    model.settings.key_error = "Failed to test key";
+                    return;
+                }
+                for (0..model.settings.provider_count) |i| {
+                    if (model.settings.providers[i].testing) {
+                        model.settings.providers[i].testing = false;
+                        model.settings.providers[i].test_error = "Failed to test key";
+                        return;
+                    }
+                }
+                return;
+            }
             const body = response.body;
             if (body.len == 0) return;
             const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
@@ -1193,16 +1316,43 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .string => |s| s,
                 else => "",
             } else "";
+            if (model.settings.key_modal_visible and model.settings.key_testing) {
+                model.settings.key_testing = false;
+                if (valid) {
+                    const escaped_provider = escapeJsonString(model.allocator, model.settings.pending_provider_id) catch return;
+                    const escaped_key = escapeJsonString(model.allocator, model.settings.key_input) catch return;
+                    const save_body = std.fmt.allocPrint(
+                        model.allocator,
+                        "{{\"provider\":\"{s}\",\"api_key\":\"{s}\"}}",
+                        .{ escaped_provider, escaped_key },
+                    ) catch return;
+                    const fetch_key = model.allocFetchKey();
+                    fx.fetch(.{
+                        .key = fetch_key,
+                        .url = "http://127.0.0.1:8080/settings/api-keys?user_id=native_sdk_chat",
+                        .method = .POST,
+                        .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+                        .body = save_body,
+                        .response = .buffered,
+                        .on_response = Effects.responseMsg(.key_saved),
+                    });
+                } else {
+                    model.settings.key_error = model.allocator.dupe(u8, error_msg) catch "Invalid key";
+                }
+                return;
+            }
             for (0..model.settings.provider_count) |i| {
                 if (model.settings.providers[i].testing) {
                     const p = &model.settings.providers[i];
                     p.testing = false;
                     if (valid) {
                         // Save the key
+                        const escaped_provider = escapeJsonString(model.allocator, p.id) catch return;
+                        const escaped_key = escapeJsonString(model.allocator, p.key_input) catch return;
                         const save_body = std.fmt.allocPrint(
                             model.allocator,
                             "{{\"provider\":\"{s}\",\"api_key\":\"{s}\"}}",
-                            .{ p.id, p.key_input },
+                            .{ escaped_provider, escaped_key },
                         ) catch return;
                         const fetch_key = model.allocFetchKey();
                         fx.fetch(.{
@@ -1222,7 +1372,45 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
         },
         .key_saved => |response| {
-            if (response.outcome != .ok) return;
+            if (response.outcome != .ok) {
+                if (model.settings.key_modal_visible) {
+                    model.settings.key_testing = false;
+                    model.settings.key_error = "Failed to save key";
+                    return;
+                }
+                for (0..model.settings.provider_count) |i| {
+                    if (model.settings.providers[i].adding_key and model.settings.providers[i].key_input.len > 0) {
+                        model.settings.providers[i].testing = false;
+                        model.settings.providers[i].test_error = "Failed to save key";
+                        return;
+                    }
+                }
+                return;
+            }
+            if (model.settings.key_modal_visible) {
+                const provider_idx = model.settings.pending_provider_idx;
+                if (provider_idx < model.settings.provider_count) {
+                    model.settings.providers[provider_idx].has_key = true;
+                    model.settings.providers[provider_idx].via_env = false;
+                    model.settings.providers[provider_idx].key_source = "user";
+                    for (0..model.settings.providers[provider_idx].model_count) |mi| {
+                        const model_idx = model.settings.providers[provider_idx].model_indices[mi];
+                        model.available_models[model_idx].key_source = "user";
+                    }
+                }
+                sortSettingsProviders(&model.settings);
+                model.settings.key_modal_visible = false;
+                model.settings.key_input = "";
+                model.settings.key_error = "";
+                const pending_idx = model.settings.pending_model_idx;
+                model.settings.pending_provider_id = "";
+                model.settings.pending_model_id = "";
+                model.settings.pending_model_name = "";
+                if (pending_idx < model.available_model_count) {
+                    saveSettingsModel(model, fx, pending_idx);
+                }
+                return;
+            }
             for (0..model.settings.provider_count) |i| {
                 if (model.settings.providers[i].adding_key and model.settings.providers[i].key_input.len > 0) {
                     model.settings.providers[i].has_key = true;
@@ -1262,6 +1450,65 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 }
             }
         },
+    }
+}
+
+fn syncModelFromLayout(model: *Model, layout: canvas.WidgetLayoutTree) void {
+    if (!model.settings.visible or model.settings.section != .providers_models) return;
+    for (layout.nodes) |node| {
+        const widget = node.widget;
+        if (widget.kind != .textarea) continue;
+        if (!std.mem.eql(u8, widget.placeholder, "Search providers and models...")) continue;
+        if (!std.mem.eql(u8, widget.text, model.settings.search_text)) {
+            model.settings.search_text = model.allocator.dupe(u8, widget.text) catch widget.text;
+            model.settings.search_runtime_text_synced = true;
+        }
+        if (widget.text_selection) |selection| {
+            model.settings.search_selection = selection;
+            model.settings.search_selection_programmatic = false;
+        }
+        return;
+    }
+}
+
+fn saveSettingsModel(model: *Model, fx: *Effects, idx: usize) void {
+    if (idx >= model.available_model_count or model.settings.saving_model) return;
+    const m = model.available_models[idx];
+    const escaped_id = escapeJsonString(model.allocator, m.id) catch return;
+    const body = std.fmt.allocPrint(
+        model.allocator,
+        "{{\"default_model\":\"{s}\"}}",
+        .{escaped_id},
+    ) catch return;
+    model.settings.saving_model = true;
+    model.settings.selected_model_idx = idx;
+    model.settings.model_error = "";
+    const fetch_key = model.allocFetchKey();
+    fx.fetch(.{
+        .key = fetch_key,
+        .url = "http://127.0.0.1:8080/settings?user_id=native_sdk_chat",
+        .method = .PATCH,
+        .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+        .body = body,
+        .response = .buffered,
+        .on_response = Effects.responseMsg(.model_selected),
+    });
+}
+
+fn providerComesBefore(a: ProviderInfo, b: ProviderInfo) bool {
+    if (a.has_key != b.has_key) return a.has_key;
+    return std.ascii.lessThanIgnoreCase(a.name, b.name);
+}
+
+fn sortSettingsProviders(settings: *SettingsState) void {
+    var i: usize = 1;
+    while (i < settings.provider_count) : (i += 1) {
+        var j = i;
+        while (j > 0 and providerComesBefore(settings.providers[j], settings.providers[j - 1])) : (j -= 1) {
+            const tmp = settings.providers[j];
+            settings.providers[j] = settings.providers[j - 1];
+            settings.providers[j - 1] = tmp;
+        }
     }
 }
 
@@ -1851,81 +2098,29 @@ fn addHistoryMessage(chat: *Chat, allocator: std.mem.Allocator, item: std.json.V
     }
 }
 
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+    }
+    return false;
+}
+
+fn upperAscii(allocator: std.mem.Allocator, value: []const u8) []const u8 {
+    const out = allocator.dupe(u8, value) catch return value;
+    for (out) |*c| c.* = std.ascii.toUpper(c.*);
+    return out;
+}
+
 fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
-    // Collect provider indices: with-key first, then without-key, sorted alphabetically
-    var sorted: [max_providers]usize = undefined;
-    var sorted_count: usize = 0;
-    // With key
-    for (0..model.settings.provider_count) |i| {
-        if (model.settings.providers[i].has_key) {
-            if (sorted_count < max_providers) {
-                sorted[sorted_count] = i;
-                sorted_count += 1;
-            }
-        }
-    }
-    // Sort with-key group alphabetically (simple insertion sort)
-    var a: usize = 1;
-    while (a < sorted_count) : (a += 1) {
-        var b = a;
-        while (b > 0 and std.mem.order(u8, model.settings.providers[sorted[b]].name, model.settings.providers[sorted[b - 1]].name) == .lt) : (b -= 1) {
-            const tmp = sorted[b];
-            sorted[b] = sorted[b - 1];
-            sorted[b - 1] = tmp;
-        }
-    }
-    const with_key_end = sorted_count;
-    // Without key
-    for (0..model.settings.provider_count) |i| {
-        if (!model.settings.providers[i].has_key) {
-            if (sorted_count < max_providers) {
-                sorted[sorted_count] = i;
-                sorted_count += 1;
-            }
-        }
-    }
-    // Sort without-key group
-    var c: usize = with_key_end + 1;
-    while (c < sorted_count) : (c += 1) {
-        var d = c;
-        while (d > with_key_end and std.mem.order(u8, model.settings.providers[sorted[d]].name, model.settings.providers[sorted[d - 1]].name) == .lt) : (d -= 1) {
-            const tmp = sorted[d];
-            sorted[d] = sorted[d - 1];
-            sorted[d - 1] = tmp;
-        }
-    }
-
-    // Filter by search
     const search = model.settings.search_text;
-    var filtered: [max_providers]usize = undefined;
-    var filter_count: usize = 0;
-    for (sorted[0..sorted_count]) |pi| {
-        if (search.len == 0) {
-            filtered[filter_count] = pi;
-            filter_count += 1;
-            continue;
-        }
-        const p = &model.settings.providers[pi];
-        const provider_matches = std.mem.indexOf(u8, p.name, search) != null;
-        // Check if any model matches
-        var model_match = false;
-        for (0..p.model_count) |mi| {
-            const m = model.available_models[p.model_indices[mi]];
-            if (std.mem.indexOf(u8, m.name, search) != null or std.mem.indexOf(u8, m.id, search) != null) {
-                model_match = true;
-                break;
-            }
-        }
-        if (provider_matches or model_match) {
-            if (filter_count < max_providers) {
-                filtered[filter_count] = pi;
-                filter_count += 1;
-            }
-        }
-    }
 
-    var children: [4]AppUi.Node = undefined;
+    var children: [3]AppUi.Node = undefined;
     var child_count: usize = 0;
+    var content_children: [4]AppUi.Node = undefined;
+    var content_count: usize = 0;
 
     // Header
     children[child_count] = ui.row(.{ .gap = 12, .padding = 16, .cross = .center, .style_tokens = .{ .background = .surface } }, .{
@@ -1934,192 +2129,153 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     });
     child_count += 1;
 
-    // Search bar + provider list card
-    var list_nodes: [256]AppUi.Node = undefined;
+    if (model.settings.section == .providers_models) {
+    // Search bar + provider-grouped model catalog
+    var list_nodes: [max_visible_settings_rows + 4]AppUi.Node = undefined;
     var list_node_count: usize = 0;
 
     // Search input
-    list_nodes[list_node_count] = ui.el(.textarea, .{
-        .text = model.settings.search_text,
-        .placeholder = "Search providers and models...",
-        .on_input = AppUi.inputMsg(.settings_search),
-        .height = 36,
-        .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
-    }, .{});
+    list_nodes[list_node_count] = blk: {
+        var field = ui.el(.textarea, .{
+            .text = model.settings.search_text,
+            .placeholder = "Search providers and models...",
+            .on_input = AppUi.inputMsg(.settings_search),
+            .height = 36,
+            .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
+        }, .{});
+        if (model.settings.search_selection_programmatic) {
+            field.widget.text_selection = model.settings.search_selection;
+        }
+        break :blk field;
+    };
     list_node_count += 1;
+
+    if (model.settings.model_error.len > 0) {
+        list_nodes[list_node_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .destructive }, .wrap = true }, model.settings.model_error);
+        list_node_count += 1;
+    }
+
+    var rendered_provider_count: usize = 0;
 
     if (model.settings.loading) {
         list_nodes[list_node_count] = ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Loading...");
         list_node_count += 1;
-    } else if (filter_count == 0) {
-        list_nodes[list_node_count] = ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "No providers found");
-        list_node_count += 1;
-    }
-
-    // Provider cards
-    for (filtered[0..filter_count]) |pi| {
-        if (list_node_count >= 250) break;
-        const p = &model.settings.providers[pi];
+    } else {
         const search_active = search.len > 0;
-        const provider_name_matches = search_active and (std.mem.indexOf(u8, p.name, search) != null);
+        for (0..model.settings.provider_count) |pi| {
+            if (list_node_count >= max_visible_settings_rows) {
+                list_nodes[list_node_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, "More models available. Search to narrow the catalog.");
+                list_node_count += 1;
+                break;
+            }
+            const p = &model.settings.providers[pi];
+            const provider_matches = search_active and containsIgnoreCase(p.name, search);
+            var visible_model_count: usize = 0;
+            for (0..p.model_count) |mi| {
+                const m = model.available_models[p.model_indices[mi]];
+                if (!search_active or provider_matches or containsIgnoreCase(m.name, search)) {
+                    visible_model_count += 1;
+                }
+            }
+            if (search_active and !provider_matches and visible_model_count == 0) continue;
 
-        // Status badge
-        const status_text: []const u8 = if (p.has_key)
-            (if (p.via_env) "Env" else "Your key")
-        else
-            "Not configured";
-        const status_node = if (p.has_key)
-            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .success } }, status_text)
-        else
-            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, status_text);
+            rendered_provider_count += 1;
+            const header_name = upperAscii(ui.arena, p.name);
+            list_nodes[list_node_count] = ui.row(.{ .gap = 8, .cross = .center, .padding = 8, .style_tokens = .{ .background = .surface_subtle, .radius = .sm } }, .{
+                ui.text(.{ .size = .sm, .grow = 1, .style_tokens = .{ .foreground = .text } }, header_name),
+            });
+            list_node_count += 1;
 
-        var card_children: [70]AppUi.Node = undefined;
-        var card_count: usize = 0;
-
-        // Header row: name + status
-        card_children[card_count] = ui.row(.{ .gap = 8, .cross = .center }, .{
-            ui.text(.{ .grow = 1 }, p.name),
-            status_node,
-        });
-        card_count += 1;
-
-        if (p.has_key) {
-            // Model list
             if (p.model_count == 0) {
-                card_children[card_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "No models available");
-                card_count += 1;
-            } else {
-                // Compact model list: small rows with padding, not full buttons
-                for (0..p.model_count) |mi| {
-                    if (card_count >= 66) break;
-                    const model_idx = p.model_indices[mi];
-                    const m = model.available_models[model_idx];
-
-                    // Filter models when search is active and provider name doesn't match
-                    if (search_active and !provider_name_matches) {
-                        if (std.mem.indexOf(u8, m.name, search) == null and std.mem.indexOf(u8, m.id, search) == null) continue;
-                    }
-
-                    const is_selected = std.mem.eql(u8, m.id, model.settings.default_model_id);
-                    const label = std.fmt.allocPrint(ui.arena, "{s}  ✓", .{m.name}) catch m.name;
-                    const plain_label: []const u8 = m.name;
-
-                    card_children[card_count] = ui.row(.{
-                        .gap = 8,
-                        .cross = .center,
-                        .padding = 4,
-                        .on_press = .{ .select_model = model_idx },
-                        .style_tokens = if (is_selected)
-                            .{ .background = .surface_pressed }
-                        else
-                            .{},
-                    }, .{
-                        ui.text(.{
-                            .size = .sm,
-                            .grow = 1,
-                            .style_tokens = if (is_selected)
-                                .{ .foreground = .text }
-                            else
-                                .{ .foreground = .text_muted },
-                        }, if (is_selected) label else plain_label),
-                    });
-                    card_count += 1;
-                }
+                list_nodes[list_node_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "No models available");
+                list_node_count += 1;
+                continue;
             }
 
-            // Remove key (not for env)
-            if (!p.via_env) {
-                card_children[card_count] = ui.button(.{
-                    .on_press = .{ .remove_key = pi },
-                    .variant = .ghost,
-                    .size = .sm,
-                    .style_tokens = .{ .foreground = .destructive },
-                }, "Remove Key");
-                card_count += 1;
-            } else {
-                card_children[card_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Configured via env — cannot remove");
-                card_count += 1;
-            }
-        } else {
-            // No key: Add Key button or expanded input
-            if (p.adding_key) {
-                // Key input field
-                card_children[card_count] = ui.el(.textarea, .{
-                    .text = p.key_input,
-                    .placeholder = "Enter API key...",
-                    .on_input = AppUi.inputMsg(.add_key_input),
-                    .height = 36,
-                    .style_tokens = .{ .background = .surface, .border_color = .border },
-                }, .{});
-                card_count += 1;
-
-                // Show/Hide + Add + Cancel buttons
-                var btns: [3]AppUi.Node = undefined;
-                var btn_n: usize = 0;
-
-                btns[btn_n] = ui.button(.{
-                    .on_press = .{ .toggle_key_visibility = pi },
-                    .variant = .ghost,
-                    .size = .sm,
-                }, if (p.key_visible) "Hide" else "Show");
-                btn_n += 1;
-
-                if (p.testing) {
-                    btns[btn_n] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Testing...");
-                    btn_n += 1;
-                } else {
-                    btns[btn_n] = ui.button(.{
-                        .on_press = .{ .add_key_submit = pi },
-                        .variant = .primary,
-                        .size = .sm,
-                    }, "Add");
-                    btn_n += 1;
+            for (0..p.model_count) |mi| {
+                if (list_node_count >= max_visible_settings_rows) {
+                    list_nodes[list_node_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, "More models available. Search to narrow the catalog.");
+                    list_node_count += 1;
+                    break;
                 }
-
-                btns[btn_n] = ui.button(.{
-                    .on_press = .{ .add_key_cancel = pi },
-                    .variant = .ghost,
-                    .size = .sm,
-                }, "Cancel");
-                btn_n += 1;
-
-                card_children[card_count] = ui.row(.{ .gap = 8, .cross = .center }, btns[0..btn_n]);
-                card_count += 1;
-
-                // Error
-                if (p.test_error.len > 0) {
-                    card_children[card_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .destructive }, .wrap = true }, p.test_error);
-                    card_count += 1;
-                }
-            } else {
-                card_children[card_count] = ui.button(.{
-                    .on_press = .{ .add_key_expand = pi },
-                    .variant = .secondary,
-                    .size = .sm,
-                }, "Add Key");
-                card_count += 1;
+                const model_idx = p.model_indices[mi];
+                const m = model.available_models[model_idx];
+                if (search_active and !provider_matches and !containsIgnoreCase(m.name, search)) continue;
+                const is_selected = std.mem.eql(u8, m.id, model.settings.default_model_id);
+                const state_text: []const u8 = if (!is_selected and !p.has_key) "Add key" else "";
+                const model_label = if (is_selected)
+                    std.fmt.allocPrint(ui.arena, "  {s}  ✓", .{m.name}) catch m.name
+                else
+                    std.fmt.allocPrint(ui.arena, "  {s}", .{m.name}) catch m.name;
+                list_nodes[list_node_count] = ui.row(.{
+                    .gap = 8,
+                    .cross = .center,
+                    .padding = 6,
+                    .on_press = .{ .select_model = model_idx },
+                    .style_tokens = if (is_selected) .{ .background = .surface_pressed, .radius = .sm } else .{ .background = .surface, .radius = .sm },
+                }, .{
+                    ui.text(.{ .size = .sm, .grow = 1, .style_tokens = .{ .foreground = if (is_selected) .text else .text_muted } }, model_label),
+                    ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = if (is_selected) .success else .text_muted } }, state_text),
+                });
+                list_node_count += 1;
             }
         }
-
-        list_nodes[list_node_count] = ui.el(.card, .{
-            .padding = 12,
-            .style_tokens = .{ .background = .surface_subtle, .radius = .md },
-        }, .{
-            ui.column(.{ .gap = 6 }, card_children[0..card_count]),
-        });
-        list_node_count += 1;
+        if (rendered_provider_count == 0) {
+            list_nodes[list_node_count] = ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "No providers or models found");
+            list_node_count += 1;
+        }
     }
 
-    children[child_count] = ui.el(.card, .{
+    content_children[content_count] = ui.el(.card, .{
         .padding = 12,
         .style_tokens = .{ .background = .surface, .radius = .md },
     }, .{
         ui.column(.{ .gap = 8 }, list_nodes[0..list_node_count]),
     });
-    child_count += 1;
+    content_count += 1;
+    }
 
+    if (model.settings.key_modal_visible) {
+        const title = std.fmt.allocPrint(ui.arena, "Add {s} key", .{model.available_models[model.settings.pending_model_idx].provider_display}) catch "Add API key";
+        const subtitle = std.fmt.allocPrint(ui.arena, "Required to use {s}.", .{model.settings.pending_model_name}) catch "Required to use this model.";
+        var modal_nodes: [5]AppUi.Node = undefined;
+        var modal_count: usize = 0;
+        modal_nodes[modal_count] = ui.text(.{ .size = .heading }, title);
+        modal_count += 1;
+        modal_nodes[modal_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, subtitle);
+        modal_count += 1;
+        modal_nodes[modal_count] = ui.el(.textarea, .{
+            .text = if (model.settings.key_visible) model.settings.key_input else "",
+            .placeholder = "Enter API key...",
+            .on_input = AppUi.inputMsg(.add_key_input),
+            .height = 36,
+            .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
+        }, .{});
+        modal_count += 1;
+        if (model.settings.key_error.len > 0) {
+            modal_nodes[modal_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .destructive }, .wrap = true }, model.settings.key_error);
+            modal_count += 1;
+        }
+        modal_nodes[modal_count] = ui.row(.{ .gap = 8, .cross = .center }, .{
+            ui.button(.{ .on_press = .{ .toggle_key_visibility = model.settings.pending_provider_idx }, .variant = .ghost, .size = .sm }, if (model.settings.key_visible) "Hide" else "Show"),
+            ui.spacer(1),
+            ui.button(.{ .on_press = .{ .add_key_cancel = model.settings.pending_provider_idx }, .variant = .ghost, .size = .sm }, "Cancel"),
+            ui.button(.{ .on_press = .{ .add_key_submit = model.settings.pending_provider_idx }, .variant = .primary, .size = .sm }, if (model.settings.key_testing) "Testing..." else "Test & Save"),
+        });
+        modal_count += 1;
+
+        content_children[content_count] = ui.el(.card, .{
+            .padding = 18,
+            .style_tokens = .{ .background = .surface_subtle, .radius = .lg },
+        }, .{
+            ui.column(.{ .gap = 10 }, modal_nodes[0..modal_count]),
+        });
+        content_count += 1;
+    }
+
+    if (model.settings.section == .general) {
     // Appearance
-    children[child_count] = ui.el(.card, .{
+    content_children[content_count] = ui.el(.card, .{
         .padding = 16,
         .style_tokens = .{ .background = .surface, .radius = .md },
     }, .{
@@ -2138,10 +2294,10 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
             }),
         }),
     });
-    child_count += 1;
+    content_count += 1;
 
     // About
-    children[child_count] = ui.el(.card, .{
+    content_children[content_count] = ui.el(.card, .{
         .padding = 16,
         .style_tokens = .{ .background = .surface, .radius = .md },
     }, .{
@@ -2151,6 +2307,37 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
             ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Backend: http://127.0.0.1:8080"),
             ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "User: native_sdk_chat"),
         }),
+    });
+    content_count += 1;
+    }
+
+    const sidebar = ui.el(.card, .{
+        .width = 120,
+        .padding = 6,
+        .style_tokens = .{ .background = .surface, .radius = .md },
+    }, .{
+        ui.column(.{ .gap = 6 }, .{
+            ui.button(.{
+                .on_press = .settings_providers_models,
+                .variant = if (model.settings.section == .providers_models) .primary else .secondary,
+                .size = .sm,
+                .width = 104,
+                .padding = 12,
+            }, "Models"),
+            ui.button(.{
+                .on_press = .settings_general,
+                .variant = if (model.settings.section == .general) .primary else .secondary,
+                .size = .sm,
+                .width = 104,
+                .padding = 12,
+            }, "General"),
+        }),
+    });
+
+    const content_slice: []const AppUi.Node = content_children[0..content_count];
+    children[child_count] = ui.row(.{ .gap = 12, .cross = .start }, .{
+        sidebar,
+        ui.column(.{ .gap = 12, .grow = 1 }, content_slice),
     });
     child_count += 1;
 
@@ -2557,6 +2744,7 @@ pub fn main(init: std.process.Init) !void {
         .update_fx = update,
         .init_fx = initFx,
         .tokens_fn = tokensFn,
+        .sync = syncModelFromLayout,
         .view = buildView,
     });
     app_state.model = initialModel();

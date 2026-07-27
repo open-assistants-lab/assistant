@@ -147,7 +147,7 @@ test "default model falls back to hosted Agnes" {
     try testing.expectEqualStrings("agnes:agnes-2.0-flash", model.selectedModel());
 }
 
-test "models response labels hosted Agnes" {
+test "models response labels selected model without credential source" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -167,7 +167,7 @@ test "models response labels hosted Agnes" {
 
     try testing.expectEqual(@as(usize, 1), model.available_model_count);
     try testing.expectEqualStrings("agnes:agnes-2.0-flash", model.selectedModel());
-    try testing.expectEqualStrings("Agnes · Agnes 2.0 Flash · Hosted", model.selectedModelLabel(arena));
+    try testing.expectEqualStrings("Agnes · Agnes 2.0 Flash", model.selectedModelLabel(arena));
 }
 
 test "hosted model shows change button" {
@@ -240,6 +240,45 @@ test "selected composer text deletes and replaces as a range" {
     main.update(&model, .{ .input_changed = .{ .set_selection = .{ .anchor = 0, .focus = 5 } } }, &fx);
     main.update(&model, .{ .input_changed = .{ .insert_text = "x" } }, &fx);
     try testing.expectEqualStrings("x", model.inputText());
+}
+
+test "selected settings search text deletes and replaces as a range" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    main.update(&model, .{ .settings_search = .{ .insert_text = "agnes" } }, &fx);
+    main.update(&model, .{ .settings_search = .{ .set_selection = .{ .anchor = 0, .focus = 5 } } }, &fx);
+    main.update(&model, .{ .settings_search = .delete_backward }, &fx);
+    try testing.expectEqualStrings("", model.settings.search_text);
+
+    main.update(&model, .{ .settings_search = .{ .insert_text = "agnes" } }, &fx);
+    main.update(&model, .{ .settings_search = .{ .set_selection = .{ .anchor = 0, .focus = 5 } } }, &fx);
+    main.update(&model, .{ .settings_search = .{ .insert_text = "x" } }, &fx);
+    try testing.expectEqualStrings("x", model.settings.search_text);
+}
+
+test "settings search skips duplicate app edit after runtime text sync" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    model.settings.search_text = "a";
+    model.settings.search_selection = .{ .anchor = 1, .focus = 1 };
+    model.settings.search_runtime_text_synced = true;
+
+    main.update(&model, .{ .settings_search = .{ .insert_text = "a" } }, &fx);
+
+    try testing.expectEqualStrings("a", model.settings.search_text);
+    try testing.expect(!model.settings.search_runtime_text_synced);
 }
 
 test "stale composer selection is clamped before inserting" {
@@ -910,4 +949,303 @@ test "draft preservation: switching chats preserves per-chat draft" {
 
     main.update(&model, .{ .switch_chat = model.chats[1].id }, &fx);
     try testing.expectEqualStrings("draft2", model.inputText());
+}
+
+test "settings catalog response parses grouped providers and models" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    const catalog_body =
+        \\{"default_model":"agnes:agnes-2.0-flash","providers":[{"id":"agnes","name":"Agnes","key_source":"hosted","has_key":true,"models":[{"id":"agnes:agnes-2.0-flash","name":"Agnes 2.0 Flash","provider":"agnes","provider_display":"Agnes","key_source":"hosted"}]},{"id":"anthropic","name":"Anthropic","key_source":"none","has_key":false,"models":[{"id":"anthropic:claude-sonnet-4-5","name":"Claude Sonnet 4.5","provider":"anthropic","provider_display":"Anthropic","key_source":"none"}]}]}
+    ;
+
+    main.update(&model, .{ .settings_loaded = .{
+        .key = 10,
+        .outcome = .ok,
+        .body = catalog_body,
+    } }, &fx);
+
+    try testing.expectEqual(@as(usize, 2), model.settings.provider_count);
+    try testing.expectEqual(@as(usize, 2), model.available_model_count);
+    try testing.expectEqualStrings("agnes", model.settings.providers[0].id);
+    try testing.expectEqualStrings("hosted", model.settings.providers[0].key_source);
+    try testing.expect(model.settings.providers[0].has_key);
+    try testing.expectEqual(@as(usize, 1), model.settings.providers[0].model_count);
+    try testing.expectEqualStrings("anthropic", model.settings.providers[1].id);
+    try testing.expectEqualStrings("none", model.settings.providers[1].key_source);
+    try testing.expect(!model.settings.providers[1].has_key);
+    try testing.expectEqual(@as(usize, 1), model.settings.providers[1].model_count);
+}
+
+test "settings open fetches dedicated model catalog endpoint" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    main.update(&model, .open_settings, &fx);
+
+    const request = fx.pendingFetchAt(0).?;
+    try testing.expectEqualStrings("http://127.0.0.1:8080/settings/model-catalog?user_id=native_sdk_chat&max_models_per_provider=20&max_providers=64", request.url);
+}
+
+test "locked settings model opens API key modal instead of saving" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    const catalog_body =
+        \\{"default_model":"agnes:agnes-2.0-flash","providers":[{"id":"anthropic","name":"Anthropic","key_source":"none","has_key":false,"models":[{"id":"anthropic:claude-sonnet-4-5","name":"Claude Sonnet 4.5","provider":"anthropic","provider_display":"Anthropic","key_source":"none"}]}]}
+    ;
+    main.update(&model, .{ .settings_loaded = .{ .key = 10, .outcome = .ok, .body = catalog_body } }, &fx);
+
+    main.update(&model, .{ .select_model = 0 }, &fx);
+
+    try testing.expect(model.settings.key_modal_visible);
+    try testing.expectEqualStrings("anthropic", model.settings.pending_provider_id);
+    try testing.expectEqualStrings("anthropic:claude-sonnet-4-5", model.settings.pending_model_id);
+    try testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
+}
+
+test "settings request bodies escape JSON strings" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    model.available_models[0] = .{
+        .id = "openai:gpt-quote\\\"slash",
+        .name = "Quoted",
+        .provider = "openai",
+        .provider_display = "OpenAI",
+        .key_source = "user",
+    };
+    model.available_model_count = 1;
+    main.update(&model, .{ .select_model = 0 }, &fx);
+
+    const select_request = fx.pendingFetchAt(0).?;
+    try testing.expect(std.mem.indexOf(u8, select_request.body, "openai:gpt-quote\\\\\\\"slash") != null);
+    const parsed_select = try std.json.parseFromSlice(std.json.Value, arena, select_request.body, .{});
+    defer parsed_select.deinit();
+    try testing.expectEqualStrings("openai:gpt-quote\\\"slash", parsed_select.value.object.get("default_model").?.string);
+}
+
+test "settings catalog renders locked model rows instead of add key cards" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    model.settings.visible = true;
+    var fx = noopFx(arena);
+
+    const catalog_body =
+        \\{"default_model":"agnes:agnes-2.0-flash","providers":[{"id":"anthropic","name":"Anthropic","key_source":"none","has_key":false,"models":[{"id":"anthropic:claude-sonnet-4-5","name":"Claude Sonnet 4.5","provider":"anthropic","provider_display":"Anthropic","key_source":"none"}]}]}
+    ;
+    main.update(&model, .{ .settings_loaded = .{ .key = 10, .outcome = .ok, .body = catalog_body } }, &fx);
+
+    const tree = try buildTree(arena, &model);
+    _ = try expectByText(tree.root, .button, "Models");
+    _ = try expectByText(tree.root, .button, "General");
+    try testing.expect(findButtonContaining(tree.root, "Providers & Models") == null);
+    _ = try expectByText(tree.root, .text, "ANTHROPIC");
+    try testing.expect(findTextContaining(tree.root, "PROVIDER") == null);
+    _ = try expectByText(tree.root, .text, "  Claude Sonnet 4.5");
+    _ = try expectByText(tree.root, .text, "Add key");
+    try testing.expect(findButtonContaining(tree.root, "Add Key") == null);
+}
+
+test "settings provider headers have no status and model rows own state" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    model.settings.visible = true;
+    var fx = noopFx(arena);
+
+    const catalog_body =
+        \\{"default_model":"agnes:agnes-2.0-flash","providers":[{"id":"agnes","name":"Agnes","key_source":"hosted","has_key":true,"models":[{"id":"agnes:agnes-2.0-flash","name":"Agnes 2.0 Flash","provider":"agnes","provider_display":"Agnes","key_source":"hosted"}]},{"id":"deepseek","name":"DeepSeek","key_source":"none","has_key":false,"models":[{"id":"deepseek:deepseek-chat","name":"DeepSeek Chat","provider":"deepseek","provider_display":"DeepSeek","key_source":"none"}]}]}
+    ;
+    main.update(&model, .{ .settings_loaded = .{ .key = 10, .outcome = .ok, .body = catalog_body } }, &fx);
+
+    const tree = try buildTree(arena, &model);
+    _ = try expectByText(tree.root, .text, "  Agnes 2.0 Flash  ✓");
+    _ = try expectByText(tree.root, .text, "  DeepSeek Chat");
+    _ = try expectByText(tree.root, .text, "Add key");
+    try testing.expect(findTextContaining(tree.root, "Ready") == null);
+    try testing.expect(findTextContaining(tree.root, "Env") == null);
+    try testing.expect(findTextContaining(tree.root, "Key required") == null);
+}
+
+test "settings general section owns appearance and about" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    model.settings.visible = true;
+
+    var tree = try buildTree(arena, &model);
+    _ = try expectByText(tree.root, .button, "Models");
+    _ = try expectByText(tree.root, .button, "General");
+    try testing.expect(findButtonContaining(tree.root, "Providers & Models") == null);
+    try testing.expect(findTextContaining(tree.root, "Appearance") == null);
+    try testing.expect(findTextContaining(tree.root, "About") == null);
+
+    var fx = noopFx(arena);
+    main.update(&model, .settings_general, &fx);
+    tree = try buildTree(arena, &model);
+    _ = try expectByText(tree.root, .text, "Appearance");
+    _ = try expectByText(tree.root, .text, "About");
+    try testing.expect(findTextContaining(tree.root, "Search providers and models") == null);
+}
+
+test "settings sidebar uses compact item sizing" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    model.settings.visible = true;
+
+    const tree = try buildTree(arena, &model);
+    const models = try expectByText(tree.root, .button, "Models");
+    const general = try expectByText(tree.root, .button, "General");
+
+    try testing.expect(models.layout.max_size.width <= 112);
+    try testing.expectEqual(@as(f32, 12), models.layout.padding.top);
+    try testing.expectEqual(@as(f32, 12), models.layout.padding.bottom);
+    try testing.expectEqual(models.frame.height, general.frame.height);
+}
+
+test "settings catalog overflow uses neutral search guidance" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    model.settings.visible = true;
+
+    model.settings.providers[0] = .{
+        .id = "openrouter",
+        .name = "OpenRouter",
+        .has_key = true,
+        .key_source = "user",
+        .model_count = 130,
+    };
+    model.settings.provider_count = 1;
+    model.settings.default_model_id = "openrouter:model-0";
+    model.available_model_count = 130;
+    for (0..130) |i| {
+        const id = try std.fmt.allocPrint(arena, "openrouter:model-{d}", .{i});
+        const name = try std.fmt.allocPrint(arena, "Model {d}", .{i});
+        model.available_models[i] = .{
+            .id = id,
+            .name = name,
+            .provider = "openrouter",
+            .provider_display = "OpenRouter",
+            .key_source = "user",
+        };
+        model.settings.providers[0].model_indices[i] = i;
+    }
+
+    const tree = try buildTree(arena, &model);
+    _ = try expectByText(tree.root, .text, "More models available. Search to narrow the catalog.");
+    try testing.expect(findTextContaining(tree.root, "Catalog truncated") == null);
+}
+
+test "settings locked model click renders centered key modal copy" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    model.settings.visible = true;
+    var fx = noopFx(arena);
+
+    const catalog_body =
+        \\{"default_model":"agnes:agnes-2.0-flash","providers":[{"id":"anthropic","name":"Anthropic","key_source":"none","has_key":false,"models":[{"id":"anthropic:claude-sonnet-4-5","name":"Claude Sonnet 4.5","provider":"anthropic","provider_display":"Anthropic","key_source":"none"}]}]}
+    ;
+    main.update(&model, .{ .settings_loaded = .{ .key = 10, .outcome = .ok, .body = catalog_body } }, &fx);
+    main.update(&model, .{ .select_model = 0 }, &fx);
+
+    const tree = try buildTree(arena, &model);
+    _ = try expectByText(tree.root, .text, "Add Anthropic key");
+    _ = try expectByText(tree.root, .text, "Required to use Claude Sonnet 4.5.");
+    _ = try expectByText(tree.root, .button, "Test & Save");
+}
+
+test "composer model cycling skips locked catalog models" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    const catalog_body =
+        \\{"default_model":"agnes:agnes-2.0-flash","providers":[{"id":"agnes","name":"Agnes","key_source":"hosted","has_key":true,"models":[{"id":"agnes:agnes-2.0-flash","name":"Agnes 2.0 Flash","provider":"agnes","provider_display":"Agnes","key_source":"hosted"}]},{"id":"anthropic","name":"Anthropic","key_source":"none","has_key":false,"models":[{"id":"anthropic:claude-sonnet-4-5","name":"Claude Sonnet 4.5","provider":"anthropic","provider_display":"Anthropic","key_source":"none"}]}]}
+    ;
+    main.update(&model, .{ .settings_loaded = .{ .key = 10, .outcome = .ok, .body = catalog_body } }, &fx);
+
+    main.update(&model, .cycle_model, &fx);
+
+    try testing.expectEqualStrings("agnes:agnes-2.0-flash", model.selectedModel());
+}
+
+test "settings toggle closes visible settings panel" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    model.settings.visible = true;
+    var fx = noopFx(arena);
+
+    main.update(&model, .open_settings, &fx);
+
+    try testing.expect(!model.settings.visible);
+    try testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
+}
+
+test "settings modal test-key network failure shows inline error" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    model.settings.key_modal_visible = true;
+    model.settings.key_testing = true;
+
+    main.update(&model, .{ .key_tested = .{ .key = 11, .outcome = .connect_failed, .body = "" } }, &fx);
+
+    try testing.expect(model.settings.key_modal_visible);
+    try testing.expect(!model.settings.key_testing);
+    try testing.expectEqualStrings("Failed to test key", model.settings.key_error);
 }

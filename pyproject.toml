@@ -76,6 +76,8 @@ allow-direct-references = true
 
 [dependency-groups]
 dev = [
+    "fastapi>=0.129.0",
+    "httpx>=0.28.1",
     "pyinstaller>=6.20.0",
     "types-pyyaml>=6.0.12.20260518",
 ]
