@@ -1,4 +1,13 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["superpowers@git+https://github.com/obra/superpowers.git"]
+  "plugin": ["superpowers@git+https://github.com/obra/superpowers.git"],
+  "mcp": {
+    "langfuse": {
+      "type": "http",
+      "url": "https://langfuse.gongchatea.com.au/api/public/mcp",
+      "headers": {
+        "Authorization": "Basic cGstbGYtNTQ0ZmNkN2QtNjU2Yy00N2IzLWI5YzAtODQ3OWVmYzQ1Mzc1OnNrLWxmLTEwODBlMDkyLThjZGUtNDViZi1iOWFkLTAzY2Y2MTBjMmYxOA=="
+      }
+    }
+  }
 }
