@@ -148,8 +148,8 @@ def _get_system_prompt(user_id: str, workspace_id: str | None = None) -> str:
 - **message_search** (use FIRST, before saying you don't know) — Full session context for specific facts, names, dates, plans, past decisions
 - **message_count** (use FOR "how many" questions) — Deterministic counting of distinct items across sessions
 - **message_timeline** (use FOR temporal reasoning) — Find dates of events, calculate "how many days between X and Y"
-- **memory_profile** — Observations the Observer collected (may be empty)
-- **memory_reflection** — Synthesized patterns from the Reflector (10+ obs, 24h min)
+- **memory_profile** — Observations collected from memory (may be empty)
+- **memory_reflection** — Synthesized patterns from memory (10+ obs, 24h min)
 
 Rule: When the user asks about past conversations, search first — don't answer from model knowledge alone."""
 

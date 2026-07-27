@@ -580,7 +580,7 @@ subagent_instruct.annotations = ToolAnnotations(title="Instruct Subagent")
 def subagent_cancel(task_id: str, user_id: str, workspace_id: str = "personal") -> str:
     """Cancel a running or pending subagent task.
 
-    Sets cancel_requested flag. The subagent's InstructionMiddleware will
+    Sets cancel_requested flag. The subagent's SubagentContext will
     raise TaskCancelledError on its next iteration.
 
     Args:

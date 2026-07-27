@@ -1,6 +1,6 @@
 """In-memory signaling between SubagentCoordinator and AgentLoop.
 
-Replaces ProgressMiddleware + InstructionMiddleware with a direct
+Replaces middleware-based progress/instruction with a direct
 context object. Cancel uses asyncio.Event (instant). Instructions
 use asyncio.Queue (real-time). Progress uses a callback (fire-and-forget
 DB write). Doom loop detection tracks last 3 tool calls.

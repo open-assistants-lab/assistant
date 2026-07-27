@@ -196,8 +196,7 @@ The codebase has a **custom agent SDK** (`src/sdk/`) that replaces LangChain/Lan
 | `subagent_models.py` | 94 | `AgentDef`, `SubagentResult`, `TaskStatus`, `TaskCancelledError`. Drops `disallowed_tools`. |
 | `work_queue.py` | 441 | `WorkQueueDB` — aiosqlite per-user SQLite work queue |
 | `coordinator.py` | 633 | `SubagentCoordinator` — PROFILE.md support, capabilities filtering |
-| `middleware_progress.py` | 88 | `ProgressMiddleware` — progress updates, doom loop detection |
-| `middleware_instruction.py` | 62 | `InstructionMiddleware` — cancel signal, course-correction injection |
+| `middleware_rubric.py` | ~300 | `RubricMiddleware` — verification loop (grader LLM, rubric, retry) |
 | `runner.py` | 537 | `create_sdk_loop`, `run_sdk_agent` — capabilities-filtered tool registration |
 | `workspace_models.py` | 128 | `Workspace`, workspace-level path models |
 | `agent_scheduler.py` | 308 | Background agent scheduling (proactive check-ins) |
@@ -219,12 +218,12 @@ The codebase has a **custom agent SDK** (`src/sdk/`) that replaces LangChain/Lan
 11. **Provider escape hatches**: `provider_options` on inputs (keyed by provider name), `provider_metadata` on outputs. Enables Anthropic `thinking`, Gemini `thinkingConfig`, OpenAI `logprobs` etc.
 12. **Reasoning as first-class content**: `Message.reasoning` field persists thinking tokens across turns. Anthropic `thinking` blocks handled in `to_anthropic()`/`from_anthropic_block()`.
 13. **Sequential tool execution**: AgentLoop executes tools one at a time (parallel deferred).
-8. **No checkpoints**: LangGraph checkpoint system was permanently disabled. Conversation history is managed by `MemoryMiddleware` + `SummarizationMiddleware`.
+8. **No checkpoints**: LangGraph checkpoint system was permanently disabled. Conversation history is managed by `SummarizationMiddleware`.
 9. **Parallel tool execution**: `_classify_tool_calls()` splits into `parallel_safe` (read-only or non-destructive), `sequential` (destructive but not needing HITL), and `interrupts` (destructive + not read-only). Concurrent batch via `asyncio.gather()`.
 10. **Usage tracking**: `Message.usage` (type `Usage`) carries token counts from provider responses. Providers populate `Usage` with `input_tokens`, `output_tokens`, `reasoning_tokens`, `cache_read_tokens`, `cache_creation_tokens`. `AgentLoop` extracts usage and passes to `CostTracker.add_usage()`. Streaming uses `StreamChunk.usage_event(Usage)` before `done` event.
 11. **provider_options on RunConfig**: `RunConfig.provider_options` (dict keyed by provider_id) is now wired through `AgentLoop.run()`, `run_stream()`, and `run_single()` to all provider calls. Previously hardcoded `None`.
 12. **MCP Tool Bridge**: `MCPToolBridge` converts MCP `mcp` SDK tool objects → SDK `ToolDefinition` with namespaced names `mcp__{server}__{tool}`. Tool invocations route through `session.call_tool()`. Supports degraded-mode (partial server failures). `mcp_reload` dynamically registers/unregisters tools in the active `AgentLoop` via `register_tool()`/`unregister_tool()`.
-13. **Subagent V1 work_queue coordination**: `WorkQueueDB` (aiosqlite) per-user at `data/private/subagents/work_queue.db`. 11 columns, 2 indexes. Config frozen at invocation into `work_queue.config`. `ProgressMiddleware` updates progress + detects doom loops (3x same tool+args). `InstructionMiddleware` checks cancel/instructions before each LLM call. `SubagentCoordinator.invoke()` wraps `AgentLoop.run()` in `asyncio.wait_for(timeout)`. All failure modes (cancel, timeout, cost exceeded, provider error) result in terminal work_queue status.
+13. **Subagent V1 work_queue coordination**: `WorkQueueDB` (aiosqlite) per-user at `data/private/subagents/work_queue.db`. 11 columns, 2 indexes. Config frozen at invocation into `work_queue.config`. `SubagentContext` provides progress updates, doom loop detection (3x same tool+args), cancel signal, and course-correction injection. `SubagentCoordinator.invoke()` wraps `AgentLoop.run()` in `asyncio.wait_for(timeout)`. All failure modes (cancel, timeout, cost exceeded, provider error) result in terminal work_queue status.
 
 **Known Provider Behaviors:**
 - OpenAI/Anthropic no longer emit duplicate `tool_end` — fixed by Phase 5 block-structured refactor
@@ -396,11 +395,8 @@ assistant/
 │   │   ├── state.py             # AgentState
 │   │   ├── loop.py              # AgentLoop, Interrupt, RunConfig, CostTracker
 │   │   ├── middleware.py             # Middleware ABC
-│   │   ├── middleware_memory.py      # MemoryMiddleware (SDK-native)
+│   │   ├── middleware_rubric.py       # RubricMiddleware (verification loop)
 │   │   ├── middleware_summarization.py  # SummarizationMiddleware
-│   │   ├── middleware_observation.py  # ObservationMiddleware (Observer + Reflector)
-│   │   ├── middleware_progress.py  # ProgressMiddleware (subagent progress + doom loop)
-│   │   ├── middleware_instruction.py  # InstructionMiddleware (subagent cancel/instructions)
 │   │   ├── native_tools.py      # ToolRegistry + category mapping
 │   │   ├── capabilities.py      # load/merge/save capabilities, tool defaults
 │   │   ├── agent_validation.py  # validate_agent_def (no circular imports)
@@ -508,8 +504,7 @@ SQLite work_queue-backed coordination with supervisor pattern. Full design in `d
 **New files:**
 - `src/sdk/subagent_models.py` — `AgentDef`, `SubagentResult`, `TaskStatus`, `TaskCancelledError`
 - `src/sdk/work_queue.py` — `WorkQueueDB` (aiosqlite, per-user at `data/private/subagents/work_queue.db`)
-- `src/sdk/middleware_progress.py` — `ProgressMiddleware` (progress updates, doom loop detection)
-- `src/sdk/middleware_instruction.py` — `InstructionMiddleware` (cancel signal, course-correction injection)
+- `src/sdk/subagent_context.py` — `SubagentContext` (replaces middleware-based progress/instruction)
 - `src/sdk/coordinator.py` — `SubagentCoordinator` (create, update, invoke, cancel, instruct, delete)
 - `tests/sdk/test_subagent_v1.py` — 38 tests
 
@@ -528,7 +523,7 @@ SQLite work_queue-backed coordination with supervisor pattern. Full design in `d
 - Config frozen at invocation into `work_queue.config` (amendments don't affect running tasks)
 - Recursion guard: subagent tools (`subagent_*`) are blocked via `capabilities.yaml` defaults (was `disallowed_tools`)
 - `SubagentCoordinator.start()` schedules background execution and returns a task ID
-- Progress via `ProgressMiddleware.abefore_model` + polling; InstructionMiddleware checks cancel/instructions before each LLM call
+- Progress via `SubagentContext` + polling; SubagentContext checks cancel/instructions before each LLM call
 - Doom loop: same tool+args called 3x → `progress.stuck = true` + auto-instruction
 - Agent definitions use **PROFILE.md** (frontmatter + Markdown body) matching Agentskills.io convention
 

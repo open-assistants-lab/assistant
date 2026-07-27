@@ -1,7 +1,7 @@
 """Subagent coordinator — creates, invokes, supervises subagents via work_queue.
 
 Replaces SubagentManager with work_queue-backed orchestration.
-Each invoke() creates a fresh AgentLoop with ProgressMiddleware + InstructionMiddleware,
+Each invoke() creates a fresh AgentLoop with SubagentContext,
 runs it with timeout and cost limits, and stores structured results in work_queue.
 """
 

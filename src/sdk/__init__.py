@@ -11,7 +11,7 @@ Public API:
     AgentLoop, Interrupt, RunConfig, CostTracker, Usage - agent loop
     Middleware - middleware base class
     SummarizationMiddleware - conversation summarization (SDK-native)
-    SubagentContext - in-memory subagent signaling (replaces ProgressMiddleware + InstructionMiddleware)
+    SubagentContext - in-memory subagent signaling (replaces middleware-based progress/instruction)
     SubagentCancelledError - raised by AgentLoop on subagent cancel
     HookManager, HookConfig, HookResult, HookDecision - shell hooks
     InputGuardrail, OutputGuardrail, ToolGuardrail, GuardrailResult, GuardrailTripwire - guardrails

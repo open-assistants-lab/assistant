@@ -16,9 +16,9 @@ def memory_profile(
     user_id: str = "default_user",
     workspace_id: str = "personal",
 ) -> str:
-    """Return observations about the user — may be empty if Observer hasn't run.
+    """Return observations about the user — may be empty if none collected.
 
-    Returns recent observations collected by the Observer. If no observations
+    Returns recent observations. If no observations
     are available, use message_search to find specific facts from conversation
     history instead.
 
@@ -61,8 +61,8 @@ def memory_reflection(
 ) -> str:
     """Search synthesized reflections — patterns and insights about the user.
 
-    Reflections are higher-order patterns discovered by the Reflector from
-    analyzing observations across time. May be empty if the Reflector hasn't
+    Reflections are higher-order patterns discovered from
+    analyzing observations across time. May be empty if no patterns have been
     run yet (requires 10+ observations and 24h interval or 50 unreflected facts).
 
     Use when looking for themes, trends, or synthesized understanding about

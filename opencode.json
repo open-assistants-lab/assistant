@@ -3,7 +3,7 @@
   "plugin": ["superpowers@git+https://github.com/obra/superpowers.git"],
   "mcp": {
     "langfuse": {
-      "type": "http",
+      "type": "remote",
       "url": "https://langfuse.gongchatea.com.au/api/public/mcp",
       "headers": {
         "Authorization": "Basic cGstbGYtMDA0NWIzNDgtYmFiZS00ZjBiLTkyZTgtOGJhNDMwYjI3NmM5OnNrLWxmLTZmZTgzYjg0LTgxOWItNDc5OS04NzM1LWUzMjFjMTEwZDkyYg=="

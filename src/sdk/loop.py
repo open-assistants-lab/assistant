@@ -148,7 +148,7 @@ class AgentLoop:
             provider=ollama_provider,
             tools=[time_get, files_list],
             system_prompt="You are a helpful assistant.",
-            middlewares=[MemoryMiddleware(user_id="alice")],
+            middlewares=[],
         )
         result = await loop.run(messages)
         # or
