@@ -24,6 +24,7 @@ from src.http.routers import (
     tools_router,
     user_prompt_router,
     webhooks_router,
+    improvements_router,
     workspace_router,
     workspaces_router,
 )
@@ -144,6 +145,7 @@ app.include_router(capabilities.router)
 app.include_router(ws_router)
 app.include_router(settings_router)
 app.include_router(webhooks_router)
+app.include_router(improvements_router)
 
 # ConnectKit OAuth + catalog routers (safe if connectkit not installed)
 try:

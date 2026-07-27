@@ -689,6 +689,8 @@ async def run_sdk_agent(
     loop.rubric = rubric
     try:
         result = await loop.run(messages)
+        # Persist RunOutcome for loop 4 (hill-climbing)
+        await _persist_run_outcome(user_id, session_id, result, loop, "manual")
         return result
     finally:
         # Store verification verdict on loop before unregister so router can read it
@@ -784,3 +786,58 @@ def reset_all_sdk_loops() -> None:
     """Reset all cached agent loops."""
     _loop_cache.clear()
     logger.info("sdk_runner.all_loops_reset", {})
+
+
+async def _persist_run_outcome(
+    user_id: str,
+    session_id: str | None,
+    result_messages: list[Message],
+    loop: AgentLoop,
+    trigger_type: str = "manual",
+) -> None:
+    """Persist a RunOutcome for loop 4 (hill-climbing analysis)."""
+    try:
+        from src.sdk.loops.storage import (
+            LoopEngineeringDB,
+            RunOutcome,
+            get_loop_engineering_db_path,
+        )
+
+        response_text = ""
+        for msg in reversed(result_messages):
+            if msg.role == "assistant" and isinstance(msg.content, str):
+                response_text = msg.content
+                break
+
+        verification_status: str | None = None
+        verification_iterations = 0
+        verification_evaluations: list[dict] = []
+        if loop.state and loop.state.extra:
+            verification_status = loop.state.extra.get("_rubric_status")
+            verification_iterations = loop.state.extra.get("_rubric_iterations", 0)
+            verification_evaluations = loop.state.extra.get("_rubric_evaluations", [])
+
+        import time
+        import uuid
+
+        outcome = RunOutcome(
+            run_id=str(uuid.uuid4()),
+            user_id=user_id,
+            session_id=session_id or "default",
+            trigger_type=trigger_type,
+            response=response_text[:1000],
+            verification_status=verification_status,
+            verification_iterations=verification_iterations,
+            verification_evaluations=verification_evaluations,
+            cost_usd=0.0,
+            input_tokens=0,
+            output_tokens=0,
+            model=getattr(loop.provider, "model", "unknown"),
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        )
+
+        db = LoopEngineeringDB(get_loop_engineering_db_path(user_id))
+        await db.init()
+        await db.save_run_outcome(outcome)
+    except Exception as e:
+        logger.warning("run_outcome.persist_failed", {"error": str(e)}, user_id=user_id)
