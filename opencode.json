@@ -6,7 +6,7 @@
       "type": "http",
       "url": "https://langfuse.gongchatea.com.au/api/public/mcp",
       "headers": {
-        "Authorization": "Basic cGstbGYtNTQ0ZmNkN2QtNjU2Yy00N2IzLWI5YzAtODQ3OWVmYzQ1Mzc1OnNrLWxmLTEwODBlMDkyLThjZGUtNDViZi1iOWFkLTAzY2Y2MTBjMmYxOA=="
+        "Authorization": "Basic cGstbGYtMDA0NWIzNDgtYmFiZS00ZjBiLTkyZTgtOGJhNDMwYjI3NmM5OnNrLWxmLTZmZTgzYjg0LTgxOWItNDc5OS04NzM1LWUzMjFjMTEwZDkyYg=="
       }
     }
   }
