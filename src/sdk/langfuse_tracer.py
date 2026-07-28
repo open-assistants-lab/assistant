@@ -340,16 +340,22 @@ class LangfuseTracer:
         if client is None:
             return
 
+        from src.sdk.middleware import Middleware
         from src.sdk.state import AgentState
 
         async def traced_run_hooks(hook_name: str, state: AgentState) -> None:
             for mw in loop.middlewares:
+                method = getattr(mw, hook_name, None)
+                if method is None:
+                    continue
+                # Skip inherited no-op hooks from Middleware base class — only trace
+                # hooks that the middleware actually overrides
+                if getattr(method, "__func__", method) is getattr(Middleware, hook_name, None):
+                    continue
+
                 with client.start_as_current_observation(
                     as_type="span", name=f"middleware:{mw.name}.{hook_name}"
                 ) as span:
-                    method = getattr(mw, hook_name, None)
-                    if method is None:
-                        continue
                     try:
                         updates = await method(state)
                         loop._apply_updates(state, updates)
