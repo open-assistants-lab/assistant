@@ -201,9 +201,9 @@ class SummarizationMiddleware(Middleware):
     async def _generate_summary(self, conversation_text: str) -> str | None:
         try:
             from src.sdk.loop import AgentLoop
-            from src.sdk.providers.factory import create_provider
+            from src.sdk.providers.factory import create_model_from_config
 
-            provider = create_provider(self.model)
+            provider = create_model_from_config(self.model)
             loop = AgentLoop(provider=provider)
 
             summary_messages = [

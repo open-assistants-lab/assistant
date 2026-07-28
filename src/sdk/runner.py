@@ -474,7 +474,7 @@ async def create_sdk_loop(user_id: str, workspace_id: str = "personal", model: s
             SummarizationMiddleware(
                 trigger_tokens=summary_config.trigger_tokens,
                 keep_tokens=summary_config.keep_tokens,
-                model=model_str,
+                model=summary_config.model or model_str,
                 on_summarize=_persist_summary,
             )
         )
