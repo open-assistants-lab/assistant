@@ -305,16 +305,14 @@ async def _run_agent_stream(
                 break
 
             elif event.kind == "rubric_evaluation_start":
-                import json as _json
                 await websocket.send_json(
-                    {"type": "rubric_evaluation_start", "data": _json.loads(event.content) if event.content else {}}
+                    {"type": "rubric_evaluation_start", "data": json.loads(event.content) if event.content else {}}
                     | {"workspace_id": workspace_id}
                 )
 
             elif event.kind == "rubric_evaluation_end":
-                import json as _json
                 await websocket.send_json(
-                    {"type": "rubric_evaluation_end", "data": _json.loads(event.content) if event.content else {}}
+                    {"type": "rubric_evaluation_end", "data": json.loads(event.content) if event.content else {}}
                     | {"workspace_id": workspace_id}
                 )
 

@@ -257,7 +257,6 @@ async def get_conversation(
             {
                 "role": m.role,
                 "content": m.content,
-                "reasoning": m.metadata.get("reasoning") if m.metadata else None,
                 "source": m.metadata.get("source") if m.metadata else None,
                 "timestamp": m.ts.isoformat() if m.ts else None,
                 "metadata": m.metadata,
