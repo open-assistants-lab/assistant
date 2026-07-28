@@ -192,6 +192,55 @@ def _persist_collected_stream_state(
         )
 
 
+@router.get("/context-info")
+async def get_context_info(
+    user_id: str = "default_user",
+    session_id: str | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Get context window info: model's max tokens, current usage, and summarization threshold."""
+    from src.config import get_settings
+    from src.sdk.middleware_summarization import count_tokens_approximately
+    from src.sdk.registry import get_model_info
+
+    settings = get_settings()
+
+    # Resolve model
+    model_str = model or settings.agent.model
+
+    # Get model context window from registry
+    context_window = None
+    try:
+        info = get_model_info(model_str)
+        if info and info.context_window:
+            context_window = info.context_window
+    except Exception:
+        pass
+
+    # Get current conversation token count
+    conversation = get_message_store(user_id)
+    sid = session_id or "default"
+    recent = conversation.get_messages_by_session_id(sid, 100)
+    sdk_msgs = _messages_from_conversation(recent)
+    current_tokens = count_tokens_approximately(sdk_msgs) if sdk_msgs else 0
+
+    # Get summarization config
+    sum_config = settings.memory.summarization
+    trigger = sum_config.get_trigger()
+    trigger_tokens = None
+    if trigger and isinstance(trigger, tuple) and trigger[0] == "tokens":
+        trigger_tokens = trigger[1]
+
+    return {
+        "model": model_str,
+        "context_window": context_window,
+        "current_tokens": current_tokens,
+        "summarization_threshold": trigger_tokens,
+        "summarization_enabled": sum_config.enabled,
+        "context_percentage": round((current_tokens / context_window * 100), 1) if context_window else None,
+    }
+
+
 @router.get("/conversation")
 async def get_conversation(
     user_id: str = "default_user", limit: int = 100, session_id: str | None = None
@@ -208,6 +257,8 @@ async def get_conversation(
             {
                 "role": m.role,
                 "content": m.content,
+                "reasoning": m.metadata.get("reasoning") if m.metadata else None,
+                "source": m.metadata.get("source") if m.metadata else None,
                 "timestamp": m.ts.isoformat() if m.ts else None,
                 "metadata": m.metadata,
             }
@@ -456,6 +507,7 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
         verbose_data: dict[str, Any] | None = None
         tool_events: list[dict[str, Any]] = []
         ai_content_parts: list[str] = []
+        last_ai: Message | None = None
         reasoning_parts: list[str] = []
         seen_canonical_text: set[str] = set()
         seen_canonical_reasoning: set[str] = set()
@@ -635,6 +687,21 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
             verbose_data = {}
         verbose_data["canvas_blocks"] = canvas_blocks
 
+        # Extract reasoning and usage from last assistant message
+        reasoning_text = None
+        usage_data = None
+        if last_ai is not None:
+            if last_ai.reasoning:
+                reasoning_text = last_ai.reasoning
+            if last_ai.usage:
+                usage_data = {
+                    "input_tokens": last_ai.usage.input_tokens,
+                    "output_tokens": last_ai.usage.output_tokens,
+                    "reasoning_tokens": last_ai.usage.reasoning_tokens,
+                    "cache_read_tokens": last_ai.usage.cache_read_tokens,
+                    "cache_creation_tokens": last_ai.usage.cache_creation_tokens,
+                }
+
         # Extract verification verdict from cached loop
         verification_verdict = None
         from src.sdk.runner import _loop_cache, _loop_cache_key
@@ -647,9 +714,11 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
 
         return MessageResponse(
             response=response,
+            reasoning=reasoning_text,
             verbose_data=verbose_data,
             tool_calls=tool_calls_list,
             verification=verification_verdict,
+            usage=usage_data,
         )
 
     except Exception as e:
@@ -811,6 +880,19 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                         aborted = True
                         yield sse("error", {"content": event.content})
                         break
+
+                    elif event.kind == "rubric_evaluation_start":
+                        yield sse("rubric_evaluation_start", json.loads(event.content) if event.content else {})
+
+                    elif event.kind == "rubric_evaluation_end":
+                        yield sse("rubric_evaluation_end", json.loads(event.content) if event.content else {})
+
+                    elif event.kind == "usage" and chunk.usage:
+                        yield sse("usage", {
+                            "input_tokens": chunk.usage.input_tokens,
+                            "output_tokens": chunk.usage.output_tokens,
+                            "reasoning_tokens": chunk.usage.reasoning_tokens,
+                        })
 
                     elif event.kind == "done" and event.content:
                         # Only emit done content as messages if no streaming text was received

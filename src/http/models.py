@@ -27,10 +27,12 @@ class VerificationVerdict(BaseModel):
 
 class MessageResponse(BaseModel):
     response: str
+    reasoning: str | None = None
     error: str | None = None
     verbose_data: dict[str, Any] | None = None
     tool_calls: list[dict[str, Any]] | None = Field(default=None)
     verification: VerificationVerdict | None = None
+    usage: dict[str, Any] | None = None
 
 
 class MemorySearchRequest(BaseModel):

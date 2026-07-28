@@ -647,8 +647,13 @@ def _messages_from_conversation(messages: list[Any]) -> list[Message]:
     for m in messages:
         role = getattr(m, "role", "user")
         content = getattr(m, "content", "")
+        meta = getattr(m, "metadata", {}) or {}
+        source = meta.get("source")
         if role == "user":
-            sdk_messages.append(Message.user(content))
+            if source:
+                sdk_messages.append(Message(role="user", content=content, source=source))
+            else:
+                sdk_messages.append(Message.user(content))
             pending_reasoning = None
             last_assistant_had_tool_calls = False
         elif role == "summary":
