@@ -77,6 +77,7 @@ class SummarizationConfig(_BaseSettings):
     trigger: list[Any] = Field(default_factory=lambda: ["tokens", 50000])
     keep: list[Any] = Field(default_factory=lambda: ["messages", 20])
     trim_tokens_to_summarize: int | None = 4000
+    prompt_file: str = Field(default="summarisation_prompt.md", description="Filename for summary prompt — looked up in per-user dir, then defaults/")
 
     # Old fields for backward compat
     trigger_tokens: int | None = None

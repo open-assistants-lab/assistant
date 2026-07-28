@@ -476,6 +476,7 @@ async def create_sdk_loop(user_id: str, workspace_id: str = "personal", model: s
                 trigger=summary_config.get_trigger(),
                 keep=summary_config.get_keep(),
                 trim_tokens_to_summarize=summary_config.trim_tokens_to_summarize,
+                prompt_file=summary_config.prompt_file,
                 on_summarize=_persist_summary,
             )
         )

@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from collections.abc import Awaitable, Callable, Iterable
 from functools import partial
+from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 from src.app_logging import get_logger
@@ -127,6 +128,35 @@ def _get_approximate_token_counter(model: Any) -> TokenCounter:
     return partial(count_tokens_approximately)
 
 
+def _load_prompt_file(prompt_file: str) -> str | None:
+    """Load summary prompt from file.
+
+    Lookup order:
+    1. Per-user: data/users/{user_id}/{prompt_file} (if user_id available)
+    2. Default: defaults/{prompt_file} (shipped with repo)
+    3. Fallback: None (caller uses DEFAULT_SUMMARY_PROMPT)
+    """
+    # Try per-user file
+    try:
+        from src.config import get_settings
+        settings = get_settings()
+        user_path = Path(settings.data_path) / "users" / "default_user" / prompt_file
+        if user_path.exists():
+            return user_path.read_text()
+    except Exception:
+        pass
+
+    # Try default file (shipped with repo)
+    try:
+        default_path = Path(__file__).parent.parent.parent / "defaults" / prompt_file
+        if default_path.exists():
+            return default_path.read_text()
+    except Exception:
+        pass
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Middleware
 # ---------------------------------------------------------------------------
@@ -146,16 +176,25 @@ class SummarizationMiddleware(Middleware):
         trigger: ContextSize | TriggerClause | list[ContextSize | TriggerClause] | None = None,
         keep: ContextSize = ("messages", _DEFAULT_MESSAGES_TO_KEEP),
         token_counter: TokenCounter | None = None,
-        summary_prompt: str = DEFAULT_SUMMARY_PROMPT,
+        summary_prompt: str | None = None,
+        prompt_file: str | None = None,
         trim_tokens_to_summarize: int | None = _DEFAULT_TRIM_TOKEN_LIMIT,
         on_summarize: SummaryCallback | None = None,
     ) -> None:
         self.model = model
         self.trigger = trigger
         self.keep = self._validate_context_size(keep, "keep")
-        self.summary_prompt = summary_prompt
         self.trim_tokens_to_summarize = trim_tokens_to_summarize
         self._on_summarize = on_summarize
+        self._prompt_file = prompt_file
+
+        # Load summary prompt: explicit param > file > built-in default
+        if summary_prompt is not None:
+            self.summary_prompt = summary_prompt
+        elif prompt_file is not None:
+            self.summary_prompt = _load_prompt_file(prompt_file) or DEFAULT_SUMMARY_PROMPT
+        else:
+            self.summary_prompt = DEFAULT_SUMMARY_PROMPT
 
         # Normalize trigger into list of clauses (AND within, OR across)
         self._trigger_clauses = self._normalize_trigger(trigger)

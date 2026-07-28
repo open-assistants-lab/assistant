@@ -40,6 +40,7 @@ memory:
     - messages
     - 20
     model: ollama-cloud:deepseek-v4-flash
+    prompt_file: summarisation_prompt.md
     trigger:
     - tokens
     - 8000
