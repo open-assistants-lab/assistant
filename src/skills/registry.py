@@ -1,6 +1,6 @@
 """Skill registry — user-level storage for runtime skills.
 
-Bundled seed skills (src/skills_seed/) are seeded to the user's skills directory on first
+Bundled seed skills (seeds/skills/) are seeded to the user's skills directory on first
 run. workspace_id and workspace skill directories are accepted for compatibility but ignored
 at runtime.
 """
@@ -43,7 +43,7 @@ def reset_skill_registries() -> None:
 class SkillRegistry:
     """Registry for user-level skills.
 
-    On first run, bundled seed skills are seeded from src/skills_seed/ to the user's skills
+    On first run, bundled seed skills are seeded from seeds/skills/ to the user's skills
     directory. workspace_id and workspace_skills_dir are compatibility-only.
     """
 
@@ -80,7 +80,7 @@ class SkillRegistry:
         if seed_marker.exists():
             return
 
-        system_src = Path("src/skills_seed")
+        system_src = Path("seeds/skills")
         if not system_src.exists():
             self.skills_dir.mkdir(parents=True, exist_ok=True)
             seed_marker.write_text("", encoding="utf-8")

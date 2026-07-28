@@ -128,33 +128,34 @@ def _get_approximate_token_counter(model: Any) -> TokenCounter:
     return partial(count_tokens_approximately)
 
 
-def _load_prompt_file(prompt_file: str) -> str | None:
-    """Load summary prompt from file.
+def _load_prompt_file(prompt_file: str, user_id: str = "default_user") -> str:
+    """Load summary prompt from per-user file.
 
-    Lookup order:
-    1. Per-user: data/users/{user_id}/{prompt_file} (if user_id available)
-    2. Default: defaults/{prompt_file} (shipped with repo)
-    3. Fallback: None (caller uses DEFAULT_SUMMARY_PROMPT)
+    If the per-user file doesn't exist, seed it from seeds/prompts/ first.
+    This ensures every user has their own editable copy.
     """
-    # Try per-user file
-    try:
-        from src.config import get_settings
-        settings = get_settings()
-        user_path = Path(settings.data_path) / "users" / "default_user" / prompt_file
-        if user_path.exists():
-            return user_path.read_text()
-    except Exception:
-        pass
+    from src.config import get_settings
+    settings = get_settings()
 
-    # Try default file (shipped with repo)
-    try:
-        default_path = Path(__file__).parent.parent.parent / "defaults" / prompt_file
-        if default_path.exists():
-            return default_path.read_text()
-    except Exception:
-        pass
+    user_path = Path(settings.data_path) / "users" / user_id / prompt_file
+    seed_path = Path(__file__).parent.parent.parent / "seeds" / "prompts" / prompt_file
 
-    return None
+    # Seed: copy from seeds/ to per-user if user file doesn't exist
+    if not user_path.exists() and seed_path.exists():
+        user_path.parent.mkdir(parents=True, exist_ok=True)
+        user_path.write_text(seed_path.read_text())
+        logger.info("summarization.prompt_seeded", {"user_id": user_id, "path": str(user_path)}, user_id=user_id)
+
+    # Read per-user file
+    if user_path.exists():
+        return user_path.read_text()
+
+    # Fallback to seeds/ if per-user seeding failed
+    if seed_path.exists():
+        return seed_path.read_text()
+
+    # Last resort: built-in constant
+    return DEFAULT_SUMMARY_PROMPT
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +179,7 @@ class SummarizationMiddleware(Middleware):
         token_counter: TokenCounter | None = None,
         summary_prompt: str | None = None,
         prompt_file: str | None = None,
+        user_id: str | None = None,
         trim_tokens_to_summarize: int | None = _DEFAULT_TRIM_TOKEN_LIMIT,
         on_summarize: SummaryCallback | None = None,
     ) -> None:
@@ -188,11 +190,11 @@ class SummarizationMiddleware(Middleware):
         self._on_summarize = on_summarize
         self._prompt_file = prompt_file
 
-        # Load summary prompt: explicit param > file > built-in default
+        # Load summary prompt: explicit param > file (seeded per user) > built-in default
         if summary_prompt is not None:
             self.summary_prompt = summary_prompt
-        elif prompt_file is not None:
-            self.summary_prompt = _load_prompt_file(prompt_file) or DEFAULT_SUMMARY_PROMPT
+        elif prompt_file is not None and user_id is not None:
+            self.summary_prompt = _load_prompt_file(prompt_file, user_id=user_id)
         else:
             self.summary_prompt = DEFAULT_SUMMARY_PROMPT
 

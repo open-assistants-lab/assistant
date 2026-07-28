@@ -53,7 +53,7 @@ class SkillStorage:
 class SystemSkillStorage(SkillStorage):
     """Storage for bundled seed skills."""
 
-    def __init__(self, base_dir: str | Path = "src/skills_seed"):
+    def __init__(self, base_dir: str | Path = "seeds/skills"):
         super().__init__(base_dir)
 
 

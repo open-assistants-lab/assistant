@@ -122,12 +122,12 @@ def _get_user_prompt_context(user_id: str) -> str:
 
 
 def _ensure_prompt_seeded(user_id: str) -> None:
-    """Seed AGENTS.md from src/prompt_seed/ on first access."""
+    """Seed Prompt.md from seeds/prompts/ on first access."""
     prompt_path = DataPaths(user_id=user_id).user_prompt_path()
     marker = prompt_path.parent / ".prompt_seeded"
     if prompt_path.exists() or marker.exists():
         return
-    seed = Path("src/prompt_seed/AGENTS.md")
+    seed = Path("seeds/prompts/Prompt.md")
     if seed.exists():
         prompt_path.parent.mkdir(parents=True, exist_ok=True)
         prompt_path.write_text(seed.read_text(encoding="utf-8"), encoding="utf-8")
@@ -477,6 +477,7 @@ async def create_sdk_loop(user_id: str, workspace_id: str = "personal", model: s
                 keep=summary_config.get_keep(),
                 trim_tokens_to_summarize=summary_config.trim_tokens_to_summarize,
                 prompt_file=summary_config.prompt_file,
+                user_id=user_id,
                 on_summarize=_persist_summary,
             )
         )

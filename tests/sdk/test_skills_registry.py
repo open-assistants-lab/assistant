@@ -94,7 +94,7 @@ def test_get_skill_registry_uses_user_cache_keys():
 
 def test_seeded_skill_deleted_after_reload_is_not_reseeded(tmp_path, monkeypatch):
     """Seed marker makes seeded skills normal user skills after first seed."""
-    seed_root = tmp_path / "src" / "skills_seed"
+    seed_root = tmp_path / "seeds" / "skills"
     seeded = seed_root / "seeded-skill"
     seeded.mkdir(parents=True)
     (seeded / "SKILL.md").write_text("""---
