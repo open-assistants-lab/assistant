@@ -47,7 +47,7 @@ You must respond with valid JSON matching this schema:
 
 MAX_TRANSCRIPT_MESSAGES = 30
 MAX_TRANSCRIPT_CHARS_PER_MESSAGE = 4000
-RUBRIC_GRADER_SOURCE = "rubric_grader"
+RUBRIC_GRADER_SOURCE = "rubric_middleware"
 _PAYLOAD_CLOSER_RE = re.compile(r"</(rubric|transcript)", re.IGNORECASE)
 
 
@@ -100,7 +100,7 @@ def _build_grader_transcript(messages: list[Message]) -> str:
     for msg in messages:
         if msg.role != "user":
             continue
-        if getattr(msg, "lc_source", None) == RUBRIC_GRADER_SOURCE:
+        if getattr(msg, "source", None) == RUBRIC_GRADER_SOURCE:
             continue
         first_user = msg
         break
@@ -219,7 +219,7 @@ class RubricMiddleware(Middleware):
 
         if evaluation["result"] == "needs_revision":
             feedback = self._revision_prompt(evaluation)
-            state.add_message(Message(role="user", content=feedback, lc_source=RUBRIC_GRADER_SOURCE))
+            state.add_message(Message(role="user", content=feedback, source=RUBRIC_GRADER_SOURCE))
             state.extra["_needs_rerun"] = True
 
         return None

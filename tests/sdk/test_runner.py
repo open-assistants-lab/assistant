@@ -26,9 +26,12 @@ async def test_create_sdk_loop_wires_on_summarize():
     ):
         settings = mock_settings.return_value
         settings.memory.summarization.enabled = True
-        settings.memory.summarization.trigger_tokens = 10
-        settings.memory.summarization.keep_tokens = 5
+        settings.memory.summarization.get_trigger = lambda: ("tokens", 10)
+        settings.memory.summarization.get_keep = lambda: ("messages", 5)
         settings.memory.summarization.model = "ollama:test-model"
+        settings.memory.summarization.trim_tokens_to_summarize = 4000
+        settings.memory.summarization.trigger_tokens = None
+        settings.memory.summarization.keep_tokens = None
         settings.agent.model = "ollama:test-model"
 
         mock_provider = AsyncMock()
@@ -49,7 +52,7 @@ async def test_create_sdk_loop_wires_on_summarize():
         assert summarization_mw is not None
         assert summarization_mw._on_summarize is not None
 
-        summarization_mw._generate_summary = AsyncMock(
+        summarization_mw._acreate_summary = AsyncMock(
             return_value=(
                 "This is a test summary of the conversation. It covers the key topics discussed "
                 "including user preferences, decisions made, and action items identified. "
@@ -179,9 +182,12 @@ async def test_run_sdk_agent_stream_triggers_summarization():
     ):
         settings = mock_settings.return_value
         settings.memory.summarization.enabled = True
-        settings.memory.summarization.trigger_tokens = 10
-        settings.memory.summarization.keep_tokens = 5
+        settings.memory.summarization.get_trigger = lambda: ("tokens", 10)
+        settings.memory.summarization.get_keep = lambda: ("messages", 5)
         settings.memory.summarization.model = "ollama:test-model"
+        settings.memory.summarization.trim_tokens_to_summarize = 4000
+        settings.memory.summarization.trigger_tokens = None
+        settings.memory.summarization.keep_tokens = None
         settings.agent.model = "ollama:test-model"
 
         mock_create_provider.return_value = MockStreamProvider()
@@ -189,7 +195,7 @@ async def test_run_sdk_agent_stream_triggers_summarization():
         mock_store = MagicMock()
         mock_get_store.return_value = mock_store
 
-        # Pre-create the loop so we can mock _generate_summary on the middleware
+        # Pre-create the loop so we can mock _acreate_summary on the middleware
         loop = await get_sdk_loop(user_id="test_stream_user", workspace_id="personal")
 
         summarization_mw = None
@@ -211,7 +217,7 @@ async def test_run_sdk_agent_stream_triggers_summarization():
             "The summary captures all essential information for future reference. "
             "Nothing important was omitted from this conversation summary."
         )
-        summarization_mw._generate_summary = AsyncMock(return_value=summary_text)
+        summarization_mw._acreate_summary = AsyncMock(return_value=summary_text)
 
         long_msgs = [Message.user(f"Message number {i} about various topics.") for i in range(30)]
 

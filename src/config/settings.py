@@ -1,6 +1,7 @@
 """Settings module for Assistant."""
 
 from pathlib import Path
+from typing import Any
 
 import yaml
 from pydantic import Field
@@ -72,11 +73,26 @@ class SummarizationConfig(_BaseSettings):
     """Summarization middleware configuration (short-term token reduction)."""
 
     enabled: bool = True
-    trigger_tokens: int = 50000
-    keep_tokens: int = 1000
     model: str = Field(default="ollama:minimax-m2.5")
+    trigger: list[Any] = Field(default_factory=lambda: ["tokens", 50000])
+    keep: list[Any] = Field(default_factory=lambda: ["messages", 20])
+    trim_tokens_to_summarize: int | None = 4000
+
+    # Old fields for backward compat
+    trigger_tokens: int | None = None
+    keep_tokens: int | None = None
 
     model_config = SettingsConfigDict(env_prefix="SUMMARY_")
+
+    def get_trigger(self) -> Any:
+        if self.trigger_tokens is not None:
+            return ("tokens", self.trigger_tokens)
+        return tuple(self.trigger) if self.trigger else None
+
+    def get_keep(self) -> Any:
+        if self.keep_tokens is not None:
+            return ("tokens", self.keep_tokens)
+        return tuple(self.keep) if self.keep else ("messages", 20)
 
 
 class VerificationConfig(_BaseSettings):

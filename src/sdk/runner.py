@@ -472,9 +472,10 @@ async def create_sdk_loop(user_id: str, workspace_id: str = "personal", model: s
 
         middlewares.append(
             SummarizationMiddleware(
-                trigger_tokens=summary_config.trigger_tokens,
-                keep_tokens=summary_config.keep_tokens,
                 model=summary_config.model or model_str,
+                trigger=summary_config.get_trigger(),
+                keep=summary_config.get_keep(),
+                trim_tokens_to_summarize=summary_config.trim_tokens_to_summarize,
                 on_summarize=_persist_summary,
             )
         )
@@ -649,7 +650,7 @@ def _messages_from_conversation(messages: list[Any]) -> list[Message]:
             pending_reasoning = None
             last_assistant_had_tool_calls = False
         elif role == "summary":
-            sdk_messages.append(Message.user(f"[SUMMARY OF PREVIOUS CONVERSATION]\n{content}"))
+            sdk_messages.append(Message(role="user", content=f"[SUMMARY OF PREVIOUS CONVERSATION]\n{content}", source="summarization_middleware"))
             pending_reasoning = None
             last_assistant_had_tool_calls = False
         elif role == "system":

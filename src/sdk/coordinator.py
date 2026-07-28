@@ -498,7 +498,7 @@ class SubagentCoordinator:
             provider_options=profile.provider_options or None,
         )
 
-        summarization_mw = SummarizationMiddleware()
+        summarization_mw = SummarizationMiddleware(model=model_str)
         middlewares = [summarization_mw]
 
         loop = AgentLoop(

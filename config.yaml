@@ -35,13 +35,15 @@ memory:
   consolidate_after_messages: 10
 
   # Summarization: SDK-native SummarizationMiddleware (short-term token reduction)
-  # trigger_tokens: summarize when total exceeds this (~8000 tokens = ~16K chars)
-  # keep_tokens: always preserve this many tokens of recent context (~2000 tokens)
+  # trigger: when to trigger summarization — ["tokens", N], ["messages", N], or ["fraction", 0.8]
+  # keep: what to preserve — ["messages", N], ["tokens", N], or ["fraction", 0.3]
+  # trim_tokens_to_summarize: max tokens to send to summary LLM (null = no limit)
   summarization:
     enabled: true
-    trigger_tokens: 8000
-    keep_tokens: 2000
     model: "ollama-cloud:deepseek-v4-flash"
+    trigger: ["tokens", 8000]
+    keep: ["messages", 20]
+    trim_tokens_to_summarize: 4000
 
 # Observability
 observability:

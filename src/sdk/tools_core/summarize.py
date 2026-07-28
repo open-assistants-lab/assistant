@@ -35,11 +35,11 @@ async def summarize_session(
     if summary_mw is None:
         return "Error: No summarization middleware configured."
 
-    before_tokens = summary_mw._total_tokens(loop.state.messages)
+    before_tokens = summary_mw.count_tokens(loop.state.messages)
     success = await summary_mw.force_summarize(loop.state, instructions=instructions)
     if not success:
         return "Conversation too short to summarize meaningfully."
-    after_tokens = summary_mw._total_tokens(loop.state.messages)
+    after_tokens = summary_mw.count_tokens(loop.state.messages)
     saved = before_tokens - after_tokens
     return f"Summarized. Saved ~{saved} tokens."
 

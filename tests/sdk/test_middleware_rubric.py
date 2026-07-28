@@ -72,7 +72,7 @@ async def test_needs_revision_injects_feedback_and_sets_rerun():
     assert provider.call_count == 1
     assert state.extra.get("_needs_rerun") is True
     assert state.extra["_rubric_status"] == "needs_revision"
-    feedback_msgs = [m for m in state.messages if getattr(m, "lc_source", None) == RUBRIC_GRADER_SOURCE]
+    feedback_msgs = [m for m in state.messages if getattr(m, "source", None) == RUBRIC_GRADER_SOURCE]
     assert len(feedback_msgs) == 1
     assert "three lines" in feedback_msgs[0].content.lower()
 
