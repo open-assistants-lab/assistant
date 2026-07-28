@@ -1037,6 +1037,7 @@ class AgentLoop:
                                     stream_usage.cache_creation_tokens += (
                                         chunk.usage.cache_creation_tokens
                                     )
+                                    yield chunk
                                     continue
                                 async for event in self._process_stream_chunk(
                                     chunk,
@@ -1081,6 +1082,7 @@ class AgentLoop:
                                 stream_usage.reasoning_tokens += chunk.usage.reasoning_tokens
                                 stream_usage.cache_read_tokens += chunk.usage.cache_read_tokens
                                 stream_usage.cache_creation_tokens += chunk.usage.cache_creation_tokens
+                                yield chunk
                                 continue
                             async for event in self._process_stream_chunk(
                                 chunk,
@@ -1297,6 +1299,7 @@ class AgentLoop:
                                         stream_usage.reasoning_tokens += chunk.usage.reasoning_tokens
                                         stream_usage.cache_read_tokens += chunk.usage.cache_read_tokens
                                         stream_usage.cache_creation_tokens += chunk.usage.cache_creation_tokens
+                                        yield chunk
                                         continue
                                     async for event in self._process_stream_chunk(
                                         chunk, stream_content_parts, stream_tool_calls_map,
@@ -1333,6 +1336,7 @@ class AgentLoop:
                                     stream_usage.reasoning_tokens += chunk.usage.reasoning_tokens
                                     stream_usage.cache_read_tokens += chunk.usage.cache_read_tokens
                                     stream_usage.cache_creation_tokens += chunk.usage.cache_creation_tokens
+                                    yield chunk
                                     continue
                                 async for event in self._process_stream_chunk(
                                     chunk, stream_content_parts, stream_tool_calls_map,
