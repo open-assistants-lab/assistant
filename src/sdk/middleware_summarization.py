@@ -472,13 +472,54 @@ class SummarizationMiddleware(Middleware):
         prompt = self.summary_prompt.format(messages=formatted)
 
         try:
+            from src.sdk.loop import get_current_agent_loop
             from src.sdk.providers.factory import create_model_from_config
 
-            provider = create_model_from_config(self.model)
-            response = await provider.chat([
+            # Prefer the current loop's provider (already Langfuse-wrapped with active trace context)
+            loop = get_current_agent_loop()
+            if loop is not None and hasattr(loop.provider, "chat"):
+                provider = loop.provider
+            else:
+                provider = create_model_from_config(self.model)
+
+            # Create a Langfuse generation observation if Langfuse is active
+            summary_messages = [
                 Message.system("You are a context extraction assistant."),
                 Message.user(prompt),
-            ])
+            ]
+
+            try:
+                from src.sdk.langfuse_tracer import LangfuseTracer
+                if LangfuseTracer.is_enabled():
+                    client = LangfuseTracer._get_client()
+                    if client:
+                        with client.start_as_current_observation(
+                            as_type="generation",
+                            name="SummarizationMiddleware_summary",
+                            model=self.model,
+                        ) as gen:
+                            try:
+                                gen.update(input=[m.model_dump() if hasattr(m, "model_dump") else str(m) for m in summary_messages])
+                            except Exception:
+                                pass
+                            response = await provider.chat(summary_messages)
+                            try:
+                                gen.update(output=response.model_dump() if hasattr(response, "model_dump") else str(response))
+                                if hasattr(response, "usage") and response.usage:
+                                    gen.update(usage_details={
+                                        "input": response.usage.input_tokens,
+                                        "output": response.usage.output_tokens,
+                                        "reasoning": response.usage.reasoning_tokens,
+                                    })
+                            except Exception:
+                                pass
+                            content = response.content if isinstance(response.content, str) else str(response.content)
+                            return content.strip()
+            except ImportError:
+                pass
+
+            # No Langfuse — just call provider directly
+            response = await provider.chat(summary_messages)
             content = response.content if isinstance(response.content, str) else str(response.content)
             return content.strip()
         except Exception as e:

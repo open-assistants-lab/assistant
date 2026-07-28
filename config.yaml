@@ -1,104 +1,72 @@
-# Agent Configuration
 agent:
-  name: "Assistant"
-  model: "agnes:agnes-2.0-flash"
-  system_prompt: |
-    You are a helpful assistant.
-
-    CRITICAL RULES:
-    - NEVER guess or estimate - always use tools to get exact numbers/facts
-    - If you don't know, say "Let me check" and call the appropriate tool
-    - Tell user EXACTLY what the tool returns, never your estimate
-    - When the user asks about their own information (name, preferences, history, facts about themselves), ALWAYS call memory_search first before answering. Do not rely on conversation context alone.
-    - For counting questions ("How many...", "How much total...", "total", list all items): use memory_count FIRST — it does deterministic counting server-side. Trust the count it returns.
-    - For questions about information that might span multiple workspaces, use memory_search_all_workspaces.
-
-# Subagent Configuration
-subagent:
-  # Default model for subagents (uses main agent model if not specified)
-  # model: "ollama-cloud:minimax-m2.5"
-
-# Memory / Checkpointing
+  model: agnes:agnes-2.0-flash
+  name: Assistant
+  system_prompt: "You are a helpful assistant.\n\nCRITICAL RULES:\n- NEVER guess or\
+    \ estimate - always use tools to get exact numbers/facts\n- If you don't know,\
+    \ say \"Let me check\" and call the appropriate tool\n- Tell user EXACTLY what\
+    \ the tool returns, never your estimate\n- When the user asks about their own\
+    \ information (name, preferences, history, facts about themselves), ALWAYS call\
+    \ memory_search first before answering. Do not rely on conversation context alone.\n\
+    - For counting questions (\"How many...\", \"How much total...\", \"total\", list\
+    \ all items): use memory_count FIRST \u2014 it does deterministic counting server-side.\
+    \ Trust the count it returns.\n- For questions about information that might span\
+    \ multiple workspaces, use memory_search_all_workspaces.\n"
+api:
+  host: 0.0.0.0
+  port: 8000
+email_sync:
+  backfill_limit: 100
+  batch_size: 50
+  cooldown_minutes: 15
+  enabled: true
+  interval_minutes: 5
+  max_retries: 3
+  retry_delay: 30
+filesystem:
+  enabled: true
+mcp:
+  enabled: true
+  idle_timeout_minutes: 30
 memory:
-  # Checkpointer: LangGraph SQLite (DISABLED - resource intensive in production)
-  # Set CHECKPOINT_ENABLED=true to enable conversational state persistence
   checkpointer:
     enabled: false
-    retention_days: 0 # 0=disabled, -1=forever, N=days
-
-  # Long-term message storage (SQLite + FTS5 + ChromaDB)
+    retention_days: 0
+  consolidate_after_messages: 10
   messages:
     enabled: true
-
-  # Memory consolidation
-  # consolidate_after_messages: N messages before triggering consolidation (0=disabled)
-  consolidate_after_messages: 10
-
-  # Summarization: SDK-native SummarizationMiddleware (short-term token reduction)
-  # trigger: when to trigger summarization — ["tokens", N], ["messages", N], or ["fraction", 0.8]
-  # keep: what to preserve — ["messages", N], ["tokens", N], or ["fraction", 0.3]
-  # trim_tokens_to_summarize: max tokens to send to summary LLM (null = no limit)
   summarization:
     enabled: true
-    model: "ollama-cloud:deepseek-v4-flash"
-    trigger: ["tokens", 8000]
-    keep: ["messages", 20]
+    keep:
+    - messages
+    - 20
+    model: ollama-cloud:deepseek-v4-flash
+    trigger:
+    - tokens
+    - 8000
     trim_tokens_to_summarize: 4000
-
-# Observability
 observability:
-  logging:
-    enabled: true
-    level: "info" # debug, info, warning, error
-    json_dir: "data/logs"
   langfuse:
     enabled: true
-    host: "https://cloud.langfuse.com"
-    environment: "development" # production, development, staging
-
-# API Server
-api:
-  host: "0.0.0.0"
-  port: 8000
-
-# Tools
+    environment: development
+    host: https://cloud.langfuse.com
+  logging:
+    enabled: true
+    json_dir: data/logs
+    level: info
+shell_tool:
+  allowed_commands:
+  - python3
+  - node
+  - echo
+  - date
+  - whoami
+  - pwd
+  enabled: true
+  max_output_kb: 100
+  timeout_seconds: 30
+skills:
+  enabled: true
+subagent: null
 tools:
   max_retries: 3
   timeout: 30
-
-# Skills
-skills:
-  enabled: true
-
-# Filesystem
-filesystem:
-  enabled: true
-  # workspace_root: ~/assistant  # Default: user's home. Override for custom path
-
-# Shell
-shell_tool:
-  enabled: true
-  allowed_commands:
-    - python3
-    - node
-    - echo
-    - date
-    - whoami
-    - pwd
-  timeout_seconds: 30
-  max_output_kb: 100
-
-# Email Sync
-email_sync:
-  enabled: true
-  interval_minutes: 5 # How often to poll for new emails
-  batch_size: 50 # Emails per batch (lower to avoid rate limits)
-  backfill_limit: 100 # Max emails to backfill initially (lower to avoid rate limits)
-  max_retries: 3 # Max retries on rate limit error
-  retry_delay: 30 # Seconds to wait before retry
-  cooldown_minutes: 15 # Minutes to wait after rate limit detected
-
-# MCP (Model Context Protocol)
-mcp:
-  enabled: true
-  idle_timeout_minutes: 30 # Kill MCP servers after this long of inactivity
