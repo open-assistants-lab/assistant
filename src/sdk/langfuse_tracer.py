@@ -67,6 +67,10 @@ class LangfuseTracer:
         original_chat_stream = provider.chat_stream
         provider_class = type(provider).__name__
 
+        # Store originals so callers can bypass the wrapper to avoid double-tracing
+        provider._original_chat = original_chat
+        provider._original_chat_stream = original_chat_stream
+
         async def traced_chat(messages, tools=None, model=None, provider_options=None, **kwargs):
             client = cls._get_client()
             if client is None:

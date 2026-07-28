@@ -502,7 +502,12 @@ class SummarizationMiddleware(Middleware):
                                 gen.update(input=[m.model_dump() if hasattr(m, "model_dump") else str(m) for m in summary_messages])
                             except Exception:
                                 pass
-                            response = await provider.chat(summary_messages)
+                            # Call the original (unwrapped) chat to avoid double-tracing
+                            original_chat = getattr(provider, "_original_chat", None)
+                            if original_chat:
+                                response = await original_chat(summary_messages)
+                            else:
+                                response = await provider.chat(summary_messages)
                             try:
                                 gen.update(output=response.model_dump() if hasattr(response, "model_dump") else str(response))
                                 if hasattr(response, "usage") and response.usage:
