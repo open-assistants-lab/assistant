@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.sdk.loops.events import AgentEvent, TriggerRegistry
+from src.sdk.loops.events import AgentEvent, TriggerRegistry, get_trigger_registry
 
 
 def test_agent_event_fields():
@@ -15,6 +15,7 @@ def test_agent_event_fields():
     )
     assert event.trigger_type == "webhook"
     assert event.rubric is None
+    assert event.model is None
     assert event.metadata == {}
 
 
@@ -75,3 +76,9 @@ async def test_trigger_registry_unregister():
     )
     with pytest.raises(KeyError):
         await registry.fire(event)
+
+
+def test_get_trigger_registry_returns_singleton():
+    r1 = get_trigger_registry()
+    r2 = get_trigger_registry()
+    assert r1 is r2

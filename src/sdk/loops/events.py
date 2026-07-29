@@ -1,4 +1,11 @@
-"""Event-driven triggers for the agent loop (loop 3)."""
+"""Event-driven triggers for the agent loop (loop 3).
+
+Trigger types:
+- cron: scheduled check-ins from AgentScheduler
+- webhook: external POST /webhooks/{trigger_id}
+- file_change: file watcher detects changes
+- manual: POST /trigger for testing/automation
+"""
 
 from __future__ import annotations
 
@@ -21,6 +28,7 @@ class AgentEvent:
     session_id: str
     message: str
     rubric: str | None = None
+    model: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -50,3 +58,50 @@ class TriggerRegistry:
             user_id=event.user_id,
         )
         await handler(event)
+
+
+# Global registry singleton
+_global_registry: TriggerRegistry | None = None
+
+
+def get_trigger_registry() -> TriggerRegistry:
+    """Get the global trigger registry."""
+    global _global_registry
+    if _global_registry is None:
+        _global_registry = TriggerRegistry()
+    return _global_registry
+
+
+async def default_trigger_handler(event: AgentEvent) -> None:
+    """Default handler that runs the agent via run_sdk_agent.
+
+    Used by all trigger types (cron, webhook, file_change, manual).
+    """
+    from src.sdk.messages import Message
+    from src.sdk.runner import run_sdk_agent
+
+    messages = [Message.user(event.message)]
+    result = await run_sdk_agent(
+        user_id=event.user_id,
+        messages=messages,
+        session_id=event.session_id,
+        model=event.model,
+        rubric=event.rubric,
+    )
+
+    response = ""
+    for msg in reversed(result):
+        if msg.role == "assistant" and isinstance(msg.content, str):
+            response = msg.content
+            break
+
+    logger.info(
+        "trigger_handler.completed",
+        {
+            "trigger_type": event.trigger_type,
+            "trigger_id": event.trigger_id,
+            "user_id": event.user_id,
+            "response_length": len(response),
+        },
+        user_id=event.user_id,
+    )

@@ -56,6 +56,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Start connectkit token refresh background task
         _token_refresh_task: asyncio.Task[Any] | None = None
 
+        # Register default trigger handler for loop 3 (event-driven)
+        try:
+            from src.sdk.loops.events import default_trigger_handler, get_trigger_registry
+            registry = get_trigger_registry()
+            for trigger_type in ("cron", "webhook", "file_change", "manual"):
+                registry.register(trigger_type, default_trigger_handler)
+            get_logger().info("trigger_registry.handlers_registered", {"types": ["cron", "webhook", "file_change", "manual"]})
+        except Exception as e:
+            get_logger().warning("trigger_registry.register_failed", {"error": str(e)})
+
         async def _refresh_loop() -> None:
             while True:
                 try:

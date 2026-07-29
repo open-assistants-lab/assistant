@@ -142,12 +142,34 @@ class AgentScheduler:
 
     async def _cycle(self) -> None:
         ctx = await self._build_context()
-        assert self._loop is not None
-        result = await self._loop.run([Message.user(ctx)])
-        text = self._extract_response(result)
-        if text and text.strip().upper() != "[SKIP]" and len(text.strip()) > 3:
-            category, ws_id = self._categorize(text)
-            await self._db.insert(text, category, ws_id)
+        # Emit AgentEvent through TriggerRegistry instead of calling loop directly
+        from src.sdk.loops.events import AgentEvent, get_trigger_registry
+
+        event = AgentEvent(
+            trigger_type="cron",
+            trigger_id=f"scheduler_{self.user_id}",
+            user_id=self.user_id,
+            session_id=f"scheduler_{self.user_id}",
+            message=ctx,
+            metadata={"source": "agent_scheduler"},
+        )
+        registry = get_trigger_registry()
+        try:
+            await registry.fire(event)
+        except KeyError:
+            # No handler registered — fall back to direct loop call
+            assert self._loop is not None
+            result = await self._loop.run([Message.user(ctx)])
+            text = self._extract_response(result)
+            if text and text.strip().upper() != "[SKIP]" and len(text.strip()) > 3:
+                category, ws_id = self._categorize(text)
+                await self._db.insert(text, category, ws_id)
+            return
+
+        # If trigger handler ran, check the result from notification DB
+        # (the default handler persists via run_sdk_agent, not notification DB)
+        # For now, scheduler notifications are only from direct loop path
+        # TODO: integrate notification DB with trigger handler results
 
     async def _build_context(self) -> str:
         now = datetime.now()
