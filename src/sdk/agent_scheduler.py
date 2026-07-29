@@ -86,7 +86,6 @@ class AgentScheduler:
 
     async def start(self) -> None:
         self._stopped = False
-        self._loop = self._create_loop()
         self._task = asyncio.create_task(self._run())
         logger.info("scheduler.started", {}, user_id=self.user_id)
 
@@ -158,18 +157,14 @@ class AgentScheduler:
             await registry.fire(event)
         except KeyError:
             # No handler registered — fall back to direct loop call
-            assert self._loop is not None
+            logger.warning("scheduler.no_trigger_handler", {"trigger_type": "cron"}, user_id=self.user_id)
+            if self._loop is None:
+                self._loop = self._create_loop()
             result = await self._loop.run([Message.user(ctx)])
             text = self._extract_response(result)
             if text and text.strip().upper() != "[SKIP]" and len(text.strip()) > 3:
                 category, ws_id = self._categorize(text)
                 await self._db.insert(text, category, ws_id)
-            return
-
-        # If trigger handler ran, check the result from notification DB
-        # (the default handler persists via run_sdk_agent, not notification DB)
-        # For now, scheduler notifications are only from direct loop path
-        # TODO: integrate notification DB with trigger handler results
 
     async def _build_context(self) -> str:
         now = datetime.now()
