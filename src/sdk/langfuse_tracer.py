@@ -199,35 +199,37 @@ class LangfuseTracer:
                     yield chunk
                 return
 
-            span = client.start_observation(name="agent_run", as_type="span")
-            try:
-                span.update(
-                    input=[
-                        m.model_dump() if hasattr(m, "model_dump") else str(m)
-                        for m in messages[:5]
-                    ]
-                )
-            except Exception:
-                pass
+            from langfuse import propagate_attributes
 
-            try:
-                from langfuse import propagate_attributes
-
-                with propagate_attributes(user_id=user_id, session_id=session_id, tags=["agent"]):
+            # Use start_as_current_observation so child observations (LLM calls,
+            # tool spans, middleware spans) are correctly nested under agent_run
+            with client.start_as_current_observation(as_type="span", name="agent_run") as trace:
+                with propagate_attributes(
+                    user_id=user_id,
+                    session_id=session_id,
+                    tags=["agent"],
+                ):
+                    try:
+                        trace.update(
+                            input=[
+                                m.model_dump() if hasattr(m, "model_dump") else str(m)
+                                for m in messages[:5]
+                            ]
+                        )
+                    except Exception:
+                        pass
                     async for chunk in original_run_stream(messages):
                         yield chunk
-            finally:
-                if loop.state and loop.state.messages:
-                    last = loop.state.messages[-1]
-                    if last.role == "assistant":
-                        content = (
-                            last.content if isinstance(last.content, str) else str(last.content)
-                        )
-                        try:
-                            span.update(output=content[:500])
-                        except Exception:
-                            pass
-                span.end()
+                    if loop.state and loop.state.messages:
+                        last = loop.state.messages[-1]
+                        if last.role == "assistant":
+                            content = (
+                                last.content if isinstance(last.content, str) else str(last.content)
+                            )
+                            try:
+                                trace.update(output=content[:500])
+                            except Exception:
+                                pass
 
         loop.run = traced_run
         loop.run_stream = traced_run_stream
