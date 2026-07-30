@@ -733,19 +733,15 @@ async def run_sdk_agent(
                 event.metadata["previous_messages"] = result
                 try:
                     await registry.fire(event)
+                    # Use rerun result as the final result
+                    rerun_result = event.metadata.get("_rerun_result")
+                    if rerun_result:
+                        result = rerun_result
                 except KeyError:
                     # No rerun handler registered — skip rerun
                     logger.warning("sdk_runner.no_rerun_handler", {}, user_id=user_id)
                 except Exception as e:
                     logger.error("sdk_runner.rerun_failed", {"error": str(e)}, user_id=user_id)
-
-                # Re-read result after rerun (the trigger handler calls run_sdk_agent again)
-                # The rerun handler runs synchronously, so result is updated
-                # Actually, the rerun handler calls run_sdk_agent which returns new messages
-                # We need to capture those — but the trigger handler doesn't return them.
-                # For now, the rerun handler persists the result and we return the original.
-                # The frontend will see the rerun as a separate run via streaming.
-                # TODO: capture rerun result and return it as the final result
 
         # Persist RunOutcome for loop 4 (hill-climbing)
         await _persist_run_outcome(user_id, session_id, result, loop, "manual")

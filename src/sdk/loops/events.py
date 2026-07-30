@@ -98,6 +98,10 @@ async def default_trigger_handler(event: AgentEvent) -> None:
         rubric=event.rubric,
     )
 
+    # Store rerun result so the caller can retrieve it
+    if event.trigger_type == "rerun":
+        event.metadata["_rerun_result"] = result
+
     response = ""
     for msg in reversed(result):
         if msg.role == "assistant" and isinstance(msg.content, str):
