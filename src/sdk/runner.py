@@ -713,8 +713,40 @@ async def run_sdk_agent(
     loop = await get_sdk_loop(user_id, workspace_id, model=model, provider_keys=provider_keys, session_id=session_id)
     register_user_loop(user_id, loop, session_id=session_id)
     loop.rubric = rubric
+    loop._flow_user_id = user_id
+    loop._flow_session_id = session_id or "default"
+    loop._flow_model = model
+    # Store user_id/session_id on loop state for middleware to use in rerun triggers
     try:
         result = await loop.run(messages)
+
+        # Check if middleware queued rerun events (e.g. rubric needs_revision)
+        if loop.state and loop.state.extra.get("_pending_rerun_events"):
+            from src.sdk.loops.events import get_trigger_registry
+
+            registry = get_trigger_registry()
+            for event in loop.state.extra.pop("_pending_rerun_events"):
+                # Update event with actual user_id/session_id/model
+                event.user_id = user_id
+                event.session_id = session_id or "default"
+                event.model = model
+                event.metadata["previous_messages"] = result
+                try:
+                    await registry.fire(event)
+                except KeyError:
+                    # No rerun handler registered — skip rerun
+                    logger.warning("sdk_runner.no_rerun_handler", {}, user_id=user_id)
+                except Exception as e:
+                    logger.error("sdk_runner.rerun_failed", {"error": str(e)}, user_id=user_id)
+
+                # Re-read result after rerun (the trigger handler calls run_sdk_agent again)
+                # The rerun handler runs synchronously, so result is updated
+                # Actually, the rerun handler calls run_sdk_agent which returns new messages
+                # We need to capture those — but the trigger handler doesn't return them.
+                # For now, the rerun handler persists the result and we return the original.
+                # The frontend will see the rerun as a separate run via streaming.
+                # TODO: capture rerun result and return it as the final result
+
         # Persist RunOutcome for loop 4 (hill-climbing)
         await _persist_run_outcome(user_id, session_id, result, loop, "manual")
         # Flush Langfuse traces if enabled

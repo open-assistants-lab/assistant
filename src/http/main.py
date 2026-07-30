@@ -60,7 +60,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             from src.sdk.loops.events import default_trigger_handler, get_trigger_registry
             registry = get_trigger_registry()
-            for trigger_type in ("cron", "webhook", "file_change", "manual"):
+            for trigger_type in ("cron", "webhook", "file_change", "manual", "rerun"):
                 registry.register(trigger_type, default_trigger_handler)
             get_logger().info("trigger_registry.handlers_registered", {"types": ["cron", "webhook", "file_change", "manual"]})
         except Exception as e:

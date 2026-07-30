@@ -6,7 +6,6 @@ import pytest
 
 from src.sdk.messages import Message
 from src.sdk.middleware_rubric import (
-    RUBRIC_GRADER_SOURCE,
     GraderResponse,
     RubricMiddleware,
 )
@@ -70,11 +69,12 @@ async def test_needs_revision_injects_feedback_and_sets_rerun():
     state = _make_state(rubric="- Three lines")
     await mw.aafter_agent(state)
     assert provider.call_count == 1
-    assert state.extra.get("_needs_rerun") is True
     assert state.extra["_rubric_status"] == "needs_revision"
-    feedback_msgs = [m for m in state.messages if getattr(m, "source", None) == RUBRIC_GRADER_SOURCE]
-    assert len(feedback_msgs) == 1
-    assert "three lines" in feedback_msgs[0].content.lower()
+    # Rerun event is queued instead of _needs_rerun flag
+    rerun_events = state.extra.get("_pending_rerun_events", [])
+    assert len(rerun_events) == 1
+    assert rerun_events[0].trigger_type == "rerun"
+    assert "three lines" in rerun_events[0].message.lower()
 
 
 @pytest.mark.asyncio
@@ -88,7 +88,7 @@ async def test_max_iterations_reached():
     state.extra["_rubric_iterations"] = 0
     await mw.aafter_agent(state)
     assert state.extra["_rubric_status"] == "max_iterations_reached"
-    assert not state.extra.get("_needs_rerun")
+    assert not state.extra.get("_pending_rerun_events")
 
 
 @pytest.mark.asyncio

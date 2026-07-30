@@ -1,10 +1,11 @@
 """Event-driven triggers for the agent loop (loop 3).
 
 Trigger types:
-- cron: scheduled check-ins from AgentScheduler
+    - cron: scheduled check-ins from AgentScheduler
 - webhook: external POST /webhooks/{trigger_id}
 - file_change: file watcher detects changes
 - manual: POST /trigger for testing/automation
+- rerun: middleware-triggered re-run (e.g. rubric needs_revision)
 """
 
 from __future__ import annotations
@@ -75,12 +76,20 @@ def get_trigger_registry() -> TriggerRegistry:
 async def default_trigger_handler(event: AgentEvent) -> None:
     """Default handler that runs the agent via run_sdk_agent.
 
-    Used by all trigger types (cron, webhook, file_change, manual).
+    Used by all trigger types (cron, webhook, file_change, manual, rerun).
+    For 'rerun' triggers, the event.message is feedback to append to the
+    existing conversation before re-running.
     """
     from src.sdk.messages import Message
     from src.sdk.runner import run_sdk_agent
 
-    messages = [Message.user(event.message)]
+    if event.trigger_type == "rerun":
+        # Rerun: append feedback as user message, then re-run with full history
+        messages = event.metadata.get("previous_messages", [])
+        messages = list(messages) + [Message(role="user", content=event.message, source="rubric_middleware")]
+    else:
+        messages = [Message.user(event.message)]
+
     result = await run_sdk_agent(
         user_id=event.user_id,
         messages=messages,

@@ -219,8 +219,28 @@ class RubricMiddleware(Middleware):
 
         if evaluation["result"] == "needs_revision":
             feedback = self._revision_prompt(evaluation)
-            state.add_message(Message(role="user", content=feedback, source=RUBRIC_GRADER_SOURCE))
-            state.extra["_needs_rerun"] = True
+            # Fire rerun trigger via TriggerRegistry instead of _needs_rerun flag
+            try:
+                from src.sdk.loops.events import AgentEvent
+
+                event = AgentEvent(
+                    trigger_type="rerun",
+                    trigger_id=str(uuid.uuid4()),
+                    user_id=state.extra.get("_user_id", "default"),
+                    session_id=state.extra.get("_session_id", "default"),
+                    message=feedback,
+                    rubric=state.extra.get("rubric"),
+                    model=state.extra.get("_model"),
+                    metadata={
+                        "previous_messages": list(state.messages),
+                        "rubric_evaluation": evaluation,
+                        "source": "rubric_middleware",
+                    },
+                )
+                # Store the event for the runner to fire after loop completes
+                state.extra.setdefault("_pending_rerun_events", []).append(event)
+            except Exception as e:
+                logger.warning("rubric.rerun_trigger_failed", {"error": str(e)})
 
         return None
 
