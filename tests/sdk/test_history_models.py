@@ -17,6 +17,8 @@ from src.sdk.history_models import (
 )
 from src.sdk.run_models import RunStatus
 
+_UNSET = object()
+
 
 def run_result(
     *,
@@ -45,7 +47,7 @@ def turn_payload(
     status: str = "completed",
     blocks: list[dict[str, Any]] | None = None,
     answer: dict[str, Any] | None = None,
-    result: dict[str, Any] | None = None,
+    result: object = _UNSET,
 ) -> dict[str, Any]:
     if blocks is None:
         blocks = [
@@ -70,8 +72,10 @@ def turn_payload(
         ]
     if answer is None and status == "completed":
         answer = {"id": "answer-1", "content": "Final answer", "timestamp": None}
-    if result is None and status == "completed":
+    if result is _UNSET and status == "completed":
         result = run_result(run_id=run_id, status=status)
+    elif result is _UNSET:
+        result = None
     return {
         "run_id": run_id,
         "status": status,
@@ -98,6 +102,27 @@ def test_cancelled_turn_may_omit_answer() -> None:
 
     assert turn.status is RunStatus.CANCELLED
     assert turn.answer is None
+
+
+def test_failed_turn_may_omit_answer() -> None:
+    turn = ConversationTurn.model_validate(
+        turn_payload(
+            status="failed",
+            answer=None,
+            result=run_result(status="failed", response="", final_message_id=None),
+        )
+    )
+
+    assert turn.status is RunStatus.FAILED
+    assert turn.answer is None
+
+
+def test_completed_turn_may_have_answer_without_result() -> None:
+    turn = ConversationTurn.model_validate(turn_payload(result=None))
+
+    assert turn.status is RunStatus.COMPLETED
+    assert turn.answer is not None
+    assert turn.result is None
 
 
 def test_completed_turn_requires_answer() -> None:
@@ -175,6 +200,16 @@ def test_rejects_block_attempt_beyond_result_attempt() -> None:
         ConversationTurn.model_validate(turn_payload(result=run_result(attempt=1)))
 
 
+def test_rejects_decreasing_block_attempts_in_sequence_order() -> None:
+    blocks = [
+        {"type": "reasoning", "id": "b1", "attempt": 2, "sequence": 1, "content": "a"},
+        {"type": "reasoning", "id": "b2", "attempt": 1, "sequence": 2, "content": "b"},
+    ]
+
+    with pytest.raises(ValidationError, match="block attempts must be nondecreasing"):
+        ConversationTurn.model_validate(turn_payload(blocks=blocks))
+
+
 def test_tool_json_is_recursively_immutable_and_serializes_as_json() -> None:
     arguments: dict[str, Any] = {"filters": [{"active": True}]}
     result: dict[str, Any] = {"items": [1, {"name": "Ada"}]}
@@ -227,15 +262,66 @@ def test_tool_rejects_non_json_values(field: str) -> None:
         ToolBlock(**values)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("arguments", {"value": float("nan")}),
+        ("result", float("inf")),
+        ("result", [float("-inf")]),
+    ],
+)
+def test_tool_rejects_nonfinite_json_floats(field: str, value: object) -> None:
+    values: dict[str, Any] = {
+        "id": "tool-1",
+        "attempt": 1,
+        "sequence": 1,
+        "tool_call_id": "call-1",
+        "name": "time_get",
+        "status": "completed",
+        "arguments": {},
+        "result": None,
+    }
+    values[field] = value
+
+    with pytest.raises(ValidationError, match="JSON-compatible"):
+        ToolBlock(**values)
+
+
+def test_tool_json_schema_describes_object_arguments_and_json_result() -> None:
+    schema = ToolBlock.model_json_schema()
+    arguments_schema = schema["properties"]["arguments"]
+    result_schema = schema["properties"]["result"]
+
+    assert arguments_schema["type"] == "object"
+    assert arguments_schema["additionalProperties"] == {"$ref": "#/$defs/JsonValue"}
+    assert result_schema["$ref"] == "#/$defs/JsonValue"
+    assert schema["$defs"]["JsonValue"] == {}
+
+
 def test_turn_message_rejects_naive_timestamp() -> None:
     with pytest.raises(ValidationError, match="timezone-aware"):
         TurnMessage(id="message-1", content="Hello", timestamp=datetime(2026, 8, 2, 12))
+
+
+@pytest.mark.parametrize("timestamp", [0, 1.5, "2026-08-02"])
+def test_turn_message_rejects_non_rfc3339_timestamp_inputs(timestamp: object) -> None:
+    with pytest.raises(ValidationError, match="datetime or RFC3339 string"):
+        TurnMessage.model_validate({"id": "message-1", "content": "Hello", "timestamp": timestamp})
 
 
 def test_turn_message_normalizes_offset_timestamp_to_utc() -> None:
     timestamp = datetime(2026, 8, 2, 8, tzinfo=timezone(timedelta(hours=-4)))
 
     message = TurnMessage(id="message-1", content="Hello", timestamp=timestamp)
+
+    assert message.timestamp == datetime(2026, 8, 2, 12, tzinfo=UTC)
+    assert message.timestamp.tzinfo is UTC
+
+
+def test_turn_message_normalizes_rfc3339_timestamp_to_utc() -> None:
+    message = TurnMessage.model_validate(
+        {"id": "message-1", "content": "Hello", "timestamp": "2026-08-02T08:00:00-04:00"}
+    )
 
     assert message.timestamp == datetime(2026, 8, 2, 12, tzinfo=UTC)
     assert message.timestamp.tzinfo is UTC
@@ -249,11 +335,37 @@ def test_turn_rejects_matching_user_and_answer_ids() -> None:
         ConversationTurn.model_validate(payload)
 
 
+def test_turn_rejects_answer_timestamp_before_user_timestamp() -> None:
+    payload = turn_payload(result=None)
+    payload["user"]["timestamp"] = "2026-08-02T12:00:00Z"
+    payload["answer"]["timestamp"] = "2026-08-02T11:59:59Z"
+
+    with pytest.raises(ValidationError, match="answer timestamp cannot precede user timestamp"):
+        ConversationTurn.model_validate(payload)
+
+
 def test_turns_response_rejects_duplicate_run_ids() -> None:
     with pytest.raises(ValidationError, match="run_ids must be unique"):
         TurnsResponse.model_validate(
             {"turns": [turn_payload(), turn_payload()], "next_cursor": None}
         )
+
+
+@pytest.mark.parametrize("duplicate_role", ["user", "answer"])
+def test_turns_response_rejects_duplicate_message_ids_across_turns(
+    duplicate_role: str,
+) -> None:
+    first = turn_payload()
+    second = turn_payload(run_id="run-2")
+    second["user"]["id"] = "user-2"
+    second["answer"]["id"] = "answer-2"
+    second["result"]["final_message_id"] = "answer-2"
+    second[duplicate_role]["id"] = first[duplicate_role]["id"]
+    if duplicate_role == "answer":
+        second["result"]["final_message_id"] = first["answer"]["id"]
+
+    with pytest.raises(ValidationError, match="message IDs must be unique"):
+        TurnsResponse.model_validate({"turns": [first, second], "next_cursor": None})
 
 
 @pytest.mark.parametrize("cursor", ["", "   "])

@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Annotated, Literal, TypeAlias
 
-from pydantic import Field, field_serializer, field_validator, model_validator
+from pydantic import Field, JsonValue, field_serializer, field_validator, model_validator
 
 from src.sdk.run_models import ContractModel, NonEmptyString, RunResult, RunStatus
 
 JSONScalar: TypeAlias = str | int | float | bool | None
 FrozenJSONValue: TypeAlias = JSONScalar | tuple[object, ...] | Mapping[str, object]
+_RFC3339_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$"
+)
 
 
 def _freeze_json(value: object) -> FrozenJSONValue:
@@ -45,6 +49,18 @@ class TurnMessage(ContractModel):
     content: str
     timestamp: datetime | None = None
 
+    @field_validator("timestamp", mode="before", json_schema_input_type=datetime | str | None)
+    @classmethod
+    def _timestamp_input(cls, value: object) -> object:
+        if value is None or isinstance(value, datetime):
+            return value
+        if not isinstance(value, str) or _RFC3339_PATTERN.fullmatch(value) is None:
+            raise ValueError("timestamp must be a datetime or RFC3339 string")
+        try:
+            return datetime.fromisoformat(value[:-1] + "+00:00" if value[-1] in "Zz" else value)
+        except ValueError as exc:
+            raise ValueError("timestamp must be a datetime or RFC3339 string") from exc
+
     @field_validator("timestamp")
     @classmethod
     def _timezone_aware_timestamp(cls, value: datetime | None) -> datetime | None:
@@ -74,7 +90,9 @@ class ToolBlock(TurnBlockBase):
     arguments: Mapping[str, object]
     result: FrozenJSONValue
 
-    @field_validator("arguments", mode="plain")
+    @field_validator(
+        "arguments", mode="plain", json_schema_input_type=dict[str, JsonValue]
+    )
     @classmethod
     def _frozen_arguments(cls, value: object) -> Mapping[str, object]:
         frozen = _freeze_json(value)
@@ -82,7 +100,7 @@ class ToolBlock(TurnBlockBase):
             raise ValueError("arguments must be a JSON-compatible object")
         return frozen
 
-    @field_validator("result", mode="plain")
+    @field_validator("result", mode="plain", json_schema_input_type=JsonValue)
     @classmethod
     def _frozen_result(cls, value: object) -> FrozenJSONValue:
         return _freeze_json(value)
@@ -110,6 +128,11 @@ class ConversationTurn(ContractModel):
             for previous, current in zip(self.blocks, self.blocks[1:])
         ):
             raise ValueError("block sequence values must be strictly increasing")
+        if any(
+            current.attempt < previous.attempt
+            for previous, current in zip(self.blocks, self.blocks[1:])
+        ):
+            raise ValueError("block attempts must be nondecreasing")
         block_ids = [block.id for block in self.blocks]
         if len(block_ids) != len(set(block_ids)):
             raise ValueError("block IDs must be unique")
@@ -118,6 +141,13 @@ class ConversationTurn(ContractModel):
             raise ValueError("completed turn requires an answer")
         if self.answer is not None and self.answer.id == self.user.id:
             raise ValueError("user and answer IDs must differ")
+        if (
+            self.answer is not None
+            and self.user.timestamp is not None
+            and self.answer.timestamp is not None
+            and self.answer.timestamp < self.user.timestamp
+        ):
+            raise ValueError("answer timestamp cannot precede user timestamp")
 
         if self.result is None:
             return self
@@ -142,8 +172,16 @@ class TurnsResponse(ContractModel):
     next_cursor: NonEmptyString | None = None
 
     @model_validator(mode="after")
-    def _unique_run_ids(self) -> TurnsResponse:
+    def _unique_ids(self) -> TurnsResponse:
         run_ids = [turn.run_id for turn in self.turns]
         if len(run_ids) != len(set(run_ids)):
             raise ValueError("run_ids must be unique")
+        message_ids = [
+            message.id
+            for turn in self.turns
+            for message in (turn.user, turn.answer)
+            if message is not None
+        ]
+        if len(message_ids) != len(set(message_ids)):
+            raise ValueError("message IDs must be unique across turns")
         return self
