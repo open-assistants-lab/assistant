@@ -18,10 +18,15 @@ from src.sdk.run_events import (
     DoneEvent,
     ErrorEvent,
     ReasoningDeltaEvent,
+    ReasoningEndEvent,
+    ReasoningStartEvent,
     RevisionStartEvent,
     RubricEndEvent,
+    RubricStartEvent,
     RunEvent,
     TextDeltaEvent,
+    TextEndEvent,
+    TextStartEvent,
     ToolInputDeltaEvent,
     ToolInputEndEvent,
     ToolInputStartEvent,
@@ -108,12 +113,44 @@ def test_canonical_run_events_fixture_is_contiguous_and_round_trips() -> None:
     assert {event.attempt for event in events} == {result.attempt}
     assert [event.timestamp for event in events] == sorted(event.timestamp for event in events)
     assert [event.model_dump(mode="json") for event in events] == payloads
+    assert result.persisted_at is not None
+    assert max(event.timestamp for event in events[:-1]) <= result.persisted_at
+    assert result.persisted_at <= events[-1].timestamp
 
+    reasoning_starts = [event for event in events if isinstance(event, ReasoningStartEvent)]
+    reasoning_deltas = [event for event in events if isinstance(event, ReasoningDeltaEvent)]
+    reasoning_ends = [event for event in events if isinstance(event, ReasoningEndEvent)]
+    assert len(reasoning_starts) == len(reasoning_ends) == 1
+    assert reasoning_deltas
+    reasoning_start = reasoning_starts[0]
+    reasoning_end = reasoning_ends[0]
+    assert reasoning_start.sequence < min(event.sequence for event in reasoning_deltas)
+    assert max(event.sequence for event in reasoning_deltas) < reasoning_end.sequence
+    assert {
+        reasoning_start.data.block_id,
+        *(event.data.block_id for event in reasoning_deltas),
+        reasoning_end.data.block_id,
+    } == {reasoning.id}
     reasoning_text = "".join(
-        event.data.delta for event in events if isinstance(event, ReasoningDeltaEvent)
+        event.data.delta for event in reasoning_deltas
     )
+
+    text_starts = [event for event in events if isinstance(event, TextStartEvent)]
+    text_deltas = [event for event in events if isinstance(event, TextDeltaEvent)]
+    text_ends = [event for event in events if isinstance(event, TextEndEvent)]
+    assert len(text_starts) == len(text_ends) == 1
+    assert text_deltas
+    text_start = text_starts[0]
+    text_end = text_ends[0]
+    assert text_start.sequence < min(event.sequence for event in text_deltas)
+    assert max(event.sequence for event in text_deltas) < text_end.sequence
+    assert {
+        text_start.data.block_id,
+        *(event.data.block_id for event in text_deltas),
+        text_end.data.block_id,
+    } == {text_start.data.block_id}
     answer_text = "".join(
-        event.data.delta for event in events if isinstance(event, TextDeltaEvent)
+        event.data.delta for event in text_deltas
     )
     assert reasoning_text == reasoning.content
     assert turn.answer is not None
@@ -125,6 +162,8 @@ def test_canonical_run_events_fixture_is_contiguous_and_round_trips() -> None:
         UsageCategory.SUMMARIZER: result.usage.summarizer,
     }
     usage_events = [event for event in events if isinstance(event, UsageEvent)]
+    usage_keys = [(event.data.category, event.data.llm_call_index) for event in usage_events]
+    assert len(usage_keys) == len(set(usage_keys))
     assert {event.data.category for event in usage_events} == {
         category for category, aggregate in usage_aggregates.items() if aggregate.available
     }
@@ -135,22 +174,44 @@ def test_canonical_run_events_fixture_is_contiguous_and_round_trips() -> None:
         "cache_read_tokens",
         "cache_creation_tokens",
     )
-    for event in usage_events:
-        aggregate = usage_aggregates[event.data.category]
+    for category, aggregate in usage_aggregates.items():
+        category_events = [event for event in usage_events if event.data.category is category]
+        if not aggregate.available:
+            assert not category_events
+            continue
         assert aggregate.available
-        assert aggregate.calls == 1
-        assert aggregate.models == (event.data.model,)
-        assert all(getattr(aggregate, field) == getattr(event.data, field) for field in usage_fields)
+        assert aggregate.calls == len(category_events)
+        assert aggregate.models == tuple(dict.fromkeys(event.data.model for event in category_events))
+        assert all(
+            getattr(aggregate, field)
+            == sum(getattr(event.data, field) for event in category_events)
+            for field in usage_fields
+        )
 
-    rubric_end = next(event for event in events if isinstance(event, RubricEndEvent))
+    rubric_starts = [event for event in events if isinstance(event, RubricStartEvent)]
+    rubric_ends = [event for event in events if isinstance(event, RubricEndEvent)]
+    assert len(rubric_starts) == len(rubric_ends) == 1
+    rubric_start = rubric_starts[0]
+    rubric_end = rubric_ends[0]
+    assert rubric_start.sequence < rubric_end.sequence
+    assert rubric_start.data.grading_run_id == rubric_end.data.evaluation.grading_run_id
+    assert rubric_start.data.max_attempts == rubric_end.data.max_attempts
+    assert rubric_end.data.max_attempts == result.verification.max_attempts
     assert rubric_end.data.evaluation == result.verification.evaluations[0]
     context = next(event for event in events if isinstance(event, ContextSnapshotEvent))
     assert context.data == result.next_context
 
-    tool_start = next(event for event in events if isinstance(event, ToolInputStartEvent))
+    tool_starts = [event for event in events if isinstance(event, ToolInputStartEvent)]
     tool_deltas = [event for event in events if isinstance(event, ToolInputDeltaEvent)]
-    tool_end = next(event for event in events if isinstance(event, ToolInputEndEvent))
-    tool_result = next(event for event in events if isinstance(event, ToolResultEvent))
+    tool_ends = [event for event in events if isinstance(event, ToolInputEndEvent)]
+    tool_results = [event for event in events if isinstance(event, ToolResultEvent)]
+    assert len(tool_starts) == len(tool_ends) == len(tool_results) == 1
+    assert tool_deltas
+    tool_start = tool_starts[0]
+    tool_end = tool_ends[0]
+    tool_result = tool_results[0]
+    assert tool_start.sequence < min(event.sequence for event in tool_deltas)
+    assert max(event.sequence for event in tool_deltas) < tool_end.sequence < tool_result.sequence
     assert {
         tool_start.data.block_id,
         *(event.data.block_id for event in tool_deltas),
