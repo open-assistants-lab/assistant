@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Annotated, Any, Generic, Literal, TypeVar
+import math
+import re
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from types import MappingProxyType
+from typing import Annotated, Generic, Literal, TypeAlias, TypeVar
 
-from pydantic import Field, TypeAdapter, field_validator, model_validator
+from pydantic import Field, TypeAdapter, field_serializer, field_validator, model_validator
 
 from src.sdk.run_models import (
     ContextSnapshot,
@@ -16,6 +20,36 @@ from src.sdk.run_models import (
     UsageCategory,
     _validate_canonical_model,
 )
+
+JSONScalar: TypeAlias = str | int | float | bool | None
+FrozenJSONValue: TypeAlias = JSONScalar | tuple[object, ...] | Mapping[str, object]
+_RFC3339_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$"
+)
+
+
+def _freeze_json(value: object) -> FrozenJSONValue:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("value must be JSON-compatible")
+        return value
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise ValueError("JSON object keys must be strings")
+        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_json(item) for item in value)
+    raise ValueError("value must be JSON-compatible")
+
+
+def _thaw_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value
 
 
 class BlockData(ContractModel):
@@ -38,14 +72,35 @@ class ToolDeltaData(BlockData):
 
 class ToolEndData(BlockData):
     tool_call_id: NonEmptyString
-    arguments: dict[str, Any]
+    arguments: Mapping[str, object]
+
+    @field_validator("arguments", mode="plain")
+    @classmethod
+    def _frozen_arguments(cls, value: object) -> Mapping[str, object]:
+        frozen = _freeze_json(value)
+        if not isinstance(frozen, Mapping):
+            raise ValueError("arguments must be a JSON-compatible object")
+        return frozen
+
+    @field_serializer("arguments")
+    def _serialize_arguments(self, value: Mapping[str, object]) -> object:
+        return _thaw_json(value)
 
 
 class ToolResultData(BlockData):
     tool_call_id: NonEmptyString
     name: NonEmptyString
     status: Literal["completed", "failed", "cancelled"]
-    content: str
+    content: FrozenJSONValue
+
+    @field_validator("content", mode="plain")
+    @classmethod
+    def _frozen_content(cls, value: object) -> FrozenJSONValue:
+        return _freeze_json(value)
+
+    @field_serializer("content")
+    def _serialize_content(self, value: FrozenJSONValue) -> object:
+        return _thaw_json(value)
 
 
 class UsageEventData(ContractModel):
@@ -84,7 +139,15 @@ class ContextCompressedData(ContractModel):
     before: ContextSnapshot
     after: ContextSnapshot
     status: Literal["succeeded", "failed"]
-    error: str | None = None
+    error: NonEmptyString | None = None
+
+    @model_validator(mode="after")
+    def _validate_error(self) -> ContextCompressedData:
+        if self.status == "succeeded" and self.error is not None:
+            raise ValueError("succeeded compression must not have an error")
+        if self.status == "failed" and self.error is None:
+            raise ValueError("failed compression requires a nonempty error")
+        return self
 
 
 class DoneData(ContractModel):
@@ -111,12 +174,24 @@ class RunEventBase(ContractModel, Generic[EventDataT]):
     attempt: int = Field(ge=1)
     data: EventDataT
 
+    @field_validator("timestamp", mode="before")
+    @classmethod
+    def _timestamp_input(cls, value: object) -> object:
+        if isinstance(value, datetime):
+            return value
+        if not isinstance(value, str) or _RFC3339_PATTERN.fullmatch(value) is None:
+            raise ValueError("timestamp must be a datetime or RFC3339 string")
+        try:
+            return datetime.fromisoformat(value[:-1] + "+00:00" if value[-1] in "Zz" else value)
+        except ValueError as exc:
+            raise ValueError("timestamp must be a datetime or RFC3339 string") from exc
+
     @field_validator("timestamp")
     @classmethod
     def _timezone_aware_timestamp(cls, value: datetime) -> datetime:
         if value.utcoffset() is None:
             raise ValueError("timestamp must be timezone-aware")
-        return value
+        return value.astimezone(UTC)
 
 
 class TextStartEvent(RunEventBase[BlockData]):
@@ -166,6 +241,12 @@ class UsageEvent(RunEventBase[UsageEventData]):
 class RubricStartEvent(RunEventBase[RubricStartData]):
     type: Literal["rubric_evaluation_start"] = "rubric_evaluation_start"
 
+    @model_validator(mode="after")
+    def _attempt_within_limit(self) -> RubricStartEvent:
+        if self.attempt > self.data.max_attempts:
+            raise ValueError("envelope attempt cannot exceed max_attempts")
+        return self
+
 
 class RubricEndEvent(RunEventBase[RubricEndData]):
     type: Literal["rubric_evaluation_end"] = "rubric_evaluation_end"
@@ -174,6 +255,8 @@ class RubricEndEvent(RunEventBase[RubricEndData]):
     def _evaluation_matches_envelope(self) -> RubricEndEvent:
         if self.data.evaluation.attempt != self.attempt:
             raise ValueError("evaluation attempt must equal envelope attempt")
+        if self.attempt > self.data.max_attempts:
+            raise ValueError("envelope attempt cannot exceed max_attempts")
         return self
 
 
@@ -236,6 +319,8 @@ class ErrorEvent(RunEventBase[ErrorData]):
             raise ValueError("result run_id must match envelope")
         if self.data.result.session_id != self.session_id:
             raise ValueError("result session_id must match envelope")
+        if self.data.result.attempt != self.attempt:
+            raise ValueError("result attempt must match envelope")
         return self
 
 
