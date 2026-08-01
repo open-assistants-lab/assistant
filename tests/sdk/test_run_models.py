@@ -29,7 +29,7 @@ def _evaluation() -> RubricEvaluation:
         attempt=1,
         result=RubricEvaluationResult.SATISFIED,
         explanation="All criteria passed.",
-        criteria=[CriterionEvaluation(name="Correct answer", passed=True)],
+        criteria=(CriterionEvaluation(name="Correct answer", passed=True),),
         passed_count=1,
         total_count=1,
     )
@@ -40,7 +40,7 @@ def _verification() -> VerificationOutcome:
         availability=RubricAvailability.ON,
         status=TerminalRubricStatus.SATISFIED,
         attempts=1,
-        evaluations=[_evaluation()],
+        evaluations=(_evaluation(),),
     )
 
 
@@ -58,7 +58,7 @@ def test_rubric_evaluation_rejects_incorrect_passed_count() -> None:
             attempt=1,
             result=RubricEvaluationResult.NEEDS_REVISION,
             explanation="One criterion failed.",
-            criteria=[CriterionEvaluation(name="Correct answer", passed=False, gap="Wrong")],
+            criteria=(CriterionEvaluation(name="Correct answer", passed=False, gap="Wrong"),),
             passed_count=1,
             total_count=1,
         )
@@ -80,7 +80,7 @@ def test_run_result_round_trips_all_canonical_outcomes() -> None:
         agent=UsageAggregate(
             available=True,
             calls=2,
-            models=["openai:gpt-5"],
+            models=("openai:gpt-5",),
             input_tokens=1000,
             output_tokens=200,
             reasoning_tokens=50,
@@ -160,7 +160,7 @@ def test_non_unavailable_verification_forbids_reason() -> None:
 
 
 def test_collection_fields_are_immutable_tuples_serialized_as_json_arrays() -> None:
-    usage = UsageAggregate(available=True, calls=1, models=[" openai : gpt-5 "])
+    usage = UsageAggregate(available=True, calls=1, models=(" openai : gpt-5 ",))
     evaluation = _evaluation()
     verification = _verification()
 
@@ -174,7 +174,7 @@ def test_collection_fields_are_immutable_tuples_serialized_as_json_arrays() -> N
 
 def test_usage_rejects_noncanonical_model_display_syntax() -> None:
     with pytest.raises(ValidationError, match="provider:model"):
-        UsageAggregate(available=True, calls=1, models=["openai/gpt-5"])
+        UsageAggregate(available=True, calls=1, models=("openai/gpt-5",))
 
 
 def test_run_result_normalizes_canonical_model() -> None:
@@ -222,9 +222,9 @@ def test_unavailable_usage_rejects_recorded_activity(payload: dict[str, object])
 
 @pytest.mark.parametrize(
     ("calls", "models"),
-    [(0, ["openai:gpt-5"]), (1, [])],
+    [(0, ("openai:gpt-5",)), (1, ())],
 )
-def test_available_usage_requires_calls_and_models(calls: int, models: list[str]) -> None:
+def test_available_usage_requires_calls_and_models(calls: int, models: tuple[str, ...]) -> None:
     with pytest.raises(ValidationError, match="available usage"):
         UsageAggregate(available=True, calls=calls, models=models)
 
@@ -247,16 +247,16 @@ def test_criterion_gap_must_match_passed_state(criterion: dict[str, object]) -> 
     [
         (
             RubricEvaluationResult.SATISFIED,
-            [CriterionEvaluation(name="Correct", passed=False, gap="Wrong")],
+            (CriterionEvaluation(name="Correct", passed=False, gap="Wrong"),),
         ),
         (
             RubricEvaluationResult.NEEDS_REVISION,
-            [CriterionEvaluation(name="Correct", passed=True)],
+            (CriterionEvaluation(name="Correct", passed=True),),
         ),
     ],
 )
 def test_evaluation_result_must_match_criteria(
-    result: RubricEvaluationResult, criteria: list[CriterionEvaluation]
+    result: RubricEvaluationResult, criteria: tuple[CriterionEvaluation, ...]
 ) -> None:
     with pytest.raises(ValidationError, match="result"):
         RubricEvaluation(
@@ -299,9 +299,9 @@ def test_terminal_status_must_match_latest_evaluation(
     status: TerminalRubricStatus, result: RubricEvaluationResult
 ) -> None:
     criteria = (
-        [CriterionEvaluation(name="Correct", passed=False, gap="Wrong")]
+        (CriterionEvaluation(name="Correct", passed=False, gap="Wrong"),)
         if result is RubricEvaluationResult.NEEDS_REVISION
-        else []
+        else ()
     )
     evaluation = RubricEvaluation(
         grading_run_id="grading-1",
@@ -317,7 +317,7 @@ def test_terminal_status_must_match_latest_evaluation(
             availability=RubricAvailability.ON,
             status=status,
             attempts=1,
-            evaluations=[evaluation],
+            evaluations=(evaluation,),
         )
 
 
@@ -342,14 +342,15 @@ def test_verification_rejects_future_and_duplicate_evaluations() -> None:
             availability=RubricAvailability.ON,
             status=TerminalRubricStatus.SATISFIED,
             attempts=1,
-            evaluations=[future_evaluation],
+            evaluations=(future_evaluation,),
         )
     with pytest.raises(ValidationError, match="grading_run_id"):
         VerificationOutcome(
             availability=RubricAvailability.ON,
             status=TerminalRubricStatus.SATISFIED,
-            attempts=1,
-            evaluations=[evaluation, evaluation],
+            attempts=2,
+            max_attempts=2,
+            evaluations=(evaluation, future_evaluation),
         )
 
 
@@ -359,7 +360,47 @@ def test_cancelled_verification_allows_unevaluated_final_attempt() -> None:
         status=TerminalRubricStatus.CANCELLED,
         attempts=2,
         max_attempts=2,
-        evaluations=[_evaluation()],
+        evaluations=(_evaluation(),),
     )
 
     assert len(outcome.evaluations) < outcome.attempts
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        TerminalRubricStatus.SATISFIED,
+        TerminalRubricStatus.MAX_ATTEMPTS_REACHED,
+        TerminalRubricStatus.INVALID_RUBRIC,
+        TerminalRubricStatus.GRADER_ERROR,
+    ],
+)
+def test_terminal_verification_requires_evaluation(status: TerminalRubricStatus) -> None:
+    with pytest.raises(ValidationError, match="at least one evaluation"):
+        VerificationOutcome(
+            availability=RubricAvailability.ON,
+            status=status,
+            attempts=1,
+        )
+
+
+def test_verification_rejects_misordered_evaluation_attempts() -> None:
+    first = RubricEvaluation(
+        grading_run_id="grading-2",
+        attempt=2,
+        result=RubricEvaluationResult.NEEDS_REVISION,
+        explanation="Needs revision.",
+        criteria=(CriterionEvaluation(name="Correct", passed=False, gap="Wrong"),),
+        passed_count=0,
+        total_count=1,
+    )
+    second = _evaluation()
+
+    with pytest.raises(ValidationError, match="strictly increasing"):
+        VerificationOutcome(
+            availability=RubricAvailability.ON,
+            status=TerminalRubricStatus.SATISFIED,
+            attempts=2,
+            max_attempts=2,
+            evaluations=(first, second),
+        )

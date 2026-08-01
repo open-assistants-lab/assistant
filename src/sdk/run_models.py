@@ -204,11 +204,27 @@ class VerificationOutcome(ContractModel):
         if self.status is TerminalRubricStatus.NOT_RUN:
             if self.attempts != 0:
                 raise ValueError("not_run status requires zero attempts")
+            if self.evaluations:
+                raise ValueError("not_run status must not have evaluations")
         elif self.attempts < 1:
             raise ValueError("a terminal rubric status other than not_run requires at least one attempt")
 
+        statuses_requiring_evaluation = {
+            TerminalRubricStatus.SATISFIED,
+            TerminalRubricStatus.MAX_ATTEMPTS_REACHED,
+            TerminalRubricStatus.INVALID_RUBRIC,
+            TerminalRubricStatus.GRADER_ERROR,
+        }
+        if self.status in statuses_requiring_evaluation and not self.evaluations:
+            raise ValueError(f"{self.status} status requires at least one evaluation")
+
         if any(evaluation.attempt > self.attempts for evaluation in self.evaluations):
             raise ValueError("evaluation attempts cannot exceed outcome attempts")
+        if any(
+            current.attempt <= previous.attempt
+            for previous, current in zip(self.evaluations, self.evaluations[1:])
+        ):
+            raise ValueError("evaluation attempts must be in strictly increasing order")
         grading_run_ids = [evaluation.grading_run_id for evaluation in self.evaluations]
         if len(grading_run_ids) != len(set(grading_run_ids)):
             raise ValueError("grading_run_id values must be unique")
@@ -226,7 +242,6 @@ class VerificationOutcome(ContractModel):
         expected_latest_result = expected_latest_results.get(self.status)
         if (
             expected_latest_result is not None
-            and self.evaluations
             and self.evaluations[-1].result is not expected_latest_result
         ):
             raise ValueError("terminal rubric status must match the latest evaluation result")
