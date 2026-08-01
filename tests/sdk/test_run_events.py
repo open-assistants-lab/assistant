@@ -10,22 +10,26 @@ from typing import Any, cast
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
+from src.sdk.history_models import ReasoningBlock, ToolBlock, TurnsResponse
 from src.sdk.run_events import (
     BlockDeltaData,
     ContextCompressedEvent,
     ContextSnapshotEvent,
     DoneEvent,
     ErrorEvent,
+    ReasoningDeltaEvent,
     RevisionStartEvent,
     RubricEndEvent,
     RunEvent,
     TextDeltaEvent,
+    ToolInputDeltaEvent,
     ToolInputEndEvent,
+    ToolInputStartEvent,
     ToolResultEvent,
     UsageEvent,
     parse_run_event,
 )
-from src.sdk.run_models import RunResult
+from src.sdk.run_models import RunResult, UsageCategory
 
 NOW = datetime(2026, 8, 2, 12, tzinfo=UTC)
 FIXTURE_DIR = Path(__file__).parents[1] / "fixtures" / "run_contracts"
@@ -88,11 +92,85 @@ def run_result(*, attempt: int = 1, run_id: str = "run-1", session_id: str = "se
 def test_canonical_run_events_fixture_is_contiguous_and_round_trips() -> None:
     result = RunResult.model_validate_json((FIXTURE_DIR / "run_result.json").read_text())
     payloads = json.loads((FIXTURE_DIR / "run_events.json").read_text())
+    turns = TurnsResponse.model_validate_json(
+        (FIXTURE_DIR / "turns_response.json").read_text()
+    )
 
     events = [parse_run_event(payload) for payload in payloads]
+    turn = turns.turns[0]
+    reasoning = next(block for block in turn.blocks if isinstance(block, ReasoningBlock))
+    tool = next(block for block in turn.blocks if isinstance(block, ToolBlock))
 
     assert [event.sequence for event in events] == list(range(1, len(events) + 1))
     assert len({event.event_id for event in events}) == len(events)
+    assert {event.run_id for event in events} == {result.run_id}
+    assert {event.session_id for event in events} == {result.session_id}
+    assert {event.attempt for event in events} == {result.attempt}
+    assert [event.timestamp for event in events] == sorted(event.timestamp for event in events)
+    assert [event.model_dump(mode="json") for event in events] == payloads
+
+    reasoning_text = "".join(
+        event.data.delta for event in events if isinstance(event, ReasoningDeltaEvent)
+    )
+    answer_text = "".join(
+        event.data.delta for event in events if isinstance(event, TextDeltaEvent)
+    )
+    assert reasoning_text == reasoning.content
+    assert turn.answer is not None
+    assert answer_text == turn.answer.content == result.response
+
+    usage_aggregates = {
+        UsageCategory.AGENT: result.usage.agent,
+        UsageCategory.GRADER: result.usage.grader,
+        UsageCategory.SUMMARIZER: result.usage.summarizer,
+    }
+    usage_events = [event for event in events if isinstance(event, UsageEvent)]
+    assert {event.data.category for event in usage_events} == {
+        category for category, aggregate in usage_aggregates.items() if aggregate.available
+    }
+    usage_fields = (
+        "input_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+        "cache_read_tokens",
+        "cache_creation_tokens",
+    )
+    for event in usage_events:
+        aggregate = usage_aggregates[event.data.category]
+        assert aggregate.available
+        assert aggregate.calls == 1
+        assert aggregate.models == (event.data.model,)
+        assert all(getattr(aggregate, field) == getattr(event.data, field) for field in usage_fields)
+
+    rubric_end = next(event for event in events if isinstance(event, RubricEndEvent))
+    assert rubric_end.data.evaluation == result.verification.evaluations[0]
+    context = next(event for event in events if isinstance(event, ContextSnapshotEvent))
+    assert context.data == result.next_context
+
+    tool_start = next(event for event in events if isinstance(event, ToolInputStartEvent))
+    tool_deltas = [event for event in events if isinstance(event, ToolInputDeltaEvent)]
+    tool_end = next(event for event in events if isinstance(event, ToolInputEndEvent))
+    tool_result = next(event for event in events if isinstance(event, ToolResultEvent))
+    assert {
+        tool_start.data.block_id,
+        *(event.data.block_id for event in tool_deltas),
+        tool_end.data.block_id,
+        tool_result.data.block_id,
+    } == {tool.id}
+    assert {
+        tool_start.data.tool_call_id,
+        *(event.data.tool_call_id for event in tool_deltas),
+        tool_end.data.tool_call_id,
+        tool_result.data.tool_call_id,
+    } == {tool.tool_call_id}
+    assert tool_start.data.name == tool_result.data.name == tool.name
+    assert "".join(event.data.delta for event in tool_deltas) == json.dumps(
+        dict(tool.arguments), separators=(",", ":")
+    )
+    assert tool_end.data.arguments == tool.arguments
+    assert tool_result.data.status == tool.status
+    assert tool_result.data.content == tool.result
+
     assert isinstance(events[-1], DoneEvent)
     assert events[-1].data.result == result
     assert [parse_run_event(event.model_dump(mode="json")) for event in events] == events

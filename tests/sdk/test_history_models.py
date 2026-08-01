@@ -96,6 +96,8 @@ def test_canonical_turns_response_fixture_validates_and_round_trips() -> None:
 
     assert response.turns[0].run_id == "run-canonical-001"
     assert response.turns[0].result == result
+    assert any(isinstance(block, ToolBlock) for block in response.turns[0].blocks)
+    assert response.model_dump(mode="json") == payload
     assert TurnsResponse.model_validate(response.model_dump(mode="json")) == response
 
 

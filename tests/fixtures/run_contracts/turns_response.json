@@ -15,12 +15,23 @@
           "attempt": 1,
           "sequence": 1,
           "content": "I will provide a concise canonical answer."
+        },
+        {
+          "type": "tool",
+          "id": "tool-block-001",
+          "attempt": 1,
+          "sequence": 2,
+          "tool_call_id": "tool-call-001",
+          "name": "time_get",
+          "status": "completed",
+          "arguments": {"timezone": "UTC"},
+          "result": {"timezone": "UTC", "time": "12:00:00"}
         }
       ],
       "answer": {
         "id": "message-assistant-001",
         "content": "The canonical run completed successfully.",
-        "timestamp": "2026-08-02T12:00:06Z"
+        "timestamp": "2026-08-02T12:00:10Z"
       },
       "result": {
         "schema_version": 1,

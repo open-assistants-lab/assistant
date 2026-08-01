@@ -55,6 +55,7 @@ def test_canonical_run_result_fixture_validates_and_round_trips() -> None:
 
     assert result.run_id == "run-canonical-001"
     assert result.model == "anthropic:claude-sonnet-4"
+    assert result.model_dump(mode="json") == payload
     assert RunResult.model_validate(result.model_dump(mode="json")) == result
 
 
