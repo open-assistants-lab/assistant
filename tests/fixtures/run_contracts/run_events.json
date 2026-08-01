@@ -1,0 +1,278 @@
+[
+  {
+    "schema_version": 1,
+    "event_id": "event-canonical-001",
+    "sequence": 1,
+    "timestamp": "2026-08-02T12:00:01Z",
+    "session_id": "session-canonical-001",
+    "run_id": "run-canonical-001",
+    "attempt": 1,
+    "type": "reasoning_start",
+    "data": {"block_id": "reasoning-block-001"}
+  },
+  {
+    "schema_version": 1,
+    "event_id": "event-canonical-002",
+    "sequence": 2,
+    "timestamp": "2026-08-02T12:00:02Z",
+    "session_id": "session-canonical-001",
+    "run_id": "run-canonical-001",
+    "attempt": 1,
+    "type": "reasoning_delta",
+    "data": {
+      "block_id": "reasoning-block-001",
+      "delta": "I will provide a concise canonical answer."
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "event-canonical-003",
+    "sequence": 3,
+    "timestamp": "2026-08-02T12:00:03Z",
+    "session_id": "session-canonical-001",
+    "run_id": "run-canonical-001",
+    "attempt": 1,
+    "type": "reasoning_end",
+    "data": {"block_id": "reasoning-block-001"}
+  },
+  {
+    "schema_version": 1,
+    "event_id": "event-canonical-004",
+    "sequence": 4,
+    "timestamp": "2026-08-02T12:00:04Z",
+    "session_id": "session-canonical-001",
+    "run_id": "run-canonical-001",
+    "attempt": 1,
+    "type": "text_start",
+    "data": {"block_id": "text-block-001"}
+  },
+  {
+    "schema_version": 1,
+    "event_id": "event-canonical-005",
+    "sequence": 5,
+    "timestamp": "2026-08-02T12:00:05Z",
+    "session_id": "session-canonical-001",
+    "run_id": "run-canonical-001",
+    "attempt": 1,
+    "type": "text_delta",
+    "data": {
+      "block_id": "text-block-001",
+      "delta": "The canonical run completed successfully."
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "event-canonical-006",
+    "sequence": 6,
+    "timestamp": "2026-08-02T12:00:06Z",
+    "session_id": "session-canonical-001",
+    "run_id": "run-canonical-001",
+    "attempt": 1,
+    "type": "text_end",
+    "data": {"block_id": "text-block-001"}
+  },
+  {
+    "schema_version": 1,
+    "event_id": "event-canonical-007",
+    "sequence": 7,
+    "timestamp": "2026-08-02T12:00:07Z",
+    "session_id": "session-canonical-001",
+    "run_id": "run-canonical-001",
+    "attempt": 1,
+    "type": "usage",
+    "data": {
+      "category": "agent",
+      "model": "anthropic:claude-sonnet-4",
+      "llm_call_index": 1,
+      "input_tokens": 120,
+      "output_tokens": 24,
+      "reasoning_tokens": 18,
+      "cache_read_tokens": 40,
+      "cache_creation_tokens": 0
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "event-canonical-008",
+    "sequence": 8,
+    "timestamp": "2026-08-02T12:00:08Z",
+    "session_id": "session-canonical-001",
+    "run_id": "run-canonical-001",
+    "attempt": 1,
+    "type": "rubric_evaluation_start",
+    "data": {
+      "grading_run_id": "grading-canonical-001",
+      "max_attempts": 2
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "event-canonical-009",
+    "sequence": 9,
+    "timestamp": "2026-08-02T12:00:09Z",
+    "session_id": "session-canonical-001",
+    "run_id": "run-canonical-001",
+    "attempt": 1,
+    "type": "rubric_evaluation_end",
+    "data": {
+      "evaluation": {
+        "grading_run_id": "grading-canonical-001",
+        "attempt": 1,
+        "result": "satisfied",
+        "explanation": "The response directly and correctly satisfies the request.",
+        "criteria": [
+          {
+            "name": "Provides the requested canonical answer",
+            "passed": true,
+            "gap": null
+          }
+        ],
+        "passed_count": 1,
+        "total_count": 1
+      },
+      "max_attempts": 2
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "event-canonical-010",
+    "sequence": 10,
+    "timestamp": "2026-08-02T12:00:10Z",
+    "session_id": "session-canonical-001",
+    "run_id": "run-canonical-001",
+    "attempt": 1,
+    "type": "usage",
+    "data": {
+      "category": "grader",
+      "model": "anthropic:claude-sonnet-4",
+      "llm_call_index": 1,
+      "input_tokens": 80,
+      "output_tokens": 12,
+      "reasoning_tokens": 0,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 0
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "event-canonical-011",
+    "sequence": 11,
+    "timestamp": "2026-08-02T12:00:11Z",
+    "session_id": "session-canonical-001",
+    "run_id": "run-canonical-001",
+    "attempt": 1,
+    "type": "context_snapshot",
+    "data": {
+      "model": "anthropic:claude-sonnet-4",
+      "attempt": 1,
+      "llm_call_index": 1,
+      "estimated_tokens": 178,
+      "context_window": 200000,
+      "percentage": 0.089,
+      "source": "prepared_context",
+      "freshness": "live",
+      "estimated": true
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "event-canonical-012",
+    "sequence": 12,
+    "timestamp": "2026-08-02T12:00:12Z",
+    "session_id": "session-canonical-001",
+    "run_id": "run-canonical-001",
+    "attempt": 1,
+    "type": "done",
+    "data": {
+      "result": {
+        "schema_version": 1,
+        "run_id": "run-canonical-001",
+        "session_id": "session-canonical-001",
+        "status": "completed",
+        "attempt": 1,
+        "model": "anthropic:claude-sonnet-4",
+        "response": "The canonical run completed successfully.",
+        "final_message_id": "message-assistant-001",
+        "usage": {
+          "agent": {
+            "available": true,
+            "calls": 1,
+            "models": ["anthropic:claude-sonnet-4"],
+            "input_tokens": 120,
+            "output_tokens": 24,
+            "reasoning_tokens": 18,
+            "cache_read_tokens": 40,
+            "cache_creation_tokens": 0
+          },
+          "grader": {
+            "available": true,
+            "calls": 1,
+            "models": ["anthropic:claude-sonnet-4"],
+            "input_tokens": 80,
+            "output_tokens": 12,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0
+          },
+          "summarizer": {
+            "available": false,
+            "calls": 0,
+            "models": [],
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0
+          }
+        },
+        "verification": {
+          "availability": "on",
+          "unavailable_reason": null,
+          "status": "satisfied",
+          "attempts": 1,
+          "max_attempts": 2,
+          "evaluations": [
+            {
+              "grading_run_id": "grading-canonical-001",
+              "attempt": 1,
+              "result": "satisfied",
+              "explanation": "The response directly and correctly satisfies the request.",
+              "criteria": [
+                {
+                  "name": "Provides the requested canonical answer",
+                  "passed": true,
+                  "gap": null
+                }
+              ],
+              "passed_count": 1,
+              "total_count": 1
+            }
+          ]
+        },
+        "last_call_context": {
+          "model": "anthropic:claude-sonnet-4",
+          "attempt": 1,
+          "llm_call_index": 1,
+          "estimated_tokens": 178,
+          "context_window": 200000,
+          "percentage": 0.089,
+          "source": "prepared_context",
+          "freshness": "live",
+          "estimated": true
+        },
+        "next_context": {
+          "model": "anthropic:claude-sonnet-4",
+          "attempt": 1,
+          "llm_call_index": 1,
+          "estimated_tokens": 202,
+          "context_window": 200000,
+          "percentage": 0.101,
+          "source": "post_run_projection",
+          "freshness": "live",
+          "estimated": true
+        },
+        "persisted_at": "2026-08-02T12:00:12Z"
+      }
+    }
+  }
+]

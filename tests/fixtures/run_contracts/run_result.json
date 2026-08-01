@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "run_id": "run-canonical-001",
+  "session_id": "session-canonical-001",
+  "status": "completed",
+  "attempt": 1,
+  "model": "anthropic:claude-sonnet-4",
+  "response": "The canonical run completed successfully.",
+  "final_message_id": "message-assistant-001",
+  "usage": {
+    "agent": {
+      "available": true,
+      "calls": 1,
+      "models": ["anthropic:claude-sonnet-4"],
+      "input_tokens": 120,
+      "output_tokens": 24,
+      "reasoning_tokens": 18,
+      "cache_read_tokens": 40,
+      "cache_creation_tokens": 0
+    },
+    "grader": {
+      "available": true,
+      "calls": 1,
+      "models": ["anthropic:claude-sonnet-4"],
+      "input_tokens": 80,
+      "output_tokens": 12,
+      "reasoning_tokens": 0,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 0
+    },
+    "summarizer": {
+      "available": false,
+      "calls": 0,
+      "models": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "reasoning_tokens": 0,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 0
+    }
+  },
+  "verification": {
+    "availability": "on",
+    "unavailable_reason": null,
+    "status": "satisfied",
+    "attempts": 1,
+    "max_attempts": 2,
+    "evaluations": [
+      {
+        "grading_run_id": "grading-canonical-001",
+        "attempt": 1,
+        "result": "satisfied",
+        "explanation": "The response directly and correctly satisfies the request.",
+        "criteria": [
+          {
+            "name": "Provides the requested canonical answer",
+            "passed": true,
+            "gap": null
+          }
+        ],
+        "passed_count": 1,
+        "total_count": 1
+      }
+    ]
+  },
+  "last_call_context": {
+    "model": "anthropic:claude-sonnet-4",
+    "attempt": 1,
+    "llm_call_index": 1,
+    "estimated_tokens": 178,
+    "context_window": 200000,
+    "percentage": 0.089,
+    "source": "prepared_context",
+    "freshness": "live",
+    "estimated": true
+  },
+  "next_context": {
+    "model": "anthropic:claude-sonnet-4",
+    "attempt": 1,
+    "llm_call_index": 1,
+    "estimated_tokens": 202,
+    "context_window": 200000,
+    "percentage": 0.101,
+    "source": "post_run_projection",
+    "freshness": "live",
+    "estimated": true
+  },
+  "persisted_at": "2026-08-02T12:00:12Z"
+}

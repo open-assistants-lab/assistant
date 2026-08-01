@@ -3,6 +3,7 @@
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -15,9 +16,10 @@ from src.sdk.history_models import (
     TurnMessage,
     TurnsResponse,
 )
-from src.sdk.run_models import RunStatus
+from src.sdk.run_models import RunResult, RunStatus
 
 _UNSET = object()
+FIXTURE_DIR = Path(__file__).parents[1] / "fixtures" / "run_contracts"
 
 
 def run_result(
@@ -84,6 +86,17 @@ def turn_payload(
         "answer": answer,
         "result": result,
     }
+
+
+def test_canonical_turns_response_fixture_validates_and_round_trips() -> None:
+    result = RunResult.model_validate_json((FIXTURE_DIR / "run_result.json").read_text())
+    payload = json.loads((FIXTURE_DIR / "turns_response.json").read_text())
+
+    response = TurnsResponse.model_validate(payload)
+
+    assert response.turns[0].run_id == "run-canonical-001"
+    assert response.turns[0].result == result
+    assert TurnsResponse.model_validate(response.model_dump(mode="json")) == response
 
 
 def test_parses_complete_ordered_turn_with_typed_blocks_and_status() -> None:

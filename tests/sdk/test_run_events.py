@@ -4,6 +4,7 @@ import json
 import operator
 from collections.abc import Mapping, MutableMapping
 from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -24,8 +25,10 @@ from src.sdk.run_events import (
     UsageEvent,
     parse_run_event,
 )
+from src.sdk.run_models import RunResult
 
 NOW = datetime(2026, 8, 2, 12, tzinfo=UTC)
+FIXTURE_DIR = Path(__file__).parents[1] / "fixtures" / "run_contracts"
 
 
 def envelope(event_type: str, data: dict[str, Any], *, attempt: int = 1) -> dict[str, Any]:
@@ -80,6 +83,19 @@ def run_result(*, attempt: int = 1, run_id: str = "run-1", session_id: str = "se
         "usage": {"agent": {"available": True, "calls": 1, "models": ["openai:gpt-5"]}},
         "verification": {"availability": "off"},
     }
+
+
+def test_canonical_run_events_fixture_is_contiguous_and_round_trips() -> None:
+    result = RunResult.model_validate_json((FIXTURE_DIR / "run_result.json").read_text())
+    payloads = json.loads((FIXTURE_DIR / "run_events.json").read_text())
+
+    events = [parse_run_event(payload) for payload in payloads]
+
+    assert [event.sequence for event in events] == list(range(1, len(events) + 1))
+    assert len({event.event_id for event in events}) == len(events)
+    assert isinstance(events[-1], DoneEvent)
+    assert events[-1].data.result == result
+    assert [parse_run_event(event.model_dump(mode="json")) for event in events] == events
 
 
 def test_parse_text_delta_preserves_typed_data() -> None:

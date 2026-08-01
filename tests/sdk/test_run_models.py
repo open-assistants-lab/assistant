@@ -1,6 +1,8 @@
 """Tests for canonical run outcome contracts."""
 
+import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -22,6 +24,8 @@ from src.sdk.run_models import (
     VerificationOutcome,
 )
 
+FIXTURE_DIR = Path(__file__).parents[1] / "fixtures" / "run_contracts"
+
 
 def _evaluation() -> RubricEvaluation:
     return RubricEvaluation(
@@ -42,6 +46,16 @@ def _verification() -> VerificationOutcome:
         attempts=1,
         evaluations=(_evaluation(),),
     )
+
+
+def test_canonical_run_result_fixture_validates_and_round_trips() -> None:
+    payload = json.loads((FIXTURE_DIR / "run_result.json").read_text())
+
+    result = RunResult.model_validate(payload)
+
+    assert result.run_id == "run-canonical-001"
+    assert result.model == "anthropic:claude-sonnet-4"
+    assert RunResult.model_validate(result.model_dump(mode="json")) == result
 
 
 def test_rubric_evaluation_accepts_consistent_derived_counts() -> None:
