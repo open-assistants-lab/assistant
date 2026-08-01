@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import math
+import re
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Literal
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     StringConstraints,
@@ -16,13 +19,38 @@ from pydantic import (
 )
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+_CANONICAL_MODEL_PATTERN = r"^[^:/\s]+:\S+$"
+_RFC3339_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$"
+)
+# Percentages are wire values, so only insignificant floating-point rounding is tolerated.
+CONTEXT_PERCENTAGE_ABS_TOLERANCE = 1e-9
 
 
-def _validate_canonical_model(value: str) -> str:
+def normalize_canonical_model(value: str) -> str:
+    """Normalize and validate a canonical provider:model identifier."""
+    if not isinstance(value, str):
+        raise ValueError("model must use canonical provider:model syntax")
     provider, separator, model = value.partition(":")
-    if not separator or not provider.strip() or not model.strip():
-        raise ValueError("model must use nonempty provider:model syntax")
-    return f"{provider.strip()}:{model.strip()}"
+    provider = provider.strip()
+    model = model.strip()
+    if (
+        not separator
+        or not provider
+        or "/" in provider
+        or any(character.isspace() for character in provider)
+        or not model
+        or any(character.isspace() for character in model)
+    ):
+        raise ValueError("model must use canonical provider:model syntax")
+    return f"{provider}:{model}"
+
+
+CanonicalModel = Annotated[
+    str,
+    StringConstraints(pattern=_CANONICAL_MODEL_PATTERN),
+    BeforeValidator(normalize_canonical_model),
+]
 
 
 class ContractModel(BaseModel):
@@ -87,17 +115,12 @@ class ContextFreshness(StrEnum):
 class UsageAggregate(ContractModel):
     available: bool = False
     calls: int = Field(default=0, ge=0)
-    models: tuple[str, ...] = ()
+    models: tuple[CanonicalModel, ...] = ()
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
     reasoning_tokens: int = Field(default=0, ge=0)
     cache_read_tokens: int = Field(default=0, ge=0)
     cache_creation_tokens: int = Field(default=0, ge=0)
-
-    @field_validator("models")
-    @classmethod
-    def _canonical_models(cls, models: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(_validate_canonical_model(model) for model in models)
 
     @model_validator(mode="after")
     def _validate_availability(self) -> UsageAggregate:
@@ -122,7 +145,7 @@ class RunUsage(ContractModel):
 
 
 class ContextSnapshot(ContractModel):
-    model: str
+    model: CanonicalModel
     attempt: int = Field(ge=1)
     llm_call_index: int = Field(ge=1)
     estimated_tokens: int | None = Field(default=None, ge=0)
@@ -132,10 +155,23 @@ class ContextSnapshot(ContractModel):
     freshness: ContextFreshness
     estimated: bool
 
-    @field_validator("model")
-    @classmethod
-    def _canonical_model(cls, value: str) -> str:
-        return _validate_canonical_model(value)
+    @model_validator(mode="after")
+    def _validate_percentage(self) -> ContextSnapshot:
+        if self.estimated_tokens is None or self.context_window is None:
+            if self.percentage is not None:
+                raise ValueError("percentage must be null when token inputs are unknown")
+            return self
+        if self.percentage is None:
+            raise ValueError("percentage is required when token inputs are known")
+        expected = self.estimated_tokens / self.context_window * 100
+        if not math.isclose(
+            self.percentage,
+            expected,
+            rel_tol=0.0,
+            abs_tol=CONTEXT_PERCENTAGE_ABS_TOLERANCE,
+        ):
+            raise ValueError("percentage must equal estimated_tokens / context_window * 100")
+        return self
 
 
 class CriterionEvaluation(ContractModel):
@@ -259,7 +295,7 @@ class RunResult(ContractModel):
     session_id: NonEmptyString
     status: RunStatus
     attempt: int = Field(ge=1)
-    model: str
+    model: CanonicalModel
     response: str
     final_message_id: str | None = None
     usage: RunUsage
@@ -268,14 +304,33 @@ class RunResult(ContractModel):
     next_context: ContextSnapshot | None = None
     persisted_at: datetime | None = None
 
-    @field_validator("model")
+    @field_validator(
+        "persisted_at", mode="before", json_schema_input_type=datetime | str | None
+    )
     @classmethod
-    def _canonical_model(cls, value: str) -> str:
-        return _validate_canonical_model(value)
+    def _persisted_at_input(cls, value: object) -> object:
+        if value is None or isinstance(value, datetime):
+            return value
+        if not isinstance(value, str) or _RFC3339_PATTERN.fullmatch(value) is None:
+            raise ValueError("persisted_at must be a datetime or RFC3339 string")
+        try:
+            return datetime.fromisoformat(value[:-1] + "+00:00" if value[-1] in "Zz" else value)
+        except ValueError as exc:
+            raise ValueError("persisted_at must be a datetime or RFC3339 string") from exc
 
     @field_validator("persisted_at")
     @classmethod
     def _timezone_aware_persisted_at(cls, value: datetime | None) -> datetime | None:
         if value is not None and value.utcoffset() is None:
             raise ValueError("persisted_at must be timezone-aware")
-        return value
+        return value.astimezone(UTC) if value is not None else None
+
+    @model_validator(mode="after")
+    def _contexts_match_run(self) -> RunResult:
+        for field_name in ("last_call_context", "next_context"):
+            context = getattr(self, field_name)
+            if context is not None and (
+                context.model != self.model or context.attempt != self.attempt
+            ):
+                raise ValueError(f"{field_name} model and attempt must match run")
+        return self

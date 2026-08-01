@@ -106,6 +106,21 @@ def test_canonical_model_accepts_slashes_in_model_remainder_and_requires_provide
             canonical_model(invalid)
 
 
+def test_settings_imports_the_shared_canonical_model_contract() -> None:
+    from src.config import user_settings
+    from src.sdk import run_models
+
+    assert user_settings.CanonicalModel is run_models.CanonicalModel
+    model_schema = next(
+        item
+        for item in VerificationOverrides.model_json_schema()["properties"]["grader_model"][
+            "anyOf"
+        ]
+        if item.get("type") == "string"
+    )
+    assert model_schema["pattern"] == r"^[^:/\s]+:\S+$"
+
+
 def test_canonical_model_normalization_applies_to_all_model_fields() -> None:
     overrides = VerificationOverrides(grader_model=" openai : grader ")
     saved = SavedUserSettings(default_model=" openai : chat ", verification=overrides)

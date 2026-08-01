@@ -27,11 +27,14 @@ from src.sdk.run_events import (
     TextDeltaEvent,
     TextEndEvent,
     TextStartEvent,
+    ToolEndData,
     ToolInputDeltaEvent,
     ToolInputEndEvent,
     ToolInputStartEvent,
+    ToolResultData,
     ToolResultEvent,
     UsageEvent,
+    UsageEventData,
     parse_run_event,
 )
 from src.sdk.run_models import RunResult, UsageCategory
@@ -80,7 +83,13 @@ def rubric_evaluation(*, attempt: int = 1) -> dict[str, Any]:
     }
 
 
-def run_result(*, attempt: int = 1, run_id: str = "run-1", session_id: str = "session-1") -> dict[str, Any]:
+def run_result(
+    *,
+    attempt: int = 1,
+    run_id: str = "run-1",
+    session_id: str = "session-1",
+    persisted_at: str | None = "2026-08-02T12:00:00Z",
+) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "run_id": run_id,
@@ -91,6 +100,7 @@ def run_result(*, attempt: int = 1, run_id: str = "run-1", session_id: str = "se
         "response": "Hello",
         "usage": {"agent": {"available": True, "calls": 1, "models": ["openai:gpt-5"]}},
         "verification": {"availability": "off"},
+        "persisted_at": persisted_at,
     }
 
 
@@ -103,6 +113,7 @@ def test_canonical_run_events_fixture_is_contiguous_and_round_trips() -> None:
 
     events = [parse_run_event(payload) for payload in payloads]
     turn = turns.turns[0]
+    assert turn.result == result
     reasoning = next(block for block in turn.blocks if isinstance(block, ReasoningBlock))
     tool = next(block for block in turn.blocks if isinstance(block, ToolBlock))
 
@@ -184,7 +195,7 @@ def test_canonical_run_events_fixture_is_contiguous_and_round_trips() -> None:
         assert aggregate.models == tuple(dict.fromkeys(event.data.model for event in category_events))
         assert all(
             getattr(aggregate, field)
-            == sum(getattr(event.data, field) for event in category_events)
+            == sum(getattr(event.data.usage, field) for event in category_events)
             for field in usage_fields
         )
 
@@ -326,20 +337,44 @@ def test_usage_normalizes_model_and_rejects_negative_single_call_usage() -> None
                 "category": "agent",
                 "model": " openai : gpt-5 ",
                 "llm_call_index": 1,
-                "input_tokens": 2,
-                "output_tokens": 3,
+                "usage": {"input_tokens": 2, "output_tokens": 3},
             },
         )
     )
     assert isinstance(event, UsageEvent)
     assert event.data.model == "openai:gpt-5"
+    assert event.data.usage.input_tokens == 2
+    with pytest.raises(ValidationError, match="frozen"):
+        event.data.usage.input_tokens = 4
 
     payload = envelope(
         "usage",
-        {"category": "agent", "model": "openai:gpt-5", "llm_call_index": 1, "input_tokens": -1},
+        {
+            "category": "agent",
+            "model": "openai:gpt-5",
+            "llm_call_index": 1,
+            "usage": {"input_tokens": -1},
+        },
     )
     with pytest.raises(ValidationError):
         parse_run_event(payload)
+
+
+def test_usage_event_wire_schema_is_nested_and_uses_canonical_model_pattern() -> None:
+    schema = UsageEventData.model_json_schema()
+
+    assert set(schema["properties"]) == {"category", "model", "llm_call_index", "usage"}
+    assert set(schema["required"]) == {"category", "model", "llm_call_index", "usage"}
+    assert schema["properties"]["model"]["pattern"] == r"^[^:/\s]+:\S+$"
+    with pytest.raises(ValidationError):
+        UsageEventData.model_validate(
+            {
+                "category": "agent",
+                "model": "openai:gpt-5",
+                "llm_call_index": 1,
+                "input_tokens": 1,
+            }
+        )
 
 
 @pytest.mark.parametrize("event_type", ["rubric_evaluation_start", "rubric_evaluation_end"])
@@ -594,6 +629,15 @@ def test_tool_payload_json_roundtrip(event_type: str, data: dict[str, Any]) -> N
     assert parse_run_event(serialized) == event
 
 
+def test_tool_event_json_schema_describes_object_arguments_and_json_content() -> None:
+    arguments_schema = ToolEndData.model_json_schema()["properties"]["arguments"]
+    content_schema = ToolResultData.model_json_schema()["properties"]["content"]
+
+    assert arguments_schema["type"] == "object"
+    assert arguments_schema["additionalProperties"] == {"$ref": "#/$defs/JsonValue"}
+    assert content_schema["$ref"] == "#/$defs/JsonValue"
+
+
 @pytest.mark.parametrize(
     ("run_id", "session_id", "attempt"),
     [("other-run", "session-1", 1), ("run-1", "other-session", 1), ("run-1", "session-1", 2)],
@@ -606,6 +650,29 @@ def test_done_result_identity_matches_envelope(run_id: str, session_id: str, att
 def test_done_accepts_matching_result() -> None:
     event = parse_run_event(envelope("done", {"result": run_result()}))
     assert isinstance(event, DoneEvent)
+
+
+def test_done_rejects_provisional_result_without_persisted_at() -> None:
+    with pytest.raises(ValidationError, match="done result must be persisted"):
+        parse_run_event(envelope("done", {"result": run_result(persisted_at=None)}))
+
+
+def test_error_accepts_provisional_result_without_persisted_at() -> None:
+    event = parse_run_event(
+        envelope(
+            "error",
+            {
+                "code": "provider_error",
+                "message": "Provider failed",
+                "retryable": True,
+                "result": run_result(persisted_at=None),
+            },
+        )
+    )
+
+    assert isinstance(event, ErrorEvent)
+    assert event.data.result is not None
+    assert event.data.result.persisted_at is None
 
 
 @pytest.mark.parametrize(("run_id", "session_id"), [("other-run", "session-1"), ("run-1", "other-session")])

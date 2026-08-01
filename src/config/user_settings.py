@@ -18,17 +18,18 @@ from pydantic import (
 )
 
 from src.sdk.run_models import (
+    CanonicalModel as CanonicalModel,
+)
+from src.sdk.run_models import (
     ContractModel,
     NonEmptyString,
     RubricAvailability,
     RubricUnavailableReason,
+    normalize_canonical_model,
 )
 
 JSONScalar: TypeAlias = str | int | float | bool | None
 FrozenJSONValue: TypeAlias = JSONScalar | tuple[object, ...] | Mapping[str, object]
-CanonicalModel: TypeAlias = Annotated[
-    str, Field(json_schema_extra={"pattern": r"^[^:/\s]+:\S+$"})
-]
 PromptHash: TypeAlias = Annotated[
     str, Field(json_schema_extra={"pattern": r"^sha256:[0-9a-f]{64}$"})
 ]
@@ -41,19 +42,7 @@ def canonical_model(value: str | None) -> str | None:
     """Normalize a nullable provider:model reference."""
     if value is None:
         return None
-    provider, separator, model = value.partition(":")
-    provider = provider.strip()
-    model = model.strip()
-    if (
-        not separator
-        or not provider
-        or "/" in provider
-        or any(character.isspace() for character in provider)
-        or not model
-        or any(character.isspace() for character in model)
-    ):
-        raise ValueError("model must use canonical provider:model syntax")
-    return f"{provider}:{model}"
+    return normalize_canonical_model(value)
 
 
 def _freeze_json(value: object) -> FrozenJSONValue:
@@ -89,11 +78,6 @@ class VerificationOverrides(SettingsModel):
     grader_model: CanonicalModel | None = None
     max_attempts: int | None = Field(default=None, ge=1, le=3)
 
-    @field_validator("grader_model")
-    @classmethod
-    def _canonical_grader_model(cls, value: str | None) -> str | None:
-        return canonical_model(value)
-
 
 class SavedUserSettings(SettingsModel):
     schema_version: Literal[1] = 1
@@ -121,11 +105,6 @@ class SavedUserSettings(SettingsModel):
             provider_keys[normalized_provider] = key
         return MappingProxyType(provider_keys)
 
-    @field_validator("default_model")
-    @classmethod
-    def _canonical_default_model(cls, value: str | None) -> str | None:
-        return canonical_model(value)
-
     @field_serializer("provider_keys")
     def _serialize_provider_keys(self, value: Mapping[str, str]) -> dict[str, str]:
         return dict(value)
@@ -143,11 +122,6 @@ class SavedUserSettingsView(SettingsModel):
     default_model: CanonicalModel | None = None
     verification: VerificationOverrides = Field(default_factory=VerificationOverrides)
 
-    @field_validator("default_model")
-    @classmethod
-    def _canonical_default_model(cls, value: str | None) -> str | None:
-        return canonical_model(value)
-
 
 class EffectiveVerificationSettings(SettingsModel):
     state: RubricAvailability
@@ -155,11 +129,6 @@ class EffectiveVerificationSettings(SettingsModel):
     grader_model: CanonicalModel | None = None
     max_attempts: int = Field(default=1, ge=1, le=3)
     grader_prompt_hash: PromptHash | None = None
-
-    @field_validator("grader_model")
-    @classmethod
-    def _canonical_grader_model(cls, value: str | None) -> str | None:
-        return canonical_model(value)
 
     @field_validator("grader_prompt_hash")
     @classmethod
@@ -190,24 +159,11 @@ class EffectiveUserSettings(SettingsModel):
     default_model: CanonicalModel
     verification: EffectiveVerificationSettings
 
-    @field_validator("default_model")
-    @classmethod
-    def _canonical_default_model(cls, value: str) -> str:
-        normalized = canonical_model(value)
-        if normalized is None:  # pragma: no cover - excluded by the field type
-            raise ValueError("default_model is required")
-        return normalized
-
 
 class UserSettingsPatch(SettingsModel):
     expected_revision: int = Field(ge=0)
     default_model: CanonicalModel | None = None
     verification: VerificationOverrides | None = None
-
-    @field_validator("default_model")
-    @classmethod
-    def _canonical_default_model(cls, value: str | None) -> str | None:
-        return canonical_model(value)
 
 
 class ProviderStatus(SettingsModel):

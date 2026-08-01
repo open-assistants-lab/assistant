@@ -1,12 +1,13 @@
 """Tests for canonical run outcome contracts."""
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+import src.sdk.run_models as run_models
 from src.sdk.run_models import (
     ContextFreshness,
     ContextSnapshot,
@@ -86,7 +87,7 @@ def test_run_result_round_trips_all_canonical_outcomes() -> None:
         llm_call_index=2,
         estimated_tokens=1200,
         context_window=128_000,
-        percentage=125.0,
+        percentage=1200 / 128_000 * 100,
         source=ContextSource.PROVIDER_USAGE,
         freshness=ContextFreshness.LIVE,
         estimated=False,
@@ -123,7 +124,7 @@ def test_run_result_round_trips_all_canonical_outcomes() -> None:
     assert restored == result
     assert restored.last_call_context is not None
     assert restored.last_call_context.model == "openai:gpt-5"
-    assert restored.last_call_context.percentage == 125.0
+    assert restored.last_call_context.percentage == 1200 / 128_000 * 100
     assert restored.persisted_at is not None
     assert restored.persisted_at.tzinfo is not None
 
@@ -207,6 +208,119 @@ def test_run_result_normalizes_canonical_model() -> None:
     assert result.model == "openai:gpt-5"
 
 
+def test_canonical_model_acceptance_and_schema_are_shared_across_run_contracts() -> None:
+    context = ContextSnapshot(
+        model=" openrouter : anthropic/claude-sonnet-4 ",
+        attempt=1,
+        llm_call_index=1,
+        source=ContextSource.HISTORY_ESTIMATE,
+        freshness=ContextFreshness.STALE,
+        estimated=True,
+    )
+    usage = UsageAggregate(
+        available=True,
+        calls=1,
+        models=(" openrouter : anthropic/claude-sonnet-4 ",),
+    )
+
+    assert context.model == "openrouter:anthropic/claude-sonnet-4"
+    assert usage.models == ("openrouter:anthropic/claude-sonnet-4",)
+    assert run_models.CanonicalModel is not str
+    assert RunResult.model_json_schema()["properties"]["model"]["pattern"] == r"^[^:/\s]+:\S+$"
+    assert ContextSnapshot.model_json_schema()["properties"]["model"]["pattern"] == r"^[^:/\s]+:\S+$"
+    assert UsageAggregate.model_json_schema()["properties"]["models"]["items"]["pattern"] == (
+        r"^[^:/\s]+:\S+$"
+    )
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["anthropic/claude", "open/router:model", "open router:model", "openai:gpt 5"],
+)
+def test_all_run_model_fields_reject_noncanonical_ids(model: str) -> None:
+    with pytest.raises(ValidationError, match="canonical provider:model"):
+        ContextSnapshot(
+            model=model,
+            attempt=1,
+            llm_call_index=1,
+            source=ContextSource.HISTORY_ESTIMATE,
+            freshness=ContextFreshness.STALE,
+            estimated=True,
+        )
+    with pytest.raises(ValidationError, match="canonical provider:model"):
+        UsageAggregate(available=True, calls=1, models=(model,))
+
+
+@pytest.mark.parametrize(
+    ("estimated_tokens", "context_window", "percentage"),
+    [(None, 100, 1.0), (10, None, 1.0), (None, None, 0.0)],
+)
+def test_context_percentage_must_be_null_when_inputs_are_unknown(
+    estimated_tokens: int | None, context_window: int | None, percentage: float
+) -> None:
+    with pytest.raises(ValidationError, match="percentage must be null"):
+        ContextSnapshot(
+            model="openai:gpt-5",
+            attempt=1,
+            llm_call_index=1,
+            estimated_tokens=estimated_tokens,
+            context_window=context_window,
+            percentage=percentage,
+            source=ContextSource.HISTORY_ESTIMATE,
+            freshness=ContextFreshness.STALE,
+            estimated=True,
+        )
+
+
+def test_context_percentage_is_required_and_derived_when_inputs_are_known() -> None:
+    values = {
+        "model": "openai:gpt-5",
+        "attempt": 1,
+        "llm_call_index": 1,
+        "estimated_tokens": 125,
+        "context_window": 100,
+        "source": ContextSource.PROVIDER_USAGE,
+        "freshness": ContextFreshness.LIVE,
+        "estimated": False,
+    }
+
+    snapshot = ContextSnapshot.model_validate({**values, "percentage": 125.0})
+    assert snapshot.percentage == 125.0
+    with pytest.raises(ValidationError, match="percentage is required"):
+        ContextSnapshot.model_validate(values)
+    with pytest.raises(ValidationError, match="estimated_tokens / context_window"):
+        ContextSnapshot.model_validate({**values, "percentage": 124.999})
+
+
+@pytest.mark.parametrize("field", ["last_call_context", "next_context"])
+@pytest.mark.parametrize(("model", "attempt"), [("anthropic:claude", 1), ("openai:gpt-5", 2)])
+def test_run_result_context_identity_matches_run(
+    field: str, model: str, attempt: int
+) -> None:
+    context = ContextSnapshot(
+        model=model,
+        attempt=attempt,
+        llm_call_index=1,
+        source=ContextSource.HISTORY_ESTIMATE,
+        freshness=ContextFreshness.STALE,
+        estimated=True,
+    )
+    with pytest.raises(ValidationError, match=f"{field} .* must match run"):
+        RunResult.model_validate(
+            {
+                "run_id": "run-1",
+                "session_id": "session-1",
+                "status": RunStatus.COMPLETED,
+                "attempt": 1,
+                "model": "openai:gpt-5",
+                "response": "Complete.",
+                "usage": RunUsage(),
+                "verification": VerificationOutcome(),
+                field: context,
+            }
+        )
+
+
 def test_run_result_requires_timezone_aware_persisted_at() -> None:
     with pytest.raises(ValidationError, match="timezone-aware"):
         RunResult(
@@ -220,6 +334,50 @@ def test_run_result_requires_timezone_aware_persisted_at() -> None:
             verification=VerificationOutcome(),
             persisted_at=datetime(2026, 8, 2, 12, 0),
         )
+
+
+@pytest.mark.parametrize("persisted_at", [0, 1.5, "0", "2026-08-02"])
+def test_run_result_rejects_non_rfc3339_persisted_at(persisted_at: object) -> None:
+    with pytest.raises(ValidationError, match="datetime or RFC3339 string"):
+        RunResult.model_validate(
+            {
+                "run_id": "run-1",
+                "session_id": "session-1",
+                "status": "completed",
+                "attempt": 1,
+                "model": "openai:gpt-5",
+                "response": "Complete.",
+                "usage": {},
+                "verification": {},
+                "persisted_at": persisted_at,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "persisted_at",
+    [
+        datetime(2026, 8, 2, 8, tzinfo=timezone(timedelta(hours=-4))),
+        "2026-08-02T08:00:00-04:00",
+    ],
+)
+def test_run_result_normalizes_persisted_at_to_utc(persisted_at: datetime | str) -> None:
+    result = RunResult.model_validate(
+        {
+            "run_id": "run-1",
+            "session_id": "session-1",
+            "status": RunStatus.COMPLETED,
+            "attempt": 1,
+            "model": "openai:gpt-5",
+            "response": "Complete.",
+            "usage": RunUsage(),
+            "verification": VerificationOutcome(),
+            "persisted_at": persisted_at,
+        }
+    )
+
+    assert result.persisted_at == datetime(2026, 8, 2, 12, tzinfo=UTC)
+    assert result.persisted_at.tzinfo is UTC
 
 
 @pytest.mark.parametrize(

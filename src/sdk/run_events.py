@@ -9,16 +9,23 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Annotated, Generic, Literal, TypeAlias, TypeVar
 
-from pydantic import Field, TypeAdapter, field_serializer, field_validator, model_validator
+from pydantic import (
+    Field,
+    JsonValue,
+    TypeAdapter,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from src.sdk.run_models import (
+    CanonicalModel,
     ContextSnapshot,
     ContractModel,
     NonEmptyString,
     RubricEvaluation,
     RunResult,
     UsageCategory,
-    _validate_canonical_model,
 )
 
 JSONScalar: TypeAlias = str | int | float | bool | None
@@ -74,7 +81,9 @@ class ToolEndData(BlockData):
     tool_call_id: NonEmptyString
     arguments: Mapping[str, object]
 
-    @field_validator("arguments", mode="plain")
+    @field_validator(
+        "arguments", mode="plain", json_schema_input_type=dict[str, JsonValue]
+    )
     @classmethod
     def _frozen_arguments(cls, value: object) -> Mapping[str, object]:
         frozen = _freeze_json(value)
@@ -93,7 +102,7 @@ class ToolResultData(BlockData):
     status: Literal["completed", "failed", "cancelled"]
     content: FrozenJSONValue
 
-    @field_validator("content", mode="plain")
+    @field_validator("content", mode="plain", json_schema_input_type=JsonValue)
     @classmethod
     def _frozen_content(cls, value: object) -> FrozenJSONValue:
         return _freeze_json(value)
@@ -103,20 +112,19 @@ class ToolResultData(BlockData):
         return _thaw_json(value)
 
 
-class UsageEventData(ContractModel):
-    category: UsageCategory
-    model: str
-    llm_call_index: int = Field(ge=1)
+class SingleCallUsage(ContractModel):
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
     reasoning_tokens: int = Field(default=0, ge=0)
     cache_read_tokens: int = Field(default=0, ge=0)
     cache_creation_tokens: int = Field(default=0, ge=0)
 
-    @field_validator("model")
-    @classmethod
-    def _canonical_model(cls, value: str) -> str:
-        return _validate_canonical_model(value)
+
+class UsageEventData(ContractModel):
+    category: UsageCategory
+    model: CanonicalModel
+    llm_call_index: int = Field(ge=1)
+    usage: SingleCallUsage
 
 
 class RubricStartData(ContractModel):
@@ -305,6 +313,8 @@ class DoneEvent(RunEventBase[DoneData]):
             raise ValueError("result session_id must match envelope")
         if self.data.result.attempt != self.attempt:
             raise ValueError("result attempt must match envelope")
+        if self.data.result.persisted_at is None:
+            raise ValueError("done result must be persisted")
         return self
 
 

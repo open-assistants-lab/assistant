@@ -146,11 +146,13 @@
       "category": "agent",
       "model": "anthropic:claude-sonnet-4",
       "llm_call_index": 1,
-      "input_tokens": 120,
-      "output_tokens": 24,
-      "reasoning_tokens": 18,
-      "cache_read_tokens": 40,
-      "cache_creation_tokens": 0
+      "usage": {
+        "input_tokens": 120,
+        "output_tokens": 24,
+        "reasoning_tokens": 18,
+        "cache_read_tokens": 40,
+        "cache_creation_tokens": 0
+      }
     }
   },
   {
@@ -208,11 +210,13 @@
       "category": "grader",
       "model": "anthropic:claude-sonnet-4",
       "llm_call_index": 1,
-      "input_tokens": 80,
-      "output_tokens": 12,
-      "reasoning_tokens": 0,
-      "cache_read_tokens": 0,
-      "cache_creation_tokens": 0
+      "usage": {
+        "input_tokens": 80,
+        "output_tokens": 12,
+        "reasoning_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0
+      }
     }
   },
   {
