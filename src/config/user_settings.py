@@ -1,0 +1,216 @@
+"""Immutable contracts for persisted and effective user settings."""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Literal, TypeAlias
+
+from pydantic import Field, JsonValue, field_serializer, field_validator, model_validator
+
+from src.sdk.run_models import (
+    ContractModel,
+    NonEmptyString,
+    RubricAvailability,
+    RubricUnavailableReason,
+)
+
+JSONScalar: TypeAlias = str | int | float | bool | None
+FrozenJSONValue: TypeAlias = JSONScalar | tuple[object, ...] | Mapping[str, object]
+
+
+def canonical_model(value: str | None) -> str | None:
+    """Normalize a nullable provider:model reference."""
+    if value is None:
+        return None
+    provider, separator, model = value.partition(":")
+    if "/" in value or not separator or not provider.strip() or not model.strip():
+        raise ValueError("model must use nonempty provider:model syntax without slashes")
+    return f"{provider.strip()}:{model.strip()}"
+
+
+def _freeze_json(value: object) -> FrozenJSONValue:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("value must be JSON-compatible")
+        return value
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise ValueError("JSON object keys must be strings")
+        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_json(item) for item in value)
+    raise ValueError("value must be JSON-compatible")
+
+
+def _thaw_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value
+
+
+class SettingsModel(ContractModel):
+    """Base for immutable settings contracts with exact schemas."""
+
+
+class VerificationOverrides(SettingsModel):
+    enabled: bool | None = None
+    grader_model: str | None = None
+    max_attempts: int | None = Field(default=None, ge=1, le=3)
+
+    @field_validator("grader_model")
+    @classmethod
+    def _canonical_grader_model(cls, value: str | None) -> str | None:
+        return canonical_model(value)
+
+
+class SavedUserSettings(SettingsModel):
+    schema_version: Literal[1] = 1
+    revision: int = Field(default=0, ge=0)
+    provider_keys: Mapping[str, str] = Field(default_factory=dict)
+    default_model: str | None = None
+    verification: VerificationOverrides = Field(default_factory=VerificationOverrides)
+
+    @field_validator("provider_keys", mode="plain", json_schema_input_type=dict[str, str])
+    @classmethod
+    def _frozen_provider_keys(cls, value: object) -> Mapping[str, str]:
+        if not isinstance(value, Mapping):
+            raise ValueError("provider_keys must be an object")
+        provider_keys: dict[str, str] = {}
+        for provider, key in value.items():
+            if not isinstance(provider, str) or not provider.strip():
+                raise ValueError("provider_keys provider IDs must be nonempty strings")
+            if not isinstance(key, str) or not key.strip():
+                raise ValueError("provider_keys values must be nonempty strings")
+            provider_keys[provider.strip()] = key
+        return MappingProxyType(provider_keys)
+
+    @field_validator("default_model")
+    @classmethod
+    def _canonical_default_model(cls, value: str | None) -> str | None:
+        return canonical_model(value)
+
+    @field_serializer("provider_keys")
+    def _serialize_provider_keys(self, value: Mapping[str, str]) -> dict[str, str]:
+        return dict(value)
+
+
+class SavedUserSettingsView(SettingsModel):
+    default_model: str | None = None
+    verification: VerificationOverrides = Field(default_factory=VerificationOverrides)
+
+    @field_validator("default_model")
+    @classmethod
+    def _canonical_default_model(cls, value: str | None) -> str | None:
+        return canonical_model(value)
+
+
+class EffectiveVerificationSettings(SettingsModel):
+    state: RubricAvailability
+    unavailable_reason: RubricUnavailableReason | None = None
+    grader_model: str | None = None
+    max_attempts: int = Field(default=1, ge=1, le=3)
+    grader_prompt_hash: str | None = None
+
+    @field_validator("grader_model")
+    @classmethod
+    def _canonical_grader_model(cls, value: str | None) -> str | None:
+        return canonical_model(value)
+
+    @model_validator(mode="after")
+    def _validate_state(self) -> EffectiveVerificationSettings:
+        if self.state is RubricAvailability.UNAVAILABLE:
+            if self.unavailable_reason is None:
+                raise ValueError("unavailable_reason is required when state is unavailable")
+        elif self.unavailable_reason is not None:
+            raise ValueError("unavailable_reason is forbidden unless state is unavailable")
+
+        if self.state is RubricAvailability.ON:
+            if self.grader_model is None:
+                raise ValueError("grader_model is required when state is on")
+            if not self.grader_prompt_hash or not self.grader_prompt_hash.startswith("sha256:"):
+                raise ValueError("grader_prompt_hash must be a nonempty sha256-prefixed value")
+            if not self.grader_prompt_hash.removeprefix("sha256:").strip():
+                raise ValueError("grader_prompt_hash must be a nonempty sha256-prefixed value")
+        return self
+
+
+class EffectiveUserSettings(SettingsModel):
+    default_model: str
+    verification: EffectiveVerificationSettings
+
+    @field_validator("default_model")
+    @classmethod
+    def _canonical_default_model(cls, value: str) -> str:
+        normalized = canonical_model(value)
+        if normalized is None:  # pragma: no cover - excluded by the field type
+            raise ValueError("default_model is required")
+        return normalized
+
+
+class UserSettingsPatch(SettingsModel):
+    expected_revision: int = Field(ge=0)
+    default_model: str | None = None
+    verification: VerificationOverrides | None = None
+
+    @field_validator("default_model")
+    @classmethod
+    def _canonical_default_model(cls, value: str | None) -> str | None:
+        return canonical_model(value)
+
+
+class ProviderStatus(SettingsModel):
+    name: NonEmptyString
+    has_key: bool
+    key_configured_via_env: bool = False
+    key_source: Literal["none", "user", "env", "hosted"]
+
+
+class UserSettingsResponse(SettingsModel):
+    schema_version: Literal[1] = 1
+    revision: int = Field(ge=0)
+    saved: SavedUserSettingsView
+    effective: EffectiveUserSettings
+    provider_status: Mapping[str, ProviderStatus]
+
+    @field_validator(
+        "provider_status", mode="plain", json_schema_input_type=dict[str, ProviderStatus]
+    )
+    @classmethod
+    def _frozen_provider_status(cls, value: object) -> Mapping[str, ProviderStatus]:
+        if not isinstance(value, Mapping):
+            raise ValueError("provider_status must be an object")
+        return MappingProxyType(
+            {
+                provider: status
+                if isinstance(status, ProviderStatus)
+                else ProviderStatus.model_validate(status)
+                for provider, status in value.items()
+            }
+        )
+
+    @field_serializer("provider_status")
+    def _serialize_provider_status(
+        self, value: Mapping[str, ProviderStatus]
+    ) -> dict[str, ProviderStatus]:
+        return dict(value)
+
+
+class SettingsError(SettingsModel):
+    code: Literal["revision_conflict", "validation_error", "configuration_error"]
+    message: str
+    details: FrozenJSONValue
+
+    @field_validator("details", mode="plain", json_schema_input_type=JsonValue)
+    @classmethod
+    def _frozen_details(cls, value: object) -> FrozenJSONValue:
+        return _freeze_json(value)
+
+    @field_serializer("details")
+    def _serialize_details(self, value: FrozenJSONValue) -> object:
+        return _thaw_json(value)
