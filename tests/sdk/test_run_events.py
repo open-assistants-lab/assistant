@@ -9,6 +9,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from src.sdk.run_events import (
     BlockDeltaData,
+    ContextCompressedEvent,
     ContextSnapshotEvent,
     DoneEvent,
     ErrorEvent,
@@ -217,6 +218,39 @@ def test_context_snapshot_attempt_matches_envelope() -> None:
 
     with pytest.raises(ValidationError, match="snapshot attempt must equal envelope attempt"):
         parse_run_event(envelope("context_snapshot", context_snapshot(attempt=1), attempt=2))
+
+
+def test_context_compressed_snapshot_attempts_match_envelope() -> None:
+    event = parse_run_event(
+        envelope(
+            "context_compressed",
+            {
+                "before": context_snapshot(attempt=2),
+                "after": context_snapshot(attempt=2),
+                "status": "succeeded",
+                "error": None,
+            },
+            attempt=2,
+        )
+    )
+
+    assert isinstance(event, ContextCompressedEvent)
+
+
+@pytest.mark.parametrize("mismatched_snapshot", ["before", "after"])
+def test_context_compressed_rejects_snapshot_attempt_mismatch(
+    mismatched_snapshot: str,
+) -> None:
+    data = {
+        "before": context_snapshot(attempt=2),
+        "after": context_snapshot(attempt=2),
+        "status": "succeeded",
+        "error": None,
+    }
+    data[mismatched_snapshot] = context_snapshot(attempt=1)
+
+    with pytest.raises(ValidationError, match="compressed context attempts must equal envelope attempt"):
+        parse_run_event(envelope("context_compressed", data, attempt=2))
 
 
 @pytest.mark.parametrize(

@@ -204,6 +204,12 @@ class ContextSnapshotEvent(RunEventBase[ContextSnapshot]):
 class ContextCompressedEvent(RunEventBase[ContextCompressedData]):
     type: Literal["context_compressed"] = "context_compressed"
 
+    @model_validator(mode="after")
+    def _snapshots_match_envelope(self) -> ContextCompressedEvent:
+        if self.data.before.attempt != self.attempt or self.data.after.attempt != self.attempt:
+            raise ValueError("compressed context attempts must equal envelope attempt")
+        return self
+
 
 class DoneEvent(RunEventBase[DoneData]):
     type: Literal["done"] = "done"
