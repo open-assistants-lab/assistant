@@ -185,14 +185,19 @@ class UserSettingsResponse(SettingsModel):
     def _frozen_provider_status(cls, value: object) -> Mapping[str, ProviderStatus]:
         if not isinstance(value, Mapping):
             raise ValueError("provider_status must be an object")
-        return MappingProxyType(
-            {
-                provider: status
+        statuses: dict[str, ProviderStatus] = {}
+        for provider, status in value.items():
+            if not isinstance(provider, str) or not provider.strip():
+                raise ValueError("provider_status provider IDs must be nonempty strings")
+            normalized_provider = provider.strip()
+            if normalized_provider in statuses:
+                raise ValueError(f"duplicate provider ID after trimming: {normalized_provider}")
+            statuses[normalized_provider] = (
+                status
                 if isinstance(status, ProviderStatus)
                 else ProviderStatus.model_validate(status)
-                for provider, status in value.items()
-            }
-        )
+            )
+        return MappingProxyType(statuses)
 
     @field_serializer("provider_status")
     def _serialize_provider_status(

@@ -244,6 +244,48 @@ def test_response_provider_status_is_immutable() -> None:
         )
 
 
+def test_response_provider_status_rejects_non_string_provider_id() -> None:
+    payload: dict[str, object] = _response().model_dump()
+    payload["provider_status"] = {
+        1: {"name": "OpenAI", "has_key": True, "key_source": "user"}
+    }
+
+    with pytest.raises(ValidationError, match="provider IDs"):
+        UserSettingsResponse.model_validate(payload)
+
+
+@pytest.mark.parametrize("provider", ["", "   "])
+def test_response_provider_status_rejects_blank_provider_id(provider: str) -> None:
+    payload: dict[str, object] = _response().model_dump()
+    payload["provider_status"] = {
+        provider: {"name": "OpenAI", "has_key": True, "key_source": "user"}
+    }
+
+    with pytest.raises(ValidationError, match="provider IDs"):
+        UserSettingsResponse.model_validate(payload)
+
+
+def test_response_provider_status_trims_provider_ids_and_serializes_as_object() -> None:
+    payload: dict[str, object] = _response().model_dump()
+    payload["provider_status"] = {
+        " openai ": {"name": "OpenAI", "has_key": True, "key_source": "user"}
+    }
+
+    response = UserSettingsResponse.model_validate(payload)
+
+    assert response.provider_status == {"openai": response.provider_status["openai"]}
+    assert list(json.loads(response.model_dump_json())["provider_status"]) == ["openai"]
+
+
+def test_response_provider_status_rejects_collisions_after_trimming() -> None:
+    payload: dict[str, object] = _response().model_dump()
+    status = {"name": "OpenAI", "has_key": True, "key_source": "user"}
+    payload["provider_status"] = {"openai": status, " openai ": status}
+
+    with pytest.raises(ValidationError, match="duplicate provider ID"):
+        UserSettingsResponse.model_validate(payload)
+
+
 def test_settings_error_details_reject_non_json_values_and_round_trip() -> None:
     error = SettingsError(
         code="revision_conflict",
