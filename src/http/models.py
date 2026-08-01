@@ -4,6 +4,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from src.sdk.run_models import RunResult
+
 
 class VerificationRequest(BaseModel):
     rubric: str | None = None
@@ -33,6 +35,7 @@ class MessageResponse(BaseModel):
     tool_calls: list[dict[str, Any]] | None = Field(default=None)
     verification: VerificationVerdict | None = None
     usage: dict[str, Any] | None = None
+    run: RunResult | None = None
 
 
 class MemorySearchRequest(BaseModel):

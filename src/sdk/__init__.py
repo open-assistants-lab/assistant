@@ -9,6 +9,8 @@ Public API:
     OllamaCloud - Ollama Cloud provider (native /api/chat)
     OpenAIProvider, AnthropicProvider, GeminiProvider - other providers
     AgentLoop, Interrupt, RunConfig, CostTracker, Usage - agent loop
+    RunEvent, parse_run_event - canonical run events
+    RunResult, RunStatus, RunUsage, VerificationOutcome - canonical run outcomes
     Middleware - middleware base class
     SummarizationMiddleware - conversation summarization (SDK-native)
     SubagentContext - in-memory subagent signaling (replaces middleware-based progress/instruction)
@@ -46,6 +48,15 @@ from src.sdk.providers.base import LLMProvider, ModelCost, ModelInfo
 from src.sdk.providers.factory import create_model_from_config, create_provider
 from src.sdk.providers.ollama import OllamaCloud
 from src.sdk.registry import get_model_info, get_provider, list_models, list_providers, refresh
+from src.sdk.run_events import RunEvent, parse_run_event
+from src.sdk.run_models import (
+    ContextSnapshot,
+    RubricEvaluation,
+    RunResult,
+    RunStatus,
+    RunUsage,
+    VerificationOutcome,
+)
 from src.sdk.state import AgentState
 from src.sdk.subagent_context import SubagentCancelledError, SubagentContext
 from src.sdk.subagent_models import (
@@ -93,6 +104,14 @@ __all__ = [
     "Interrupt",
     "RunConfig",
     "CostTracker",
+    "RunEvent",
+    "parse_run_event",
+    "RunResult",
+    "RunStatus",
+    "RunUsage",
+    "VerificationOutcome",
+    "RubricEvaluation",
+    "ContextSnapshot",
     "Middleware",
     "SubagentContext",
     "SubagentCancelledError",
