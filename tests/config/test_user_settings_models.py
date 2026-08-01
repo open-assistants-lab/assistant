@@ -22,6 +22,8 @@ from src.config.user_settings import (
 )
 from src.sdk.run_models import RubricAvailability, RubricUnavailableReason
 
+_PROMPT_HASH = f"sha256:{'a' * 64}"
+
 
 def _effective_verification(
     *, state: RubricAvailability = RubricAvailability.ON
@@ -30,7 +32,7 @@ def _effective_verification(
         state=state,
         grader_model="openai:gpt-5",
         max_attempts=2,
-        grader_prompt_hash="sha256:abc123",
+        grader_prompt_hash=_PROMPT_HASH,
     )
 
 
@@ -83,11 +85,23 @@ def test_verification_rejects_more_than_three_attempts() -> None:
         )
 
 
-def test_canonical_model_normalizes_nullable_values_and_rejects_slashes() -> None:
+def test_canonical_model_accepts_slashes_in_model_remainder_and_requires_provider() -> None:
     assert canonical_model(None) is None
     assert canonical_model(" openai : gpt-5 ") == "openai:gpt-5"
+    assert (
+        canonical_model(" openrouter : anthropic/claude-sonnet-4 ")
+        == "openrouter:anthropic/claude-sonnet-4"
+    )
 
-    for invalid in ("openai/gpt-5", "openai:", ":gpt-5", "gpt-5", "  "):
+    for invalid in (
+        "anthropic/claude-sonnet-4",
+        "openrouter:",
+        ":anthropic/claude-sonnet-4",
+        "open/router:model",
+        "open router:model",
+        "openrouter:anthropic/claude sonnet",
+        "  ",
+    ):
         with pytest.raises(ValueError):
             canonical_model(invalid)
 
@@ -105,7 +119,7 @@ def test_canonical_model_normalization_applies_to_all_model_fields() -> None:
         verification=EffectiveVerificationSettings(
             state=RubricAvailability.ON,
             grader_model=" openai : effective-grader ",
-            grader_prompt_hash="sha256:prompt",
+            grader_prompt_hash=_PROMPT_HASH,
         ),
     )
 
@@ -141,6 +155,15 @@ def test_saved_provider_keys_are_immutable_and_round_trip_as_json_object() -> No
     assert SavedUserSettings.model_validate_json(dumped) == settings
 
 
+def test_saved_settings_repr_masks_provider_key_values_without_masking_json() -> None:
+    secret = "known-provider-secret"
+    settings = SavedUserSettings(provider_keys={"openai": secret})
+
+    assert secret not in repr(settings)
+    assert secret not in str(settings)
+    assert json.loads(settings.model_dump_json())["provider_keys"] == {"openai": secret}
+
+
 @pytest.mark.parametrize(
     "provider_keys",
     [{"": "secret"}, {"   ": "secret"}, {"openai": ""}, {"openai": "   "}],
@@ -148,6 +171,11 @@ def test_saved_provider_keys_are_immutable_and_round_trip_as_json_object() -> No
 def test_saved_provider_keys_reject_blank_ids_and_values(provider_keys: dict[str, str]) -> None:
     with pytest.raises(ValidationError, match="provider_keys"):
         SavedUserSettings(provider_keys=provider_keys)
+
+
+def test_saved_provider_keys_reject_collisions_after_trimming() -> None:
+    with pytest.raises(ValidationError, match="duplicate provider ID"):
+        SavedUserSettings(provider_keys={"openai": "first", " openai ": "second"})
 
 
 def test_response_cannot_represent_provider_keys_or_secret_values() -> None:
@@ -176,7 +204,7 @@ def test_unavailable_reason_is_required_only_for_unavailable_state() -> None:
                 state=state,
                 unavailable_reason=RubricUnavailableReason.MISSING_PROMPT,
                 grader_model="openai:grader" if state is RubricAvailability.ON else None,
-                grader_prompt_hash="sha256:prompt" if state is RubricAvailability.ON else None,
+                grader_prompt_hash=_PROMPT_HASH if state is RubricAvailability.ON else None,
             )
 
 
@@ -184,7 +212,7 @@ def test_on_verification_requires_canonical_model_and_prompt_hash() -> None:
     with pytest.raises(ValidationError, match="grader_model"):
         EffectiveVerificationSettings(
             state=RubricAvailability.ON,
-            grader_prompt_hash="sha256:prompt",
+            grader_prompt_hash=_PROMPT_HASH,
         )
     with pytest.raises(ValidationError, match="grader_prompt_hash"):
         EffectiveVerificationSettings(
@@ -195,7 +223,7 @@ def test_on_verification_requires_canonical_model_and_prompt_hash() -> None:
         EffectiveVerificationSettings(
             state=RubricAvailability.ON,
             grader_model="openai/grader",
-            grader_prompt_hash="sha256:prompt",
+            grader_prompt_hash=_PROMPT_HASH,
         )
     with pytest.raises(ValidationError, match="grader_prompt_hash"):
         EffectiveVerificationSettings(
@@ -213,14 +241,93 @@ def test_on_verification_requires_canonical_model_and_prompt_hash() -> None:
     off = EffectiveVerificationSettings(
         state=RubricAvailability.OFF,
         grader_model="openai:grader",
-        grader_prompt_hash="sha256:prompt",
+        grader_prompt_hash=_PROMPT_HASH,
     )
     assert off.grader_model == "openai:grader"
+
+
+@pytest.mark.parametrize("state", [RubricAvailability.OFF, RubricAvailability.UNAVAILABLE])
+@pytest.mark.parametrize(
+    "invalid_hash",
+    ["sha256:abc123", f"sha256:{'g' * 64}"],
+)
+def test_non_null_prompt_hash_is_exact_in_every_state(
+    state: RubricAvailability, invalid_hash: str
+) -> None:
+    kwargs: dict[str, object] = {
+        "state": state,
+        "grader_prompt_hash": invalid_hash,
+    }
+    if state is RubricAvailability.UNAVAILABLE:
+        kwargs["unavailable_reason"] = RubricUnavailableReason.MISSING_PROMPT
+
+    with pytest.raises(ValidationError, match="grader_prompt_hash"):
+        EffectiveVerificationSettings.model_validate(kwargs)
+
+
+def test_prompt_hash_normalizes_uppercase_hex() -> None:
+    settings = EffectiveVerificationSettings(
+        state=RubricAvailability.OFF,
+        grader_prompt_hash=f"sha256:{'ABCDEF' * 10}ABCD",
+    )
+
+    assert settings.grader_prompt_hash == f"sha256:{'abcdef' * 10}abcd"
 
 
 def test_provider_status_rejects_unknown_key_source() -> None:
     with pytest.raises(ValidationError, match="key_source"):
         ProviderStatus(name="OpenAI", has_key=True, key_source="vault")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("key_source", "has_key", "key_configured_via_env"),
+    [
+        ("none", False, False),
+        ("user", True, False),
+        ("env", True, True),
+        ("hosted", True, False),
+    ],
+)
+def test_provider_status_accepts_consistent_key_metadata(
+    key_source: str, has_key: bool, key_configured_via_env: bool
+) -> None:
+    status = ProviderStatus.model_validate(
+        {
+            "name": "OpenAI",
+            "has_key": has_key,
+            "key_configured_via_env": key_configured_via_env,
+            "key_source": key_source,
+        }
+    )
+
+    assert status.key_source == key_source
+
+
+@pytest.mark.parametrize(
+    ("key_source", "has_key", "key_configured_via_env"),
+    [
+        ("none", True, False),
+        ("none", False, True),
+        ("user", False, False),
+        ("user", True, True),
+        ("env", False, True),
+        ("env", True, False),
+        ("hosted", False, False),
+        ("hosted", True, True),
+    ],
+)
+def test_provider_status_rejects_contradictory_key_metadata(
+    key_source: str, has_key: bool, key_configured_via_env: bool
+) -> None:
+    with pytest.raises(ValidationError, match="key_source"):
+        ProviderStatus.model_validate(
+            {
+                "name": "OpenAI",
+                "has_key": has_key,
+                "key_configured_via_env": key_configured_via_env,
+                "key_source": key_source,
+            }
+        )
 
 
 def test_contracts_are_frozen_and_reject_extra_fields() -> None:
@@ -284,6 +391,26 @@ def test_response_provider_status_rejects_collisions_after_trimming() -> None:
 
     with pytest.raises(ValidationError, match="duplicate provider ID"):
         UserSettingsResponse.model_validate(payload)
+
+
+def test_json_schema_describes_canonical_models_hashes_and_provider_ids() -> None:
+    overrides_schema = VerificationOverrides.model_json_schema()["properties"]
+    grader_model_schema = next(
+        item for item in overrides_schema["grader_model"]["anyOf"] if item.get("type") == "string"
+    )
+    effective_schema = EffectiveVerificationSettings.model_json_schema()["properties"]
+    hash_schema = next(
+        item
+        for item in effective_schema["grader_prompt_hash"]["anyOf"]
+        if item.get("type") == "string"
+    )
+    saved_schema = SavedUserSettings.model_json_schema()["properties"]
+    response_schema = UserSettingsResponse.model_json_schema()["properties"]
+
+    assert grader_model_schema["pattern"] == r"^[^:/\s]+:\S+$"
+    assert hash_schema["pattern"] == r"^sha256:[0-9a-f]{64}$"
+    assert saved_schema["provider_keys"]["propertyNames"]["minLength"] == 1
+    assert response_schema["provider_status"]["propertyNames"]["minLength"] == 1
 
 
 def test_settings_error_details_reject_non_json_values_and_round_trip() -> None:
