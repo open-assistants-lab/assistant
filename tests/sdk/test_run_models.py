@@ -272,6 +272,38 @@ def test_context_percentage_must_be_null_when_inputs_are_unknown(
         )
 
 
+def test_context_zero_window_is_valid_with_null_percentage() -> None:
+    snapshot = ContextSnapshot(
+        model="openai:gpt-5",
+        attempt=1,
+        llm_call_index=1,
+        estimated_tokens=10,
+        context_window=0,
+        percentage=None,
+        source=ContextSource.HISTORY_ESTIMATE,
+        freshness=ContextFreshness.STALE,
+        estimated=True,
+    )
+
+    assert snapshot.context_window == 0
+    assert snapshot.percentage is None
+
+
+def test_context_zero_window_rejects_percentage() -> None:
+    with pytest.raises(ValidationError, match="percentage must be null"):
+        ContextSnapshot(
+            model="openai:gpt-5",
+            attempt=1,
+            llm_call_index=1,
+            estimated_tokens=10,
+            context_window=0,
+            percentage=100.0,
+            source=ContextSource.HISTORY_ESTIMATE,
+            freshness=ContextFreshness.STALE,
+            estimated=True,
+        )
+
+
 def test_context_percentage_is_required_and_derived_when_inputs_are_known() -> None:
     values = {
         "model": "openai:gpt-5",

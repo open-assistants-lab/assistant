@@ -149,7 +149,7 @@ class ContextSnapshot(ContractModel):
     attempt: int = Field(ge=1)
     llm_call_index: int = Field(ge=1)
     estimated_tokens: int | None = Field(default=None, ge=0)
-    context_window: int | None = Field(default=None, ge=1)
+    context_window: int | None = Field(default=None, ge=0)
     percentage: float | None = Field(default=None, ge=0)
     source: ContextSource
     freshness: ContextFreshness
@@ -157,7 +157,7 @@ class ContextSnapshot(ContractModel):
 
     @model_validator(mode="after")
     def _validate_percentage(self) -> ContextSnapshot:
-        if self.estimated_tokens is None or self.context_window is None:
+        if self.estimated_tokens is None or not self.context_window:
             if self.percentage is not None:
                 raise ValueError("percentage must be null when token inputs are unknown")
             return self
