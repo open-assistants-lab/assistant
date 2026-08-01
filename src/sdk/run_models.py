@@ -228,6 +228,11 @@ class VerificationOutcome(ContractModel):
         grading_run_ids = [evaluation.grading_run_id for evaluation in self.evaluations]
         if len(grading_run_ids) != len(set(grading_run_ids)):
             raise ValueError("grading_run_id values must be unique")
+        if (
+            self.status in statuses_requiring_evaluation
+            and self.evaluations[-1].attempt != self.attempts
+        ):
+            raise ValueError("final evaluation attempt must equal outcome attempts")
 
         if self.status is TerminalRubricStatus.MAX_ATTEMPTS_REACHED:
             if self.attempts != self.max_attempts:

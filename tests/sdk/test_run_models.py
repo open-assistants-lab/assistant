@@ -404,3 +404,14 @@ def test_verification_rejects_misordered_evaluation_attempts() -> None:
             max_attempts=2,
             evaluations=(first, second),
         )
+
+
+def test_terminal_verification_requires_evaluation_for_final_attempt() -> None:
+    with pytest.raises(ValidationError, match="final evaluation attempt"):
+        VerificationOutcome(
+            availability=RubricAvailability.ON,
+            status=TerminalRubricStatus.SATISFIED,
+            attempts=3,
+            max_attempts=3,
+            evaluations=(_evaluation(),),
+        )
