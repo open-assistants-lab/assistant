@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -293,6 +294,71 @@ def test_resolution_failure_is_controlled_and_does_not_reset(
     assert settings_api["resets"] == []
 
 
+def test_patch_resolution_failure_leaves_durable_settings_unchanged(
+    client, settings_api, monkeypatch, test_user_id
+):
+    store = settings_api["get_store"](test_user_id)
+    store.patch(UserSettingsPatch(expected_revision=0, default_model="ollama:minimax-m2.5"))
+    original_bytes = store.path.read_bytes()
+    original_revision = store.load().revision
+    settings_api["resets"].clear()
+    monkeypatch.setattr(
+        settings_router,
+        "resolve_effective_user_settings",
+        lambda **kwargs: (_ for _ in ()).throw(
+            settings_router.SettingsResolutionError("preflight failed")
+        ),
+    )
+
+    response = client.patch(
+        "/settings",
+        params={"user_id": test_user_id},
+        json={"expected_revision": original_revision, "default_model": "openai:gpt-4.1"},
+    )
+
+    assert response.status_code == 500
+    assert store.path.read_bytes() == original_bytes
+    assert store.load().revision == original_revision
+    assert settings_api["resets"] == []
+
+
+def test_patch_response_after_commit_performs_no_store_prompt_or_catalog_io(
+    client, settings_api, monkeypatch, test_user_id
+):
+    store = settings_api["get_store"](test_user_id)
+    original_patch = store.patch
+
+    def patch_then_disable_io(patch):
+        mutation = original_patch(patch)
+        monkeypatch.setattr(
+            settings_router,
+            "_catalog_snapshot",
+            lambda: (_ for _ in ()).throw(AssertionError("post-commit catalog I/O")),
+        )
+        monkeypatch.setattr(
+            store,
+            "load",
+            lambda: (_ for _ in ()).throw(AssertionError("post-commit store I/O")),
+        )
+        monkeypatch.setattr(
+            store,
+            "load_grader_prompt",
+            lambda: (_ for _ in ()).throw(AssertionError("post-commit prompt I/O")),
+        )
+        return mutation
+
+    monkeypatch.setattr(store, "patch", patch_then_disable_io)
+
+    response = client.patch(
+        "/settings",
+        params={"user_id": test_user_id},
+        json={"expected_revision": 0, "default_model": "openai:gpt-4.1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["revision"] == 1
+
+
 def test_key_mutations_share_revision_preserve_settings_and_reset_only_on_change(
     client, settings_api, test_user_id
 ):
@@ -352,7 +418,25 @@ def test_model_catalog_keeps_native_shape_with_effective_status_and_revision(
     assert openai["key_source"] == "env"
     assert openai["has_key"] is True
     assert openai["models"][0]["key_source"] == "env"
+    ollama = next(provider for provider in body["providers"] if provider["id"] == "ollama")
+    assert ollama["key_source"] == "local"
+    assert ollama["has_key"] is True
+    assert ollama["models"][0]["key_source"] == "local"
     assert "host-secret" not in response.text
+
+
+def test_sync_settings_routes_are_offloaded_by_fastapi() -> None:
+    for handler in (
+        settings_router.get_settings,
+        settings_router.update_settings,
+        settings_router.model_catalog,
+        settings_router.list_api_keys,
+        settings_router.set_api_key,
+        settings_router.delete_api_key,
+    ):
+        assert not inspect.iscoroutinefunction(handler), handler.__name__
+
+    assert inspect.iscoroutinefunction(settings_router.test_api_key)
 
 
 def test_traversal_user_id_is_rejected_without_calling_store(client, monkeypatch):

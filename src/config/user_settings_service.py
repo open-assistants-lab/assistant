@@ -70,6 +70,8 @@ def resolve_provider_statuses(
             key_source = "user"
         elif any(environ.get(name, "").strip() for name in env_names):
             key_source = "hosted" if provider_id == "agnes" else "env"
+        elif provider_id in _LOCAL_PROVIDERS:
+            key_source = "local"
         else:
             key_source = "none"
 

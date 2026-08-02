@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Literal
 
 from fastapi import APIRouter, Body, Query
@@ -13,7 +15,11 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from src.app_logging import get_logger
 from src.config import get_settings as get_host_settings
 from src.config.user_settings import (
+    EffectiveUserSettings,
     FrozenJSONValue,
+    GraderPromptResponse,
+    ProviderStatus,
+    SavedUserSettings,
     SettingsError,
     UserSettingsPatch,
     UserSettingsResponse,
@@ -228,13 +234,51 @@ def _catalog_snapshot() -> tuple[list[dict[str, Any]], dict[str, list[dict[str, 
     return providers, models
 
 
-def _resolve_response(
+@dataclass(frozen=True)
+class _SettingsPreflight:
+    saved: SavedUserSettings
+    providers: tuple[Mapping[str, object], ...]
+    models: Mapping[str, tuple[Mapping[str, str], ...]]
+    provider_status: Mapping[str, ProviderStatus]
+    effective: EffectiveUserSettings
+    prompt: GraderPromptResponse | None
+    environ: Mapping[str, str]
+
+    def response(self, saved: SavedUserSettings | None = None) -> UserSettingsResponse:
+        return build_user_settings_response(
+            self.saved if saved is None else saved,
+            self.effective,
+            self.provider_status,
+        )
+
+
+def _preflight_settings(
     store: UserSettingsStore,
-    providers: list[dict[str, Any]],
-    models: Mapping[str, list[dict[str, str]]],
-) -> UserSettingsResponse:
-    saved = store.load()
-    provider_status = resolve_provider_statuses(saved, providers, os.environ)
+    saved: SavedUserSettings | None = None,
+) -> _SettingsPreflight:
+    resolved_saved = store.load() if saved is None else saved
+    raw_providers, raw_models = _catalog_snapshot()
+    providers = tuple(
+        MappingProxyType(
+            {
+                **provider,
+                "env": (
+                    tuple(provider.get("env", []))
+                    if isinstance(provider.get("env", []), (list, tuple))
+                    else provider.get("env")
+                ),
+            }
+        )
+        for provider in raw_providers
+    )
+    models = MappingProxyType(
+        {
+            provider_id: tuple(MappingProxyType(dict(model)) for model in provider_models)
+            for provider_id, provider_models in raw_models.items()
+        }
+    )
+    environ = MappingProxyType(dict(os.environ))
+    provider_status = resolve_provider_statuses(resolved_saved, providers, environ)
     available_providers = frozenset(models)
     available_models = frozenset(
         model["id"] for provider_models in models.values() for model in provider_models
@@ -247,8 +291,9 @@ def _resolve_response(
         prompt = None
 
     host = get_host_settings()
-    effective = resolve_effective_user_settings(
-        saved=saved,
+    # Validate host defaults even when a user override would otherwise bypass them.
+    resolve_effective_user_settings(
+        saved=SavedUserSettings(),
         prompt=prompt,
         host_default_model=host.agent.model,
         host_verification_enabled=host.verification.enabled,
@@ -258,7 +303,46 @@ def _resolve_response(
         model_available=available_models.__contains__,
         provider_available=available_providers.__contains__,
     )
-    return build_user_settings_response(saved, effective, provider_status)
+    effective = resolve_effective_user_settings(
+        saved=resolved_saved,
+        prompt=prompt,
+        host_default_model=host.agent.model,
+        host_verification_enabled=host.verification.enabled,
+        host_grader_model=host.verification.grader_model,
+        host_max_attempts=host.verification.max_iterations,
+        provider_status=provider_status,
+        model_available=available_models.__contains__,
+        provider_available=available_providers.__contains__,
+    )
+    return _SettingsPreflight(
+        saved=resolved_saved,
+        providers=providers,
+        models=models,
+        provider_status=provider_status,
+        effective=effective,
+        prompt=prompt,
+        environ=environ,
+    )
+
+
+def _preview_patch(current: SavedUserSettings, patch: UserSettingsPatch) -> SavedUserSettings:
+    payload = current.model_dump(mode="json")
+    if "default_model" in patch.model_fields_set:
+        payload["default_model"] = patch.default_model
+    if "verification" in patch.model_fields_set:
+        if patch.verification is None:
+            payload["verification"] = VerificationOverrides().model_dump(mode="json")
+        else:
+            verification = current.verification.model_dump(mode="json")
+            for field in patch.verification.model_fields_set:
+                verification[field] = getattr(patch.verification, field)
+            payload["verification"] = verification
+
+    candidate = SavedUserSettings.model_validate(payload)
+    if candidate != current:
+        payload["revision"] = current.revision + 1
+        candidate = SavedUserSettings.model_validate(payload)
+    return candidate
 
 
 def _configuration_failure() -> JSONResponse:
@@ -271,11 +355,10 @@ def _configuration_failure() -> JSONResponse:
 
 
 @router.get("", response_model=UserSettingsResponse)
-async def get_settings(user_id: str = Query("default_user")) -> UserSettingsResponse | JSONResponse:
+def get_settings(user_id: str = Query("default_user")) -> UserSettingsResponse | JSONResponse:
     """Read canonical saved and effective settings without exposing credentials."""
     try:
-        providers, models = _catalog_snapshot()
-        return _resolve_response(_get_settings_store(user_id), providers, models)
+        return _preflight_settings(_get_settings_store(user_id)).response()
     except ValueError:
         return _settings_error(422, "validation_error", "Invalid settings request", {})
     except (SettingsConfigurationError, SettingsWriteError, SettingsResolutionError):
@@ -283,27 +366,26 @@ async def get_settings(user_id: str = Query("default_user")) -> UserSettingsResp
 
 
 @router.get("/model-catalog", response_model=None)
-async def model_catalog(
+def model_catalog(
     user_id: str = Query("default_user"),
     max_models_per_provider: int | None = None,
     max_providers: int | None = None,
 ) -> dict[str, Any] | JSONResponse:
     """Return the Settings provider-grouped model catalog."""
     try:
-        catalog_providers, models = _catalog_snapshot()
-        resolved = _resolve_response(_get_settings_store(user_id), catalog_providers, models)
+        preflight = _preflight_settings(_get_settings_store(user_id))
     except ValueError:
         return _settings_error(422, "validation_error", "Invalid settings request", {})
     except (SettingsConfigurationError, SettingsWriteError, SettingsResolutionError):
         return _configuration_failure()
 
-    providers = []
-    for provider in catalog_providers:
-        provider_id = provider["id"]
-        provider_name = provider["name"]
-        status = resolved.provider_status[provider_id]
+    providers: list[dict[str, Any]] = []
+    for provider in preflight.providers:
+        provider_id = str(provider["id"])
+        provider_name = str(provider["name"])
+        status = preflight.provider_status[provider_id]
         key_source = status.key_source
-        all_provider_models = models[provider_id]
+        all_provider_models = preflight.models[provider_id]
         provider_model_count = len(all_provider_models)
         shown_models = (
             all_provider_models[:max_models_per_provider]
@@ -329,15 +411,15 @@ async def model_catalog(
     total_providers = len(providers)
     shown_providers = providers[:max_providers] if max_providers is not None else providers
     return {
-        "revision": resolved.revision,
-        "default_model": resolved.effective.default_model,
+        "revision": preflight.saved.revision,
+        "default_model": preflight.effective.default_model,
         "total_providers": total_providers,
         "providers": shown_providers,
     }
 
 
 @router.patch("", response_model=UserSettingsResponse)
-async def update_settings(
+def update_settings(
     body: Any = Body(...),
     user_id: str = Query("default_user"),
 ) -> UserSettingsResponse | JSONResponse:
@@ -345,18 +427,24 @@ async def update_settings(
     try:
         request = UpdateSettingsRequest.model_validate(body)
         store = _get_settings_store(user_id)
-        expected_revision = request.expected_revision
-        if expected_revision is None:
-            expected_revision = store.load().revision
+        current = store.load()
+        expected_revision = (
+            request.expected_revision
+            if request.expected_revision is not None
+            else current.revision
+        )
         patch_payload: dict[str, Any] = {"expected_revision": expected_revision}
         for field in ("default_model", "verification"):
             if field in request.model_fields_set:
                 patch_payload[field] = getattr(request, field)
-        mutation = store.patch(UserSettingsPatch.model_validate(patch_payload))
+        patch = UserSettingsPatch.model_validate(patch_payload)
+        if patch.expected_revision != current.revision:
+            raise RevisionConflict(patch.expected_revision, current.revision)
+        preflight = _preflight_settings(store, _preview_patch(current, patch))
+        mutation = store.patch(patch)
         if mutation.changed:
             _reset_user_loops(user_id)
-        providers, models = _catalog_snapshot()
-        return _resolve_response(store, providers, models)
+        return preflight.response(mutation.settings)
     except RevisionConflict as exc:
         return _settings_error(
             409,
@@ -371,7 +459,7 @@ async def update_settings(
 
 
 @router.get("/api-keys", response_model=None)
-async def list_api_keys(user_id: str = Query("default_user")) -> dict[str, bool] | JSONResponse:
+def list_api_keys(user_id: str = Query("default_user")) -> dict[str, bool] | JSONResponse:
     """List which providers have stored API keys (without revealing keys)."""
     try:
         saved = _get_settings_store(user_id).load()
@@ -383,7 +471,7 @@ async def list_api_keys(user_id: str = Query("default_user")) -> dict[str, bool]
 
 
 @router.post("/api-keys", response_model=None)
-async def set_api_key(
+def set_api_key(
     body: Any = Body(...),
     user_id: str = Query("default_user"),
 ) -> dict[str, str | int] | JSONResponse:
@@ -456,7 +544,7 @@ async def test_api_key(body: TestKeyRequest) -> dict[str, Any]:
 
 
 @router.delete("/api-keys/{provider}", response_model=None)
-async def delete_api_key(
+def delete_api_key(
     provider: str,
     user_id: str = Query("default_user"),
 ) -> dict[str, str | int] | JSONResponse:

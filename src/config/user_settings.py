@@ -200,7 +200,7 @@ class ProviderStatus(SettingsModel):
     name: NonEmptyString
     has_key: bool
     key_configured_via_env: bool = False
-    key_source: Literal["none", "user", "env", "hosted"]
+    key_source: Literal["none", "user", "env", "hosted", "local"]
 
     @model_validator(mode="after")
     def _validate_key_metadata(self) -> ProviderStatus:
@@ -209,6 +209,7 @@ class ProviderStatus(SettingsModel):
             "user": (True, False),
             "env": (True, True),
             "hosted": (True, False),
+            "local": (True, False),
         }[self.key_source]
         if (self.has_key, self.key_configured_via_env) != expected:
             raise ValueError("has_key and key_configured_via_env must match key_source")

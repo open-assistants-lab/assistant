@@ -274,6 +274,27 @@ def test_provider_status_none_when_no_key_exists() -> None:
     assert statuses["openai"] == ProviderStatus(name="OpenAI", has_key=False, key_source="none")
 
 
+@pytest.mark.parametrize("provider_id", ["ollama", "llamacpp"])
+def test_local_provider_status_needs_no_credential(provider_id: str) -> None:
+    statuses = resolve_provider_statuses(
+        SavedUserSettings(), [{"id": provider_id, "name": "Local"}], {}
+    )
+
+    assert statuses[provider_id] == ProviderStatus(
+        name="Local", has_key=True, key_source="local"
+    )
+
+
+def test_local_provider_saved_key_still_has_precedence() -> None:
+    statuses = resolve_provider_statuses(
+        SavedUserSettings(provider_keys={"ollama": "user-secret"}),
+        [{"id": "ollama", "name": "Ollama"}],
+        {"OLLAMA_API_KEY": "env-secret"},
+    )
+
+    assert statuses["ollama"].key_source == "user"
+
+
 def test_malformed_provider_descriptors_are_skipped_and_first_collision_wins() -> None:
     statuses = resolve_provider_statuses(
         SavedUserSettings(),

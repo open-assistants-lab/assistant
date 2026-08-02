@@ -301,6 +301,7 @@ def test_provider_status_rejects_unknown_key_source() -> None:
         ("user", True, False),
         ("env", True, True),
         ("hosted", True, False),
+        ("local", True, False),
     ],
 )
 def test_provider_status_accepts_consistent_key_metadata(
@@ -329,6 +330,8 @@ def test_provider_status_accepts_consistent_key_metadata(
         ("env", True, False),
         ("hosted", False, False),
         ("hosted", True, True),
+        ("local", False, False),
+        ("local", True, True),
     ],
 )
 def test_provider_status_rejects_contradictory_key_metadata(
