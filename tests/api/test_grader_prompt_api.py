@@ -387,34 +387,68 @@ def test_grader_prompt_store_factory_injects_host_default(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("operation", "method", "path"),
+    ("operation", "helper", "method", "path"),
     [
-        ("save_grader_prompt", "put", "/user/grader-prompt"),
-        ("reset_grader_prompt", "post", "/user/grader-prompt/reset"),
+        (
+            "save_grader_prompt",
+            "_save_grader_prompt_sync",
+            "put",
+            "/user/grader-prompt",
+        ),
+        (
+            "reset_grader_prompt",
+            "_reset_grader_prompt_sync",
+            "post",
+            "/user/grader-prompt/reset",
+        ),
     ],
 )
-def test_grader_prompt_mutations_use_threadpool(
-    client, grader_prompt_api, monkeypatch, test_user_id, operation, method, path
+def test_grader_prompt_store_creation_and_mutation_use_threadpool(
+    client, grader_prompt_api, monkeypatch, test_user_id, operation, helper, method, path
 ):
+    store = grader_prompt_api["get_store"](test_user_id)
     if operation == "reset_grader_prompt":
-        grader_prompt_api["get_store"](test_user_id).save_grader_prompt(
+        store.save_grader_prompt(
             user_prompt_router.GraderPromptUpdate(content="custom", expected_revision=0)
         )
         body = {"expected_revision": 1}
     else:
         body = {"content": "custom", "expected_revision": 0}
-    calls: list[str] = []
+    original_mutation = getattr(store, operation)
+    inside_threadpool = False
+    threadpool_calls: list[str] = []
+    factory_calls: list[str] = []
+    mutation_calls: list[str] = []
+
+    def get_store(user_id):
+        assert inside_threadpool
+        factory_calls.append(user_id)
+        return store
+
+    def mutate(request):
+        assert inside_threadpool
+        mutation_calls.append(operation)
+        return original_mutation(request)
 
     async def run_in_threadpool(function, *args):
-        calls.append(function.__name__)
-        return function(*args)
+        nonlocal inside_threadpool
+        threadpool_calls.append(function.__name__)
+        inside_threadpool = True
+        try:
+            return function(*args)
+        finally:
+            inside_threadpool = False
 
+    monkeypatch.setattr(user_prompt_router, "_get_grader_prompt_store", get_store)
+    monkeypatch.setattr(store, operation, mutate)
     monkeypatch.setattr(user_prompt_router, "run_in_threadpool", run_in_threadpool)
 
     response = client.request(method, path, params={"user_id": test_user_id}, json=body)
 
     assert response.status_code == 200
-    assert calls == [operation]
+    assert threadpool_calls == [helper]
+    assert factory_calls == [test_user_id]
+    assert mutation_calls == [operation]
 
 
 def test_grader_prompt_route_execution_models(app):

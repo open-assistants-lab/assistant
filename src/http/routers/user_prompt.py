@@ -17,6 +17,7 @@ from src.config.user_settings import (
     SettingsError,
 )
 from src.config.user_settings_store import (
+    GraderPromptMutation,
     RevisionConflict,
     SettingsConfigurationError,
     SettingsWriteError,
@@ -41,6 +42,18 @@ def _get_grader_prompt_store(user_id: str) -> UserSettingsStore:
         user_id,
         legacy_default_rubric=get_settings().verification.default_rubric,
     )
+
+
+def _save_grader_prompt_sync(
+    user_id: str, request: GraderPromptUpdate
+) -> GraderPromptMutation:
+    return _get_grader_prompt_store(user_id).save_grader_prompt(request)
+
+
+def _reset_grader_prompt_sync(
+    user_id: str, request: RevisionRequest
+) -> GraderPromptMutation:
+    return _get_grader_prompt_store(user_id).reset_grader_prompt(request)
 
 
 def _reset_grader_prompt_loops(user_id: str) -> None:
@@ -104,8 +117,7 @@ async def set_grader_prompt(
     try:
         payload = await request.json()
         update = GraderPromptUpdate.model_validate(payload)
-        store = _get_grader_prompt_store(user_id)
-        mutation = await run_in_threadpool(store.save_grader_prompt, update)
+        mutation = await run_in_threadpool(_save_grader_prompt_sync, user_id, update)
         if mutation.changed:
             _reset_grader_prompt_loops(user_id)
         return mutation.response
@@ -131,8 +143,7 @@ async def reset_grader_prompt(
     try:
         payload = await request.json()
         revision = RevisionRequest.model_validate(payload)
-        store = _get_grader_prompt_store(user_id)
-        mutation = await run_in_threadpool(store.reset_grader_prompt, revision)
+        mutation = await run_in_threadpool(_reset_grader_prompt_sync, user_id, revision)
         if mutation.changed:
             _reset_grader_prompt_loops(user_id)
         return mutation.response
