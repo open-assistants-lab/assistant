@@ -1262,3 +1262,51 @@ def test_successful_grader_prompt_transaction_removes_journal(tmp_path: Path) ->
 
     assert mutation.changed is True
     assert not _journal_path(store).exists()
+
+
+def test_recovery_file_fsync_failure_retains_journal_until_durable_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.config import user_settings_store as store_module
+
+    store = _grader_store(tmp_path)
+    store.set_provider_key("openai", SECRET)
+    store.load_grader_prompt()
+    prompt_path = _paths(tmp_path).user_grader_prompt_path()
+    prompt_before = prompt_path.read_bytes()
+    settings_before = store.path.read_bytes()
+    monkeypatch.setattr(
+        store,
+        "_remove_journal",
+        lambda: (_ for _ in ()).throw(SystemExit("simulated crash")),
+    )
+    with pytest.raises(SystemExit):
+        store.save_grader_prompt(
+            GraderPromptUpdate(content="replacement rubric", expected_revision=1)
+        )
+    prompt_after_crash = prompt_path.read_bytes()
+
+    real_fsync = store_module.os.fsync
+    failed = False
+
+    def fail_first_regular_file(descriptor: int) -> None:
+        nonlocal failed
+        if not failed and stat.S_ISREG(os.fstat(descriptor).st_mode):
+            failed = True
+            raise OSError(errno.EIO, "recovery durability failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(store_module.os, "fsync", fail_first_regular_file)
+    recovered = _grader_store(tmp_path)
+
+    with pytest.raises(SettingsWriteError, match="recovery.*pending|manual"):
+        recovered.load()
+
+    assert _journal_path(recovered).exists()
+    assert prompt_path.read_bytes() == prompt_after_crash
+
+    monkeypatch.setattr(store_module.os, "fsync", real_fsync)
+    assert recovered.load().revision == 1
+    assert prompt_path.read_bytes() == prompt_before
+    assert recovered.path.read_bytes() == settings_before
+    assert not _journal_path(recovered).exists()

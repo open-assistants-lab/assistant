@@ -308,7 +308,7 @@ class UserSettingsStore:
         try:
             if not snapshot.existed:
                 path.unlink(missing_ok=True)
-                self._best_effort_fsync_parent(path)
+                self._fsync_parent(path, "grader prompt transaction recovery")
                 return
 
             assert snapshot.content is not None
@@ -326,13 +326,10 @@ class UserSettingsStore:
             with file:
                 file.write(snapshot.content)
                 file.flush()
-                try:
-                    os.fsync(file.fileno())
-                except OSError:
-                    pass
+                os.fsync(file.fileno())
             os.replace(temporary_path, path)
             temporary_path = None
-            self._best_effort_fsync_parent(path)
+            self._fsync_parent(path, "grader prompt transaction recovery")
         finally:
             if descriptor is not None:
                 try:
@@ -344,12 +341,6 @@ class UserSettingsStore:
                     temporary_path.unlink(missing_ok=True)
                 except OSError:
                     pass
-
-    def _best_effort_fsync_parent(self, path: Path) -> None:
-        try:
-            self._fsync_parent(path, "rollback")
-        except SettingsWriteError:
-            pass
 
     @staticmethod
     def _snapshot_payload(snapshot: _FileSnapshot) -> dict[str, object]:
