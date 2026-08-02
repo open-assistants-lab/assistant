@@ -532,7 +532,7 @@ class TestProviderFactory:
         )
 
         create.assert_called_once_with(
-            "OpenAI", model="gpt-5", api_key="request-secret"
+            "openai", model="gpt-5", api_key="request-secret"
         )
 
     def test_saved_provider_key_wins_over_environment(self):
@@ -703,10 +703,14 @@ class TestProviderFactory:
 
         store.load.assert_called_once_with()
 
-    def test_registry_provider_without_resolved_key_is_used_directly(self):
+    def test_registry_anthropic_provider_retains_native_class_and_saved_key(self):
+        secret = "saved-anthropic-secret"
         store = MagicMock()
-        store.load.return_value = SavedUserSettings()
-        registry_provider = SimpleNamespace()
+        store.load.return_value = SavedUserSettings(provider_keys={"anthropic": secret})
+
+        def registry_create(model_ref: str, api_key: str | None = None):
+            return AnthropicProvider(api_key=api_key, model=model_ref.split(":", 1)[1])
+
         with (
             patch("src.config.get_settings", return_value=_host_settings()),
             patch(
@@ -715,99 +719,179 @@ class TestProviderFactory:
             ),
             patch(
                 "src.sdk.providers.factory.create_provider_from_registry_model",
-                return_value=registry_provider,
-            ) as registry_create,
-            patch("src.sdk.providers.factory.create_provider") as create,
+                side_effect=registry_create,
+            ) as registry,
         ):
-            result = create_model_from_config("openrouter:openai/gpt-4o", user_id="alice")
+            provider = create_model_from_config("Anthropic:claude-sonnet-4", user_id="alice")
 
-        assert result is registry_provider
-        registry_create.assert_called_once_with("openrouter:openai/gpt-4o", api_key=None)
-        create.assert_not_called()
+        assert isinstance(provider, AnthropicProvider)
+        assert provider.api_key == secret
+        registry.assert_called_once_with("anthropic:claude-sonnet-4", api_key=secret)
 
-    def test_registry_provider_with_api_key_attribute_receives_resolved_key(self):
-        secret = "saved-registry-secret"
-        store = MagicMock()
-        store.load.return_value = SavedUserSettings(provider_keys={"openrouter": secret})
-        registry_provider = SimpleNamespace(_api_key="environment-key")
-        logger = MagicMock()
+    def test_registry_gemini_provider_retains_native_class_and_request_key(self):
+        secret = "request-gemini-secret"
+
+        def registry_create(model_ref: str, api_key: str | None = None):
+            return GeminiProvider(api_key=api_key, model=model_ref.split(":", 1)[1])
+
         with (
             patch("src.config.get_settings", return_value=_host_settings()),
             patch(
-                "src.sdk.providers.factory._user_settings_store.UserSettingsStore",
-                return_value=store,
-            ),
+                "src.sdk.providers.factory._user_settings_store.UserSettingsStore"
+            ) as store_type,
             patch(
                 "src.sdk.providers.factory.create_provider_from_registry_model",
-                return_value=registry_provider,
+                side_effect=registry_create,
             ),
-            patch("src.sdk.providers.factory.create_provider") as create,
-            patch("src.sdk.providers.factory.logger", logger),
         ):
-            result = create_model_from_config("openrouter:openai/gpt-4o", user_id="alice")
-
-        assert result is registry_provider
-        assert registry_provider._api_key == secret
-        create.assert_not_called()
-        assert secret not in repr(logger.method_calls)
-
-    @pytest.mark.parametrize(
-        ("registry_provider", "expected_type"),
-        [
-            (
-                SimpleNamespace(
-                    provider_type="registry-compatible",
-                    base_url="https://registry.example/v1",
-                ),
-                "registry-compatible",
-            ),
-            (
-                SimpleNamespace(base_url="https://registry.example/v1"),
-                "openai-compatible",
-            ),
-        ],
-    )
-    def test_registry_provider_without_api_key_attribute_is_reconstructed(
-        self, registry_provider: SimpleNamespace, expected_type: str
-    ):
-        secret = "request-registry-secret"
-        store = MagicMock()
-        store.load.return_value = SavedUserSettings()
-        replacement = MagicMock()
-        logger = MagicMock()
-        with (
-            patch("src.config.get_settings", return_value=_host_settings()),
-            patch(
-                "src.sdk.providers.factory._user_settings_store.UserSettingsStore",
-                return_value=store,
-            ),
-            patch(
-                "src.sdk.providers.factory.create_provider_from_registry_model",
-                return_value=registry_provider,
-            ),
-            patch(
-                "src.sdk.providers.factory.create_provider", return_value=replacement
-            ) as create,
-            patch("src.sdk.providers.factory.logger", logger),
-        ):
-            result = create_model_from_config(
-                "openrouter:anthropic/claude-sonnet-4",
-                provider_keys={"openrouter": secret},
+            provider = create_model_from_config(
+                "Gemini:gemini-2.5-pro",
+                provider_keys={"gemini": secret},
                 user_id="alice",
             )
 
-        assert result is replacement
-        create.assert_called_once_with(
-            expected_type,
-            model="anthropic/claude-sonnet-4",
-            api_key=secret,
-            base_url="https://registry.example/v1",
+        assert isinstance(provider, GeminiProvider)
+        assert provider.api_key == secret
+        store_type.assert_not_called()
+
+    def test_registry_ollama_cloud_retains_native_class_and_saved_key(self):
+        secret = "saved-ollama-secret"
+        store = MagicMock()
+        store.load.return_value = SavedUserSettings(provider_keys={"OLLAMA-CLOUD": secret})
+
+        def registry_create(model_ref: str, api_key: str | None = None):
+            return OllamaCloud(api_key=api_key, model=model_ref.split(":", 1)[1])
+
+        with (
+            patch("src.config.get_settings", return_value=_host_settings()),
+            patch(
+                "src.sdk.providers.factory._user_settings_store.UserSettingsStore",
+                return_value=store,
+            ),
+            patch(
+                "src.sdk.providers.factory.create_provider_from_registry_model",
+                side_effect=registry_create,
+            ),
+        ):
+            provider = create_model_from_config("ollama-cloud:minimax-m2.5", user_id="alice")
+
+        assert isinstance(provider, OllamaCloud)
+        assert provider.api_key == secret
+
+    def test_registry_openai_compatible_provider_is_used_directly(self):
+        secret = "request-openrouter-secret"
+
+        def registry_create(model_ref: str, api_key: str | None = None):
+            return OpenAIProvider(
+                api_key=api_key,
+                model=model_ref.split(":", 1)[1],
+                provider_id="openrouter",
+                base_url="https://openrouter.ai/api/v1",
+            )
+
+        with (
+            patch("src.config.get_settings", return_value=_host_settings()),
+            patch("src.sdk.providers.factory._user_settings_store.UserSettingsStore") as store,
+            patch(
+                "src.sdk.providers.factory.create_provider_from_registry_model",
+                side_effect=registry_create,
+            ),
+        ):
+            provider = create_model_from_config(
+                "OpenRouter:anthropic/claude-sonnet-4",
+                provider_keys={"OpenRouter": secret},
+                user_id="alice",
+            )
+
+        assert isinstance(provider, OpenAIProvider)
+        assert provider.provider_id == "openrouter"
+        assert provider.model == "anthropic/claude-sonnet-4"
+        assert provider._client.api_key == secret
+        store.assert_not_called()
+
+    def test_explicit_model_and_matching_request_key_skip_user_settings_store(self):
+        provider = MagicMock()
+        with (
+            patch("src.config.get_settings", return_value=_host_settings()),
+            patch("src.sdk.providers.factory._user_settings_store.UserSettingsStore") as store,
+            patch("src.sdk.providers.factory.create_provider_from_registry_model", return_value=None),
+            patch("src.sdk.providers.factory.create_provider", return_value=provider),
+        ):
+            result = create_model_from_config(
+                "OpenAI:gpt-4.1",
+                provider_keys={"openai": "request-secret"},
+                user_id="alice",
+            )
+
+        assert result is provider
+        store.assert_not_called()
+
+    def test_explicit_model_without_matching_request_key_loads_saved_key_once(self):
+        store = MagicMock()
+        store.load.return_value = SavedUserSettings(provider_keys={"openai": "saved-secret"})
+        with (
+            patch("src.config.get_settings", return_value=_host_settings()),
+            patch(
+                "src.sdk.providers.factory._user_settings_store.UserSettingsStore",
+                return_value=store,
+            ) as store_type,
+            patch("src.sdk.providers.factory.create_provider_from_registry_model", return_value=None),
+            patch("src.sdk.providers.factory.create_provider") as create,
+        ):
+            create_model_from_config("OpenAI:gpt-4.1", user_id="alice")
+
+        store_type.assert_called_once_with("alice")
+        store.load.assert_called_once_with()
+        create.assert_called_once_with("openai", model="gpt-4.1", api_key="saved-secret")
+
+    def test_missing_model_loads_one_snapshot_for_saved_default_and_key(self):
+        store = MagicMock()
+        store.load.return_value = SavedUserSettings(
+            default_model="OpenAI:gpt-4.1", provider_keys={"openai": "saved-secret"}
+        )
+        with (
+            patch("src.config.get_settings", return_value=_host_settings()),
+            patch(
+                "src.sdk.providers.factory._user_settings_store.UserSettingsStore",
+                return_value=store,
+            ),
+            patch("src.sdk.providers.factory.create_provider_from_registry_model", return_value=None),
+            patch("src.sdk.providers.factory.create_provider") as create,
+        ):
+            create_model_from_config(user_id="alice")
+
+        store.load.assert_called_once_with()
+        create.assert_called_once_with("openai", model="gpt-4.1", api_key="saved-secret")
+
+    def test_settings_storage_oserror_logs_redacted_and_falls_back_to_host_and_env(self):
+        secret = "filesystem-secret"
+        logger = MagicMock()
+        with (
+            patch("src.config.get_settings", return_value=_host_settings("OpenAI:host-model")),
+            patch(
+                "src.sdk.providers.factory._user_settings_store.UserSettingsStore",
+                side_effect=OSError(secret),
+            ),
+            patch("src.sdk.providers.factory.create_provider_from_registry_model", return_value=None),
+            patch("src.sdk.providers.factory.logger", logger),
+            patch.dict("os.environ", {"OPENAI_API_KEY": "environment-secret"}),
+        ):
+            provider = create_model_from_config(user_id="alice")
+
+        assert isinstance(provider, OpenAIProvider)
+        assert provider.model == "host-model"
+        assert provider._client.api_key == "environment-secret"
+        logger.warning.assert_called_once_with(
+            "provider.user_settings_load_failed",
+            {"error_type": "OSError"},
+            user_id="alice",
         )
         assert secret not in repr(logger.method_calls)
 
-    def test_registry_miss_uses_standard_provider_creation(self):
+    def test_uppercase_model_provider_uses_lowercase_saved_key_and_registry_ref(self):
+        secret = "saved-openai-secret"
         store = MagicMock()
-        store.load.return_value = SavedUserSettings()
+        store.load.return_value = SavedUserSettings(provider_keys={"openai": secret})
         provider = MagicMock()
         with (
             patch("src.config.get_settings", return_value=_host_settings()),
@@ -817,16 +901,32 @@ class TestProviderFactory:
             ),
             patch(
                 "src.sdk.providers.factory.create_provider_from_registry_model",
-                return_value=None,
-            ),
-            patch(
-                "src.sdk.providers.factory.create_provider", return_value=provider
-            ) as create,
+                return_value=provider,
+            ) as registry,
         ):
-            result = create_model_from_config("custom:model", user_id="alice")
+            result = create_model_from_config("OpenAI:gpt-4.1", user_id="alice")
 
         assert result is provider
-        create.assert_called_once_with("custom", model="model", api_key=None)
+        registry.assert_called_once_with("openai:gpt-4.1", api_key=secret)
+
+    def test_uppercase_model_provider_uses_lowercase_environment_lookup(self):
+        store = MagicMock()
+        store.load.return_value = SavedUserSettings()
+        with (
+            patch("src.config.get_settings", return_value=_host_settings()),
+            patch(
+                "src.sdk.providers.factory._user_settings_store.UserSettingsStore",
+                return_value=store,
+            ),
+            patch("src.sdk.providers.factory.create_provider_from_registry_model", return_value=None),
+            patch.dict("os.environ", {"OPENAI_API_KEY": "environment-secret"}),
+        ):
+            provider = create_model_from_config("OpenAI:gpt-4.1", user_id="alice")
+
+        assert isinstance(provider, OpenAIProvider)
+        assert provider.provider_id == "openai"
+        assert provider.model == "gpt-4.1"
+        assert provider._client.api_key == "environment-secret"
 
     def test_parse_model_string_with_provider(self):
         provider, model = _parse_model_string("openai:gpt-4o")

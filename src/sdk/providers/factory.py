@@ -7,6 +7,7 @@ dynamically. Falls back to hardcoded defaults for well-known providers.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from typing import Any
 
 import src.config.user_settings_store as _user_settings_store
@@ -206,7 +207,7 @@ def _load_user_settings(user_id: str) -> SavedUserSettings | None:
     """Load one canonical settings snapshot, falling back safely on known failures."""
     try:
         return _user_settings_store.UserSettingsStore(user_id).load()
-    except (_user_settings_store.UserSettingsStoreError, ValueError) as exc:
+    except (_user_settings_store.UserSettingsStoreError, OSError, ValueError) as exc:
         logger.warning(
             "provider.user_settings_load_failed",
             {"error_type": type(exc).__name__},
@@ -215,10 +216,22 @@ def _load_user_settings(user_id: str) -> SavedUserSettings | None:
         return None
 
 
+def _provider_key(keys: Mapping[str, str] | None, provider_type: str) -> str | None:
+    if not keys:
+        return None
+    value = keys.get(provider_type)
+    if value:
+        return value
+    return next(
+        (value for provider, value in keys.items() if provider.lower() == provider_type and value),
+        None,
+    )
+
+
 def _load_stored_key(provider_type: str, user_id: str = "default_user") -> str | None:
     """Check the canonical per-user settings store for a provider API key."""
     saved = _load_user_settings(user_id)
-    return saved.provider_keys.get(provider_type) if saved is not None else None
+    return _provider_key(saved.provider_keys, provider_type.lower()) if saved is not None else None
 
 
 def _load_stored_default_model(user_id: str = "default_user") -> str | None:
@@ -235,36 +248,29 @@ def create_model_from_config(
     from src.config import get_settings
 
     settings = get_settings()
-    saved = _load_user_settings(user_id)
-    model_str = config_model or (saved.default_model if saved else None) or settings.agent.model
+    saved: SavedUserSettings | None = None
+    settings_loaded = False
+    model_str = config_model
+    if not model_str:
+        saved = _load_user_settings(user_id)
+        settings_loaded = True
+        model_str = (saved.default_model if saved else None) or settings.agent.model
 
     provider_type, model_name = _parse_model_string(model_str)
+    normalized_model_ref = _normalized_model_ref(model_str, provider_type, model_name)
 
-    resolved_key = None
-    if provider_keys:
-        resolved_key = provider_keys.get(provider_type) or provider_keys.get(provider_type.lower(), "")
-        if not resolved_key:
-            resolved_key = None
-
+    resolved_key = _provider_key(provider_keys, provider_type)
     if not resolved_key:
-        resolved_key = saved.provider_keys.get(provider_type) if saved else None
+        if not settings_loaded:
+            saved = _load_user_settings(user_id)
+            settings_loaded = True
+        resolved_key = _provider_key(saved.provider_keys, provider_type) if saved else None
 
-    registry_provider = create_provider_from_registry_model(model_str, api_key=resolved_key)
+    registry_provider = create_provider_from_registry_model(
+        normalized_model_ref, api_key=resolved_key
+    )
     if registry_provider is not None:
-        if not resolved_key:
-            provider = registry_provider
-        elif hasattr(registry_provider, "_api_key"):
-            setattr(registry_provider, "_api_key", resolved_key)
-            provider = registry_provider
-        else:
-            registry_type = getattr(registry_provider, "provider_type", "openai-compatible")
-            base_url = getattr(registry_provider, "base_url", None)
-            provider = create_provider(
-                registry_type,
-                model=model_name,
-                api_key=resolved_key,
-                base_url=base_url,
-            )
+        provider = registry_provider
     else:
         provider = create_provider(provider_type, model=model_name, api_key=resolved_key)
 
@@ -291,8 +297,16 @@ def create_model_from_config(
 def _parse_model_string(model_str: str) -> tuple[str, str]:
     if ":" in model_str:
         provider, model_name = model_str.split(":", 1)
-        return provider.strip(), model_name.strip()
+        return provider.strip().lower(), model_name.strip()
     if "/" in model_str:
         provider, model_name = model_str.split("/", 1)
-        return provider.strip(), model_name.strip()
+        return provider.strip().lower(), model_name.strip()
     return "ollama", model_str.strip()
+
+
+def _normalized_model_ref(model_str: str, provider_type: str, model_name: str) -> str:
+    if ":" in model_str:
+        return f"{provider_type}:{model_name}"
+    if "/" in model_str:
+        return f"{provider_type}/{model_name}"
+    return model_name
