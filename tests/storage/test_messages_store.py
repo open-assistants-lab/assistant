@@ -559,6 +559,23 @@ def test_message_table_has_chronological_indexes() -> None:
     assert "idx_messages_role" in names
     assert "idx_messages_session_ts" in names
     assert "idx_messages_session_role_ts" in names
+    assert "idx_messages_session_rowid" in names
+
+
+def test_scoped_rowid_limit_query_uses_session_index_without_temp_sort() -> None:
+    store = _store()
+
+    with store._core.db._connect() as cur:
+        plan = cur.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT rowid, id FROM messages "
+            "WHERE session_id = ? ORDER BY rowid DESC LIMIT ?",
+            ["session-a", 50],
+        ).fetchall()
+    details = [str(row[3]) for row in plan]
+
+    assert any("USING INDEX idx_messages_session_rowid" in detail for detail in details)
+    assert all("TEMP B-TREE" not in detail for detail in details)
 
 
 def test_message_store_initializes_when_duckdb_unavailable() -> None:

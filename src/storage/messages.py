@@ -106,6 +106,10 @@ class MessageStore:
                     "CREATE INDEX IF NOT EXISTS idx_messages_session_role_ts "
                     "ON messages(session_id, role, ts DESC)"
                 )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_messages_session_rowid "
+                    "ON messages(session_id)"
+                )
         except Exception:
             pass
 
