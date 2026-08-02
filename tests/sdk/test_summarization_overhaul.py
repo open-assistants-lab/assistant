@@ -98,6 +98,8 @@ def test_compression_artifact_rejects_empty_duplicate_ids_and_extra_fields():
     base = dict(
         summary="summary",
         replacement_messages=(CompressionMessage.from_message(Message.user("summary")),),
+        summarized_message_count=1,
+        preserved_message_count=1,
         summarized_message_ids=("one",),
         preserved_message_ids=("two",),
         persistence_eligible=True,
@@ -175,6 +177,8 @@ def test_compression_result_rejects_count_and_persistence_mismatches():
     artifact = CompressionArtifact(
         summary="summary",
         replacement_messages=(snapshot,),
+        summarized_message_count=1,
+        preserved_message_count=0,
         summarized_message_ids=("old-1",),
         preserved_message_ids=(),
         persistence_eligible=True,
@@ -203,6 +207,8 @@ def test_compression_result_rejects_invalid_successful_persistence_linkage():
     artifact = CompressionArtifact(
         summary="summary",
         replacement_messages=(snapshot,),
+        summarized_message_count=1,
+        preserved_message_count=0,
         summarized_message_ids=("old-1",),
         persistence_eligible=True,
     )
@@ -729,6 +735,39 @@ async def test_langfuse_failure_never_duplicates_provider_call(monkeypatch, fail
 
 
 @pytest.mark.asyncio
+async def test_langfuse_setup_failure_uses_wrapped_provider_original_chat(monkeypatch):
+    from src.sdk.langfuse_tracer import LangfuseTracer
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+
+    class Client:
+        def start_as_current_observation(self, **kwargs):
+            raise RuntimeError("trace setup failed")
+
+    class WrappedProvider:
+        wrapped_calls = 0
+        original_calls = 0
+
+        async def chat(self, messages):
+            self.wrapped_calls += 1
+            raise RuntimeError("wrapped tracer recursion")
+
+        async def _original_chat(self, messages):
+            self.original_calls += 1
+            return Message.assistant("summary")
+
+    provider = WrappedProvider()
+    monkeypatch.setattr(LangfuseTracer, "is_enabled", staticmethod(lambda: True))
+    monkeypatch.setattr(LangfuseTracer, "_get_client", staticmethod(lambda: Client()))
+    middleware = SummarizationMiddleware(
+        "ollama-cloud:test", summary_provider_factory=lambda: provider
+    )
+    summary, _ = await middleware._acreate_summary([Message.user("history")])
+    assert summary == "summary"
+    assert provider.original_calls == 1
+    assert provider.wrapped_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_provider_failure_inside_langfuse_observation_is_not_retried(monkeypatch):
     from src.sdk.langfuse_tracer import LangfuseTracer
     from src.sdk.middleware_summarization import SummarizationMiddleware
@@ -788,6 +827,34 @@ async def test_persistence_not_requested_when_ineligible_or_sink_absent(with_sin
     result = await mw.force_summarize(state, _context())
     assert result.telemetry.persistence.status == "not_requested"
     assert calls == []
+    assert result.artifact.summarized_message_count == 2
+    assert result.artifact.summarized_message_ids == ()
+    assert result.telemetry.summarized_message_count == 2
+
+
+@pytest.mark.asyncio
+async def test_mixed_provenance_keeps_actual_counts_independent_from_ids():
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+    from src.sdk.state import AgentState
+
+    messages = [
+        _stored("user", "stored", "stored-1"),
+        Message.user("unstored"),
+        _stored("user", "recent-stored", "stored-2"),
+        Message.user("recent-unstored"),
+    ]
+    state = AgentState(messages=messages)
+    result = await SummarizationMiddleware(
+        "ollama-cloud:test", keep=("messages", 2), summary_provider_factory=lambda: _Provider()
+    ).force_summarize(state, _context())
+    artifact = result.artifact
+    assert artifact.summarized_message_count == 2
+    assert artifact.preserved_message_count == 2
+    assert artifact.summarized_message_ids == ("stored-1",)
+    assert artifact.preserved_message_ids == ("stored-2",)
+    assert artifact.persistence_eligible is False
+    assert result.telemetry.summarized_message_count == 2
+    assert result.telemetry.preserved_message_count == 2
 
 
 @pytest.mark.asyncio
