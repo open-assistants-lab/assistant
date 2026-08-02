@@ -148,6 +148,12 @@ class DataPaths:
     def user_prompt_path(self) -> Path:
         return self.user_dir / "AGENTS.md"
 
+    def user_settings_path(self) -> Path:
+        return self.user_dir / "settings.json"
+
+    def user_grader_prompt_path(self) -> Path:
+        return self.user_dir / "grader_prompt.md"
+
     def email_dir(self) -> Path:
         p = self.user_dir / "Email"
         p.mkdir(parents=True, exist_ok=True)
