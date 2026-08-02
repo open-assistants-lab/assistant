@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import errno
 import json as json
 import os as os
+import platform as platform
 import tempfile as tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +26,11 @@ logger = get_logger()
 _DEFAULT_GRADER_SEED_PATH = (
     Path(__file__).resolve().parents[2] / "seeds" / "prompts" / "grader_prompt.md"
 )
+_UNSUPPORTED_DURABILITY_ERRNOS = {
+    errno.EBADF,
+    errno.EINVAL,
+    getattr(errno, "ENOTSUP", errno.EINVAL),
+}
 
 
 class UserSettingsStoreError(Exception):
@@ -183,11 +190,15 @@ class UserSettingsStore:
     def _load_locked(self) -> SavedUserSettings:
         canonical: SavedUserSettings | None = None
         canonical_raw: dict[str, Any] | None = None
-        if self._path.exists():
+        canonical_exists = self._path.exists()
+        legacy_exists = self._legacy_path.exists()
+        if canonical_exists:
             canonical, canonical_raw = self._read_canonical()
 
-        if not self._legacy_path.exists():
+        if not legacy_exists:
             return canonical or SavedUserSettings()
+        if canonical is not None and self._paths_alias():
+            return canonical
 
         try:
             legacy = self._read_legacy()
@@ -220,6 +231,20 @@ class UserSettingsStore:
         self._rename_legacy()
         return merged
 
+    def _paths_alias(self) -> bool:
+        try:
+            if self._path.samefile(self._legacy_path):
+                return True
+        except OSError:
+            pass
+
+        canonical = os.path.normcase(str(self._path.resolve(strict=False)))
+        legacy = os.path.normcase(str(self._legacy_path.resolve(strict=False)))
+        if platform.system() == "Darwin":
+            canonical = canonical.casefold()
+            legacy = legacy.casefold()
+        return canonical == legacy
+
     def _read_canonical(self) -> tuple[SavedUserSettings, dict[str, Any]]:
         raw = self._read_json(self._path, source="canonical")
         if not isinstance(raw, dict):
@@ -234,10 +259,50 @@ class UserSettingsStore:
             "schema_version": 1,
             "revision": 0,
             "provider_keys": raw.get("provider_keys", {}),
-            "default_model": raw.get("default_model"),
+            "default_model": None,
             "verification": {},
         }
-        return self._validate_configuration(payload, source="legacy")
+        settings = self._validate_configuration(payload, source="legacy")
+        legacy_model = raw.get("default_model")
+        if legacy_model is None:
+            return settings
+
+        payload["default_model"] = self._normalize_legacy_model(legacy_model)
+        try:
+            return self._validate_configuration(payload, source="legacy model")
+        except SettingsConfigurationError:
+            logger.warning(
+                "user_settings.legacy_model_invalid",
+                self._legacy_model_metadata(legacy_model),
+                user_id=self._user_id,
+            )
+            return settings
+
+    @staticmethod
+    def _normalize_legacy_model(value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        if ":" in normalized:
+            return normalized
+        if "/" in normalized:
+            provider, model = normalized.split("/", 1)
+            return f"{provider.strip()}:{model.strip()}"
+        return f"ollama:{normalized}"
+
+    @staticmethod
+    def _legacy_model_metadata(value: object) -> dict[str, object]:
+        if not isinstance(value, str):
+            syntax = "non_string"
+            length = None
+        else:
+            syntax = "colon" if ":" in value else "slash" if "/" in value else "bare"
+            length = len(value)
+        return {
+            "model_type": type(value).__name__,
+            "model_length": length,
+            "model_syntax": syntax,
+        }
 
     @staticmethod
     def _read_json(path: Path, *, source: str) -> object:
@@ -261,6 +326,7 @@ class UserSettingsStore:
     def _rename_legacy(self) -> None:
         migrated_path = self._legacy_path.with_name(f"{self._legacy_path.name}.migrated")
         try:
+            os.chmod(self._legacy_path, 0o600)
             os.replace(self._legacy_path, migrated_path)
         except OSError:
             raise SettingsWriteError("Unable to finish user settings migration") from None
@@ -287,6 +353,8 @@ class UserSettingsStore:
             os.replace(temporary_path, self._path)
             temporary_path = None
             self._fsync_parent()
+        except SettingsWriteError:
+            raise
         except Exception:
             raise SettingsWriteError("Unable to persist user settings") from None
         finally:
@@ -305,12 +373,19 @@ class UserSettingsStore:
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
         try:
             descriptor = os.open(self._path.parent, flags)
-        except OSError:
-            return
+        except OSError as exc:
+            if exc.errno in _UNSUPPORTED_DURABILITY_ERRNOS:
+                return
+            raise SettingsWriteError(
+                "User settings were replaced, but durability confirmation failed"
+            ) from None
         try:
             os.fsync(descriptor)
-        except OSError:
-            pass
+        except OSError as exc:
+            if exc.errno not in _UNSUPPORTED_DURABILITY_ERRNOS:
+                raise SettingsWriteError(
+                    "User settings were replaced, but durability confirmation failed"
+                ) from None
         finally:
             try:
                 os.close(descriptor)

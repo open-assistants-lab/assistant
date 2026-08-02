@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import stat
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -120,6 +122,46 @@ def test_legacy_migration_preserves_values_and_renames_source(tmp_path: Path) ->
     assert store.legacy_path.with_name("settings.json.migrated").exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are not supported")
+def test_migrated_legacy_file_is_restricted_to_owner(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    _write_json(store.legacy_path, {"provider_keys": {"openai": SECRET}})
+    store.legacy_path.chmod(0o644)
+
+    store.load()
+
+    migrated = store.legacy_path.with_name("settings.json.migrated")
+    assert stat.S_IMODE(migrated.stat().st_mode) == 0o600
+
+
+def test_case_insensitive_legacy_alias_is_treated_only_as_canonical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.config import user_settings_store as store_module
+
+    paths = _paths(tmp_path)
+    canonical_path = paths.user_settings_path()
+    _write_json(canonical_path, _canonical())
+    legacy_alias = canonical_path.with_name(canonical_path.name.upper())
+    if not legacy_alias.exists():
+        _write_json(legacy_alias, _canonical())
+    warnings: list[dict[str, Any]] = []
+    monkeypatch.setattr(store_module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        store_module.logger,
+        "warning",
+        lambda event, data, user_id="default_user": warnings.append(data),
+    )
+    store = UserSettingsStore("alice", paths=paths, legacy_path=legacy_alias)
+
+    settings = store.load()
+
+    assert settings.revision == 2
+    assert canonical_path.exists()
+    assert not canonical_path.with_name(f"{legacy_alias.name}.migrated").exists()
+    assert warnings == []
+
+
 def test_canonical_and_legacy_merge_keys_with_canonical_precedence(tmp_path: Path) -> None:
     store = _store(tmp_path)
     _write_json(store.path, _canonical(provider_keys={"openai": "new", "gemini": "g"}))
@@ -150,6 +192,57 @@ def test_legacy_default_is_used_when_canonical_field_was_omitted(tmp_path: Path)
     _write_json(store.legacy_path, {"provider_keys": {}, "default_model": "anthropic:claude"})
 
     assert store.load().default_model == "anthropic:claude"
+
+
+@pytest.mark.parametrize(
+    ("legacy_model", "expected"),
+    [
+        (" openai : gpt-5 ", "openai:gpt-5"),
+        ("anthropic/claude-sonnet", "anthropic:claude-sonnet"),
+        ("llama3.2", "ollama:llama3.2"),
+    ],
+)
+def test_legacy_models_normalize_to_canonical_ids(
+    tmp_path: Path, legacy_model: str, expected: str
+) -> None:
+    store = _store(tmp_path)
+    _write_json(
+        store.legacy_path,
+        {"provider_keys": {"openai": SECRET}, "default_model": legacy_model},
+    )
+
+    settings = store.load()
+
+    assert settings.default_model == expected
+    assert settings.provider_keys == {"openai": SECRET}
+
+
+def test_invalid_legacy_model_preserves_keys_and_logs_only_redacted_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.config import user_settings_store as store_module
+
+    store = _store(tmp_path)
+    invalid_model = f"bad provider/{SECRET}"
+    _write_json(
+        store.legacy_path,
+        {"provider_keys": {"openai": SECRET}, "default_model": invalid_model},
+    )
+    calls: list[tuple[str, dict[str, Any], str]] = []
+    monkeypatch.setattr(
+        store_module.logger,
+        "warning",
+        lambda event, data, user_id="default_user": calls.append((event, data, user_id)),
+    )
+
+    settings = store.load()
+
+    assert settings.provider_keys == {"openai": SECRET}
+    assert settings.default_model is None
+    assert len(calls) == 1
+    assert set(calls[0][1]) == {"model_type", "model_length", "model_syntax"}
+    assert SECRET not in repr(calls)
+    assert invalid_model not in repr(calls)
 
 
 def test_explicit_canonical_null_default_wins_over_legacy(tmp_path: Path) -> None:
@@ -482,6 +575,79 @@ def test_parent_close_failure_after_replace_does_not_report_write_failure(
     mutation = store.set_provider_key("openai", SECRET)
 
     assert mutation.changed is True
+    assert store.load().provider_keys == {"openai": SECRET}
+
+
+def test_unsupported_parent_fsync_error_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.config import user_settings_store as store_module
+
+    store = _store(tmp_path)
+    real_fsync = store_module.os.fsync
+    calls = 0
+
+    def unsupported_on_parent(descriptor: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError(errno.EINVAL, "directory fsync unsupported")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(store_module.os, "fsync", unsupported_on_parent)
+
+    mutation = store.set_provider_key("openai", SECRET)
+
+    assert mutation.changed is True
+    assert mutation.settings.revision == 1
+
+
+def test_parent_fsync_eio_surfaces_durability_error_and_persisted_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.config import user_settings_store as store_module
+
+    store = _store(tmp_path)
+    _write_json(store.path, _canonical(revision=0, provider_keys={"openai": SECRET}))
+    real_fsync = store_module.os.fsync
+    calls = 0
+
+    def fail_parent_fsync(descriptor: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError(errno.EIO, "durability failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(store_module.os, "fsync", fail_parent_fsync)
+
+    with pytest.raises(SettingsWriteError, match="durability confirmation failed") as raised:
+        store.patch(UserSettingsPatch(expected_revision=0, default_model="openai:new"))
+
+    assert SECRET not in str(raised.value)
+    assert store.load().revision == 1
+    with pytest.raises(RevisionConflict):
+        store.patch(UserSettingsPatch(expected_revision=0, default_model="openai:new"))
+
+
+def test_parent_open_eio_surfaces_durability_error_after_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.config import user_settings_store as store_module
+
+    store = _store(tmp_path)
+    real_open = store_module.os.open
+
+    def fail_parent_open(path: str | os.PathLike[str], flags: int, mode: int = 0o777) -> int:
+        if Path(path) == store.path.parent:
+            raise OSError(errno.EIO, "durability failure")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(store_module.os, "open", fail_parent_open)
+
+    with pytest.raises(SettingsWriteError, match="durability confirmation failed"):
+        store.set_provider_key("openai", SECRET)
+
     assert store.load().provider_keys == {"openai": SECRET}
 
 
