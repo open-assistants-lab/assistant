@@ -22,13 +22,27 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
+from pydantic import TypeAdapter
+
+from src.sdk.compression import (
+    CompressionContext,
+    CompressionObserver,
+    CompressionReason,
+    CompressionResult,
+    CompressionStatus,
+    CompressionTelemetry,
+    PersistenceStatus,
+    SummaryPersistenceResult,
+)
+from src.sdk.context_measurement import build_context_snapshot
 from src.sdk.guardrails import (
     GuardrailResult,
     GuardrailTripwire,
@@ -40,6 +54,12 @@ from src.sdk.handoffs import Handoff
 from src.sdk.messages import Message, StreamChunk, ToolCall, Usage
 from src.sdk.middleware import Middleware
 from src.sdk.providers.base import LLMProvider, ModelCost, ProviderContextOverflowError
+from src.sdk.run_models import (
+    CanonicalModel,
+    ContextFreshness,
+    ContextSnapshot,
+    ContextSource,
+)
 from src.sdk.state import AgentState
 from src.sdk.subagent_context import SubagentCancelledError, SubagentContext
 from src.sdk.subagent_models import TaskCancelledError
@@ -48,6 +68,10 @@ from src.sdk.tracing import SpanType, TraceProvider
 from src.sdk.validation import repair_tool_call
 
 logger = logging.getLogger(__name__)
+
+ContextMeasurer = Callable[..., ContextSnapshot]
+ContextSink = Callable[[ContextSnapshot], Awaitable[None] | None]
+_canonical_model_adapter = TypeAdapter(CanonicalModel)
 
 _current_agent_loop: ContextVar[AgentLoop | None] = ContextVar("_current_agent_loop", default=None)
 
@@ -172,6 +196,10 @@ class AgentLoop:
         user_id: str | None = None,
         workspace_id: str | None = None,
         cancel_event: asyncio.Event | None = None,
+        model_id: CanonicalModel | None = None,
+        context_measurer: ContextMeasurer = build_context_snapshot,
+        context_sink: ContextSink | None = None,
+        compression_sink: CompressionObserver | None = None,
     ) -> None:
         self.provider = provider
         self.system_prompt = system_prompt
@@ -188,6 +216,20 @@ class AgentLoop:
         self.subagent_ctx: SubagentContext | None = None
         self.cancel_event: asyncio.Event | None = cancel_event
         self.rubric: str | None = None
+        provider_model = getattr(provider, "model", None) or "unknown"
+        inferred_model = (
+            provider_model
+            if ":" in str(provider_model)
+            else f"{getattr(provider, 'provider_id', None) or 'ollama'}:{provider_model}"
+        )
+        self.model_id = _canonical_model_adapter.validate_python(model_id or inferred_model)
+        self.context_measurer = context_measurer
+        self.context_sink = context_sink
+        self.compression_sink = compression_sink
+        self.last_call_context: ContextSnapshot | None = None
+        self.next_context: ContextSnapshot | None = None
+        self.last_compression: CompressionTelemetry | None = None
+        self._agent_call_index = 0
 
         self._registry = ToolRegistry()
         if tools:
@@ -748,6 +790,188 @@ class AgentLoop:
                 return mw
         return None
 
+    def _reset_context_telemetry(self) -> None:
+        self.last_call_context = None
+        self.next_context = None
+        self.last_compression = None
+        self._agent_call_index = 0
+
+    def _flow_identity(self) -> tuple[int, str]:
+        try:
+            attempt = max(1, int(getattr(self, "_flow_attempt", 1)))
+        except (TypeError, ValueError):
+            attempt = 1
+        session_id = str(getattr(self, "_flow_session_id", "default") or "default").strip()
+        return attempt, session_id or "default"
+
+    def _measure_context(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None,
+        llm_call_index: int,
+        source: ContextSource = ContextSource.PREPARED_CONTEXT,
+    ) -> ContextSnapshot | None:
+        attempt, _ = self._flow_identity()
+        try:
+            return self.context_measurer(
+                model=self.model_id,
+                messages=messages,
+                tools=tools,
+                attempt=attempt,
+                llm_call_index=llm_call_index,
+                source=source,
+                freshness=ContextFreshness.LIVE,
+            )
+        except Exception:
+            logger.warning("context_measurement_error", exc_info=True)
+            return None
+
+    async def _notify_context(self, snapshot: ContextSnapshot) -> None:
+        if self.context_sink is None:
+            return
+        try:
+            result = self.context_sink(snapshot)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.warning("context_sink_error", exc_info=True)
+
+    async def _notify_compression(self, telemetry: CompressionTelemetry) -> None:
+        if self.compression_sink is None:
+            return
+        try:
+            result = self.compression_sink(telemetry)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.warning("compression_sink_error", exc_info=True)
+
+    async def _prepare_agent_call(
+        self, state: AgentState
+    ) -> tuple[list[Message], list[ToolDefinition] | None]:
+        intended_index = self._agent_call_index + 1
+        state.extra.pop("_compression_context", None)
+        state.extra.pop("_compression_result", None)
+        tools_before = self._registry.list_tools() or None
+        before = self._measure_context(
+            self._prepare_messages(state), tools_before, intended_index
+        )
+        attempt, session_id = self._flow_identity()
+        state.extra["_compression_context"] = CompressionContext(
+            session_id=session_id,
+            model=self.model_id,
+            attempt=attempt,
+            llm_call_index=intended_index,
+            reason=CompressionReason.THRESHOLD,
+            before=before,
+        )
+        try:
+            await self._run_hooks("abefore_model", state)
+            compression_result = state.extra.pop("_compression_result", None)
+        finally:
+            state.extra.pop("_compression_context", None)
+
+        prepared = self._prepare_messages(state)
+        tools = self._registry.list_tools() or None
+        if isinstance(compression_result, CompressionResult):
+            if compression_result.compressed:
+                after = self._measure_context(prepared, tools, intended_index)
+                telemetry = compression_result.telemetry.model_copy(
+                    update={"before_context": before, "after_context": after}
+                )
+                compression_result = compression_result.model_copy(update={"telemetry": telemetry})
+            self.last_compression = compression_result.telemetry
+            await self._notify_compression(compression_result.telemetry)
+        return prepared, tools
+
+    async def _record_agent_call(
+        self, prepared: list[Message], tools: list[ToolDefinition] | None
+    ) -> int:
+        self._agent_call_index += 1
+        snapshot = self._measure_context(prepared, tools, self._agent_call_index)
+        self.last_call_context = snapshot
+        if snapshot is not None:
+            await self._notify_context(snapshot)
+        return self._agent_call_index
+
+    def _project_next_context(self, state: AgentState) -> None:
+        if self._agent_call_index < 1:
+            self.next_context = None
+            return
+        self.next_context = self._measure_context(
+            self._prepare_messages(state),
+            None,
+            self._agent_call_index,
+            ContextSource.POST_RUN_PROJECTION,
+        )
+
+    async def compress_context(
+        self,
+        reason: CompressionReason,
+        instructions: str | None = None,
+    ) -> CompressionResult:
+        """Compress current state and collect typed, non-blocking telemetry."""
+        from src.sdk.middleware_summarization import SummarizationMiddleware
+
+        intended_index = self._agent_call_index + 1
+        attempt, session_id = self._flow_identity()
+        before = self.last_call_context
+        if before is not None:
+            before = before.model_copy(
+                update={
+                    "model": self.model_id,
+                    "attempt": attempt,
+                    "llm_call_index": intended_index,
+                }
+            )
+        else:
+            before = self._measure_context(
+                self._prepare_messages(self.state),
+                self._registry.list_tools() or None,
+                intended_index,
+            )
+        context = CompressionContext(
+            session_id=session_id,
+            model=self.model_id,
+            attempt=attempt,
+            llm_call_index=intended_index,
+            reason=reason,
+            before=before,
+        )
+        middleware = self.find_middleware(SummarizationMiddleware)
+        if middleware is None:
+            result = CompressionResult(
+                telemetry=CompressionTelemetry(
+                    status=CompressionStatus.SKIPPED,
+                    reason=reason,
+                    summary_model=self.model_id,
+                    persistence=SummaryPersistenceResult(status=PersistenceStatus.NOT_REQUESTED),
+                    error_code="middleware_not_configured",
+                    before_context=before,
+                )
+            )
+        else:
+            try:
+                result = await middleware.force_summarize(
+                    self.state, context, instructions=instructions
+                )
+            finally:
+                self.state.extra.pop("_compression_context", None)
+                self.state.extra.pop("_compression_result", None)
+        if result.compressed:
+            after = self._measure_context(
+                self._prepare_messages(self.state),
+                self._registry.list_tools() or None,
+                intended_index,
+            )
+            telemetry = result.telemetry.model_copy(
+                update={"before_context": before, "after_context": after}
+            )
+            result = result.model_copy(update={"telemetry": telemetry})
+        self.last_compression = result.telemetry
+        await self._notify_compression(result.telemetry)
+        return result
+
     async def _check_subagent_before_llm(self, state: AgentState) -> None:
         if not (ctx := self.subagent_ctx):
             return
@@ -776,6 +1000,7 @@ class AgentLoop:
 
     async def _run_impl(self, messages: list[Message]) -> list[Message]:
         """Internal run implementation (wrapped by run() for ContextVar lifecycle)."""
+        self._reset_context_telemetry()
         state = AgentState(messages=list(messages))
         self.state = state
         if self.rubric:
@@ -793,6 +1018,7 @@ class AgentLoop:
         except GuardrailTripwire as e:
             state.add_message(Message.assistant(content=f"Input blocked: {e.result.message}"))
             await self._run_hooks("aafter_agent", state)
+            self._project_next_context(state)
             return state.messages
 
         try:
@@ -802,6 +1028,7 @@ class AgentLoop:
             raise
 
         await self._run_hooks("aafter_agent", state)
+        self._project_next_context(state)
         return state.messages
 
     async def _run_react_loop(self, state: AgentState, cost_tracker: CostTracker) -> None:
@@ -816,15 +1043,13 @@ class AgentLoop:
             llm_success = False
             while overflow_retries < 3 and not llm_success:
                 await self._check_subagent_before_llm(state)
-                await self._run_hooks("abefore_model", state)
-
-                prepared = self._prepare_messages(state)
-                tools = self._registry.list_tools() or None
+                prepared, tools = await self._prepare_agent_call(state)
+                call_index = await self._record_agent_call(prepared, tools)
 
                 try:
                     if self.trace_provider:
                         async with self.trace_provider.start_span(
-                            SpanType.LLM_CALL, f"llm_call_{iteration}"
+                            SpanType.LLM_CALL, f"llm_call_{call_index}"
                         ) as span:
                             response = await self.provider.chat(
                                 prepared,
@@ -860,13 +1085,9 @@ class AgentLoop:
                     overflow_retries += 1
                     logger.warning(f"context_overflow iteration={iteration} retry={overflow_retries}")
 
-                    from src.sdk.middleware_summarization import SummarizationMiddleware
-
-                    summary_mw = self.find_middleware(SummarizationMiddleware)
-                    if summary_mw is not None:
-                        success = await summary_mw.force_summarize(state)
-                        if success:
-                            continue
+                    result = await self.compress_context(CompressionReason.PROVIDER_OVERFLOW)
+                    if result.compressed and overflow_retries < 3:
+                        continue
 
                     state.add_message(
                         Message.assistant(content="Context too large after summarization attempt.")
@@ -943,6 +1164,7 @@ class AgentLoop:
             reasoning (alongside reasoning_delta)
         """
         state = AgentState(messages=list(messages))
+        self._reset_context_telemetry()
         self.state = state
         if self.rubric:
             state.extra["rubric"] = self.rubric
@@ -981,10 +1203,10 @@ class AgentLoop:
         except Exception:
             guardrail_task = None
 
-        overflow_retries = 0
-
         try:
-            for iteration in range(self.run_config.max_iterations):
+            iteration = 0
+            overflow_retries = 0
+            while iteration < self.run_config.max_iterations:
                 # Cooperative cancellation check
                 if self.cancel_event and self.cancel_event.is_set():
                     yield StreamChunk.done(content="", tool_calls=all_tool_calls)
@@ -995,11 +1217,16 @@ class AgentLoop:
                     yield StreamChunk.error(message=f"Run limit reached: {limit_reason}")
                     break
 
-                await self._check_subagent_before_llm(state)
-                await self._run_hooks("abefore_model", state)
+                if guardrail_task is not None:
+                    try:
+                        await guardrail_task
+                    except GuardrailTripwire as e:
+                        yield StreamChunk.error(message=f"Input blocked: {e.result.message}")
+                        break
+                    guardrail_task = None
 
-                prepared = self._prepare_messages(state)
-                tools = self._registry.list_tools() or None
+                await self._check_subagent_before_llm(state)
+                prepared, tools = await self._prepare_agent_call(state)
 
                 stream_content_parts: list[str] = []
                 stream_tool_calls: list[ToolCall] = []
@@ -1009,18 +1236,11 @@ class AgentLoop:
                 in_reasoning_block = False
                 stream_usage = Usage()
 
-                if guardrail_task is not None:
-                    try:
-                        await guardrail_task
-                    except GuardrailTripwire as e:
-                        yield StreamChunk.error(message=f"Input blocked: {e.result.message}")
-                        break
-                    guardrail_task = None
-
+                call_index = await self._record_agent_call(prepared, tools)
                 try:
                     if self.trace_provider:
                         async with self.trace_provider.start_span(
-                            SpanType.LLM_CALL, f"llm_call_{iteration}"
+                            SpanType.LLM_CALL, f"llm_call_{call_index}"
                         ) as llm_span:
                             async for chunk in self.provider.chat_stream(
                                 prepared,
@@ -1118,14 +1338,9 @@ class AgentLoop:
                         content=f"\n[Context overflow — compacting... retry {overflow_retries}/3]\n"
                     )
 
-                    from src.sdk.middleware_summarization import SummarizationMiddleware
-
-                    summary_mw = self.find_middleware(SummarizationMiddleware)
-                    if summary_mw is not None:
-                        success = await summary_mw.force_summarize(state)
-                        if success:
-                            if overflow_retries < 3:
-                                continue
+                    result = await self.compress_context(CompressionReason.PROVIDER_OVERFLOW)
+                    if result.compressed and overflow_retries < 3:
+                        continue
 
                     yield StreamChunk.error(message="Context too large after summarization attempt.")
                     break
@@ -1160,6 +1375,7 @@ class AgentLoop:
                     content=assistant_content,
                     tool_calls=stream_tool_calls,
                     reasoning=reasoning_content,
+                    usage=stream_usage,
                 )
 
                 # When the model uses interleaved reasoning (deepseek, kimi, etc.),
@@ -1249,11 +1465,15 @@ class AgentLoop:
                     async for event in self._execute_single_tool_streaming(tc, state):
                         yield event
 
+                overflow_retries = 0
+                iteration += 1
+
         except SubagentCancelledError:
             await self._run_hooks("aafter_agent", state)
             raise
 
         await self._run_hooks("aafter_agent", state)
+        self._project_next_context(state)
 
         # Drain pending stream events from middleware (e.g. rubric_evaluation_end)
         for event in state.extra.pop("_pending_stream_events", []):

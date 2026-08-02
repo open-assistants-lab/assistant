@@ -4,15 +4,32 @@ These tests use a MockProvider that returns predetermined responses,
 so they run without any real LLM service.
 """
 
+import asyncio
 import json
 import time
 
 import pytest
 
+from src.sdk.compression import (
+    CompressionArtifact,
+    CompressionMessage,
+    CompressionReason,
+    CompressionResult,
+    CompressionStatus,
+    CompressionTelemetry,
+)
+from src.sdk.guardrails import GuardrailResult, InputGuardrail
 from src.sdk.loop import AgentLoop, CostTracker, RunConfig
 from src.sdk.messages import Message, StreamChunk, ToolCall, Usage
 from src.sdk.middleware import Middleware
-from src.sdk.providers.base import LLMProvider, ModelCost, ModelInfo
+from src.sdk.middleware_summarization import SummarizationMiddleware
+from src.sdk.providers.base import (
+    LLMProvider,
+    ModelCost,
+    ModelInfo,
+    ProviderContextOverflowError,
+)
+from src.sdk.run_models import ContextSnapshot, ContextSource
 from src.sdk.state import AgentState
 from src.sdk.tools import ToolAnnotations, ToolDefinition, ToolResult, tool
 
@@ -83,6 +100,107 @@ class MockProvider(LLMProvider):
     @property
     def provider_id(self) -> str:
         return "mock"
+
+
+def _measured_snapshot(**kwargs) -> ContextSnapshot:
+    messages = kwargs["messages"]
+    tools = kwargs["tools"] or []
+    estimated_tokens = sum(len(str(message.content)) for message in messages) + len(tools) * 100
+    return ContextSnapshot(
+        model=kwargs["model"],
+        attempt=kwargs["attempt"],
+        llm_call_index=kwargs["llm_call_index"],
+        estimated_tokens=estimated_tokens,
+        context_window=10_000,
+        percentage=estimated_tokens / 100,
+        source=kwargs["source"],
+        freshness=kwargs["freshness"],
+        estimated=True,
+    )
+
+
+def _compression_result(context, status=CompressionStatus.SUCCEEDED) -> CompressionResult:
+    if status is not CompressionStatus.SUCCEEDED:
+        return CompressionResult(
+            telemetry=CompressionTelemetry(
+                status=status,
+                reason=context.reason,
+                summary_model=context.model,
+                persistence={"status": "not_requested"},
+                error_code="not_compressed",
+                before_context=context.before,
+            )
+        )
+    replacement = (CompressionMessage.from_message(Message.user("compressed summary")),)
+    artifact = CompressionArtifact(
+        summary="compressed summary",
+        replacement_messages=replacement,
+        summarized_message_count=1,
+        preserved_message_count=0,
+        summarized_message_ids=("old-1",),
+        persistence_eligible=True,
+    )
+    return CompressionResult(
+        artifact=artifact,
+        telemetry=CompressionTelemetry(
+            status=status,
+            reason=context.reason,
+            before_message_count=1,
+            after_message_count=1,
+            before_token_count=10,
+            after_token_count=5,
+            summarized_message_count=1,
+            replacement_message_count=1,
+            summary_model=context.model,
+            persistence={"status": "not_requested"},
+            before_context=context.before,
+        ),
+    )
+
+
+class ScriptedCompressionMiddleware(SummarizationMiddleware):
+    def __init__(self, *, automatic=False, status=CompressionStatus.SUCCEEDED):
+        super().__init__("mock:test")
+        self.automatic = automatic
+        self.status = status
+        self.contexts = []
+
+    async def force_summarize(self, state, context, instructions=None):
+        self.contexts.append(context)
+        result = _compression_result(context, self.status)
+        if result.compressed and result.artifact:
+            state.messages = [message.to_message() for message in result.artifact.replacement_messages]
+            state.extra["_compression_result"] = result
+        return result
+
+    async def abefore_model(self, state):
+        if not self.automatic:
+            return None
+        context = state.extra["_compression_context"]
+        result = await self.force_summarize(state, context)
+        return {"extra": {"_compression_result": result}}
+
+
+class OverflowProvider(MockProvider):
+    def __init__(self, *, failures: int, stream: bool = False):
+        super().__init__([Message.assistant("recovered")])
+        self.failures = failures
+        self.stream_mode = stream
+        self.attempts = 0
+
+    async def chat(self, messages, tools=None, model=None, **kwargs):
+        self.attempts += 1
+        if self.attempts <= self.failures:
+            raise ProviderContextOverflowError("too large")
+        return await super().chat(messages, tools, model, **kwargs)
+
+    async def chat_stream_impl(self, messages, tools, model, **kwargs):
+        self.attempts += 1
+        if self.attempts <= self.failures:
+            raise ProviderContextOverflowError("too large")
+        yield StreamChunk.text_delta(content="recovered")
+        yield StreamChunk.usage_event(Usage(input_tokens=7, output_tokens=2))
+        yield StreamChunk.done(content="recovered")
 
 
 @tool
@@ -1231,3 +1349,329 @@ class TestProviderOptions:
         assert config.provider_options is not None
         assert "anthropic" in config.provider_options
         assert "openai" in config.provider_options
+
+
+class TestContextTelemetry:
+    async def test_model_id_is_inferred_and_explicit_id_is_normalized(self):
+        provider = MockProvider([Message.assistant("ok")])
+        provider.model = "test-model"
+        inferred = AgentLoop(provider=provider)
+        explicit = AgentLoop(provider=provider, model_id=" openai:gpt-4o ")
+        assert inferred.model_id == "mock:test-model"
+        assert explicit.model_id == "openai:gpt-4o"
+
+    def test_invalid_explicit_model_id_is_rejected(self):
+        with pytest.raises(ValueError, match="canonical"):
+            AgentLoop(provider=MockProvider(), model_id="not canonical model")
+
+    async def test_snapshot_uses_pre_hook_and_actual_messages_with_tools(self):
+        measured = []
+
+        def measurer(**kwargs):
+            measured.append((list(kwargs["messages"]), list(kwargs["tools"] or [])))
+            return _measured_snapshot(**kwargs)
+
+        class AddContext(Middleware):
+            async def abefore_model(self, state):
+                return {"messages": [*state.messages, Message.system("hook context")]}
+
+        loop = AgentLoop(
+            provider=MockProvider([Message.assistant("ok")]),
+            tools=[echo],
+            system_prompt="system context",
+            middlewares=[AddContext()],
+            context_measurer=measurer,
+        )
+        await loop.run([Message.user("question")])
+        assert [message.content for message in measured[0][0]] == ["system context", "question"]
+        assert [message.content for message in measured[1][0]] == [
+            "system context",
+            "question",
+            "hook context",
+        ]
+        assert [tool.name for tool in measured[1][1]] == ["echo"]
+
+    async def test_dynamic_tools_are_measured_on_next_call(self):
+        snapshots = []
+
+        class RegisterTool(Middleware):
+            calls = 0
+
+            async def abefore_model(self, state):
+                self.calls += 1
+                if self.calls == 2:
+                    loop.register_tool(add)
+
+        provider = MockProvider(
+            [
+                Message.assistant(tool_calls=[ToolCall(id="one", name="echo", arguments={})]),
+                Message.assistant("done"),
+            ]
+        )
+        loop = AgentLoop(
+            provider=provider,
+            tools=[echo],
+            middlewares=[RegisterTool()],
+            context_sink=snapshots.append,
+            context_measurer=_measured_snapshot,
+        )
+        await loop.run([Message.user("go")])
+        assert snapshots[1].estimated_tokens - snapshots[0].estimated_tokens >= 100
+
+    async def test_nonstream_react_indexes_and_final_projection(self):
+        snapshots = []
+        provider = MockProvider(
+            [
+                Message.assistant(
+                    tool_calls=[
+                        ToolCall(id="one", name="echo", arguments={}),
+                        ToolCall(id="two", name="add", arguments={"a": 1, "b": 2}),
+                    ]
+                ),
+                Message.assistant("final answer"),
+            ]
+        )
+        loop = AgentLoop(
+            provider=provider,
+            tools=[echo, add],
+            context_sink=snapshots.append,
+            context_measurer=_measured_snapshot,
+        )
+        await loop.run([Message.user("go")])
+        assert [snapshot.llm_call_index for snapshot in snapshots] == [1, 2]
+        assert loop.last_call_context == snapshots[-1]
+        assert loop.next_context.llm_call_index == 2
+        assert loop.next_context.source is ContextSource.POST_RUN_PROJECTION
+
+    async def test_stream_matches_nonstream_snapshot_and_attaches_usage(self):
+        nonstream_snapshots = []
+        stream_snapshots = []
+        nonstream = AgentLoop(
+            provider=MockProvider([Message.assistant("answer")]),
+            model_id="mock:test",
+            context_sink=nonstream_snapshots.append,
+            context_measurer=_measured_snapshot,
+        )
+        stream_provider = MockProvider()
+        stream_provider.set_stream_events(
+            [[StreamChunk.text_delta("answer"), StreamChunk.usage_event(Usage(input_tokens=9))]]
+        )
+        stream = AgentLoop(
+            provider=stream_provider,
+            model_id="mock:test",
+            context_sink=stream_snapshots.append,
+            context_measurer=_measured_snapshot,
+        )
+        await nonstream.run([Message.user("same")])
+        events = [event async for event in stream.run_stream([Message.user("same")])]
+        assert stream_snapshots == nonstream_snapshots
+        assert stream.state.messages[-1].usage == Usage(input_tokens=9)
+        assert all(event.canonical_type != "context_snapshot" for event in events)
+
+    @pytest.mark.parametrize("stream", [False, True])
+    async def test_blocked_input_guardrail_has_no_snapshot(self, stream):
+        async def block(input_text, state):
+            return GuardrailResult(tripwire_triggered=True, message="blocked")
+
+        snapshots = []
+        loop = AgentLoop(
+            provider=MockProvider([Message.assistant("unused")]),
+            input_guardrails=[InputGuardrail(name="block", check=block)],
+            context_sink=snapshots.append,
+            context_measurer=_measured_snapshot,
+        )
+        if stream:
+            _ = [event async for event in loop.run_stream([Message.user("secret")])]
+        else:
+            await loop.run([Message.user("secret")])
+        assert snapshots == []
+        assert loop.last_call_context is None
+
+    async def test_overflow_compresses_between_indexed_calls(self):
+        snapshots = []
+        telemetry = []
+        middleware = ScriptedCompressionMiddleware()
+        loop = AgentLoop(
+            provider=OverflowProvider(failures=1),
+            middlewares=[middleware],
+            context_sink=snapshots.append,
+            compression_sink=telemetry.append,
+            context_measurer=_measured_snapshot,
+        )
+        await loop.run([Message.user("large")])
+        assert [snapshot.llm_call_index for snapshot in snapshots] == [1, 2]
+        assert middleware.contexts[0].reason is CompressionReason.PROVIDER_OVERFLOW
+        assert middleware.contexts[0].llm_call_index == 2
+        assert telemetry[0].before_context.llm_call_index == 2
+        assert telemetry[0].after_context.llm_call_index == 2
+
+    async def test_overflow_is_bounded_to_three_provider_calls(self):
+        provider = OverflowProvider(failures=10)
+        snapshots = []
+        loop = AgentLoop(
+            provider=provider,
+            middlewares=[ScriptedCompressionMiddleware()],
+            context_sink=snapshots.append,
+            context_measurer=_measured_snapshot,
+        )
+        result = await loop.run([Message.user("large")])
+        assert provider.attempts == 3
+        assert [snapshot.llm_call_index for snapshot in snapshots] == [1, 2, 3]
+        assert result[-1].content == "Context too large after summarization attempt."
+
+    async def test_stream_overflow_retries_same_react_iteration(self):
+        snapshots = []
+        loop = AgentLoop(
+            provider=OverflowProvider(failures=1, stream=True),
+            middlewares=[ScriptedCompressionMiddleware()],
+            context_sink=snapshots.append,
+            context_measurer=_measured_snapshot,
+        )
+        events = [event async for event in loop.run_stream([Message.user("large")])]
+        assert [snapshot.llm_call_index for snapshot in snapshots] == [1, 2]
+        assert loop.state.messages[-1].usage == Usage(input_tokens=7, output_tokens=2)
+        assert events[-1].type == "done"
+
+    async def test_automatic_compression_observer_gets_contexts_and_cleanup(self):
+        observed = []
+        loop = AgentLoop(
+            provider=MockProvider([Message.assistant("done")]),
+            middlewares=[ScriptedCompressionMiddleware(automatic=True)],
+            compression_sink=observed.append,
+            context_measurer=_measured_snapshot,
+        )
+        await loop.run([Message.user("history")])
+        assert observed[0].reason is CompressionReason.THRESHOLD
+        assert observed[0].before_context.estimated_tokens == len("history")
+        assert observed[0].after_context.estimated_tokens == len("compressed summary")
+        assert loop.last_compression == observed[0]
+        assert "_compression_context" not in loop.state.extra
+        assert "_compression_result" not in loop.state.extra
+
+    @pytest.mark.parametrize(
+        "status", [CompressionStatus.SKIPPED, CompressionStatus.FAILED]
+    )
+    async def test_automatic_non_success_keeps_contract_context_semantics(self, status):
+        observed = []
+        loop = AgentLoop(
+            provider=MockProvider([Message.assistant("done")]),
+            middlewares=[ScriptedCompressionMiddleware(automatic=True, status=status)],
+            compression_sink=observed.append,
+            context_measurer=_measured_snapshot,
+        )
+        await loop.run([Message.user("history")])
+        assert observed[0].status is status
+        assert observed[0].before_context.llm_call_index == 1
+        assert observed[0].after_context is None
+
+    async def test_post_projection_includes_final_hook_and_excludes_schemas(self):
+        class FinalSummary(Middleware):
+            async def aafter_agent(self, state):
+                return {"messages": [*state.messages, Message.user("final summary")]}
+
+        loop = AgentLoop(
+            provider=MockProvider([Message.assistant("final answer")]),
+            tools=[echo],
+            middlewares=[FinalSummary()],
+            context_measurer=_measured_snapshot,
+        )
+        await loop.run([Message.user("question")])
+        assert loop.next_context.estimated_tokens == len("questionfinal answerfinal summary")
+
+    async def test_context_sink_exception_is_nonfatal(self):
+        def broken_sink(snapshot):
+            raise RuntimeError("sink broke")
+
+        loop = AgentLoop(
+            provider=MockProvider([Message.assistant("ok")]),
+            context_sink=broken_sink,
+            context_measurer=_measured_snapshot,
+        )
+        result = await loop.run([Message.user("hi")])
+        assert result[-1].content == "ok"
+        assert loop.last_call_context.llm_call_index == 1
+
+    async def test_async_context_sink_is_awaited(self):
+        snapshots = []
+
+        async def sink(snapshot):
+            await asyncio.sleep(0)
+            snapshots.append(snapshot)
+
+        loop = AgentLoop(
+            provider=MockProvider([Message.assistant("ok")]),
+            context_sink=sink,
+            context_measurer=_measured_snapshot,
+        )
+        await loop.run([Message.user("hi")])
+        assert len(snapshots) == 1
+
+    async def test_measurement_exception_preserves_actual_call_index(self):
+        calls = 0
+
+        def broken_measurer(**kwargs):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("measurement broke")
+
+        loop = AgentLoop(
+            provider=MockProvider([Message.assistant("ok")]), context_measurer=broken_measurer
+        )
+        result = await loop.run([Message.user("hi")])
+        assert result[-1].content == "ok"
+        assert loop._agent_call_index == 1
+        assert loop.last_call_context is None
+        assert calls >= 2
+
+    async def test_compression_observer_exception_is_nonfatal(self):
+        def broken_observer(telemetry):
+            raise RuntimeError("observer broke")
+
+        loop = AgentLoop(
+            provider=MockProvider([Message.assistant("ok")]),
+            middlewares=[ScriptedCompressionMiddleware(automatic=True)],
+            compression_sink=broken_observer,
+            context_measurer=_measured_snapshot,
+        )
+        result = await loop.run([Message.user("hi")])
+        assert result[-1].content == "ok"
+        assert loop.last_compression.status is CompressionStatus.SUCCEEDED
+
+    async def test_direct_run_resets_prior_telemetry(self):
+        middleware = ScriptedCompressionMiddleware(automatic=True)
+        provider = MockProvider([Message.assistant("first"), Message.assistant("second")])
+        loop = AgentLoop(
+            provider=provider, middlewares=[middleware], context_measurer=_measured_snapshot
+        )
+        await loop.run([Message.user("one")])
+        middleware.automatic = False
+        await loop.run([Message.user("two")])
+        assert loop._agent_call_index == 1
+        assert loop.last_call_context.llm_call_index == 1
+        assert loop.last_compression is None
+
+    async def test_post_projection_is_not_sent_to_call_sink(self):
+        snapshots = []
+        loop = AgentLoop(
+            provider=MockProvider([Message.assistant("ok")]),
+            context_sink=snapshots.append,
+            context_measurer=_measured_snapshot,
+        )
+        await loop.run([Message.user("hi")])
+        assert len(snapshots) == 1
+        assert snapshots[0].source is ContextSource.PREPARED_CONTEXT
+        assert loop.next_context.source is ContextSource.POST_RUN_PROJECTION
+
+    async def test_cancelled_stream_before_provider_has_no_snapshot(self):
+        snapshots = []
+        cancel = asyncio.Event()
+        cancel.set()
+        loop = AgentLoop(
+            provider=MockProvider(),
+            cancel_event=cancel,
+            context_sink=snapshots.append,
+            context_measurer=_measured_snapshot,
+        )
+        events = [event async for event in loop.run_stream([Message.user("hi")])]
+        assert snapshots == []
+        assert events[-1].type == "done"
