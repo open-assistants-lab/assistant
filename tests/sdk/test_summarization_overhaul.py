@@ -451,7 +451,7 @@ async def test_generation_failure_leaves_exact_state_and_does_not_call_sink(resp
         "ollama-cloud:test",
         keep=("messages", 2),
         summary_provider_factory=lambda: provider,
-        summary_sink=lambda artifact, context: sink_calls.append(artifact),
+        summary_sink=lambda context, artifact: sink_calls.append(artifact),
     )
     result = await mw.force_summarize(state, _context())
     assert result.telemetry.status == "failed"
@@ -467,8 +467,8 @@ async def test_sink_success_propagates_storage_id_to_summary_message():
 
     calls = []
 
-    async def sink(artifact, context):
-        calls.append((artifact, context))
+    async def sink(context, artifact):
+        calls.append((context, artifact))
         return SummaryPersistenceResult(status="succeeded", summary_id="summary-1")
 
     state = AgentState(messages=[_stored("user", str(i), f"id-{i}") for i in range(4)])
@@ -477,6 +477,8 @@ async def test_sink_success_propagates_storage_id_to_summary_message():
     )
     result = await mw.force_summarize(state, _context())
     assert len(calls) == 1
+    assert calls[0][0] == _context()
+    assert calls[0][1].summary == "summary"
     assert result.artifact.persisted_summary_id == "summary-1"
     assert state.messages[0].storage_id == "summary-1"
 
@@ -486,7 +488,7 @@ async def test_sink_failure_does_not_fail_compression():
     from src.sdk.middleware_summarization import SummarizationMiddleware
     from src.sdk.state import AgentState
 
-    def sink(artifact, context):
+    def sink(context, artifact):
         raise RuntimeError("database unavailable")
 
     state = AgentState(messages=[_stored("user", str(i), f"id-{i}") for i in range(4)])
@@ -506,7 +508,7 @@ async def test_persistence_not_requested_when_ineligible_or_sink_absent(with_sin
     from src.sdk.state import AgentState
 
     calls = []
-    sink = (lambda artifact, context: calls.append(artifact)) if with_sink else None
+    sink = (lambda context, artifact: calls.append(artifact)) if with_sink else None
     state = AgentState(messages=[Message.user(str(i)) for i in range(4)])
     mw = SummarizationMiddleware(
         "ollama-cloud:test", keep=("messages", 2), summary_provider_factory=lambda: _Provider(), summary_sink=sink
@@ -524,7 +526,7 @@ async def test_second_compression_of_persisted_summary_remains_eligible():
 
     sequence = iter(["summary-1", "summary-2"])
 
-    def sink(artifact, context):
+    def sink(context, artifact):
         return SummaryPersistenceResult(status="succeeded", summary_id=next(sequence))
 
     state = AgentState(messages=[_stored("user", str(i), f"id-{i}") for i in range(4)])
