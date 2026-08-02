@@ -9,7 +9,12 @@ from typing import Any
 import pytest
 from fastapi.routing import APIRoute
 
-from src.config.user_settings_store import SettingsWriteError, UserSettingsStore
+from src.config.user_settings import GraderPromptUpdate
+from src.config.user_settings_store import (
+    RevisionConflict,
+    SettingsWriteError,
+    UserSettingsStore,
+)
 from src.http.routers import user_prompt as user_prompt_router
 from src.storage.paths import DataPaths
 
@@ -196,7 +201,7 @@ def test_invalid_put_never_echoes_sensitive_submitted_content(
 
 @pytest.mark.parametrize("operation", ["put", "reset"])
 def test_stale_mutations_return_exact_conflict_without_changes(
-    client, grader_prompt_api, test_user_id, operation
+    client, grader_prompt_api, monkeypatch, test_user_id, operation
 ):
     custom = "current rubric\n"
     client.put(
@@ -205,6 +210,13 @@ def test_stale_mutations_return_exact_conflict_without_changes(
         json={"content": custom, "expected_revision": 0},
     )
     grader_prompt_api["resets"].clear()
+    threadpool_calls: list[str] = []
+
+    async def run_in_threadpool(function, *args):
+        threadpool_calls.append(function.__name__)
+        return function(*args)
+
+    monkeypatch.setattr(user_prompt_router, "run_in_threadpool", run_in_threadpool)
 
     if operation == "put":
         response = client.put(
@@ -223,11 +235,79 @@ def test_stale_mutations_return_exact_conflict_without_changes(
     assert response.json() == {
         "code": "revision_conflict",
         "message": "Settings revision conflict",
-        "details": {"expected": 0, "actual": 1},
+        "details": {
+            "expected": 0,
+            "actual": 1,
+            "latest": _expected(custom, "customized", 1),
+        },
     }
+    assert "stale secret" not in response.text
     current = client.get("/user/grader-prompt", params={"user_id": test_user_id}).json()
     assert current == _expected(custom, "customized", 1)
+    mutation_helper = (
+        "_save_grader_prompt_sync" if operation == "put" else "_reset_grader_prompt_sync"
+    )
+    assert threadpool_calls == [mutation_helper, "_grader_prompt_conflict_details_sync"]
     assert grader_prompt_api["resets"] == []
+
+
+def test_conflict_latest_failure_is_redacted_and_does_not_reset(
+    client, grader_prompt_api, monkeypatch, test_user_id
+):
+    store = grader_prompt_api["get_store"](test_user_id)
+    store.save_grader_prompt(GraderPromptUpdate(content="current", expected_revision=0))
+    grader_prompt_api["resets"].clear()
+    original_save = store.save_grader_prompt
+
+    def conflict_then_break_load(update):
+        try:
+            return original_save(update)
+        except RevisionConflict:
+            monkeypatch.setattr(
+                store,
+                "load_grader_prompt",
+                lambda: (_ for _ in ()).throw(RuntimeError("latest secret")),
+            )
+            raise
+
+    monkeypatch.setattr(store, "save_grader_prompt", conflict_then_break_load)
+
+    response = client.put(
+        "/user/grader-prompt",
+        params={"user_id": test_user_id},
+        json={"content": "stale secret", "expected_revision": 0},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "code": "revision_conflict",
+        "message": "Settings revision conflict",
+        "details": {
+            "expected": 0,
+            "actual": 1,
+            "latest_error": "configuration_error",
+        },
+    }
+    assert "secret" not in response.text
+    assert grader_prompt_api["resets"] == []
+
+
+def test_get_blank_persisted_prompt_returns_controlled_configuration_error(
+    client, grader_prompt_api, test_user_id
+):
+    store = grader_prompt_api["get_store"](test_user_id)
+    store._grader_prompt_path.parent.mkdir(parents=True, exist_ok=True)
+    store._grader_prompt_path.write_text(" \n\t", encoding="utf-8")
+
+    response = client.get("/user/grader-prompt", params={"user_id": test_user_id})
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "code": "configuration_error",
+        "message": "Unable to process user settings",
+        "details": {},
+    }
+    assert store._grader_prompt_path.read_text(encoding="utf-8") == " \n\t"
 
 
 def test_reset_restores_packaged_seed_then_default_reset_is_noop(

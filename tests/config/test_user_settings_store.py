@@ -235,6 +235,39 @@ def test_versioned_aliased_canonical_is_chmodded_without_rename(tmp_path: Path) 
     assert not shared_path.with_name("settings.json.migrated").exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are not supported")
+def test_versioned_ordinary_canonical_is_secured_before_keys_are_returned(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    _write_json(store.path, _canonical(provider_keys={"openai": SECRET}))
+    store.path.chmod(0o644)
+
+    settings = store.load()
+
+    assert settings.provider_keys == {"openai": SECRET}
+    assert stat.S_IMODE(store.path.stat().st_mode) == 0o600
+
+
+def test_canonical_security_failure_is_typed_and_secret_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.config import user_settings_store as store_module
+
+    store = _store(tmp_path)
+    _write_json(store.path, _canonical(provider_keys={"openai": SECRET}))
+    monkeypatch.setattr(
+        store_module.os,
+        "chmod",
+        lambda path, mode: (_ for _ in ()).throw(OSError(f"cannot secure {SECRET}")),
+    )
+
+    with pytest.raises(SettingsConfigurationError) as raised:
+        store.load()
+
+    assert SECRET not in str(raised.value)
+    assert SECRET not in repr(raised.value)
+    assert raised.value.__cause__ is None
+
+
 def test_canonical_and_legacy_merge_keys_with_canonical_precedence(tmp_path: Path) -> None:
     store = _store(tmp_path)
     _write_json(store.path, _canonical(provider_keys={"openai": "new", "gemini": "g"}))
@@ -782,6 +815,21 @@ def test_load_grader_prompt_seeds_exact_content_without_settings_write(tmp_path:
     assert not store.path.exists()
 
 
+@pytest.mark.parametrize("content", ["", " ", "\n\t"])
+def test_load_grader_prompt_rejects_existing_blank_file_without_overwriting(
+    tmp_path: Path, content: str
+) -> None:
+    store = _grader_store(tmp_path)
+    prompt_path = _paths(tmp_path).user_grader_prompt_path()
+    prompt_path.parent.mkdir(parents=True, exist_ok=True)
+    prompt_path.write_text(content, encoding="utf-8")
+
+    with pytest.raises(SettingsConfigurationError, match="grader prompt"):
+        store.load_grader_prompt()
+
+    assert prompt_path.read_text(encoding="utf-8") == content
+
+
 def test_default_packaged_seed_is_independent_of_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1052,8 +1100,8 @@ def test_post_replace_prompt_durability_failure_restores_both_files(
     prompt_before = prompt_path.read_bytes() if prompt_path.exists() else None
     settings_before = store.path.read_bytes() if store.path.exists() else None
     prompt_mode_before = stat.S_IMODE(prompt_path.stat().st_mode) if prompt_path.exists() else None
-    settings_mode_before = stat.S_IMODE(store.path.stat().st_mode) if store.path.exists() else None
     expected_revision = store.load().revision
+    settings_mode_before = stat.S_IMODE(store.path.stat().st_mode) if store.path.exists() else None
     _fail_nth_fsync(monkeypatch, 2)
 
     with pytest.raises(SettingsWriteError, match="durability confirmation failed"):
@@ -1084,8 +1132,8 @@ def test_post_replace_settings_durability_failure_restores_both_files(
     prompt_before = prompt_path.read_bytes() if prompt_path.exists() else None
     settings_before = store.path.read_bytes() if store.path.exists() else None
     prompt_mode_before = stat.S_IMODE(prompt_path.stat().st_mode) if prompt_path.exists() else None
-    settings_mode_before = stat.S_IMODE(store.path.stat().st_mode) if store.path.exists() else None
     expected_revision = store.load().revision
+    settings_mode_before = stat.S_IMODE(store.path.stat().st_mode) if store.path.exists() else None
     _fail_nth_fsync(monkeypatch, 4)
 
     with pytest.raises(SettingsWriteError, match="durability confirmation failed"):

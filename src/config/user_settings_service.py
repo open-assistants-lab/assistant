@@ -131,7 +131,8 @@ def resolve_effective_user_settings(
             raise SettingsResolutionError("Invalid host verification max attempts configuration")
         max_attempts = host_max_attempts
 
-    prompt_hash = prompt.content_hash if prompt is not None else None
+    prompt_available = prompt is not None and bool(prompt.content.strip())
+    prompt_hash = prompt.content_hash if prompt is not None and prompt_available else None
     if not enabled:
         verification = EffectiveVerificationSettings(
             state=RubricAvailability.OFF,
@@ -141,7 +142,7 @@ def resolve_effective_user_settings(
         )
     else:
         reason: RubricUnavailableReason | None = None
-        if prompt is None:
+        if not prompt_available:
             reason = RubricUnavailableReason.MISSING_PROMPT
         elif grader_model is None:
             reason = RubricUnavailableReason.INVALID_GRADER_MODEL

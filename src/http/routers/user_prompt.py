@@ -56,6 +56,19 @@ def _reset_grader_prompt_sync(
     return _get_grader_prompt_store(user_id).reset_grader_prompt(request)
 
 
+def _grader_prompt_conflict_details_sync(
+    user_id: str, expected: int, actual: int
+) -> dict[str, object]:
+    details: dict[str, object] = {"expected": expected, "actual": actual}
+    try:
+        details["latest"] = _get_grader_prompt_store(user_id).load_grader_prompt().model_dump(
+            mode="json"
+        )
+    except Exception:
+        details["latest_error"] = "configuration_error"
+    return details
+
+
 def _reset_grader_prompt_loops(user_id: str) -> None:
     from src.sdk.runner import reset_user_sdk_loops
 
@@ -122,11 +135,14 @@ async def set_grader_prompt(
             _reset_grader_prompt_loops(user_id)
         return mutation.response
     except RevisionConflict as exc:
+        details = await run_in_threadpool(
+            _grader_prompt_conflict_details_sync, user_id, exc.expected, exc.actual
+        )
         return _grader_prompt_error(
             409,
             "revision_conflict",
             "Settings revision conflict",
-            {"expected": exc.expected, "actual": exc.actual},
+            details,
         )
     except (JSONDecodeError, UnicodeDecodeError, ValidationError, ValueError):
         return _grader_prompt_error(422, "validation_error", "Invalid settings request", {})
@@ -148,11 +164,14 @@ async def reset_grader_prompt(
             _reset_grader_prompt_loops(user_id)
         return mutation.response
     except RevisionConflict as exc:
+        details = await run_in_threadpool(
+            _grader_prompt_conflict_details_sync, user_id, exc.expected, exc.actual
+        )
         return _grader_prompt_error(
             409,
             "revision_conflict",
             "Settings revision conflict",
-            {"expected": exc.expected, "actual": exc.actual},
+            details,
         )
     except (JSONDecodeError, UnicodeDecodeError, ValidationError, ValueError):
         return _grader_prompt_error(422, "validation_error", "Invalid settings request", {})

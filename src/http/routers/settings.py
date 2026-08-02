@@ -304,7 +304,10 @@ def _preflight_settings(
     try:
         prompt = store.load_grader_prompt()
     except SettingsConfigurationError as exc:
-        if str(exc) != "No default grader prompt is configured":
+        if str(exc) not in {
+            "No default grader prompt is configured",
+            "User grader prompt is blank",
+        }:
             raise
         prompt = None
 
@@ -464,11 +467,15 @@ def update_settings(
             _reset_user_loops(user_id)
         return preflight.response(mutation.settings)
     except RevisionConflict as exc:
+        try:
+            latest = _preflight_settings(store).response().model_dump(mode="json")
+        except (SettingsConfigurationError, SettingsWriteError, SettingsResolutionError):
+            return _configuration_failure()
         return _settings_error(
             409,
             "revision_conflict",
             "Settings revision conflict",
-            {"expected": exc.expected, "actual": exc.actual},
+            {"expected": exc.expected, "actual": exc.actual, "latest": latest},
         )
     except (ValidationError, ValueError):
         return _settings_error(422, "validation_error", "Invalid settings request", {})

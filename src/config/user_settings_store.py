@@ -276,9 +276,12 @@ class UserSettingsStore:
 
     def _read_grader_prompt(self) -> str:
         try:
-            return self._grader_prompt_path.read_text(encoding="utf-8")
+            content = self._grader_prompt_path.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
             raise SettingsConfigurationError("User grader prompt is invalid") from None
+        if not content.strip():
+            raise SettingsConfigurationError("User grader prompt is blank")
+        return content
 
     @staticmethod
     def _grader_prompt_response(
@@ -563,7 +566,9 @@ class UserSettingsStore:
         raw = self._read_json(self._path, source="canonical")
         if not isinstance(raw, dict):
             raise SettingsConfigurationError("Canonical user settings are invalid")
-        return self._validate_configuration(raw, source="canonical"), raw
+        settings = self._validate_configuration(raw, source="canonical")
+        self._secure_canonical_file()
+        return settings, raw
 
     def _read_legacy(self) -> SavedUserSettings:
         raw = self._read_json(self._legacy_path, source="legacy")
@@ -599,7 +604,7 @@ class UserSettingsStore:
         try:
             os.chmod(self._path, 0o600)
         except OSError:
-            raise SettingsWriteError("Unable to secure user settings") from None
+            raise SettingsConfigurationError("Unable to secure user settings") from None
 
     @staticmethod
     def _normalize_legacy_model(value: object) -> object:

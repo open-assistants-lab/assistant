@@ -150,15 +150,17 @@ def test_get_settings_treats_missing_default_prompt_as_unavailable(
 def test_patch_revision_conflict_and_legacy_revision_compatibility(
     client, settings_api, test_user_id
 ):
+    secret = "conflict-provider-secret"
+    settings_api["get_store"](test_user_id).set_provider_key("openai", secret)
     first = client.patch(
         "/settings",
         params={"user_id": test_user_id},
-        json={"expected_revision": 0, "default_model": "openai:gpt-4.1"},
+        json={"expected_revision": 1, "default_model": "openai:gpt-4.1"},
     )
     stale = client.patch(
         "/settings",
         params={"user_id": test_user_id},
-        json={"expected_revision": 0, "default_model": "ollama:minimax-m2.5"},
+        json={"expected_revision": 1, "default_model": "ollama:minimax-m2.5"},
     )
     legacy = client.patch(
         "/settings",
@@ -167,15 +169,17 @@ def test_patch_revision_conflict_and_legacy_revision_compatibility(
     )
 
     assert first.status_code == 200
-    assert first.json()["revision"] == 1
+    assert first.json()["revision"] == 2
     assert stale.status_code == 409
     assert stale.json() == {
         "code": "revision_conflict",
         "message": "Settings revision conflict",
-        "details": {"expected": 0, "actual": 1},
+        "details": {"expected": 1, "actual": 2, "latest": first.json()},
     }
+    assert "provider_keys" not in stale.text
+    assert secret not in stale.text
     assert legacy.status_code == 200
-    assert legacy.json()["revision"] == 2
+    assert legacy.json()["revision"] == 3
     assert settings_api["resets"] == [
         (test_user_id, "settings_changed"),
         (test_user_id, "settings_changed"),
@@ -222,6 +226,30 @@ def test_patch_explicit_null_clears_while_omitted_fields_are_preserved(
         "grader_model": None,
         "max_attempts": 2,
     }
+
+
+def test_get_settings_treats_blank_persisted_prompt_as_unavailable(
+    client, settings_api, test_user_id
+):
+    store = settings_api["get_store"](test_user_id)
+    store.patch(
+        UserSettingsPatch(
+            expected_revision=0,
+            verification=VerificationOverrides(enabled=True),
+        )
+    )
+    store._grader_prompt_path.parent.mkdir(parents=True, exist_ok=True)
+    store._grader_prompt_path.write_text(" \n\t", encoding="utf-8")
+
+    response = client.get("/settings", params={"user_id": test_user_id})
+
+    assert response.status_code == 200
+    assert response.json()["revision"] == 1
+    verification = response.json()["effective"]["verification"]
+    assert verification["state"] == "unavailable"
+    assert verification["unavailable_reason"] == "missing_prompt"
+    assert verification["grader_prompt_hash"] is None
+    assert response.json()["saved"]["verification"]["enabled"] is True
 
 
 def test_patch_noop_does_not_increment_revision_or_reset(client, settings_api, test_user_id):

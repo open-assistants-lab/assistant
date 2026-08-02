@@ -164,6 +164,18 @@ def test_enabled_without_prompt_is_unavailable_before_callbacks() -> None:
     assert calls == []
 
 
+def test_enabled_with_defensively_constructed_blank_prompt_is_unavailable() -> None:
+    prompt = GraderPromptResponse.model_construct(
+        content=" \n\t", source="customized", content_hash=_HASH, revision=1
+    )
+
+    effective = _resolve(prompt=prompt)
+
+    assert effective.verification.state is RubricAvailability.UNAVAILABLE
+    assert effective.verification.unavailable_reason is RubricUnavailableReason.MISSING_PROMPT
+    assert effective.verification.grader_prompt_hash is None
+
+
 def test_malformed_grader_is_unavailable_not_an_exception() -> None:
     effective = _resolve(host_grader_model="not-canonical")
     assert effective.verification.state is RubricAvailability.UNAVAILABLE
