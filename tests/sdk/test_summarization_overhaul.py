@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from src.sdk.messages import Message
+from src.sdk.run_models import ContextFreshness, ContextSnapshot, ContextSource
 
 
 def _msg(role: str, content: str = "", tool_call_id: str | None = None, tool_calls=None) -> Message:
@@ -18,6 +20,120 @@ def _msg(role: str, content: str = "", tool_call_id: str | None = None, tool_cal
 def _tc(tc_id: str, name: str = "time_get", args=None) -> Message:
     from src.sdk.messages import ToolCall
     return ToolCall(id=tc_id, name=name, arguments=args or {})
+
+
+def _context(reason="manual"):
+    from src.sdk.compression import CompressionContext
+
+    return CompressionContext(
+        session_id="session-1",
+        model="ollama-cloud:test",
+        attempt=1,
+        llm_call_index=1,
+        reason=reason,
+    )
+
+
+def _stored(role: str, content: str, storage_id: str) -> Message:
+    return Message(role=role, content=content, storage_id=storage_id)
+
+
+class _Provider:
+    def __init__(self, content="summary", usage=None, error=None):
+        self.content = content
+        self.usage = usage
+        self.error = error
+        self.calls = 0
+
+    async def chat(self, messages):
+        self.calls += 1
+        if self.error:
+            raise self.error
+        return Message.assistant(self.content, usage=self.usage)
+
+
+# -- Typed compression contracts --
+
+
+def test_compression_context_validates_identity_and_json():
+    before = ContextSnapshot(
+        model="ollama-cloud:test",
+        attempt=1,
+        llm_call_index=1,
+        estimated_tokens=10,
+        context_window=100,
+        percentage=10,
+        source=ContextSource.PREPARED_CONTEXT,
+        freshness=ContextFreshness.LIVE,
+        estimated=True,
+    )
+    context = _context()
+    context = context.model_copy(update={"before": before})
+    assert context.model_dump(mode="json")["reason"] == "manual"
+    with pytest.raises(ValidationError):
+        context.__class__(**{**context.model_dump(), "attempt": 2})
+
+
+@pytest.mark.parametrize("field,value", [("session_id", ""), ("attempt", 0), ("llm_call_index", 0)])
+def test_compression_context_rejects_invalid_fields(field, value):
+    data = _context().model_dump()
+    data[field] = value
+    with pytest.raises(ValidationError):
+        _context().__class__(**data)
+
+
+def test_summary_persistence_result_invariants():
+    from src.sdk.compression import PersistenceStatus, SummaryPersistenceResult
+
+    assert SummaryPersistenceResult(status="succeeded", summary_id="sum-1").status is PersistenceStatus.SUCCEEDED
+    with pytest.raises(ValidationError):
+        SummaryPersistenceResult(status="succeeded")
+    with pytest.raises(ValidationError):
+        SummaryPersistenceResult(status="failed", summary_id="sum-1")
+
+
+def test_compression_artifact_rejects_empty_duplicate_ids_and_extra_fields():
+    from src.sdk.compression import CompressionArtifact
+
+    base = dict(
+        summary="summary",
+        replacement_messages=(Message.user("summary"),),
+        summarized_message_ids=("one",),
+        preserved_message_ids=("two",),
+        persistence_eligible=True,
+    )
+    with pytest.raises(ValidationError):
+        CompressionArtifact(**{**base, "summarized_message_ids": ("one", "one")})
+    with pytest.raises(ValidationError):
+        CompressionArtifact(**{**base, "summary": ""})
+    with pytest.raises(ValidationError):
+        CompressionArtifact(**base, unknown=True)
+
+
+def test_compression_result_compressed_invariant():
+    from src.sdk.compression import CompressionResult, CompressionTelemetry
+
+    telemetry = CompressionTelemetry(
+        status="skipped",
+        reason="manual",
+        summary_model="ollama-cloud:test",
+        persistence={"status": "not_requested"},
+    )
+    result = CompressionResult(telemetry=telemetry)
+    assert result.compressed is False
+    assert result.model_dump(mode="json")["telemetry"]["status"] == "skipped"
+
+
+def test_failed_telemetry_requires_error_and_forbids_after_context():
+    from src.sdk.compression import CompressionTelemetry
+
+    with pytest.raises(ValidationError):
+        CompressionTelemetry(
+            status="failed",
+            reason="manual",
+            summary_model="ollama-cloud:test",
+            persistence={"status": "not_requested"},
+        )
 
 
 # -- ProviderContextOverflowError --
@@ -214,26 +330,28 @@ def test_build_new_messages_uses_user_role_with_source():
 
 
 @pytest.mark.asyncio
-async def test_force_summarize_returns_false_for_short_conversation():
+async def test_force_summarize_skips_short_conversation_without_mutation():
     from src.sdk.middleware_summarization import SummarizationMiddleware
     from src.sdk.state import AgentState
 
     mw = SummarizationMiddleware(model="ollama-cloud:test")
     state = AgentState(messages=[Message.user("hi")])
-    result = await mw.force_summarize(state)
-    assert result is False
+    original = list(state.messages)
+    result = await mw.force_summarize(state, _context())
+    assert result.compressed is False
+    assert state.messages == original
 
 
 @pytest.mark.asyncio
-async def test_force_summarize_returns_false_for_two_messages():
+async def test_force_summarize_skips_when_keep_window_covers_all_messages():
     from src.sdk.middleware_summarization import SummarizationMiddleware
     from src.sdk.state import AgentState
 
     mw = SummarizationMiddleware(model="ollama-cloud:test", keep=("messages", 2))
     state = AgentState(messages=[Message.user("hi"), Message.assistant("hello")])
     # Can't split — all messages are in the "keep" window
-    result = await mw.force_summarize(state)
-    assert result is False
+    result = await mw.force_summarize(state, _context())
+    assert result.compressed is False
 
 
 # -- Constructor validation --
@@ -272,3 +390,246 @@ def test_partition_messages():
     assert len(to_summarize) == 2
     assert len(preserved) == 1
     assert preserved[0].content == "3"
+
+
+# -- Lossless typed compression behavior --
+
+
+@pytest.mark.asyncio
+async def test_force_retains_recent_suffix_and_unsummarized_old_remainder():
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+    from src.sdk.state import AgentState
+
+    provider = _Provider()
+    messages = [_stored("user", str(i), f"id-{i}") for i in range(6)]
+    state = AgentState(messages=list(messages))
+    mw = SummarizationMiddleware(
+        "ollama-cloud:test",
+        keep=("messages", 2),
+        trim_tokens_to_summarize=2,
+        token_counter=lambda items: len(list(items)),
+        summary_provider_factory=lambda: provider,
+    )
+    result = await mw.force_summarize(state, _context())
+    assert result.compressed
+    assert [m.content for m in state.messages[1:]] == ["2", "3", "4", "5"]
+    assert result.artifact.summarized_message_ids == ("id-0", "id-1")
+    assert result.artifact.preserved_message_ids == ("id-2", "id-3", "id-4", "id-5")
+
+
+@pytest.mark.asyncio
+async def test_auto_and_force_use_identical_compression_output():
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+    from src.sdk.state import AgentState
+
+    messages = [_stored("user", str(i), f"id-{i}") for i in range(4)]
+    kwargs = dict(
+        model="ollama-cloud:test",
+        trigger=("messages", 3),
+        keep=("messages", 2),
+        summary_provider_factory=lambda: _Provider("same"),
+    )
+    forced_state = AgentState(messages=list(messages))
+    forced = await SummarizationMiddleware(**kwargs).force_summarize(forced_state, _context())
+    auto_state = AgentState(messages=list(messages), extra={"_compression_context": _context("threshold")})
+    update = await SummarizationMiddleware(**kwargs).abefore_model(auto_state)
+    assert update is not None
+    assert [m.content for m in forced.artifact.replacement_messages] == [m.content for m in update["messages"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", [RuntimeError("boom"), ""])
+async def test_generation_failure_leaves_exact_state_and_does_not_call_sink(response):
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+    from src.sdk.state import AgentState
+
+    sink_calls = []
+    provider = _Provider(error=response) if isinstance(response, Exception) else _Provider(response)
+    messages = [_stored("user", str(i), f"id-{i}") for i in range(4)]
+    state = AgentState(messages=messages)
+    mw = SummarizationMiddleware(
+        "ollama-cloud:test",
+        keep=("messages", 2),
+        summary_provider_factory=lambda: provider,
+        summary_sink=lambda artifact, context: sink_calls.append(artifact),
+    )
+    result = await mw.force_summarize(state, _context())
+    assert result.telemetry.status == "failed"
+    assert state.messages is messages
+    assert sink_calls == []
+
+
+@pytest.mark.asyncio
+async def test_sink_success_propagates_storage_id_to_summary_message():
+    from src.sdk.compression import SummaryPersistenceResult
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+    from src.sdk.state import AgentState
+
+    calls = []
+
+    async def sink(artifact, context):
+        calls.append((artifact, context))
+        return SummaryPersistenceResult(status="succeeded", summary_id="summary-1")
+
+    state = AgentState(messages=[_stored("user", str(i), f"id-{i}") for i in range(4)])
+    mw = SummarizationMiddleware(
+        "ollama-cloud:test", keep=("messages", 2), summary_provider_factory=lambda: _Provider(), summary_sink=sink
+    )
+    result = await mw.force_summarize(state, _context())
+    assert len(calls) == 1
+    assert result.artifact.persisted_summary_id == "summary-1"
+    assert state.messages[0].storage_id == "summary-1"
+
+
+@pytest.mark.asyncio
+async def test_sink_failure_does_not_fail_compression():
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+    from src.sdk.state import AgentState
+
+    def sink(artifact, context):
+        raise RuntimeError("database unavailable")
+
+    state = AgentState(messages=[_stored("user", str(i), f"id-{i}") for i in range(4)])
+    mw = SummarizationMiddleware(
+        "ollama-cloud:test", keep=("messages", 2), summary_provider_factory=lambda: _Provider(), summary_sink=sink
+    )
+    result = await mw.force_summarize(state, _context())
+    assert result.compressed
+    assert result.telemetry.persistence.status == "failed"
+    assert result.artifact.persisted_summary_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_sink", [False, True])
+async def test_persistence_not_requested_when_ineligible_or_sink_absent(with_sink):
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+    from src.sdk.state import AgentState
+
+    calls = []
+    sink = (lambda artifact, context: calls.append(artifact)) if with_sink else None
+    state = AgentState(messages=[Message.user(str(i)) for i in range(4)])
+    mw = SummarizationMiddleware(
+        "ollama-cloud:test", keep=("messages", 2), summary_provider_factory=lambda: _Provider(), summary_sink=sink
+    )
+    result = await mw.force_summarize(state, _context())
+    assert result.telemetry.persistence.status == "not_requested"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_second_compression_of_persisted_summary_remains_eligible():
+    from src.sdk.compression import SummaryPersistenceResult
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+    from src.sdk.state import AgentState
+
+    sequence = iter(["summary-1", "summary-2"])
+
+    def sink(artifact, context):
+        return SummaryPersistenceResult(status="succeeded", summary_id=next(sequence))
+
+    state = AgentState(messages=[_stored("user", str(i), f"id-{i}") for i in range(4)])
+    mw = SummarizationMiddleware(
+        "ollama-cloud:test", keep=("messages", 2), summary_provider_factory=lambda: _Provider(), summary_sink=sink
+    )
+    await mw.force_summarize(state, _context())
+    state.messages.extend([_stored("user", "new-1", "new-1"), _stored("user", "new-2", "new-2")])
+    result = await mw.force_summarize(state, _context())
+    assert result.artifact.persistence_eligible
+    assert result.artifact.persisted_summary_id == "summary-2"
+
+
+@pytest.mark.asyncio
+async def test_summary_provider_factory_is_lazy_and_called_once():
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+    from src.sdk.state import AgentState
+
+    calls = []
+    provider = _Provider()
+
+    def factory():
+        calls.append(True)
+        return provider
+
+    mw = SummarizationMiddleware("ollama-cloud:test", keep=("messages", 1), summary_provider_factory=factory)
+    assert calls == []
+    for offset in (0, 10):
+        state = AgentState(messages=[_stored("user", str(offset + i), f"id-{offset+i}") for i in range(3)])
+        await mw.force_summarize(state, _context())
+    assert calls == [True]
+    assert provider.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_usage_aggregation_is_exact():
+    from src.sdk.messages import Usage
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+    from src.sdk.state import AgentState
+
+    usage = Usage(input_tokens=11, output_tokens=7, reasoning_tokens=3, cache_read_tokens=2, cache_creation_tokens=1)
+    state = AgentState(messages=[_stored("user", str(i), f"id-{i}") for i in range(3)])
+    result = await SummarizationMiddleware(
+        "ollama-cloud:test", keep=("messages", 1), summary_provider_factory=lambda: _Provider(usage=usage)
+    ).force_summarize(state, _context())
+    aggregate = result.telemetry.summarizer_usage
+    assert aggregate.model_dump() == {
+        "available": True, "calls": 1, "models": ("ollama-cloud:test",), "input_tokens": 11,
+        "output_tokens": 7, "reasoning_tokens": 3, "cache_read_tokens": 2, "cache_creation_tokens": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_absent_usage_is_unavailable():
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+    from src.sdk.state import AgentState
+
+    state = AgentState(messages=[_stored("user", str(i), f"id-{i}") for i in range(3)])
+    result = await SummarizationMiddleware(
+        "ollama-cloud:test", keep=("messages", 1), summary_provider_factory=lambda: _Provider()
+    ).force_summarize(state, _context())
+    assert result.telemetry.summarizer_usage.available is False
+
+
+def test_prefix_trim_respects_budget_without_losing_remainder():
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+
+    mw = SummarizationMiddleware(
+        "ollama-cloud:test", trim_tokens_to_summarize=2, token_counter=lambda items: len(list(items))
+    )
+    messages = [Message.user(str(i)) for i in range(4)]
+    assert mw._trim_messages_for_summary(messages) == messages[:2]
+
+
+def test_prefix_trim_returns_empty_for_oversized_first_message():
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+
+    mw = SummarizationMiddleware("ollama-cloud:test", trim_tokens_to_summarize=1, token_counter=lambda items: 2)
+    assert mw._trim_messages_for_summary([Message.user("oversized")]) == []
+
+
+def test_prefix_trim_does_not_split_assistant_tool_pair():
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+
+    messages = [Message.user("a"), _msg("assistant", tool_calls=[_tc("tc")]), _msg("tool", "r", "tc")]
+    mw = SummarizationMiddleware(
+        "ollama-cloud:test", trim_tokens_to_summarize=2, token_counter=lambda items: len(list(items))
+    )
+    assert mw._trim_messages_for_summary(messages) == messages[:1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["succeeded", "failed", "skipped"])
+async def test_automatic_hook_stores_typed_result_for_every_outcome(outcome):
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+    from src.sdk.state import AgentState
+
+    provider = _Provider(error=RuntimeError("boom")) if outcome == "failed" else _Provider()
+    trigger = ("messages", 99) if outcome == "skipped" else ("messages", 2)
+    state = AgentState(
+        messages=[_stored("user", str(i), f"id-{i}") for i in range(4)],
+        extra={"_compression_context": _context("threshold")},
+    )
+    update = await SummarizationMiddleware(
+        "ollama-cloud:test", trigger=trigger, keep=("messages", 2), summary_provider_factory=lambda: provider
+    ).abefore_model(state)
+    assert update["extra"]["_compression_result"].telemetry.status == outcome
+    assert ("messages" in update) is (outcome == "succeeded")
