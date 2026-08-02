@@ -16,6 +16,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+import src.config.user_settings_store as _user_settings_store
+import src.sdk.context_measurement as _context_measurement
+import src.sdk.run_models as _run_models
 from src.app_logging import get_logger, timer
 from src.config import get_settings
 from src.http.auth import require_auth
@@ -48,6 +51,11 @@ logger = get_logger()
 def _stream_key(user_id: str, session_id: str | None) -> str:
     """Composite key for per-session stream tracking (enables concurrent sessions per user)."""
     return f"{user_id}:{session_id or 'default'}"
+
+
+def _normalized_session_id(session_id: str | None) -> str:
+    """Return the nonempty session boundary used for scoped history reads."""
+    return session_id.strip() if session_id and session_id.strip() else "default"
 
 
 def sse(event_type: str, data: dict[str, Any]) -> str:
@@ -193,38 +201,50 @@ def _persist_collected_stream_state(
 
 
 @router.get("/context-info")
-async def get_context_info(
+def get_context_info(
     user_id: str = "default_user",
     session_id: str | None = None,
     model: str | None = None,
 ) -> dict[str, Any]:
-    """Get context window info: model's max tokens, current usage, and summarization threshold."""
-    from src.config import get_settings
-    from src.sdk.middleware_summarization import count_tokens_approximately
-    from src.sdk.registry import get_model_info
-
+    """Estimate persisted session history without running or mutating the agent."""
     settings = get_settings()
+    if model is not None:
+        try:
+            model_str = _run_models.normalize_canonical_model(model)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Invalid model identifier") from exc
+    else:
+        saved_model = None
+        try:
+            saved_model = _user_settings_store.UserSettingsStore(user_id).load().default_model
+        except (_user_settings_store.UserSettingsStoreError, OSError, ValueError) as exc:
+            logger.warning(
+                "context_info.user_settings_load_failed",
+                {"error_type": type(exc).__name__},
+                user_id=user_id,
+            )
+        if saved_model:
+            model_str = saved_model
+        else:
+            host_model = settings.agent.model.strip()
+            if ":" not in host_model:
+                if "/" in host_model:
+                    provider, model_id = host_model.split("/", 1)
+                    host_model = f"{provider}:{model_id}"
+                else:
+                    host_model = f"ollama:{host_model}"
+            try:
+                model_str = _run_models.normalize_canonical_model(host_model)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="Invalid host model identifier") from exc
 
-    # Resolve model
-    model_str = model or settings.agent.model
-
-    # Get model context window from registry
-    context_window = None
-    try:
-        info = get_model_info(model_str)
-        if info and info.context_window:
-            context_window = info.context_window
-    except Exception:
-        pass
-
-    # Get current conversation token count
+    context_window = _context_measurement.resolve_context_window(model_str)
     conversation = get_message_store(user_id)
-    sid = session_id or "default"
-    recent = conversation.get_messages_by_session_id(sid, 100)
+    sid = _normalized_session_id(session_id)
+    recent = conversation.get_messages_with_summary(session_id=sid, limit=100)
     sdk_msgs = _messages_from_conversation(recent)
-    current_tokens = count_tokens_approximately(sdk_msgs) if sdk_msgs else 0
+    current_tokens = _context_measurement.estimate_message_tokens(sdk_msgs)
 
-    # Get summarization config
     sum_config = settings.memory.summarization
     trigger = sum_config.get_trigger()
     trigger_tokens = None
@@ -237,7 +257,10 @@ async def get_context_info(
         "current_tokens": current_tokens,
         "summarization_threshold": trigger_tokens,
         "summarization_enabled": sum_config.enabled,
-        "context_percentage": round((current_tokens / context_window * 100), 1) if context_window else None,
+        "context_percentage": current_tokens / context_window * 100 if context_window else None,
+        "source": "history_estimate",
+        "freshness": "stale",
+        "estimated": True,
     }
 
 
@@ -487,7 +510,7 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
             return MessageResponse(response=f"{tool_name} approved (execution pending).")
 
         conversation = get_message_store(user_id)
-        session_id = req.session_id or "default"
+        session_id = _normalized_session_id(req.session_id)
         conversation.add_message("user", req.message, metadata={}, session_id=session_id)
 
         # Resolve rubric for verification
@@ -499,7 +522,7 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
             if settings.verification.enabled and settings.verification.default_rubric:
                 rubric = settings.verification.default_rubric
 
-        recent_messages = conversation.get_messages_by_session_id(session_id, 50)
+        recent_messages = conversation.get_messages_with_summary(session_id=session_id, limit=50)
         sdk_messages = _messages_from_conversation(recent_messages)
 
         logger = get_logger()
@@ -732,7 +755,7 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
     """Send a message and stream response using SSE (SDK-powered)."""
     try:
         user_id = req.user_id or "default_user"
-        session_id = req.session_id or "default"
+        session_id = _normalized_session_id(req.session_id)
         skey = _stream_key(user_id, session_id)
 
         conversation = get_message_store(user_id)
@@ -752,7 +775,7 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
             if stream_settings.verification.enabled and stream_settings.verification.default_rubric:
                 stream_rubric = stream_settings.verification.default_rubric
 
-        recent_messages = conversation.get_messages_by_session_id(session_id, 50)
+        recent_messages = conversation.get_messages_with_summary(session_id=session_id, limit=50)
         sdk_messages = _messages_from_conversation(recent_messages)
 
         logger = get_logger()
@@ -1019,7 +1042,7 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
     instruction appended. The response is a text/event-stream identical in shape
     to POST /message/stream so existing SSE clients can consume it unchanged.
     """
-    session_id = req.session_id or "default"
+    session_id = _normalized_session_id(req.session_id)
     skey = _stream_key(req.user_id, session_id)
     pending = _pending_interrupts.pop(skey, None)
     if not pending and req.session_id is None:
@@ -1034,7 +1057,7 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
         _pending_interrupts[skey] = pending
         raise HTTPException(status_code=409, detail="Pending tool call does not match call_id")
     tool_name = pending.get("tool", "unknown")
-    session_id = pending.get("session_id") or session_id
+    session_id = _normalized_session_id(pending.get("session_id") or session_id)
     skey = _stream_key(req.user_id, session_id)
     model = pending.get("model")
     provider_keys = pending.get("provider_keys")
@@ -1065,7 +1088,7 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
         seen_canonical_reasoning: set[str] = set()
         seen_canonical_tool_starts: set[str] = set()
         try:
-            recent = conversation.get_messages_by_session_id(session_id, 50)
+            recent = conversation.get_messages_with_summary(session_id=session_id, limit=50)
             retry_msgs = _messages_from_conversation(recent)
             retry_msgs.append(Message.user(f"approve: please proceed with {tool_name}"))
 

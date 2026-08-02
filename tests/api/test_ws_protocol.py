@@ -236,6 +236,78 @@ class TestMessageSerialization:
 
 class TestWebSocketPersistence:
     @pytest.mark.asyncio
+    async def test_ws_runner_uses_only_session_scoped_summary_history(self, monkeypatch):
+        calls = []
+        captured = {}
+
+        class Store:
+            def add_message(self, *args, **kwargs):
+                return "msg-1"
+
+            def get_messages_with_summary(self, *, session_id, limit):
+                calls.append((session_id, limit))
+                sessions = {
+                    "session-a": [
+                        SimpleNamespace(role="summary", content="A summary", metadata={}),
+                        SimpleNamespace(role="user", content="A retained", metadata={}),
+                    ],
+                    "session-b": [
+                        SimpleNamespace(role="summary", content="B sentinel", metadata={})
+                    ],
+                }
+                return sessions[session_id]
+
+            def get_messages_by_session_id(self, *args, **kwargs):
+                raise AssertionError("WebSocket runner used raw history")
+
+        class FakeWebSocket:
+            client = None
+
+            def __init__(self):
+                self.messages = [
+                    json.dumps(
+                        {
+                            "type": "user_message",
+                            "content": "new A",
+                            "user_id": "u",
+                            "session_id": "session-a",
+                        }
+                    )
+                ]
+
+            async def accept(self):
+                pass
+
+            async def receive_text(self):
+                if self.messages:
+                    return self.messages.pop(0)
+                raise WebSocketDisconnect()
+
+            async def send_json(self, payload):
+                pass
+
+        async def fake_run_agent_stream(*args, **kwargs):
+            captured["messages"] = args[2]
+
+        monkeypatch.setattr(
+            ws_router,
+            "get_settings",
+            lambda: SimpleNamespace(
+                auth=SimpleNamespace(api_key="", solo_bypass=True),
+                verification=SimpleNamespace(enabled=False),
+            ),
+        )
+        monkeypatch.setattr(ws_router, "get_message_store", lambda *args: Store())
+        monkeypatch.setattr(ws_router, "_run_agent_stream", fake_run_agent_stream)
+
+        await ws_router.ws_conversation(FakeWebSocket())
+
+        contents = [str(message.content) for message in captured["messages"]]
+        assert calls == [("session-a", 50)]
+        assert any("A summary" in content for content in contents)
+        assert all("B sentinel" not in content for content in contents)
+
+    @pytest.mark.asyncio
     async def test_run_agent_stream_accepts_legacy_only_alias_chunks(self, monkeypatch):
         from src.sdk.messages import StreamChunk
 
@@ -583,6 +655,7 @@ class TestWebSocketPersistence:
     @pytest.mark.asyncio
     async def test_ws_approval_get_sdk_loop_receives_session_id(self, monkeypatch):
         captured_calls = []
+        history_calls = []
         stream_calls = 0
 
         class FakeLoop:
@@ -596,8 +669,12 @@ class TestWebSocketPersistence:
             def add_message(self, *args, **kwargs):
                 return "msg-1"
 
-            def get_messages_by_session_id(self, session_id, limit):
+            def get_messages_with_summary(self, *, session_id, limit):
+                history_calls.append((session_id, limit))
                 return []
+
+            def get_messages_by_session_id(self, *args, **kwargs):
+                raise AssertionError("approval runner used raw history")
 
         class FakeWebSocket:
             client = None
@@ -652,6 +729,7 @@ class TestWebSocketPersistence:
 
         assert captured_calls
         assert captured_calls[0][1]["session_id"] == "chat-1"
+        assert history_calls == [("chat-1", 50), ("chat-1", 50)]
 
     @pytest.mark.asyncio
     async def test_ws_cancel_sets_running_stream_cancel_event(self, monkeypatch):
@@ -661,7 +739,7 @@ class TestWebSocketPersistence:
             def add_message(self, *args, **kwargs):
                 return "msg-1"
 
-            def get_messages_by_session_id(self, session_id, limit):
+            def get_messages_with_summary(self, *, session_id, limit):
                 return []
 
         class FakeWebSocket:
@@ -715,7 +793,7 @@ class TestWebSocketPersistence:
             def add_message(self, *args, **kwargs):
                 return "msg-1"
 
-            def get_messages_by_session_id(self, session_id, limit):
+            def get_messages_with_summary(self, *, session_id, limit):
                 return []
 
         class FakeWebSocket:
@@ -875,6 +953,7 @@ class TestWebSocketPersistence:
     @pytest.mark.asyncio
     async def test_ws_pending_loop_handles_edit_and_approve(self, monkeypatch):
         stream_calls = 0
+        history_calls = []
 
         class FakeLoop:
             def __init__(self):
@@ -887,15 +966,26 @@ class TestWebSocketPersistence:
             def add_message(self, *args, **kwargs):
                 return "msg-1"
 
-            def get_messages_by_session_id(self, session_id, limit):
+            def get_messages_with_summary(self, *, session_id, limit):
+                history_calls.append((session_id, limit))
                 return []
+
+            def get_messages_by_session_id(self, *args, **kwargs):
+                raise AssertionError("edit-and-approve runner used raw history")
 
         class FakeWebSocket:
             client = None
 
             def __init__(self):
                 self.messages = [
-                    json.dumps({"type": "user_message", "content": "delete", "user_id": "test_user"}),
+                    json.dumps(
+                        {
+                            "type": "user_message",
+                            "content": "delete",
+                            "user_id": "test_user",
+                            "session_id": "session-a",
+                        }
+                    ),
                     json.dumps(
                         {
                             "type": "edit_and_approve",
@@ -945,6 +1035,7 @@ class TestWebSocketPersistence:
 
         assert stream_calls == 2
         assert loop.approved[0].arguments == {"path": "/edited"}
+        assert history_calls == [("session-a", 50), ("session-a", 50)]
 
     @pytest.mark.asyncio
     async def test_ws_approval_rejects_mismatched_call_id(self, monkeypatch):
@@ -959,7 +1050,7 @@ class TestWebSocketPersistence:
             def add_message(self, *args, **kwargs):
                 return "msg-1"
 
-            def get_messages_by_session_id(self, session_id, limit):
+            def get_messages_with_summary(self, *, session_id, limit):
                 return []
 
         class FakeWebSocket:
@@ -1141,7 +1232,7 @@ class TestWebSocketPersistence:
             def add_message(self, *args, **kwargs):
                 return "msg-1"
 
-            def get_messages_by_session_id(self, session_id, limit):
+            def get_messages_with_summary(self, *, session_id, limit):
                 return []
 
         class FakeWebSocket:

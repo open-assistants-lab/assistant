@@ -66,7 +66,8 @@ def _persist_ws_conversation_message(
 
 
 def _resolve_ws_session_id(msg: Any, fallback: str) -> str:
-    return getattr(msg, "session_id", None) or fallback
+    session_id = getattr(msg, "session_id", None) or fallback
+    return session_id.strip() if session_id.strip() else "default"
 
 
 def _pending_runtime_context(
@@ -75,8 +76,9 @@ def _pending_runtime_context(
     model: str | None,
     provider_keys: dict[str, str] | None,
 ) -> tuple[str, str | None, dict[str, str] | None]:
+    run_session_id = pending.get("session_id") or session_id
     return (
-        pending.get("session_id") or session_id,
+        run_session_id.strip() if run_session_id.strip() else "default",
         pending.get("model"),
         pending.get("provider_keys"),
     )
@@ -517,7 +519,9 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     pending_container[0] = None
                     conversation = get_message_store(user_id, workspace_id)
                     retry_msgs = _messages_from_conversation(
-                        conversation.get_messages_by_session_id(run_session_id, 50)
+                        conversation.get_messages_with_summary(
+                            session_id=run_session_id, limit=50
+                        )
                     )
                     retry_msgs.append(Message.user(f"approve: please proceed with {tool_name}"))
                     await _run_agent_stream(
@@ -591,7 +595,9 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     pending_container[0] = None
                     conversation = get_message_store(user_id, workspace_id)
                     retry_msgs = _messages_from_conversation(
-                        conversation.get_messages_by_session_id(run_session_id, 50)
+                        conversation.get_messages_with_summary(
+                            session_id=run_session_id, limit=50
+                        )
                     )
                     retry_msgs.append(Message.user(f"approved: proceed with {tool_name} with edited args: {msg.edited_args}"))
                     await _run_agent_stream(
@@ -658,7 +664,9 @@ async def ws_conversation(websocket: WebSocket) -> None:
             _persist_ws_conversation_message(conversation, "user", content, session_id=session_id)
             t2 = time.monotonic()
 
-            recent_messages = conversation.get_messages_by_session_id(session_id, 50)
+            recent_messages = conversation.get_messages_with_summary(
+                session_id=session_id, limit=50
+            )
             t3 = time.monotonic()
 
             sdk_messages = _messages_from_conversation(recent_messages)
@@ -810,7 +818,9 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     pending_container[0] = None
                     # Retry with approval context
                     retry_msgs = _messages_from_conversation(
-                        conversation.get_messages_by_session_id(run_session_id, 50)
+                        conversation.get_messages_with_summary(
+                            session_id=run_session_id, limit=50
+                        )
                     )
                     retry_msgs.append(Message.user(f"approve: please proceed with {tool_name}"))
                     await _run_agent_stream(
@@ -848,7 +858,9 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     )
                     pending_container[0] = None
                     retry_msgs = _messages_from_conversation(
-                        conversation.get_messages_by_session_id(run_session_id, 50)
+                        conversation.get_messages_with_summary(
+                            session_id=run_session_id, limit=50
+                        )
                     )
                     retry_msgs.append(
                         Message.user(

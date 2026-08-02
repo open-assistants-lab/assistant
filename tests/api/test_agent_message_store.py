@@ -28,8 +28,83 @@ class FakeConversation:
     def get_messages_by_session_id(self, session_id: str, limit: int = 50) -> list[StoredMessage]:
         return self.messages[-limit:]
 
-    def get_messages_with_summary(self, limit: int) -> list[StoredMessage]:
+    def get_messages_with_summary(
+        self, *, session_id: str, limit: int
+    ) -> list[StoredMessage]:
         return self.messages[-limit:]
+
+
+class SessionAwareConversation(FakeConversation):
+    def __init__(self) -> None:
+        super().__init__()
+        self.summary_calls: list[tuple[str, int]] = []
+        self.raw_calls: list[tuple[str, int]] = []
+        self.sessions = {
+            "session-a": [StoredMessage("summary", "A summary"), StoredMessage("user", "A kept")],
+            "session-b": [StoredMessage("summary", "B sentinel")],
+        }
+
+    def get_messages_with_summary(
+        self, *, session_id: str, limit: int
+    ) -> list[StoredMessage]:
+        self.summary_calls.append((session_id, limit))
+        return self.sessions[session_id]
+
+    def get_messages_by_session_id(self, session_id: str, limit: int = 50) -> list[StoredMessage]:
+        self.raw_calls.append((session_id, limit))
+        raise AssertionError("raw transcript used for model input")
+
+
+@pytest.mark.asyncio
+async def test_rest_runner_uses_only_session_scoped_summary_history(monkeypatch) -> None:
+    from src.http.routers import conversation as conversation_router
+
+    store = SessionAwareConversation()
+    captured = {}
+
+    async def fake_run_sdk_agent(**kwargs):
+        captured.update(kwargs)
+        return [Message.assistant("done")]
+
+    monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+    monkeypatch.setattr(conversation_router, "run_sdk_agent", fake_run_sdk_agent)
+
+    await conversation_router.handle_message(
+        MessageRequest(message="new A", user_id="u", session_id="session-a")
+    )
+
+    contents = [str(message.content) for message in captured["messages"]]
+    assert store.summary_calls == [("session-a", 50)]
+    assert store.raw_calls == []
+    assert any("A summary" in content for content in contents)
+    assert all("B sentinel" not in content for content in contents)
+
+
+@pytest.mark.asyncio
+async def test_sse_runner_uses_only_session_scoped_summary_history(monkeypatch) -> None:
+    from src.http.routers import conversation as conversation_router
+
+    store = SessionAwareConversation()
+    captured = {}
+
+    async def fake_stream(**kwargs):
+        captured.update(kwargs)
+        yield StreamChunk.done("done")
+
+    monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+    monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
+
+    response = await conversation_router.message_stream(
+        MessageRequest(message="new A", user_id="u", session_id="session-a")
+    )
+    async for _ in response.body_iterator:
+        pass
+
+    contents = [str(message.content) for message in captured["messages"]]
+    assert store.summary_calls == [("session-a", 50)]
+    assert store.raw_calls == []
+    assert any("A summary" in content for content in contents)
+    assert all("B sentinel" not in content for content in contents)
 
 
 def test_tool_messages_are_preserved_as_context() -> None:

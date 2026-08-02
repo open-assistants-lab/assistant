@@ -11,7 +11,7 @@ class FakeConversation:
         self.messages.append((args, kwargs))
         return "msg-1"
 
-    def get_messages_by_session_id(self, *args, **kwargs):
+    def get_messages_with_summary(self, *args, **kwargs):
         return []
 
 
@@ -55,7 +55,7 @@ class TestMessageSessionPropagation:
             def add_message(self, *args, **kwargs):
                 return "msg-1"
 
-            def get_messages_by_session_id(self, *args, **kwargs):
+            def get_messages_with_summary(self, *args, **kwargs):
                 return []
 
         async def fake_run_sdk_agent_stream(**kwargs):
@@ -117,6 +117,41 @@ class TestTitleGeneration:
 
         assert title == "Project Planning"
         assert captured["user_id"] == "title_user"
+
+    @pytest.mark.asyncio
+    async def test_title_generation_keeps_raw_transcript_history(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from src.http.routers import conversation as conversation_router
+
+        calls = []
+
+        class Store:
+            def get_messages_by_session_id(self, session_id, limit):
+                calls.append((session_id, limit))
+                return [
+                    SimpleNamespace(role="user", content="A useful question"),
+                    SimpleNamespace(role="assistant", content="A useful answer"),
+                ]
+
+            def get_messages_with_summary(self, **kwargs):
+                raise AssertionError("title generation must use raw history")
+
+            def update_session_title(self, session_id, title):
+                pass
+
+        async def fake_summarize(*args, **kwargs):
+            return "Useful title"
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda user_id: Store())
+        monkeypatch.setattr(conversation_router, "_summarize_title", fake_summarize)
+
+        result = await conversation_router.generate_title(
+            conversation_router.TitleRequest(user_id="u", session_id="session-a"), None
+        )
+
+        assert result["title"] == "Useful title"
+        assert calls == [("session-a", 50)]
 
 
 class TestStreamEdgeCases:
@@ -326,6 +361,59 @@ class TestStreamEdgeCases:
         assert captured_streams[0]["model"] == "openai:gpt-4.1"
         assert captured_streams[0]["provider_keys"] == {"openai": "original"}
         assert captured_streams[0]["session_id"] == "chat-1"
+
+    @pytest.mark.asyncio
+    async def test_sse_approval_runner_uses_scoped_summary_history(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from src.http.routers import conversation as conversation_router
+        from src.sdk.messages import StreamChunk
+
+        calls = []
+
+        class Store:
+            def get_messages_with_summary(self, *, session_id, limit):
+                calls.append((session_id, limit))
+                return [SimpleNamespace(role="summary", content="A summary", metadata={})]
+
+            def get_messages_by_session_id(self, *args, **kwargs):
+                raise AssertionError("approval runner used raw history")
+
+            def add_message(self, *args, **kwargs):
+                pass
+
+        class Loop:
+            def approve_tool_call(self, tool_call):
+                pass
+
+        captured = {}
+        conversation_router._pending_interrupts["u:session-a"] = {
+            "tool": "time_get",
+            "call_id": "call-1",
+            "session_id": "session-a",
+        }
+
+        async def fake_get_loop(*args, **kwargs):
+            return Loop()
+
+        async def fake_stream(**kwargs):
+            captured.update(kwargs)
+            yield StreamChunk.done("approved")
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args: Store())
+        monkeypatch.setattr(conversation_router, "get_sdk_loop", fake_get_loop)
+        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
+
+        response = await conversation_router.approve_tool(
+            conversation_router.ApproveRequest(
+                user_id="u", call_id="call-1", session_id="session-a"
+            )
+        )
+        async for _ in response.body_iterator:
+            pass
+
+        assert calls == [("session-a", 50)]
+        assert "A summary" in str(captured["messages"][0].content)
 
     @pytest.mark.asyncio
     async def test_sse_error_persists_partial_state_without_success_fallback(self, monkeypatch):
@@ -708,7 +796,7 @@ class TestStreamEdgeCases:
             def add_message(self, *args, **kwargs):
                 return "msg-1"
 
-            def get_messages_by_session_id(self, *args, **kwargs):
+            def get_messages_with_summary(self, *args, **kwargs):
                 return []
 
         async def fake_run_sdk_agent(**kwargs):
@@ -735,6 +823,29 @@ class TestGetConversation:
         data = r.json()
         assert "messages" in data
         assert isinstance(data["messages"], list)
+
+    @pytest.mark.asyncio
+    async def test_get_conversation_keeps_raw_transcript_history(self, monkeypatch):
+        from src.http.routers import conversation as conversation_router
+
+        calls = []
+
+        class Store:
+            def get_messages_by_session_id(self, session_id, limit):
+                calls.append((session_id, limit))
+                return []
+
+            def get_messages_with_summary(self, **kwargs):
+                raise AssertionError("GET transcript must stay raw")
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda user_id: Store())
+
+        result = await conversation_router.get_conversation(
+            user_id="u", session_id="session-a", limit=17
+        )
+
+        assert result == {"messages": []}
+        assert calls == [("session-a", 17)]
 
     def test_get_conversation_with_user_id(self, client, test_user_id):
         r = client.get("/conversation", params={"user_id": test_user_id})
