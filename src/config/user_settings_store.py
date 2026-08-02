@@ -18,7 +18,6 @@ from typing import Any
 from pydantic import ValidationError
 
 from src.app_logging import get_logger
-from src.config.settings import get_settings
 from src.config.user_settings import (
     GraderPromptResponse,
     GraderPromptUpdate,
@@ -33,7 +32,6 @@ logger = get_logger()
 _DEFAULT_GRADER_SEED_PATH = (
     Path(__file__).resolve().parents[2] / "seeds" / "prompts" / "grader_prompt.md"
 )
-_USE_HOST_DEFAULT = object()
 _UNSUPPORTED_DURABILITY_ERRNOS = {
     errno.EBADF,
     errno.EINVAL,
@@ -100,7 +98,7 @@ class UserSettingsStore:
         paths: DataPaths | None = None,
         legacy_path: Path | None = None,
         grader_seed_path: Path | None = None,
-        legacy_default_rubric: str | None | object = _USE_HOST_DEFAULT,
+        legacy_default_rubric: str | None = None,
     ) -> None:
         resolved_paths = paths or DataPaths(user_id=user_id)
         if resolved_paths.user_id != user_id:
@@ -113,11 +111,7 @@ class UserSettingsStore:
         )
         self._grader_seed_path = grader_seed_path or _DEFAULT_GRADER_SEED_PATH
         self._grader_prompt_path = resolved_paths.user_grader_prompt_path()
-        self._legacy_default_rubric = (
-            get_settings().verification.default_rubric
-            if legacy_default_rubric is _USE_HOST_DEFAULT
-            else legacy_default_rubric
-        )
+        self._legacy_default_rubric = legacy_default_rubric
         self._lock = _lock_for(self._path)
 
     @property

@@ -9,7 +9,6 @@ import os
 import stat
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1115,38 +1114,38 @@ def test_default_seeding_post_replace_failure_restores_absence(
     assert not store.path.exists()
 
 
-def test_default_fallback_uses_loaded_settings_without_reading_cwd_env(
+def test_omitted_fallback_ignores_uninitialized_settings_and_hostile_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from src.config import settings as settings_module
-    from src.config import user_settings_store as store_module
 
     cwd = tmp_path / "cwd"
     cwd.mkdir()
+    (cwd / "config.yaml").write_text(
+        "verification:\n  default_rubric: hostile config rubric\n", encoding="utf-8"
+    )
     (cwd / ".env").write_text(
         "VERIFICATION__DEFAULT_RUBRIC=conflicting cwd rubric\n", encoding="utf-8"
     )
+    alice_paths = _paths(tmp_path)
+    bob_paths = _paths(tmp_path, "bob")
     monkeypatch.chdir(cwd)
-    monkeypatch.setattr(
-        store_module,
-        "get_settings",
-        lambda: SimpleNamespace(
-            verification=SimpleNamespace(default_rubric="already loaded rubric")
-        ),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        settings_module.AppConfig,
-        "from_yaml",
-        lambda path: (_ for _ in ()).throw(AssertionError("must not reload settings")),
-    )
-    store = _grader_store(tmp_path, seed=None, legacy_default_rubric=None)
-    store = UserSettingsStore(
+    monkeypatch.setattr(settings_module, "_config", None)
+    seed_path = tmp_path / "missing" / "grader_prompt.md"
+    omitted = UserSettingsStore(
         "alice",
-        paths=_paths(tmp_path),
-        grader_seed_path=store.grader_seed_path,
+        paths=alice_paths,
+        grader_seed_path=seed_path,
+    )
+    injected = UserSettingsStore(
+        "bob",
+        paths=bob_paths,
+        grader_seed_path=seed_path,
+        legacy_default_rubric="explicit fallback rubric",
     )
 
-    response = store.load_grader_prompt()
+    with pytest.raises(SettingsConfigurationError, match="default grader prompt"):
+        omitted.load_grader_prompt()
 
-    assert response.content == "already loaded rubric"
+    assert injected.load_grader_prompt().content == "explicit fallback rubric"
+    assert settings_module._config is None
