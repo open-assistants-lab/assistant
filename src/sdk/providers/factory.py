@@ -79,7 +79,11 @@ def create_provider(
     if resolved_type == "ollama":
         env_base_url = os.environ.get("OLLAMA_LOCAL_BASE_URL", "")
         resolved_url = base_url or env_base_url or registry_url or "http://localhost:11434/v1"
-        return OpenAIProvider(base_url=resolved_url, model=model or "minimax-m2.5")
+        return OpenAIProvider(
+            base_url=resolved_url,
+            model=model or "minimax-m2.5",
+            provider_id="ollama",
+        )
 
     if resolved_type == "ollama-cloud":
         resolved_key = api_key or os.environ.get("OLLAMA_API_KEY", "")

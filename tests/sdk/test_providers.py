@@ -471,6 +471,7 @@ class TestProviderFactory:
         ):
             p = create_provider("ollama", model="gemma4:e4b")
             assert isinstance(p, OpenAIProvider)
+            assert p.provider_id == "ollama"
             assert p.model == "gemma4:e4b"
 
     def test_create_ollama_cloud_provider(self):
@@ -508,6 +509,7 @@ class TestProviderFactory:
             api_key="gsk-test",
         )
         assert isinstance(p, OpenAIProvider)
+        assert p.provider_id == "groq"
 
     def test_create_deepseek_provider(self):
         p = create_provider("deepseek", model="deepseek-chat", api_key="sk-test")
@@ -536,6 +538,7 @@ class TestProviderFactory:
                 mock_settings.return_value.agent.model = "ollama:minimax-m2.5"
                 p = create_model_from_config("ollama:minimax-m2.5")
                 assert isinstance(p, OpenAIProvider)
+                assert p.provider_id == "ollama"
 
     def test_create_model_from_config_ollama_stays_local_with_cloud_env(self):
         with patch.dict(

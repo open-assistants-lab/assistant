@@ -264,6 +264,33 @@ async def test_create_sdk_loop_uses_canonical_provider_model_id(
     assert loop.model_id == expected
 
 
+@pytest.mark.asyncio
+async def test_create_sdk_loop_uses_actual_local_ollama_identity(loop_factory, monkeypatch):
+    from src.sdk import runner
+    from src.sdk.providers.factory import create_model_from_config
+    from src.sdk.providers.openai import OpenAIProvider
+
+    monkeypatch.setattr(runner, "create_model_from_config", create_model_from_config)
+    monkeypatch.setattr(
+        "src.sdk.providers.factory.create_provider_from_registry_model",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.sdk.providers.factory._load_stored_key", lambda *args, **kwargs: None
+    )
+
+    loop = await runner.create_sdk_loop(
+        user_id="test_user",
+        model="ollama:qwen3:8b",
+        session_id="chat-1",
+    )
+
+    assert isinstance(loop.provider, OpenAIProvider)
+    assert loop.provider.provider_id == "ollama"
+    assert loop.model_id == "ollama:qwen3:8b"
+    assert loop.middlewares[0].model == "ollama:qwen3:8b"
+
+
 def test_messages_from_conversation_preserves_user_storage_identity():
     from src.sdk.runner import _messages_from_conversation
 
