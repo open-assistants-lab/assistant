@@ -192,13 +192,13 @@ class UserSettingsStore:
         canonical_raw: dict[str, Any] | None = None
         canonical_exists = self._path.exists()
         legacy_exists = self._legacy_path.exists()
+        if canonical_exists and legacy_exists and self._paths_alias():
+            return self._load_aliased_settings()
         if canonical_exists:
             canonical, canonical_raw = self._read_canonical()
 
         if not legacy_exists:
             return canonical or SavedUserSettings()
-        if canonical is not None and self._paths_alias():
-            return canonical
 
         try:
             legacy = self._read_legacy()
@@ -231,6 +231,19 @@ class UserSettingsStore:
         self._rename_legacy()
         return merged
 
+    def _load_aliased_settings(self) -> SavedUserSettings:
+        raw = self._read_json(self._path, source="settings")
+        if not isinstance(raw, dict):
+            raise SettingsConfigurationError("User settings are invalid")
+        if "schema_version" in raw:
+            settings = self._validate_configuration(raw, source="canonical")
+            self._secure_canonical_file()
+            return settings
+
+        settings = self._parse_legacy(raw)
+        self._atomic_write(settings)
+        return settings
+
     def _paths_alias(self) -> bool:
         try:
             if self._path.samefile(self._legacy_path):
@@ -253,6 +266,9 @@ class UserSettingsStore:
 
     def _read_legacy(self) -> SavedUserSettings:
         raw = self._read_json(self._legacy_path, source="legacy")
+        return self._parse_legacy(raw)
+
+    def _parse_legacy(self, raw: object) -> SavedUserSettings:
         if not isinstance(raw, dict) or not set(raw).issubset({"provider_keys", "default_model"}):
             raise SettingsConfigurationError("Legacy user settings are invalid")
         payload = {
@@ -277,6 +293,12 @@ class UserSettingsStore:
                 user_id=self._user_id,
             )
             return settings
+
+    def _secure_canonical_file(self) -> None:
+        try:
+            os.chmod(self._path, 0o600)
+        except OSError:
+            raise SettingsWriteError("Unable to secure user settings") from None
 
     @staticmethod
     def _normalize_legacy_model(value: object) -> object:

@@ -162,6 +162,50 @@ def test_case_insensitive_legacy_alias_is_treated_only_as_canonical(
     assert warnings == []
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are not supported")
+def test_unversioned_aliased_legacy_is_normalized_in_place_without_rename(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    shared_path = paths.user_settings_path()
+    _write_json(
+        shared_path,
+        {
+            "provider_keys": {"anthropic": SECRET},
+            "default_model": "anthropic/claude-sonnet",
+        },
+    )
+    shared_path.chmod(0o644)
+    store = UserSettingsStore("alice", paths=paths, legacy_path=shared_path)
+
+    settings = store.load()
+
+    persisted = json.loads(shared_path.read_text(encoding="utf-8"))
+    assert settings.default_model == "anthropic:claude-sonnet"
+    assert settings.provider_keys == {"anthropic": SECRET}
+    assert persisted["schema_version"] == 1
+    assert persisted["revision"] == 0
+    assert persisted["default_model"] == "anthropic:claude-sonnet"
+    assert stat.S_IMODE(shared_path.stat().st_mode) == 0o600
+    assert not shared_path.with_name("settings.json.migrated").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are not supported")
+def test_versioned_aliased_canonical_is_chmodded_without_rename(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    shared_path = paths.user_settings_path()
+    original = _write_json(shared_path, _canonical(provider_keys={"openai": SECRET}))
+    shared_path.chmod(0o644)
+    store = UserSettingsStore("alice", paths=paths, legacy_path=shared_path)
+
+    settings = store.load()
+
+    assert settings.revision == 2
+    assert shared_path.read_bytes() == original
+    assert stat.S_IMODE(shared_path.stat().st_mode) == 0o600
+    assert not shared_path.with_name("settings.json.migrated").exists()
+
+
 def test_canonical_and_legacy_merge_keys_with_canonical_precedence(tmp_path: Path) -> None:
     store = _store(tmp_path)
     _write_json(store.path, _canonical(provider_keys={"openai": "new", "gemini": "g"}))
