@@ -21,6 +21,9 @@ from src.config.user_settings import (
 from src.storage.paths import DataPaths
 
 logger = get_logger()
+_DEFAULT_GRADER_SEED_PATH = (
+    Path(__file__).resolve().parents[2] / "seeds" / "prompts" / "grader_prompt.md"
+)
 
 
 class UserSettingsStoreError(Exception):
@@ -68,6 +71,7 @@ class UserSettingsStore:
         user_id: str,
         paths: DataPaths | None = None,
         legacy_path: Path | None = None,
+        grader_seed_path: Path | None = None,
     ) -> None:
         resolved_paths = paths or DataPaths(user_id=user_id)
         if resolved_paths.user_id != user_id:
@@ -78,6 +82,7 @@ class UserSettingsStore:
         self._legacy_path = legacy_path or (
             resolved_paths.base / "users" / self._user_id / "settings.json"
         )
+        self._grader_seed_path = grader_seed_path or _DEFAULT_GRADER_SEED_PATH
         self._lock = _lock_for(self._path)
 
     @property
@@ -87,6 +92,10 @@ class UserSettingsStore:
     @property
     def legacy_path(self) -> Path:
         return self._legacy_path
+
+    @property
+    def grader_seed_path(self) -> Path:
+        return self._grader_seed_path
 
     def load(self) -> SavedUserSettings:
         with self._lock:

@@ -78,6 +78,31 @@ def test_properties_expose_injected_paths(tmp_path: Path) -> None:
     assert store.legacy_path == tmp_path / "legacy" / "alice" / "settings.json"
 
 
+def test_grader_seed_path_is_injectable_and_has_deterministic_packaged_default(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    injected_seed = tmp_path / "packaged" / "grader.md"
+
+    injected = UserSettingsStore(
+        "alice",
+        paths=paths,
+        legacy_path=tmp_path / "legacy.json",
+        grader_seed_path=injected_seed,
+    )
+    default_first = UserSettingsStore("alice", paths=paths)
+    default_second = UserSettingsStore("alice", paths=paths)
+
+    assert injected.grader_seed_path == injected_seed
+    assert default_first.grader_seed_path == default_second.grader_seed_path
+    assert default_first.grader_seed_path.is_absolute()
+    assert default_first.grader_seed_path.parts[-3:] == (
+        "seeds",
+        "prompts",
+        "grader_prompt.md",
+    )
+
+
 def test_legacy_migration_preserves_values_and_renames_source(tmp_path: Path) -> None:
     store = _store(tmp_path)
     _write_json(
@@ -412,18 +437,26 @@ def test_atomic_write_uses_unique_temp_in_target_directory(
     from src.config import user_settings_store as store_module
 
     store = _store(tmp_path)
-    observed: list[tuple[str | None, str | None, str | None]] = []
+    observed: list[Path] = []
     real_mkstemp = store_module.tempfile.mkstemp
 
     def recording_mkstemp(*, prefix: str | None = None, suffix: str | None = None, dir: str | None = None) -> tuple[int, str]:
-        observed.append((prefix, suffix, dir))
-        return real_mkstemp(prefix=prefix, suffix=suffix, dir=dir)
+        descriptor, temporary_name = real_mkstemp(prefix=prefix, suffix=suffix, dir=dir)
+        observed.append(Path(temporary_name))
+        return descriptor, temporary_name
 
     monkeypatch.setattr(store_module.tempfile, "mkstemp", recording_mkstemp)
 
     store.set_provider_key("openai", SECRET)
+    store.set_provider_key("anthropic", "second-secret")
 
-    assert observed == [(".settings.json.", ".tmp", str(store.path.parent))]
+    assert len(observed) == 2
+    assert observed[0] != observed[1]
+    assert {path.parent for path in observed} == {store.path.parent}
+    assert all(
+        path.name.startswith(".settings.json.") and path.name.endswith(".tmp")
+        for path in observed
+    )
 
 
 def test_canonical_file_mode_is_owner_only(tmp_path: Path) -> None:
