@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from unittest import mock
 
 import pytest
+from coremem.types import Memory as CoreMemory
 
 import src.storage.messages as messages_storage
 from src.storage.messages import MessageStore, get_message_store
@@ -40,6 +41,19 @@ def test_message_session_id_is_preserved() -> None:
     messages = store.get_messages_by_session_id("session-a")
 
     assert messages[0].session_id == "session-a"
+
+
+def test_get_messages_by_session_filters_backend_leakage_after_normalizing_session() -> None:
+    store = _store()
+    store.add_message("user", "allowed", session_id="session-a")
+    store.add_message("user", "leaked", session_id="session-b")
+    memories = store._core.fetch_all()
+    store._core.fetch = mock.Mock(return_value=memories)
+
+    messages = store.get_messages_by_session_id(" session-a ")
+
+    assert [message.content for message in messages] == ["allowed"]
+    store._core.fetch.assert_called_once_with(limit=50, session_id="session-a")
 
 
 @pytest.mark.parametrize("session_id", ["", " ", "\t\n"])
@@ -267,6 +281,67 @@ def test_summary_context_limit_one_returns_only_summary() -> None:
     store.add_message("assistant", "new", session_id="a")
 
     assert [m.content for m in store.get_messages_with_summary("a", limit=1)] == ["summary"]
+
+
+def test_equal_timestamp_id_after_summary_is_included() -> None:
+    store = _store()
+    instant = datetime(2026, 8, 3, 12, tzinfo=UTC)
+    summary = CoreMemory(
+        id="middle",
+        content="summary",
+        role="summary",
+        ts=instant,
+        session_id="a",
+        metadata={
+            "source": "summarization_middleware",
+            **_summary_metadata(["summarized"]),
+        },
+    )
+    after = CoreMemory(
+        id="z-after",
+        content="after",
+        role="assistant",
+        ts=instant.astimezone(timezone(timedelta(hours=1))),
+        session_id="a",
+    )
+    store._scoped_memories = mock.Mock(return_value=[after, summary])
+
+    assert [message.content for message in store.get_messages_with_summary("a")] == [
+        "summary",
+        "after",
+    ]
+
+
+def test_equal_timestamp_id_before_summary_is_excluded_unless_preserved() -> None:
+    store = _store()
+    instant = datetime(2026, 8, 3, 12, tzinfo=UTC)
+    before = CoreMemory(
+        id="a-before",
+        content="before",
+        role="assistant",
+        ts=instant,
+        session_id="a",
+    )
+    summary = CoreMemory(
+        id="middle",
+        content="summary",
+        role="summary",
+        ts=instant,
+        session_id="a",
+        metadata={
+            "source": "summarization_middleware",
+            **_summary_metadata(["summarized"]),
+        },
+    )
+    store._scoped_memories = mock.Mock(return_value=[summary, before])
+
+    assert [message.content for message in store.get_messages_with_summary("a")] == ["summary"]
+
+    summary.metadata["preserved_message_ids"] = ["a-before"]
+    assert [message.content for message in store.get_messages_with_summary("a")] == [
+        "summary",
+        "before",
+    ]
 
 
 def test_no_valid_summary_falls_back_to_latest_non_summary_messages() -> None:
