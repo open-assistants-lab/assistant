@@ -121,7 +121,9 @@ class MessageStore:
         # Start background observer and reflector workers
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self._core.start_pipelines())
+            start_pipelines = getattr(self._core, "start_pipelines", None)
+            if start_pipelines is not None:
+                loop.create_task(start_pipelines())
         except (RuntimeError, AttributeError):
             pass  # No event loop or no pipelines — feature not available
 
@@ -741,7 +743,7 @@ class MessageStore:
 
     def count_messages(self, start_date: date | None = None, end_date: date | None = None) -> int:
         if not start_date and not end_date:
-            return cast(int, self._core.count())
+            return self._core.count()
         ts_after = f"{start_date.isoformat()}T00:00:00" if start_date else None
         ts_before = f"{end_date.isoformat()}T23:59:59" if end_date else None
         try:

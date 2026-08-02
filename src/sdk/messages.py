@@ -82,6 +82,12 @@ class Message(BaseModel):
     reasoning: str | None = None
     provider_metadata: dict[str, dict[str, Any]] = Field(default_factory=dict)
     usage: Usage | None = None
+    # Internal provenance used by compression and rubric middleware. These fields
+    # are not part of provider payloads or the public serialized message contract.
+    source: str | None = Field(default=None, exclude=True)
+    storage_id: str | None = Field(default=None, exclude=True)
+    storage_ts: str | None = Field(default=None, exclude=True)
+    storage_session_id: str | None = Field(default=None, exclude=True)
 
     model_config = {"extra": "allow"}
 

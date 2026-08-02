@@ -50,8 +50,15 @@ _loop_lock = asyncio.Lock()
 _user_loops: dict[str, AgentLoop] = {}
 
 
+def _normalize_session_id(session_id: str | None) -> str:
+    if session_id is None:
+        return "default"
+    normalized = session_id.strip()
+    return normalized or "default"
+
+
 def _active_loop_key(user_id: str, session_id: str | None = None) -> str:
-    return f"{user_id}:session:{session_id or 'default'}"
+    return f"{user_id}:session:{_normalize_session_id(session_id)}"
 
 
 def register_user_loop(user_id: str, loop: AgentLoop, session_id: str | None = None) -> None:
@@ -90,7 +97,7 @@ def _loop_cache_key(
     session_id: str | None = None,
 ) -> str:
     del workspace_id  # Compatibility-only; loop state is bounded by user session.
-    key = f"{user_id}:model:{model or 'default'}:session:{session_id or 'default'}"
+    key = f"{user_id}:model:{model or 'default'}:session:{_normalize_session_id(session_id)}"
     if provider_keys:
         encoded = json.dumps(provider_keys, sort_keys=True, separators=(",", ":"))
         key_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
@@ -318,7 +325,7 @@ async def create_sdk_loop(
 
     del workspace_id
     runtime_workspace_id = "personal"
-    runtime_session_id = session_id or "default"
+    runtime_session_id = _normalize_session_id(session_id)
     _seed_default_workspace()
     t0 = time.monotonic()
     settings = get_settings()
@@ -647,8 +654,10 @@ async def get_sdk_loop(user_id: str, workspace_id: str = "personal", model: str 
     its own AgentLoop instance so that self.state and self.cancel_event are not
     clobbered across concurrent run_stream calls.
     """
-    cache_key = _loop_cache_key(user_id, workspace_id, model, provider_keys, session_id)
-    runtime_session_id = session_id or "default"
+    runtime_session_id = _normalize_session_id(session_id)
+    cache_key = _loop_cache_key(
+        user_id, workspace_id, model, provider_keys, runtime_session_id
+    )
     async with _loop_lock:
         if cache_key not in _loop_cache:
             _loop_cache[cache_key] = await create_sdk_loop(
@@ -658,7 +667,16 @@ async def get_sdk_loop(user_id: str, workspace_id: str = "personal", model: str 
                 provider_keys=provider_keys,
                 session_id=runtime_session_id,
             )
-            logger.info("sdk_runner.loop_created", {"user_id": user_id, "workspace_id": workspace_id, "model": model, "session_id": session_id}, user_id=user_id)
+            logger.info(
+                "sdk_runner.loop_created",
+                {
+                    "user_id": user_id,
+                    "workspace_id": workspace_id,
+                    "model": model,
+                    "session_id": runtime_session_id,
+                },
+                user_id=user_id,
+            )
             _loop_cache.move_to_end(cache_key)
             if len(_loop_cache) > _MAX_LOOP_CACHE:
                 _loop_cache.popitem(last=False)
@@ -713,14 +731,19 @@ def _messages_from_conversation(messages: list[Any]) -> list[Message]:
         meta = getattr(m, "metadata", {}) or {}
         source = meta.get("source")
         ts = getattr(m, "ts", None)
-        storage_identity = {
-            "storage_id": getattr(m, "id", ""),
-            "storage_ts": str(ts.isoformat()) if ts is not None else "",
-            "storage_session_id": getattr(m, "session_id", ""),
-        }
+        storage_id = getattr(m, "id", "")
+        storage_ts = str(ts.isoformat()) if ts is not None else ""
+        storage_session_id = getattr(m, "session_id", "")
         if role == "user":
             sdk_messages.append(
-                Message(role="user", content=content, source=source, **storage_identity)
+                Message(
+                    role="user",
+                    content=content,
+                    source=source,
+                    storage_id=storage_id,
+                    storage_ts=storage_ts,
+                    storage_session_id=storage_session_id,
+                )
             )
             pending_reasoning = None
             last_assistant_had_tool_calls = False
@@ -730,13 +753,23 @@ def _messages_from_conversation(messages: list[Any]) -> list[Message]:
                     role="user",
                     content=f"[SUMMARY OF PREVIOUS CONVERSATION]\n{content}",
                     source=source or "summarization_middleware",
-                    **storage_identity,
+                    storage_id=storage_id,
+                    storage_ts=storage_ts,
+                    storage_session_id=storage_session_id,
                 )
             )
             pending_reasoning = None
             last_assistant_had_tool_calls = False
         elif role == "system":
-            sdk_messages.append(Message(role="system", content=content, **storage_identity))
+            sdk_messages.append(
+                Message(
+                    role="system",
+                    content=content,
+                    storage_id=storage_id,
+                    storage_ts=storage_ts,
+                    storage_session_id=storage_session_id,
+                )
+            )
             pending_reasoning = None
             last_assistant_had_tool_calls = False
         elif role == "tool":
@@ -750,7 +783,9 @@ def _messages_from_conversation(messages: list[Any]) -> list[Message]:
                         tool_call_id=tool_call_id,
                         content=str(content or ""),
                         name=tool_name,
-                        **storage_identity,
+                        storage_id=storage_id,
+                        storage_ts=storage_ts,
+                        storage_session_id=storage_session_id,
                     )
                 )
             else:
@@ -758,7 +793,9 @@ def _messages_from_conversation(messages: list[Any]) -> list[Message]:
                     Message(
                         role="user",
                         content=f"[TOOL RESULT: {tool_name}]\n{content}",
-                        **storage_identity,
+                        storage_id=storage_id,
+                        storage_ts=storage_ts,
+                        storage_session_id=storage_session_id,
                     )
                 )
             pending_reasoning = None
@@ -771,7 +808,9 @@ def _messages_from_conversation(messages: list[Any]) -> list[Message]:
                     role="assistant",
                     content=content,
                     reasoning=pending_reasoning,
-                    **storage_identity,
+                    storage_id=storage_id,
+                    storage_ts=storage_ts,
+                    storage_session_id=storage_session_id,
                 )
             )
             pending_reasoning = None
@@ -802,11 +841,18 @@ async def run_sdk_agent(
     Returns:
         Final message list from the agent.
     """
-    loop = await get_sdk_loop(user_id, workspace_id, model=model, provider_keys=provider_keys, session_id=session_id)
-    register_user_loop(user_id, loop, session_id=session_id)
+    runtime_session_id = _normalize_session_id(session_id)
+    loop = await get_sdk_loop(
+        user_id,
+        workspace_id,
+        model=model,
+        provider_keys=provider_keys,
+        session_id=runtime_session_id,
+    )
+    register_user_loop(user_id, loop, session_id=runtime_session_id)
     loop.rubric = rubric
     loop._flow_user_id = user_id  # type: ignore[attr-defined]
-    loop._flow_session_id = session_id or "default"  # type: ignore[attr-defined]
+    loop._flow_session_id = runtime_session_id  # type: ignore[attr-defined]
     loop._flow_model = loop.model_id  # type: ignore[attr-defined]
     loop._flow_attempt = 1  # type: ignore[attr-defined]
     # Store user_id/session_id on loop state for middleware to use in rerun triggers
@@ -821,7 +867,7 @@ async def run_sdk_agent(
             for event in loop.state.extra.pop("_pending_rerun_events"):
                 # Update event with actual user_id/session_id/model
                 event.user_id = user_id
-                event.session_id = session_id or "default"
+                event.session_id = runtime_session_id
                 event.model = model
                 event.metadata["previous_messages"] = result
                 try:
@@ -837,7 +883,7 @@ async def run_sdk_agent(
                     logger.error("sdk_runner.rerun_failed", {"error": str(e)}, user_id=user_id)
 
         # Persist RunOutcome for loop 4 (hill-climbing)
-        await _persist_run_outcome(user_id, session_id, result, loop, "manual")
+        await _persist_run_outcome(user_id, runtime_session_id, result, loop, "manual")
         # Flush Langfuse traces if enabled
         from src.sdk.langfuse_tracer import LangfuseTracer
 
@@ -854,7 +900,7 @@ async def run_sdk_agent(
         else:
             loop._verification_verdict = None  # type: ignore[attr-defined]
         loop.rubric = None
-        unregister_user_loop(user_id, loop, session_id=session_id)
+        unregister_user_loop(user_id, loop, session_id=runtime_session_id)
 
 
 async def run_sdk_agent_stream(
@@ -867,14 +913,21 @@ async def run_sdk_agent_stream(
     session_id: str | None = None,
     rubric: str | None = None,
 ) -> Any:
-    loop = await get_sdk_loop(user_id, workspace_id, model=model, provider_keys=provider_keys, session_id=session_id)
+    runtime_session_id = _normalize_session_id(session_id)
+    loop = await get_sdk_loop(
+        user_id,
+        workspace_id,
+        model=model,
+        provider_keys=provider_keys,
+        session_id=runtime_session_id,
+    )
     loop.cancel_event = cancel_event
     loop.rubric = rubric
     loop._flow_user_id = user_id  # type: ignore[attr-defined]
-    loop._flow_session_id = session_id or "default"  # type: ignore[attr-defined]
+    loop._flow_session_id = runtime_session_id  # type: ignore[attr-defined]
     loop._flow_model = loop.model_id  # type: ignore[attr-defined]
     loop._flow_attempt = 1  # type: ignore[attr-defined]
-    register_user_loop(user_id, loop, session_id=session_id)
+    register_user_loop(user_id, loop, session_id=runtime_session_id)
 
     try:
         async for chunk in loop.run_stream(messages):
@@ -885,12 +938,14 @@ async def run_sdk_agent_stream(
     finally:
         # Persist RunOutcome for loop 4 (hill-climbing)
         if hasattr(loop, "state") and loop.state:
-            await _persist_run_outcome(user_id, session_id, loop.state.messages, loop, "manual")
+            await _persist_run_outcome(
+                user_id, runtime_session_id, loop.state.messages, loop, "manual"
+            )
         # Flush Langfuse traces if enabled
         from src.sdk.langfuse_tracer import LangfuseTracer
 
         LangfuseTracer.flush()
-        unregister_user_loop(user_id, loop, session_id=session_id)
+        unregister_user_loop(user_id, loop, session_id=runtime_session_id)
 
 
 def reset_sdk_loop(
@@ -907,12 +962,13 @@ def reset_sdk_loop(
     del workspace_id
     removed = 0
     cache_prefix = f"{user_id}:"
-    if session_id:
+    if session_id is not None:
+        normalized_session_id = _normalize_session_id(session_id)
         for cache_key in list(_loop_cache):
             if not cache_key.startswith(cache_prefix) or ":session:" not in cache_key:
                 continue
             key_session = cache_key.split(":session:", 1)[1].split(":keys:", 1)[0]
-            if key_session == session_id:
+            if key_session == normalized_session_id:
                 del _loop_cache[cache_key]
                 removed += 1
     else:
@@ -985,7 +1041,7 @@ async def _persist_run_outcome(
         outcome = RunOutcome(
             run_id=str(uuid.uuid4()),
             user_id=user_id,
-            session_id=session_id or "default",
+            session_id=_normalize_session_id(session_id),
             trigger_type=trigger_type,
             response=response_text[:1000],
             verification_status=verification_status,

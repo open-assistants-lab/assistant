@@ -120,6 +120,21 @@ class TestMessage:
         assert data["role"] == "user"
         assert data["content"] == "hello"
 
+    def test_internal_provenance_is_typed_but_not_serialized(self):
+        msg = Message(
+            role="user",
+            content="hello",
+            source="history",
+            storage_id="message-1",
+            storage_ts="2026-08-03T00:00:00+00:00",
+            storage_session_id="chat-1",
+        )
+
+        assert msg.storage_id == "message-1"
+        assert msg.storage_session_id == "chat-1"
+        assert "storage_id" not in msg.model_dump()
+        assert "source" not in msg.model_dump()
+
     def test_deserialization(self):
         data = {
             "role": "assistant",
