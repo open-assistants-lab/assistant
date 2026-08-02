@@ -545,6 +545,8 @@ class SummarizationMiddleware(Middleware):
     async def _call_summary_provider(self, provider: Any, messages: list[Message]) -> Message:
         response: Message | None = None
         provider_call_started = False
+        original_chat = getattr(provider, "_original_chat", None)
+        chat = original_chat if callable(original_chat) else provider.chat
         try:
             from src.sdk.langfuse_tracer import LangfuseTracer
 
@@ -556,8 +558,6 @@ class SummarizationMiddleware(Middleware):
                         name="SummarizationMiddleware_summary",
                         model=self.model,
                     ) as generation:
-                        original_chat = getattr(provider, "_original_chat", None)
-                        chat = original_chat if callable(original_chat) else provider.chat
                         provider_call_started = True
                         response = cast(Message, await chat(messages))
                         try:
@@ -582,7 +582,7 @@ class SummarizationMiddleware(Middleware):
                 return response
             if provider_call_started:
                 raise
-        return cast(Message, await provider.chat(messages))
+        return cast(Message, await chat(messages))
 
     def _usage_aggregate(self, usage: Usage | None) -> UsageAggregate:
         if usage is None:
@@ -671,7 +671,11 @@ class SummarizationMiddleware(Middleware):
             )
             summarized_ids = self._storage_ids(summarized_messages)
             preserved_ids = self._storage_ids([*old_remainder, *recent_messages])
-            persistence_eligible = len(summarized_ids) == len(summarized_messages)
+            summarized_count = len(summarized_messages)
+            preserved_count = len(old_remainder) + len(recent_messages)
+            persistence_eligible = (
+                summarized_count > 0 and len(summarized_ids) == summarized_count
+            )
             after_tokens = self.token_counter(list(replacement_messages))
             after_context = self._after_context(context.before, after_tokens)
             def prepared_result(
@@ -684,6 +688,8 @@ class SummarizationMiddleware(Middleware):
                     replacement_messages=replacement_snapshots,
                     summarized_ids=summarized_ids,
                     preserved_ids=preserved_ids,
+                    summarized_count=summarized_count,
+                    preserved_count=preserved_count,
                     persistence_eligible=persistence_eligible,
                     persistence=persistence,
                     before_count=before_count,
@@ -793,6 +799,8 @@ class SummarizationMiddleware(Middleware):
         replacement_messages: tuple[CompressionMessage, ...],
         summarized_ids: tuple[str, ...],
         preserved_ids: tuple[str, ...],
+        summarized_count: int,
+        preserved_count: int,
         persistence_eligible: bool,
         persistence: SummaryPersistenceResult,
         before_count: int,
@@ -810,6 +818,8 @@ class SummarizationMiddleware(Middleware):
         artifact = CompressionArtifact(
             summary=summary,
             replacement_messages=snapshots,
+            summarized_message_count=summarized_count,
+            preserved_message_count=preserved_count,
             summarized_message_ids=summarized_ids,
             preserved_message_ids=preserved_ids,
             persistence_eligible=persistence_eligible,
@@ -822,8 +832,8 @@ class SummarizationMiddleware(Middleware):
             after_message_count=len(snapshots),
             before_token_count=before_tokens,
             after_token_count=after_tokens,
-            summarized_message_count=len(summarized_ids),
-            preserved_message_count=len(preserved_ids),
+            summarized_message_count=summarized_count,
+            preserved_message_count=preserved_count,
             replacement_message_count=len(snapshots),
             summary_model=self.model,
             summarizer_usage=usage,

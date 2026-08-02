@@ -163,6 +163,8 @@ class CompressionMessage(ContractModel):
 class CompressionArtifact(ContractModel):
     summary: NonEmptyString
     replacement_messages: tuple[CompressionMessage, ...]
+    summarized_message_count: int = Field(ge=0)
+    preserved_message_count: int = Field(ge=0)
     summarized_message_ids: tuple[NonEmptyString, ...]
     preserved_message_ids: tuple[NonEmptyString, ...] = ()
     persistence_eligible: bool
@@ -179,8 +181,16 @@ class CompressionArtifact(ContractModel):
     def _validate_persistence(self) -> CompressionArtifact:
         if not self.replacement_messages:
             raise ValueError("replacement_messages must not be empty")
-        if not self.summarized_message_ids and self.persistence_eligible:
-            raise ValueError("persistence eligibility requires summarized message IDs")
+        if len(self.summarized_message_ids) > self.summarized_message_count:
+            raise ValueError("summarized IDs cannot exceed summarized message count")
+        if len(self.preserved_message_ids) > self.preserved_message_count:
+            raise ValueError("preserved IDs cannot exceed preserved message count")
+        eligible = (
+            self.summarized_message_count > 0
+            and len(self.summarized_message_ids) == self.summarized_message_count
+        )
+        if self.persistence_eligible is not eligible:
+            raise ValueError("persistence eligibility must reflect complete summarized provenance")
         if self.persisted_summary_id is not None and not self.persistence_eligible:
             raise ValueError("persisted summary ID requires persistence eligibility")
         return self
@@ -246,10 +256,10 @@ class CompressionResult(ContractModel):
             return self
         artifact = self.artifact
         telemetry = self.telemetry
-        if telemetry.summarized_message_count != len(artifact.summarized_message_ids):
-            raise ValueError("summarized count must match artifact IDs")
-        if telemetry.preserved_message_count != len(artifact.preserved_message_ids):
-            raise ValueError("preserved count must match artifact IDs")
+        if telemetry.summarized_message_count != artifact.summarized_message_count:
+            raise ValueError("summarized count must match artifact count")
+        if telemetry.preserved_message_count != artifact.preserved_message_count:
+            raise ValueError("preserved count must match artifact count")
         if telemetry.replacement_message_count != len(artifact.replacement_messages):
             raise ValueError("replacement count must match artifact messages")
         if telemetry.after_message_count != len(artifact.replacement_messages):
