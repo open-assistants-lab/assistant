@@ -6,16 +6,19 @@ dynamically. Falls back to hardcoded defaults for well-known providers.
 
 from __future__ import annotations
 
-import json
 import os
-from pathlib import Path
 from typing import Any
 
+import src.config.user_settings_store as _user_settings_store
+from src.app_logging import get_logger
+from src.config.user_settings import SavedUserSettings
 from src.sdk.providers.anthropic import AnthropicProvider
 from src.sdk.providers.base import LLMProvider
 from src.sdk.providers.gemini import GeminiProvider
 from src.sdk.providers.ollama import OllamaCloud
 from src.sdk.providers.openai import OpenAIProvider
+
+logger = get_logger()
 
 _PROVIDER_CLASSES: dict[str, type[LLMProvider]] = {
     "openai": OpenAIProvider,
@@ -199,36 +202,29 @@ def _default_provider_options(provider_id: str) -> dict[str, Any]:
     return {}
 
 
-def _load_stored_key(provider_type: str, user_id: str = "default_user") -> str | None:
-    """Check per-user settings store for a provider API key."""
+def _load_user_settings(user_id: str) -> SavedUserSettings | None:
+    """Load one canonical settings snapshot, falling back safely on known failures."""
     try:
-        from src.config.settings import get_settings
-        root = get_settings().data_path or "data"
-        settings_path = Path(f"{root}/users/{user_id}/settings.json")
-        if settings_path.exists():
-            stored: dict[str, Any] = json.loads(settings_path.read_text())
-            keys: dict[str, Any] = stored.get("provider_keys", {})
-            value = keys.get(provider_type)
-            return str(value) if value is not None else None
-    except Exception:
-        pass
-    return None
+        return _user_settings_store.UserSettingsStore(user_id).load()
+    except (_user_settings_store.UserSettingsStoreError, ValueError) as exc:
+        logger.warning(
+            "provider.user_settings_load_failed",
+            {"error_type": type(exc).__name__},
+            user_id=user_id,
+        )
+        return None
+
+
+def _load_stored_key(provider_type: str, user_id: str = "default_user") -> str | None:
+    """Check the canonical per-user settings store for a provider API key."""
+    saved = _load_user_settings(user_id)
+    return saved.provider_keys.get(provider_type) if saved is not None else None
 
 
 def _load_stored_default_model(user_id: str = "default_user") -> str | None:
-    """Check per-user settings store for a default model override."""
-    try:
-        from src.config.settings import get_settings
-
-        root = get_settings().data_path or "data"
-        settings_path = Path(f"{root}/users/{user_id}/settings.json")
-        if settings_path.exists():
-            stored: dict[str, Any] = json.loads(settings_path.read_text())
-            value = stored.get("default_model")
-            return str(value) if value else None
-    except Exception:
-        pass
-    return None
+    """Check the canonical per-user settings store for a default model override."""
+    saved = _load_user_settings(user_id)
+    return saved.default_model if saved is not None else None
 
 
 def create_model_from_config(
@@ -239,7 +235,8 @@ def create_model_from_config(
     from src.config import get_settings
 
     settings = get_settings()
-    model_str = config_model or _load_stored_default_model(user_id) or settings.agent.model
+    saved = _load_user_settings(user_id)
+    model_str = config_model or (saved.default_model if saved else None) or settings.agent.model
 
     provider_type, model_name = _parse_model_string(model_str)
 
@@ -250,18 +247,11 @@ def create_model_from_config(
             resolved_key = None
 
     if not resolved_key:
-        resolved_key = _load_stored_key(provider_type, user_id)
+        resolved_key = saved.provider_keys.get(provider_type) if saved else None
 
     registry_provider = create_provider_from_registry_model(model_str, api_key=resolved_key)
     if registry_provider is not None:
-        if resolved_key and hasattr(registry_provider, '_api_key'):
-            registry_provider._api_key = resolved_key
-        elif resolved_key:
-            provider_type = getattr(registry_provider, 'provider_type', 'openai-compatible')
-            base_url = getattr(registry_provider, 'base_url', None)
-            provider = create_provider(provider_type, model=model_name, api_key=resolved_key, base_url=base_url)
-        else:
-            provider = registry_provider
+        provider = registry_provider
     else:
         provider = create_provider(provider_type, model=model_name, api_key=resolved_key)
 
