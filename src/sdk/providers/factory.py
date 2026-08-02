@@ -251,7 +251,20 @@ def create_model_from_config(
 
     registry_provider = create_provider_from_registry_model(model_str, api_key=resolved_key)
     if registry_provider is not None:
-        provider = registry_provider
+        if not resolved_key:
+            provider = registry_provider
+        elif hasattr(registry_provider, "_api_key"):
+            setattr(registry_provider, "_api_key", resolved_key)
+            provider = registry_provider
+        else:
+            registry_type = getattr(registry_provider, "provider_type", "openai-compatible")
+            base_url = getattr(registry_provider, "base_url", None)
+            provider = create_provider(
+                registry_type,
+                model=model_name,
+                api_key=resolved_key,
+                base_url=base_url,
+            )
     else:
         provider = create_provider(provider_type, model=model_name, api_key=resolved_key)
 
