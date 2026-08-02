@@ -110,11 +110,11 @@ def build_context_snapshot(
     source: ContextSource,
     freshness: ContextFreshness,
     estimator: TokenEstimator = estimate_text_tokens,
-    window_resolver: ContextWindowResolver = resolve_context_window,
+    context_window_resolver: ContextWindowResolver = resolve_context_window,
 ) -> ContextSnapshot:
     """Build a context snapshot for the exact context prepared for an LLM call."""
     estimated_tokens = estimate_prepared_tokens(messages, tools, estimator)
-    context_window = window_resolver(model)
+    context_window = context_window_resolver(model)
     percentage = estimated_tokens / context_window * 100 if context_window else None
     return ContextSnapshot(
         model=model,

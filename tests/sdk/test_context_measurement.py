@@ -199,7 +199,7 @@ def test_snapshot_carries_identity_provenance_and_derived_percentage() -> None:
         source=ContextSource.PREPARED_CONTEXT,
         freshness=ContextFreshness.LIVE,
         estimator=_length,
-        window_resolver=lambda _model: 100,
+        context_window_resolver=lambda _model: 100,
     )
     expected = estimate_prepared_tokens([Message.user("abcdef")], [_tool()], _length)
 
@@ -223,7 +223,7 @@ def test_snapshot_has_null_window_and_percentage_when_model_is_unknown() -> None
         llm_call_index=1,
         source=ContextSource.HISTORY_ESTIMATE,
         freshness=ContextFreshness.STALE,
-        window_resolver=lambda _model: None,
+        context_window_resolver=lambda _model: None,
     )
 
     assert snapshot.estimated_tokens == 0
@@ -240,7 +240,7 @@ def test_snapshot_json_roundtrip_preserves_generated_contract() -> None:
         llm_call_index=1,
         source=ContextSource.PREPARED_CONTEXT,
         freshness=ContextFreshness.LIVE,
-        window_resolver=lambda _model: 1_000,
+        context_window_resolver=lambda _model: 1_000,
     )
 
     assert ContextSnapshot.model_validate_json(snapshot.model_dump_json()) == snapshot
