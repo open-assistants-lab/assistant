@@ -93,11 +93,11 @@ def test_summary_persistence_result_invariants():
 
 
 def test_compression_artifact_rejects_empty_duplicate_ids_and_extra_fields():
-    from src.sdk.compression import CompressionArtifact
+    from src.sdk.compression import CompressionArtifact, CompressionMessage
 
     base = dict(
         summary="summary",
-        replacement_messages=(Message.user("summary"),),
+        replacement_messages=(CompressionMessage.from_message(Message.user("summary")),),
         summarized_message_ids=("one",),
         preserved_message_ids=("two",),
         persistence_eligible=True,
@@ -134,6 +134,88 @@ def test_failed_telemetry_requires_error_and_forbids_after_context():
             summary_model="ollama-cloud:test",
             persistence={"status": "not_requested"},
         )
+
+
+def test_compression_snapshots_are_deeply_owned_and_materialize_fresh_messages():
+    from src.sdk.compression import CompressionMessage
+    from src.sdk.messages import ToolCall, Usage
+
+    source = Message(
+        role="assistant",
+        content=[{"type": "text", "text": "original"}],
+        tool_calls=[ToolCall(id="tc", name="tool", arguments={"nested": [1, 2]})],
+        provider_metadata={"provider": {"nested": {"value": 1}}},
+        usage=Usage(input_tokens=3),
+        storage_id="stored-1",
+        source="history",
+    )
+    snapshot = CompressionMessage.from_message(source)
+    source.content[0]["text"] = "mutated"
+    source.tool_calls[0].arguments["nested"].append(3)
+    assert snapshot.to_message().content[0]["text"] == "original"
+    assert snapshot.to_message().tool_calls[0].arguments == {"nested": [1, 2]}
+    first = snapshot.to_message()
+    second = snapshot.to_message()
+    first.content[0]["text"] = "changed"
+    assert second.content[0]["text"] == "original"
+    assert first is not second
+    with pytest.raises(ValidationError):
+        snapshot.content_json = '"changed"'
+
+
+def test_compression_result_rejects_count_and_persistence_mismatches():
+    from src.sdk.compression import (
+        CompressionArtifact,
+        CompressionMessage,
+        CompressionResult,
+        CompressionTelemetry,
+    )
+
+    snapshot = CompressionMessage.from_message(Message.user("summary"))
+    artifact = CompressionArtifact(
+        summary="summary",
+        replacement_messages=(snapshot,),
+        summarized_message_ids=("old-1",),
+        preserved_message_ids=(),
+        persistence_eligible=True,
+    )
+    telemetry = CompressionTelemetry(
+        status="succeeded",
+        reason="manual",
+        summarized_message_count=2,
+        replacement_message_count=1,
+        summary_model="ollama-cloud:test",
+        persistence={"status": "not_requested"},
+    )
+    with pytest.raises(ValidationError):
+        CompressionResult(artifact=artifact, telemetry=telemetry)
+
+
+def test_compression_result_rejects_invalid_successful_persistence_linkage():
+    from src.sdk.compression import (
+        CompressionArtifact,
+        CompressionMessage,
+        CompressionResult,
+        CompressionTelemetry,
+    )
+
+    snapshot = CompressionMessage.from_message(Message.user("summary"))
+    artifact = CompressionArtifact(
+        summary="summary",
+        replacement_messages=(snapshot,),
+        summarized_message_ids=("old-1",),
+        persistence_eligible=True,
+    )
+    telemetry = CompressionTelemetry(
+        status="succeeded",
+        reason="manual",
+        summarized_message_count=1,
+        replacement_message_count=1,
+        summary_model="ollama-cloud:test",
+        persistence={"status": "succeeded", "summary_id": "summary-1"},
+    )
+    with pytest.raises(ValidationError):
+        CompressionResult(artifact=artifact, telemetry=telemetry)
 
 
 # -- ProviderContextOverflowError --
@@ -460,6 +542,59 @@ async def test_generation_failure_leaves_exact_state_and_does_not_call_sink(resp
 
 
 @pytest.mark.asyncio
+async def test_replacement_token_counter_failure_precedes_sink_and_leaves_state_unchanged():
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+    from src.sdk.state import AgentState
+
+    sink_calls = []
+
+    def counter(items):
+        materialized = list(items)
+        if any(getattr(message, "source", None) == "summarization_middleware" for message in materialized):
+            raise RuntimeError("replacement count failed")
+        return len(materialized)
+
+    messages = [_stored("user", str(i), f"id-{i}") for i in range(4)]
+    state = AgentState(messages=messages)
+    middleware = SummarizationMiddleware(
+        "ollama-cloud:test",
+        keep=("messages", 2),
+        token_counter=counter,
+        summary_provider_factory=lambda: _Provider(),
+        summary_sink=lambda context, artifact: sink_calls.append(artifact),
+    )
+    result = await middleware.force_summarize(state, _context())
+    assert result.telemetry.status == "failed"
+    assert result.telemetry.error_code == "compression_preparation_error"
+    assert state.messages is messages
+    assert state.extra == {}
+    assert sink_calls == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_summary_template_placeholder_is_typed_failure_without_sink():
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+    from src.sdk.state import AgentState
+
+    provider = _Provider()
+    sink_calls = []
+    messages = [_stored("user", str(i), f"id-{i}") for i in range(4)]
+    state = AgentState(messages=messages)
+    middleware = SummarizationMiddleware(
+        "ollama-cloud:test",
+        keep=("messages", 2),
+        summary_prompt="{messages} {unknown_placeholder}",
+        summary_provider_factory=lambda: provider,
+        summary_sink=lambda context, artifact: sink_calls.append(artifact),
+    )
+    result = await middleware.force_summarize(state, _context())
+    assert result.telemetry.status == "failed"
+    assert state.messages is messages
+    assert provider.calls == 0
+    assert sink_calls == []
+
+
+@pytest.mark.asyncio
 async def test_sink_success_propagates_storage_id_to_summary_message():
     from src.sdk.compression import SummaryPersistenceResult
     from src.sdk.middleware_summarization import SummarizationMiddleware
@@ -481,6 +616,143 @@ async def test_sink_success_propagates_storage_id_to_summary_message():
     assert calls[0][1].summary == "summary"
     assert result.artifact.persisted_summary_id == "summary-1"
     assert state.messages[0].storage_id == "summary-1"
+
+
+@pytest.mark.asyncio
+async def test_sink_cannot_mutate_snapshot_and_state_materialization_is_independent():
+    from src.sdk.compression import SummaryPersistenceResult
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+    from src.sdk.state import AgentState
+
+    mutation_errors = []
+
+    def sink(context, artifact):
+        try:
+            artifact.replacement_messages[0].content_json = '"corrupt"'
+        except ValidationError as exc:
+            mutation_errors.append(exc)
+        return SummaryPersistenceResult(status="succeeded", summary_id="summary-owned")
+
+    state = AgentState(messages=[_stored("user", str(i), f"id-{i}") for i in range(4)])
+    result = await SummarizationMiddleware(
+        "ollama-cloud:test",
+        keep=("messages", 2),
+        summary_provider_factory=lambda: _Provider(),
+        summary_sink=sink,
+    ).force_summarize(state, _context())
+    assert mutation_errors
+    state.messages[0].content = "state mutation"
+    assert result.artifact.replacement_messages[0].content != "state mutation"
+    assert result.artifact.replacement_messages[0].to_message() is not state.messages[0]
+
+
+@pytest.mark.asyncio
+async def test_langfuse_observation_uses_unwrapped_provider_exactly_once(monkeypatch):
+    from src.sdk.langfuse_tracer import LangfuseTracer
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+
+    class Observation:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def update(self, **kwargs):
+            return None
+
+    class Client:
+        observations = 0
+
+        def start_as_current_observation(self, **kwargs):
+            self.observations += 1
+            return Observation()
+
+    class WrappedProvider:
+        wrapped_calls = 0
+        original_calls = 0
+
+        async def chat(self, messages):
+            self.wrapped_calls += 1
+            return Message.assistant("wrapped")
+
+        async def _original_chat(self, messages):
+            self.original_calls += 1
+            return Message.assistant("summary")
+
+    client = Client()
+    provider = WrappedProvider()
+    monkeypatch.setattr(LangfuseTracer, "is_enabled", staticmethod(lambda: True))
+    monkeypatch.setattr(LangfuseTracer, "_get_client", staticmethod(lambda: client))
+    middleware = SummarizationMiddleware(
+        "ollama-cloud:test", summary_provider_factory=lambda: provider
+    )
+    summary, _ = await middleware._acreate_summary([Message.user("history")])
+    assert summary == "summary"
+    assert client.observations == 1
+    assert provider.original_calls == 1
+    assert provider.wrapped_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_point", ["setup", "update"])
+async def test_langfuse_failure_never_duplicates_provider_call(monkeypatch, failure_point):
+    from src.sdk.langfuse_tracer import LangfuseTracer
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+
+    class Observation:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def update(self, **kwargs):
+            if failure_point == "update":
+                raise RuntimeError("trace update failed")
+
+    class Client:
+        def start_as_current_observation(self, **kwargs):
+            if failure_point == "setup":
+                raise RuntimeError("trace setup failed")
+            return Observation()
+
+    provider = _Provider()
+    monkeypatch.setattr(LangfuseTracer, "is_enabled", staticmethod(lambda: True))
+    monkeypatch.setattr(LangfuseTracer, "_get_client", staticmethod(lambda: Client()))
+    middleware = SummarizationMiddleware(
+        "ollama-cloud:test", summary_provider_factory=lambda: provider
+    )
+    summary, _ = await middleware._acreate_summary([Message.user("history")])
+    assert summary == "summary"
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_inside_langfuse_observation_is_not_retried(monkeypatch):
+    from src.sdk.langfuse_tracer import LangfuseTracer
+    from src.sdk.middleware_summarization import SummarizationMiddleware
+
+    class Observation:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class Client:
+        def start_as_current_observation(self, **kwargs):
+            return Observation()
+
+    provider = _Provider(error=RuntimeError("provider failed"))
+    monkeypatch.setattr(LangfuseTracer, "is_enabled", staticmethod(lambda: True))
+    monkeypatch.setattr(LangfuseTracer, "_get_client", staticmethod(lambda: Client()))
+    middleware = SummarizationMiddleware(
+        "ollama-cloud:test", summary_provider_factory=lambda: provider
+    )
+    with pytest.raises(Exception, match="summary provider failed"):
+        await middleware._acreate_summary([Message.user("history")])
+    assert provider.calls == 1
 
 
 @pytest.mark.asyncio
