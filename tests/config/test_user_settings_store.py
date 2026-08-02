@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
 import stat
@@ -11,8 +12,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
-from src.config.user_settings import UserSettingsPatch, VerificationOverrides
+from src.config.user_settings import (
+    GraderPromptResponse,
+    GraderPromptUpdate,
+    RevisionRequest,
+    UserSettingsPatch,
+    VerificationOverrides,
+)
 from src.config.user_settings_store import (
     RevisionConflict,
     SettingsConfigurationError,
@@ -22,6 +30,7 @@ from src.config.user_settings_store import (
 from src.storage.paths import DataPaths
 
 SECRET = "sk-test-super-secret"
+SEED = "# Seed rubric\n\n- Check the answer.\n"
 
 
 def _paths(tmp_path: Path, user_id: str = "alice") -> DataPaths:
@@ -39,6 +48,26 @@ def _store(tmp_path: Path, user_id: str = "alice") -> UserSettingsStore:
         user_id,
         paths=paths,
         legacy_path=tmp_path / "legacy" / user_id / "settings.json",
+    )
+
+
+def _grader_store(
+    tmp_path: Path,
+    user_id: str = "alice",
+    *,
+    seed: str | None = SEED,
+    legacy_default_rubric: str | None = "legacy rubric",
+) -> UserSettingsStore:
+    seed_path = tmp_path / "packaged" / "grader_prompt.md"
+    if seed is not None:
+        seed_path.parent.mkdir(parents=True, exist_ok=True)
+        seed_path.write_text(seed, encoding="utf-8")
+    return UserSettingsStore(
+        user_id,
+        paths=_paths(tmp_path, user_id),
+        legacy_path=tmp_path / "legacy" / user_id / "settings.json",
+        grader_seed_path=seed_path,
+        legacy_default_rubric=legacy_default_rubric,
     )
 
 
@@ -704,3 +733,286 @@ def test_exceptions_and_mutation_repr_do_not_expose_secrets(tmp_path: Path) -> N
     assert SECRET not in str(mutation)
     assert SECRET not in repr(conflict)
     assert SECRET not in str(conflict)
+
+
+def test_grader_prompt_contracts_are_immutable_exact_and_validate_schema() -> None:
+    content = "  exact rubric\n\n"
+    digest = f"sha256:{hashlib.sha256(content.encode()).hexdigest()}"
+    response = GraderPromptResponse(
+        content=content,
+        source="customized",
+        content_hash=digest,
+        revision=0,
+    )
+    update = GraderPromptUpdate(content=content, expected_revision=0)
+
+    assert response.content == content
+    assert update.content == content
+    assert GraderPromptResponse.model_json_schema()["additionalProperties"] is False
+    assert GraderPromptUpdate.model_json_schema()["additionalProperties"] is False
+    with pytest.raises(ValidationError):
+        response.revision = 1
+    with pytest.raises(ValidationError):
+        GraderPromptResponse(
+            content="x", source="customized", content_hash=f"sha256:{'A' * 64}", revision=0
+        )
+    with pytest.raises(ValidationError):
+        RevisionRequest(expected_revision=-1)
+
+
+@pytest.mark.parametrize("content", ["", " ", "\n\t"])
+def test_grader_prompt_update_rejects_blank_content(content: str) -> None:
+    with pytest.raises(ValidationError, match="content"):
+        GraderPromptUpdate(content=content, expected_revision=0)
+
+
+def test_load_grader_prompt_seeds_exact_content_without_settings_write(tmp_path: Path) -> None:
+    store = _grader_store(tmp_path)
+
+    response = store.load_grader_prompt()
+
+    prompt_path = _paths(tmp_path).user_grader_prompt_path()
+    assert prompt_path.read_text(encoding="utf-8") == SEED
+    assert response == GraderPromptResponse(
+        content=SEED,
+        source="seeded",
+        content_hash=f"sha256:{hashlib.sha256(SEED.encode()).hexdigest()}",
+        revision=0,
+    )
+    assert not store.path.exists()
+
+
+def test_default_packaged_seed_is_independent_of_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    store = UserSettingsStore("alice", paths=_paths(tmp_path))
+
+    response = store.load_grader_prompt()
+
+    assert response.content.startswith("# Default Response Rubric\n")
+    assert response.source == "seeded"
+
+
+def test_missing_packaged_seed_uses_nonblank_legacy_default(tmp_path: Path) -> None:
+    store = _grader_store(tmp_path, seed=None, legacy_default_rubric="  legacy exact\n")
+
+    response = store.load_grader_prompt()
+
+    assert response.content == "  legacy exact\n"
+    assert response.source == "seeded"
+
+
+@pytest.mark.parametrize("legacy", [None, "", " \n"])
+def test_missing_packaged_and_legacy_default_raises_configuration_error(
+    tmp_path: Path, legacy: str | None
+) -> None:
+    store = _grader_store(tmp_path, seed=None, legacy_default_rubric=legacy)
+
+    with pytest.raises(SettingsConfigurationError, match="default grader prompt"):
+        store.load_grader_prompt()
+
+
+def test_grader_prompts_are_isolated_by_user(tmp_path: Path) -> None:
+    alice = _grader_store(tmp_path, "alice")
+    bob = _grader_store(tmp_path, "bob")
+
+    alice.save_grader_prompt(GraderPromptUpdate(content="alice rubric\n", expected_revision=0))
+
+    assert alice.load_grader_prompt().content == "alice rubric\n"
+    assert bob.load_grader_prompt().content == SEED
+
+
+def test_save_grader_prompt_preserves_exact_content_hash_and_increments_revision(
+    tmp_path: Path,
+) -> None:
+    store = _grader_store(tmp_path)
+    content = "  custom rubric\n\n"
+
+    mutation = store.save_grader_prompt(
+        GraderPromptUpdate(content=content, expected_revision=0)
+    )
+
+    assert mutation.changed is True
+    assert mutation.response.content == content
+    assert mutation.response.content_hash == f"sha256:{hashlib.sha256(content.encode()).hexdigest()}"
+    assert mutation.response.source == "customized"
+    assert mutation.response.revision == 1
+    assert store.load().revision == 1
+
+
+def test_save_same_grader_prompt_is_noop(tmp_path: Path) -> None:
+    store = _grader_store(tmp_path)
+    store.load_grader_prompt()
+    before = store.path.read_bytes() if store.path.exists() else None
+
+    mutation = store.save_grader_prompt(
+        GraderPromptUpdate(content=SEED, expected_revision=0)
+    )
+
+    assert mutation.changed is False
+    assert mutation.response.revision == 0
+    assert (store.path.read_bytes() if store.path.exists() else None) == before
+
+
+def test_stale_grader_update_preserves_prompt_and_settings_bytes(tmp_path: Path) -> None:
+    store = _grader_store(tmp_path)
+    store.set_provider_key("openai", SECRET)
+    prompt = store.load_grader_prompt()
+    prompt_path = _paths(tmp_path).user_grader_prompt_path()
+    prompt_before = prompt_path.read_bytes()
+    settings_before = store.path.read_bytes()
+
+    with pytest.raises(RevisionConflict):
+        store.save_grader_prompt(
+            GraderPromptUpdate(content="stale rubric", expected_revision=prompt.revision - 1)
+        )
+
+    assert prompt_path.read_bytes() == prompt_before
+    assert store.path.read_bytes() == settings_before
+
+
+def test_reset_grader_prompt_changes_once_then_is_noop(tmp_path: Path) -> None:
+    store = _grader_store(tmp_path)
+    changed = store.save_grader_prompt(
+        GraderPromptUpdate(content="custom", expected_revision=0)
+    )
+
+    reset = store.reset_grader_prompt(RevisionRequest(expected_revision=1))
+    noop = store.reset_grader_prompt(RevisionRequest(expected_revision=2))
+
+    assert changed.changed is True
+    assert reset.changed is True
+    assert reset.response.content == SEED
+    assert reset.response.source == "seeded"
+    assert reset.response.revision == 2
+    assert noop.changed is False
+    assert noop.response.revision == 2
+
+
+def test_stale_grader_reset_preserves_bytes(tmp_path: Path) -> None:
+    store = _grader_store(tmp_path)
+    store.save_grader_prompt(GraderPromptUpdate(content="custom", expected_revision=0))
+    prompt_path = _paths(tmp_path).user_grader_prompt_path()
+    prompt_before = prompt_path.read_bytes()
+    settings_before = store.path.read_bytes()
+
+    with pytest.raises(RevisionConflict):
+        store.reset_grader_prompt(RevisionRequest(expected_revision=0))
+
+    assert prompt_path.read_bytes() == prompt_before
+    assert store.path.read_bytes() == settings_before
+
+
+def test_prompt_write_failure_leaves_settings_and_prompt_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _grader_store(tmp_path)
+    store.load_grader_prompt()
+    prompt_path = _paths(tmp_path).user_grader_prompt_path()
+    prompt_before = prompt_path.read_bytes()
+    monkeypatch.setattr(
+        store,
+        "_atomic_write_prompt",
+        lambda content: (_ for _ in ()).throw(SettingsWriteError("prompt write failed")),
+    )
+
+    with pytest.raises(SettingsWriteError):
+        store.save_grader_prompt(GraderPromptUpdate(content=SECRET, expected_revision=0))
+
+    assert prompt_path.read_bytes() == prompt_before
+    assert not store.path.exists()
+
+
+def test_settings_write_failure_rolls_back_existing_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _grader_store(tmp_path)
+    store.set_provider_key("openai", SECRET)
+    store.load_grader_prompt()
+    prompt_path = _paths(tmp_path).user_grader_prompt_path()
+    prompt_before = prompt_path.read_bytes()
+    settings_before = store.path.read_bytes()
+    monkeypatch.setattr(
+        store,
+        "_atomic_write",
+        lambda settings: (_ for _ in ()).throw(SettingsWriteError("settings write failed")),
+    )
+
+    with pytest.raises(SettingsWriteError) as raised:
+        store.save_grader_prompt(GraderPromptUpdate(content=SECRET, expected_revision=1))
+
+    assert SECRET not in str(raised.value)
+    assert prompt_path.read_bytes() == prompt_before
+    assert store.path.read_bytes() == settings_before
+
+
+def test_settings_write_failure_restores_initial_prompt_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _grader_store(tmp_path)
+    prompt_path = _paths(tmp_path).user_grader_prompt_path()
+    monkeypatch.setattr(
+        store,
+        "_atomic_write",
+        lambda settings: (_ for _ in ()).throw(SettingsWriteError("settings write failed")),
+    )
+
+    with pytest.raises(SettingsWriteError):
+        store.save_grader_prompt(GraderPromptUpdate(content="custom", expected_revision=0))
+
+    assert not prompt_path.exists()
+    assert not store.path.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are not supported")
+def test_grader_prompt_is_mode_0600(tmp_path: Path) -> None:
+    store = _grader_store(tmp_path)
+
+    store.load_grader_prompt()
+
+    assert stat.S_IMODE(_paths(tmp_path).user_grader_prompt_path().stat().st_mode) == 0o600
+
+
+def test_grader_prompt_failure_cleans_unique_temp_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.config import user_settings_store as store_module
+
+    store = _grader_store(tmp_path)
+    prompt_path = _paths(tmp_path).user_grader_prompt_path()
+    real_replace = store_module.os.replace
+
+    def fail_prompt_replace(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+        if Path(target) == prompt_path:
+            raise OSError("boom")
+        real_replace(source, target)
+
+    monkeypatch.setattr(store_module.os, "replace", fail_prompt_replace)
+
+    with pytest.raises(SettingsWriteError):
+        store.load_grader_prompt()
+
+    assert list(prompt_path.parent.glob(f".{prompt_path.name}.*.tmp")) == []
+
+
+def test_packaged_seed_change_updates_hash_and_marks_old_seed_customized(tmp_path: Path) -> None:
+    store = _grader_store(tmp_path, seed="first seed")
+    first = store.load_grader_prompt()
+    store.grader_seed_path.write_text("second seed", encoding="utf-8")
+    new_user = UserSettingsStore(
+        "bob",
+        paths=_paths(tmp_path, "bob"),
+        grader_seed_path=store.grader_seed_path,
+        legacy_default_rubric=None,
+    )
+
+    second = store.load_grader_prompt()
+    newly_seeded = new_user.load_grader_prompt()
+
+    assert second.content == "first seed"
+    assert second.content_hash == first.content_hash
+    assert second.source == "customized"
+    assert newly_seeded.content == "second seed"
+    assert newly_seeded.content_hash != first.content_hash
+    assert newly_seeded.source == "seeded"

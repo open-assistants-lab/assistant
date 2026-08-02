@@ -166,6 +166,36 @@ class UserSettingsPatch(SettingsModel):
     verification: VerificationOverrides | None = None
 
 
+class GraderPromptResponse(SettingsModel):
+    content: str
+    source: Literal["seeded", "customized"]
+    content_hash: PromptHash
+    revision: int = Field(ge=0)
+
+    @field_validator("content_hash")
+    @classmethod
+    def _exact_prompt_hash(cls, value: str) -> str:
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None:
+            raise ValueError("content_hash must be lowercase sha256 followed by 64 hexadecimal characters")
+        return value
+
+
+class GraderPromptUpdate(SettingsModel):
+    content: str
+    expected_revision: int = Field(ge=0)
+
+    @field_validator("content")
+    @classmethod
+    def _nonblank_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("content must not be blank")
+        return value
+
+
+class RevisionRequest(SettingsModel):
+    expected_revision: int = Field(ge=0)
+
+
 class ProviderStatus(SettingsModel):
     name: NonEmptyString
     has_key: bool

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import errno
+import hashlib
+import io
 import json as json
 import os as os
 import platform as platform
@@ -15,7 +17,11 @@ from typing import Any
 from pydantic import ValidationError
 
 from src.app_logging import get_logger
+from src.config import settings as _settings
 from src.config.user_settings import (
+    GraderPromptResponse,
+    GraderPromptUpdate,
+    RevisionRequest,
     SavedUserSettings,
     UserSettingsPatch,
     VerificationOverrides,
@@ -26,6 +32,8 @@ logger = get_logger()
 _DEFAULT_GRADER_SEED_PATH = (
     Path(__file__).resolve().parents[2] / "seeds" / "prompts" / "grader_prompt.md"
 )
+_HOST_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"
+_USE_HOST_DEFAULT = object()
 _UNSUPPORTED_DURABILITY_ERRNOS = {
     errno.EBADF,
     errno.EINVAL,
@@ -60,6 +68,12 @@ class SettingsMutation:
     changed: bool
 
 
+@dataclass(frozen=True)
+class GraderPromptMutation:
+    response: GraderPromptResponse
+    changed: bool
+
+
 _LOCKS_GUARD = Lock()
 _PATH_LOCKS: dict[Path, RLock] = {}
 
@@ -79,6 +93,7 @@ class UserSettingsStore:
         paths: DataPaths | None = None,
         legacy_path: Path | None = None,
         grader_seed_path: Path | None = None,
+        legacy_default_rubric: str | None | object = _USE_HOST_DEFAULT,
     ) -> None:
         resolved_paths = paths or DataPaths(user_id=user_id)
         if resolved_paths.user_id != user_id:
@@ -90,6 +105,12 @@ class UserSettingsStore:
             resolved_paths.base / "users" / self._user_id / "settings.json"
         )
         self._grader_seed_path = grader_seed_path or _DEFAULT_GRADER_SEED_PATH
+        self._grader_prompt_path = resolved_paths.user_grader_prompt_path()
+        self._legacy_default_rubric = (
+            _settings.AppConfig.from_yaml(_HOST_CONFIG_PATH).verification.default_rubric
+            if legacy_default_rubric is _USE_HOST_DEFAULT
+            else legacy_default_rubric
+        )
         self._lock = _lock_for(self._path)
 
     @property
@@ -107,6 +128,25 @@ class UserSettingsStore:
     def load(self) -> SavedUserSettings:
         with self._lock:
             return self._load_locked()
+
+    def load_grader_prompt(self) -> GraderPromptResponse:
+        with self._lock:
+            settings = self._load_locked()
+            application_default = self._application_default_grader_prompt()
+            if not self._grader_prompt_path.exists():
+                self._atomic_write_prompt(application_default)
+            content = self._read_grader_prompt()
+            return self._grader_prompt_response(content, application_default, settings.revision)
+
+    def save_grader_prompt(self, update: GraderPromptUpdate) -> GraderPromptMutation:
+        with self._lock:
+            return self._mutate_grader_prompt(update.content, update.expected_revision)
+
+    def reset_grader_prompt(self, request: RevisionRequest) -> GraderPromptMutation:
+        with self._lock:
+            return self._mutate_grader_prompt(
+                self._application_default_grader_prompt(), request.expected_revision
+            )
 
     def patch(self, patch: UserSettingsPatch) -> SettingsMutation:
         with self._lock:
@@ -157,6 +197,81 @@ class UserSettingsStore:
         normalized_provider, _ = self._validated_provider_key(provider, "validation-placeholder")
         with self._lock:
             return self._load_locked().provider_keys.get(normalized_provider)
+
+    def _mutate_grader_prompt(
+        self, content: str, expected_revision: int
+    ) -> GraderPromptMutation:
+        current_settings = self._load_locked()
+        if expected_revision != current_settings.revision:
+            raise RevisionConflict(expected_revision, current_settings.revision)
+        if not content.strip():
+            raise ValueError("Grader prompt content must not be blank")
+
+        application_default = self._application_default_grader_prompt()
+        existed = self._grader_prompt_path.exists()
+        previous = self._read_grader_prompt() if existed else application_default
+        if content == previous:
+            return GraderPromptMutation(
+                response=self._grader_prompt_response(
+                    previous, application_default, current_settings.revision
+                ),
+                changed=False,
+            )
+
+        settings_payload = current_settings.model_dump(mode="json")
+        settings_payload["revision"] = current_settings.revision + 1
+        changed_settings = SavedUserSettings.model_validate(settings_payload)
+        self._atomic_write_prompt(content)
+        try:
+            self._atomic_write(changed_settings)
+        except SettingsWriteError:
+            self._restore_grader_prompt(previous, existed)
+            raise
+        return GraderPromptMutation(
+            response=self._grader_prompt_response(
+                content, application_default, changed_settings.revision
+            ),
+            changed=True,
+        )
+
+    def _application_default_grader_prompt(self) -> str:
+        try:
+            content = self._grader_seed_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            content = ""
+        if content.strip():
+            return content
+        if isinstance(self._legacy_default_rubric, str) and self._legacy_default_rubric.strip():
+            return self._legacy_default_rubric
+        raise SettingsConfigurationError("No default grader prompt is configured")
+
+    def _read_grader_prompt(self) -> str:
+        try:
+            return self._grader_prompt_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            raise SettingsConfigurationError("User grader prompt is invalid") from None
+
+    @staticmethod
+    def _grader_prompt_response(
+        content: str, application_default: str, revision: int
+    ) -> GraderPromptResponse:
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        return GraderPromptResponse(
+            content=content,
+            source="seeded" if content == application_default else "customized",
+            content_hash=f"sha256:{digest}",
+            revision=revision,
+        )
+
+    def _restore_grader_prompt(self, content: str, existed: bool) -> None:
+        try:
+            if existed:
+                self._atomic_write_prompt(content)
+            else:
+                self._grader_prompt_path.unlink(missing_ok=True)
+                self._fsync_parent(self._grader_prompt_path, "grader prompt")
+        except (OSError, SettingsWriteError):
+            pass
 
     @staticmethod
     def _patched_verification(
@@ -354,31 +469,42 @@ class UserSettingsStore:
             raise SettingsWriteError("Unable to finish user settings migration") from None
 
     def _atomic_write(self, settings: SavedUserSettings) -> None:
+        buffer = io.StringIO()
+        try:
+            json.dump(settings.model_dump(mode="json"), buffer, indent=2, sort_keys=True)
+        except Exception:
+            raise SettingsWriteError("Unable to persist user settings") from None
+        payload = buffer.getvalue() + "\n"
+        self._atomic_write_text(self._path, payload, "user settings")
+
+    def _atomic_write_prompt(self, content: str) -> None:
+        self._atomic_write_text(self._grader_prompt_path, content, "grader prompt")
+
+    def _atomic_write_text(self, path: Path, content: str, subject: str) -> None:
         descriptor: int | None = None
         temporary_path: Path | None = None
         try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
             descriptor, temporary_name = tempfile.mkstemp(
-                prefix=f".{self._path.name}.",
+                prefix=f".{path.name}.",
                 suffix=".tmp",
-                dir=str(self._path.parent),
+                dir=str(path.parent),
             )
             temporary_path = Path(temporary_name)
             os.fchmod(descriptor, 0o600)
-            file = os.fdopen(descriptor, "w", encoding="utf-8")
+            file = os.fdopen(descriptor, "wb")
             descriptor = None
             with file:
-                json.dump(settings.model_dump(mode="json"), file, indent=2, sort_keys=True)
-                file.write("\n")
+                file.write(content.encode("utf-8"))
                 file.flush()
                 os.fsync(file.fileno())
-            os.replace(temporary_path, self._path)
+            os.replace(temporary_path, path)
             temporary_path = None
-            self._fsync_parent()
+            self._fsync_parent(path, subject)
         except SettingsWriteError:
             raise
         except Exception:
-            raise SettingsWriteError("Unable to persist user settings") from None
+            raise SettingsWriteError(f"Unable to persist {subject}") from None
         finally:
             if descriptor is not None:
                 try:
@@ -391,22 +517,23 @@ class UserSettingsStore:
                 except OSError:
                     pass
 
-    def _fsync_parent(self) -> None:
+    def _fsync_parent(self, path: Path | None = None, subject: str = "user settings") -> None:
+        target = path or self._path
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
         try:
-            descriptor = os.open(self._path.parent, flags)
+            descriptor = os.open(target.parent, flags)
         except OSError as exc:
             if exc.errno in _UNSUPPORTED_DURABILITY_ERRNOS:
                 return
             raise SettingsWriteError(
-                "User settings were replaced, but durability confirmation failed"
+                f"{subject.capitalize()} were replaced, but durability confirmation failed"
             ) from None
         try:
             os.fsync(descriptor)
         except OSError as exc:
             if exc.errno not in _UNSUPPORTED_DURABILITY_ERRNOS:
                 raise SettingsWriteError(
-                    "User settings were replaced, but durability confirmation failed"
+                    f"{subject.capitalize()} were replaced, but durability confirmation failed"
                 ) from None
         finally:
             try:
