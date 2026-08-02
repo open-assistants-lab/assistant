@@ -439,6 +439,46 @@ def test_sync_settings_routes_are_offloaded_by_fastapi() -> None:
     assert inspect.iscoroutinefunction(settings_router.test_api_key)
 
 
+def test_key_test_offloads_provider_setup(client, monkeypatch) -> None:
+    from src.sdk import registry
+    from src.sdk.providers import factory
+
+    class FakeModels:
+        async def list(self):
+            return []
+
+    class FakeProvider:
+        _client = type("FakeClient", (), {"models": FakeModels()})()
+
+    monkeypatch.setattr(
+        registry,
+        "get_provider",
+        lambda provider: {"type": "openai-compatible", "base_url": "https://example.test"},
+    )
+    monkeypatch.setattr(factory, "create_provider", lambda *args, **kwargs: FakeProvider())
+    calls = []
+
+    async def fake_run_in_threadpool(function, *args):
+        calls.append((function, args))
+        return function(*args)
+
+    monkeypatch.setattr(
+        settings_router,
+        "run_in_threadpool",
+        fake_run_in_threadpool,
+        raising=False,
+    )
+
+    response = client.post(
+        "/settings/test-key",
+        json={"provider": "openai", "api_key": "test-secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"valid": True}
+    assert calls == [(settings_router._setup_provider_key_test, ("openai", "test-secret"))]
+
+
 def test_traversal_user_id_is_rejected_without_calling_store(client, monkeypatch):
     called = False
 

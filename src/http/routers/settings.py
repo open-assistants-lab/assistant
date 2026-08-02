@@ -11,6 +11,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Body, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from src.app_logging import get_logger
 from src.config import get_settings as get_host_settings
@@ -98,6 +99,23 @@ async def _test_http_provider_key(prov: Any, provider: str, api_key: str) -> dic
     if status is not None and 200 <= status < 300:
         return {"valid": True}
     return _key_test_error(status, getattr(response, "text", response))
+
+
+def _setup_provider_key_test(provider: str, api_key: str) -> tuple[Any, str]:
+    """Resolve metadata and construct a provider outside the event loop."""
+    from src.sdk.providers.factory import create_provider
+    from src.sdk.registry import get_provider as get_provider_meta
+
+    meta = get_provider_meta(provider)
+    provider_type = meta.get("type", "openai-compatible") if meta else "openai-compatible"
+    base_url = meta.get("base_url", "") if meta else ""
+    if (
+        base_url
+        and provider_type in ("openai", "openai-compatible")
+        and not base_url.rstrip("/").endswith("/v1")
+    ):
+        base_url = base_url.rstrip("/") + "/v1"
+    return create_provider(provider, api_key=api_key, base_url=base_url or None), provider_type
 
 
 def _get_settings_store(user_id: str) -> UserSettingsStore:
@@ -501,9 +519,6 @@ async def test_api_key(body: TestKeyRequest) -> dict[str, Any]:
     Makes a minimal API call (list models) to verify the key works.
     Returns success/failure with an error message on failure.
     """
-    from src.sdk.providers.factory import create_provider
-    from src.sdk.registry import get_provider as get_provider_meta
-
     provider = body.provider
     api_key = body.api_key
 
@@ -511,14 +526,9 @@ async def test_api_key(body: TestKeyRequest) -> dict[str, Any]:
         return {"valid": False, "error": "API key is empty"}
 
     try:
-        meta = get_provider_meta(provider)
-        provider_type = meta.get("type", "openai-compatible") if meta else "openai-compatible"
-        base_url = meta.get("base_url", "") if meta else ""
-
-        if base_url and provider_type in ("openai", "openai-compatible") and not base_url.rstrip("/").endswith("/v1"):
-            base_url = base_url.rstrip("/") + "/v1"
-
-        prov = create_provider(provider, api_key=api_key, base_url=base_url or None)
+        prov, provider_type = await run_in_threadpool(
+            _setup_provider_key_test, provider, api_key
+        )
         try:
             if hasattr(prov, "_client"):
                 await prov._client.models.list()
