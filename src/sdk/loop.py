@@ -915,7 +915,7 @@ class AgentLoop:
 
         intended_index = self._agent_call_index + 1
         attempt, session_id = self._flow_identity()
-        before = self.last_call_context
+        before = self.last_call_context if reason is CompressionReason.PROVIDER_OVERFLOW else None
         if before is not None:
             before = before.model_copy(
                 update={

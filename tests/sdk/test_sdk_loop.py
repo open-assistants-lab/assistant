@@ -1505,6 +1505,60 @@ class TestContextTelemetry:
         assert telemetry[0].before_context.llm_call_index == 2
         assert telemetry[0].after_context.llm_call_index == 2
 
+    async def test_manual_compression_measures_current_prepared_context(self):
+        measured = []
+
+        def measurer(**kwargs):
+            measured.append(
+                ([message.content for message in kwargs["messages"]], kwargs["tools"])
+            )
+            return _measured_snapshot(**kwargs)
+
+        summary_provider = MockProvider([Message.assistant("current summary")])
+        middleware = SummarizationMiddleware(
+            "mock:test",
+            keep=("messages", 1),
+            summary_provider_factory=lambda: summary_provider,
+        )
+        loop = AgentLoop(
+            provider=MockProvider([Message.assistant("initial answer")]),
+            tools=[echo],
+            middlewares=[middleware],
+            context_measurer=measurer,
+        )
+        await loop.run([Message.user("initial question")])
+        loop.state.add_message(
+            Message.assistant(
+                "checking current state",
+                tool_calls=[ToolCall(id="manual-tool", name="echo", arguments={})],
+            )
+        )
+        loop.state.add_message(
+            Message.tool_result(
+                tool_call_id="manual-tool", content="current tool output", name="echo"
+            )
+        )
+        current_content = [message.content for message in loop._prepare_messages(loop.state)]
+        measured.clear()
+
+        result = await loop.compress_context(CompressionReason.MANUAL)
+
+        assert result.compressed
+        assert measured[0][0] == current_content
+        assert [tool.name for tool in measured[0][1]] == ["echo"]
+        assert result.telemetry.before_context.estimated_tokens == sum(
+            len(str(content)) for content in current_content
+        ) + 100
+        assert result.telemetry.after_context == _measured_snapshot(
+            model=loop.model_id,
+            messages=loop._prepare_messages(loop.state),
+            tools=[echo],
+            attempt=1,
+            llm_call_index=2,
+            source=ContextSource.PREPARED_CONTEXT,
+            freshness=result.telemetry.before_context.freshness,
+        )
+
     async def test_overflow_is_bounded_to_three_provider_calls(self):
         provider = OverflowProvider(failures=10)
         snapshots = []
