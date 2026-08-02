@@ -279,4 +279,4 @@ class OpenAIProvider(LLMProvider):
         return max(1, len(text) // 4)
 
     def get_model_info(self, model: str) -> ModelInfo:
-        return ModelInfo(id=model, name=model, provider_id="openai", context_window=128000)
+        return ModelInfo(id=model, name=model, provider_id=self.provider_id, context_window=128000)

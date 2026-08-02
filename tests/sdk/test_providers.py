@@ -262,6 +262,25 @@ class TestOpenAIProvider:
             "temperature": 0,
         }
 
+    def test_get_model_info_preserves_openai_identity(self):
+        provider = OpenAIProvider(model="gpt-4.1")
+
+        assert provider.get_model_info("gpt-4.1").provider_id == "openai"
+
+    def test_get_model_info_preserves_local_ollama_identity(self):
+        provider = create_provider("ollama", model="qwen3:8b")
+
+        assert provider.get_model_info("qwen3:8b").provider_id == "ollama"
+
+    def test_get_model_info_preserves_custom_compatible_identity(self):
+        provider = create_provider(
+            "groq",
+            model="llama-3.1-70b-versatile",
+            api_key="gsk-test",
+        )
+
+        assert provider.get_model_info("llama-3.1-70b-versatile").provider_id == "groq"
+
     def test_extension_fields_move_to_extra_body(self):
         p = OpenAIProvider(api_key="sk-test")
         params = {
