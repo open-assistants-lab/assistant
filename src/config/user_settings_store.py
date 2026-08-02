@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import errno
 import hashlib
 import io
@@ -111,6 +113,7 @@ class UserSettingsStore:
         )
         self._grader_seed_path = grader_seed_path or _DEFAULT_GRADER_SEED_PATH
         self._grader_prompt_path = resolved_paths.user_grader_prompt_path()
+        self._journal_path = self._path.with_name(".grader_prompt_transaction.json")
         self._legacy_default_rubric = legacy_default_rubric
         self._lock = _lock_for(self._path)
 
@@ -150,6 +153,7 @@ class UserSettingsStore:
 
     def reset_grader_prompt(self, request: RevisionRequest) -> GraderPromptMutation:
         with self._lock:
+            self._recover_pending_transaction()
             return self._mutate_grader_prompt(
                 self._application_default_grader_prompt(), request.expected_revision
             )
@@ -230,11 +234,27 @@ class UserSettingsStore:
         prompt_snapshot = self._snapshot_file(self._grader_prompt_path)
         settings_snapshot = self._snapshot_file(self._path)
         try:
+            self._write_journal(prompt_snapshot, settings_snapshot)
             self._atomic_write_prompt(content)
             self._atomic_write(changed_settings)
-        except SettingsWriteError:
-            self._restore_snapshot(self._grader_prompt_path, prompt_snapshot)
-            self._restore_snapshot(self._path, settings_snapshot)
+            self._remove_journal()
+        except SettingsWriteError as original:
+            if self._journal_exists():
+                try:
+                    self._recover_pending_transaction()
+                except (SettingsConfigurationError, SettingsWriteError):
+                    raise SettingsWriteError(
+                        "Grader prompt transaction recovery is pending; manual recovery may be required"
+                    ) from None
+            raise original
+        except Exception:
+            if self._journal_exists():
+                try:
+                    self._recover_pending_transaction()
+                except (SettingsConfigurationError, SettingsWriteError):
+                    raise SettingsWriteError(
+                        "Grader prompt transaction recovery is pending; manual recovery may be required"
+                    ) from None
             raise
         return GraderPromptMutation(
             response=self._grader_prompt_response(
@@ -313,8 +333,6 @@ class UserSettingsStore:
             os.replace(temporary_path, path)
             temporary_path = None
             self._best_effort_fsync_parent(path)
-        except OSError:
-            pass
         finally:
             if descriptor is not None:
                 try:
@@ -332,6 +350,122 @@ class UserSettingsStore:
             self._fsync_parent(path, "rollback")
         except SettingsWriteError:
             pass
+
+    @staticmethod
+    def _snapshot_payload(snapshot: _FileSnapshot) -> dict[str, object]:
+        return {
+            "existed": snapshot.existed,
+            "content": (
+                base64.b64encode(snapshot.content).decode("ascii")
+                if snapshot.content is not None
+                else None
+            ),
+            "mode": snapshot.mode,
+        }
+
+    @staticmethod
+    def _snapshot_from_payload(payload: object) -> _FileSnapshot:
+        if not isinstance(payload, dict) or set(payload) != {"existed", "content", "mode"}:
+            raise ValueError
+        existed = payload["existed"]
+        content = payload["content"]
+        mode = payload["mode"]
+        if not isinstance(existed, bool):
+            raise ValueError
+        if not existed:
+            if content is not None or mode is not None:
+                raise ValueError
+            return _FileSnapshot(existed=False, content=None, mode=None)
+        if not isinstance(content, str) or not isinstance(mode, int) or isinstance(mode, bool):
+            raise ValueError
+        if not 0 <= mode <= 0o7777:
+            raise ValueError
+        decoded = base64.b64decode(content.encode("ascii"), validate=True)
+        return _FileSnapshot(existed=True, content=decoded, mode=mode)
+
+    def _write_journal(
+        self, prompt: _FileSnapshot, settings: _FileSnapshot
+    ) -> None:
+        payload = {
+            "version": 1,
+            "prompt": self._snapshot_payload(prompt),
+            "settings": self._snapshot_payload(settings),
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+        self._atomic_write_text(
+            self._journal_path, encoded, "grader prompt transaction journal"
+        )
+
+    def _read_journal(self) -> tuple[_FileSnapshot, _FileSnapshot]:
+        try:
+            journal_stat = self._journal_path.lstat()
+            if not stat.S_ISREG(journal_stat.st_mode) or self._journal_path.is_symlink():
+                raise ValueError
+            if os.name != "nt" and stat.S_IMODE(journal_stat.st_mode) != 0o600:
+                raise ValueError
+            payload = json.loads(self._journal_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or set(payload) != {
+                "version",
+                "prompt",
+                "settings",
+            }:
+                raise ValueError
+            if payload["version"] != 1:
+                raise ValueError
+            return (
+                self._snapshot_from_payload(payload["prompt"]),
+                self._snapshot_from_payload(payload["settings"]),
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError, binascii.Error):
+            raise SettingsConfigurationError(
+                "Grader prompt transaction journal is invalid or insecure"
+            ) from None
+
+    def _recover_pending_transaction(self) -> None:
+        if not self._journal_exists():
+            return
+        prompt_snapshot, settings_snapshot = self._read_journal()
+        failed = False
+        for path, snapshot in (
+            (self._grader_prompt_path, prompt_snapshot),
+            (self._path, settings_snapshot),
+        ):
+            try:
+                self._restore_snapshot(path, snapshot)
+            except Exception:
+                failed = True
+        if failed:
+            raise SettingsWriteError(
+                "Grader prompt transaction recovery is pending; manual recovery may be required"
+            )
+        try:
+            self._remove_journal()
+        except SettingsWriteError:
+            raise SettingsWriteError(
+                "Grader prompt transaction recovery is pending; manual recovery may be required"
+            ) from None
+
+    def _remove_journal(self) -> None:
+        try:
+            journal_content = self._journal_path.read_text(encoding="utf-8")
+            self._journal_path.unlink()
+            self._fsync_parent(self._journal_path, "grader prompt transaction journal")
+        except Exception:
+            if not self._journal_exists() and "journal_content" in locals():
+                try:
+                    self._atomic_write_text(
+                        self._journal_path,
+                        journal_content,
+                        "grader prompt transaction journal",
+                    )
+                except SettingsWriteError:
+                    pass
+            raise SettingsWriteError(
+                "Unable to finalize grader prompt transaction journal"
+            ) from None
+
+    def _journal_exists(self) -> bool:
+        return os.path.lexists(self._journal_path)
 
     @staticmethod
     def _patched_verification(
@@ -363,6 +497,7 @@ class UserSettingsStore:
         return SettingsMutation(settings=changed, changed=True)
 
     def _load_locked(self) -> SavedUserSettings:
+        self._recover_pending_transaction()
         canonical: SavedUserSettings | None = None
         canonical_raw: dict[str, Any] | None = None
         canonical_exists = self._path.exists()

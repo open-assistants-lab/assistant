@@ -1149,3 +1149,116 @@ def test_omitted_fallback_ignores_uninitialized_settings_and_hostile_cwd(
 
     assert injected.load_grader_prompt().content == "explicit fallback rubric"
     assert settings_module._config is None
+
+
+def _journal_path(store: UserSettingsStore) -> Path:
+    return store.path.with_name(".grader_prompt_transaction.json")
+
+
+@pytest.mark.parametrize("crash_after", ["prompt", "settings"])
+def test_next_load_recovers_crashed_grader_prompt_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_after: str,
+) -> None:
+    store = _grader_store(tmp_path)
+    store.set_provider_key("openai", SECRET)
+    store.load_grader_prompt()
+    prompt_path = _paths(tmp_path).user_grader_prompt_path()
+    prompt_before = prompt_path.read_bytes()
+    settings_before = store.path.read_bytes()
+
+    if crash_after == "prompt":
+        monkeypatch.setattr(
+            store,
+            "_atomic_write",
+            lambda settings: (_ for _ in ()).throw(SystemExit("simulated crash")),
+        )
+    else:
+        monkeypatch.setattr(
+            store,
+            "_remove_journal",
+            lambda: (_ for _ in ()).throw(SystemExit("simulated crash")),
+            raising=False,
+        )
+
+    with pytest.raises(SystemExit, match="simulated crash"):
+        store.save_grader_prompt(
+            GraderPromptUpdate(content="replacement rubric", expected_revision=1)
+        )
+
+    assert _journal_path(store).exists()
+    recovered = _grader_store(tmp_path)
+    assert recovered.load().revision == 1
+    assert prompt_path.read_bytes() == prompt_before
+    assert recovered.path.read_bytes() == settings_before
+    assert not _journal_path(recovered).exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are not supported")
+def test_grader_prompt_transaction_journal_is_mode_0600(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _grader_store(tmp_path)
+    monkeypatch.setattr(
+        store,
+        "_atomic_write_prompt",
+        lambda content: (_ for _ in ()).throw(SystemExit("simulated crash")),
+    )
+
+    with pytest.raises(SystemExit):
+        store.save_grader_prompt(GraderPromptUpdate(content="custom", expected_revision=0))
+
+    assert stat.S_IMODE(_journal_path(store).stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("insecure", [False, True])
+def test_invalid_grader_prompt_transaction_journal_is_configuration_error(
+    tmp_path: Path,
+    insecure: bool,
+) -> None:
+    store = _grader_store(tmp_path)
+    journal = _journal_path(store)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text(f'{{"invalid": "{SECRET}"}}', encoding="utf-8")
+    journal.chmod(0o644 if insecure else 0o600)
+
+    with pytest.raises(SettingsConfigurationError) as raised:
+        store.load()
+
+    assert SECRET not in str(raised.value)
+    assert journal.exists()
+
+
+def test_permanent_recovery_failure_leaves_journal_and_reports_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _grader_store(tmp_path)
+    store.load_grader_prompt()
+    monkeypatch.setattr(
+        store,
+        "_atomic_write",
+        lambda settings: (_ for _ in ()).throw(SettingsWriteError("settings failed")),
+    )
+    monkeypatch.setattr(
+        store,
+        "_restore_snapshot",
+        lambda path, snapshot: (_ for _ in ()).throw(OSError("restore failed")),
+    )
+
+    with pytest.raises(SettingsWriteError, match="recovery.*pending|manual") as raised:
+        store.save_grader_prompt(GraderPromptUpdate(content=SECRET, expected_revision=0))
+
+    assert SECRET not in str(raised.value)
+    assert _journal_path(store).exists()
+
+
+def test_successful_grader_prompt_transaction_removes_journal(tmp_path: Path) -> None:
+    store = _grader_store(tmp_path)
+
+    mutation = store.save_grader_prompt(
+        GraderPromptUpdate(content="custom rubric", expected_revision=0)
+    )
+
+    assert mutation.changed is True
+    assert not _journal_path(store).exists()
