@@ -2,24 +2,53 @@
 
 from __future__ import annotations
 
-import json
 import os
-from pathlib import Path
-from typing import Any, cast
+from collections.abc import Mapping
+from typing import Any, Literal
 
-from fastapi import APIRouter, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Body, Query
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from src.app_logging import get_logger
+from src.config import get_settings as get_host_settings
+from src.config.user_settings import (
+    FrozenJSONValue,
+    SettingsError,
+    UserSettingsPatch,
+    UserSettingsResponse,
+    VerificationOverrides,
+)
+from src.config.user_settings_service import (
+    SettingsResolutionError,
+    build_user_settings_response,
+    resolve_effective_user_settings,
+    resolve_provider_statuses,
+)
+from src.config.user_settings_store import (
+    RevisionConflict,
+    SettingsConfigurationError,
+    SettingsWriteError,
+    UserSettingsStore,
+)
+from src.sdk.run_models import CanonicalModel
 
 
 class UpdateSettingsRequest(BaseModel):
     """Request body for PATCH /settings."""
-    default_model: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int | None = None
+    default_model: CanonicalModel | None = None
+    verification: VerificationOverrides | None = None
 
 
 class SetApiKeyRequest(BaseModel):
     """Request body for POST /settings/api-keys."""
+
+    model_config = ConfigDict(extra="forbid")
+
     provider: str
     api_key: str
 
@@ -65,30 +94,29 @@ async def _test_http_provider_key(prov: Any, provider: str, api_key: str) -> dic
     return _key_test_error(status, getattr(response, "text", response))
 
 
-def _settings_path(user_id: str) -> Path:
-    from src.config.settings import get_settings
-
-    root = get_settings().data_path or "data"
-    return Path(f"{root}/users/{user_id}/settings.json")
-
-
-def _read_settings(user_id: str) -> dict[str, Any]:
-    path = _settings_path(user_id)
-    if path.exists():
-        return cast(dict[str, Any], json.loads(path.read_text()))
-    return {"provider_keys": {}, "default_model": None}
-
-
-def _write_settings(user_id: str, data: dict[str, Any]) -> None:
-    path = _settings_path(user_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2))
+def _get_settings_store(user_id: str) -> UserSettingsStore:
+    """Create a settings store with the host's legacy rubric fallback."""
+    host = get_host_settings()
+    return UserSettingsStore(
+        user_id,
+        legacy_default_rubric=host.verification.default_rubric,
+    )
 
 
 def _reset_user_loops(user_id: str) -> None:
     from src.sdk.runner import reset_user_sdk_loops
 
     reset_user_sdk_loops(user_id, reason="settings_changed")
+
+
+def _settings_error(
+    status_code: int,
+    code: Literal["revision_conflict", "validation_error", "configuration_error"],
+    message: str,
+    details: FrozenJSONValue,
+) -> JSONResponse:
+    error = SettingsError(code=code, message=message, details=details)
+    return JSONResponse(status_code=status_code, content=error.model_dump(mode="json"))
 
 
 _KNOWN_PROVIDERS = [
@@ -145,13 +173,6 @@ _STATIC_MODELS = {
 }
 
 
-def _provider_name(provider_id: str) -> str:
-    for provider in _catalog_providers():
-        if provider["id"] == provider_id:
-            return provider["name"]
-    return provider_id.title()
-
-
 def _catalog_providers() -> list[dict[str, Any]]:
     providers_by_id = {provider["id"]: dict(provider) for provider in _KNOWN_PROVIDERS}
     try:
@@ -170,32 +191,6 @@ def _catalog_providers() -> list[dict[str, Any]]:
     except Exception:
         pass
     return sorted(providers_by_id.values(), key=lambda provider: provider["name"].lower())
-
-
-def _registry_env_key_for_provider(provider_id: str) -> str | None:
-    try:
-        from src.sdk.registry import get_provider
-
-        provider = get_provider(provider_id)
-        if not provider:
-            return None
-        for env_key in provider.get("env", []):
-            if os.environ.get(str(env_key)):
-                return str(env_key)
-    except Exception:
-        return None
-    return None
-
-
-def _provider_key_source(provider_id: str, user_id: str, data: dict[str, Any] | None = None) -> str:
-    settings = data if data is not None else _read_settings(user_id)
-    if provider_id in settings.get("provider_keys", {}):
-        return "user"
-
-    if _env_key_for_provider(provider_id) is not None or _registry_env_key_for_provider(provider_id):
-        return "hosted" if provider_id == "agnes" else "env"
-
-    return "none"
 
 
 def _provider_models(provider_id: str, provider_name: str) -> list[dict[str, str]]:
@@ -224,42 +219,91 @@ def _provider_models(provider_id: str, provider_name: str) -> list[dict[str, str
     return list(deduped.values())
 
 
-@router.get("")
-async def get_settings(user_id: str = Query("default_user")) -> dict[str, Any]:
-    """Read current settings (default model, which providers have keys)."""
-    data = _read_settings(user_id)
-
-    provider_status: dict[str, Any] = {}
-    for p in _catalog_providers():
-        pid = p["id"]
-        key_source = _provider_key_source(pid, user_id, data)
-        provider_status[pid] = {
-            "name": p["name"],
-            "has_key": key_source != "none",
-            "key_configured_via_env": key_source == "env",
-            "key_source": key_source,
-        }
-    return {
-        "default_model": data.get("default_model"),
-        "provider_status": provider_status,
+def _catalog_snapshot() -> tuple[list[dict[str, Any]], dict[str, list[dict[str, str]]]]:
+    providers = _catalog_providers()
+    models = {
+        str(provider["id"]): _provider_models(str(provider["id"]), str(provider["name"]))
+        for provider in providers
     }
+    return providers, models
 
 
-@router.get("/model-catalog")
+def _resolve_response(
+    store: UserSettingsStore,
+    providers: list[dict[str, Any]],
+    models: Mapping[str, list[dict[str, str]]],
+) -> UserSettingsResponse:
+    saved = store.load()
+    provider_status = resolve_provider_statuses(saved, providers, os.environ)
+    available_providers = frozenset(models)
+    available_models = frozenset(
+        model["id"] for provider_models in models.values() for model in provider_models
+    )
+    try:
+        prompt = store.load_grader_prompt()
+    except SettingsConfigurationError as exc:
+        if str(exc) != "No default grader prompt is configured":
+            raise
+        prompt = None
+
+    host = get_host_settings()
+    effective = resolve_effective_user_settings(
+        saved=saved,
+        prompt=prompt,
+        host_default_model=host.agent.model,
+        host_verification_enabled=host.verification.enabled,
+        host_grader_model=host.verification.grader_model,
+        host_max_attempts=host.verification.max_iterations,
+        provider_status=provider_status,
+        model_available=available_models.__contains__,
+        provider_available=available_providers.__contains__,
+    )
+    return build_user_settings_response(saved, effective, provider_status)
+
+
+def _configuration_failure() -> JSONResponse:
+    return _settings_error(
+        500,
+        "configuration_error",
+        "Unable to process user settings",
+        {},
+    )
+
+
+@router.get("", response_model=UserSettingsResponse)
+async def get_settings(user_id: str = Query("default_user")) -> UserSettingsResponse | JSONResponse:
+    """Read canonical saved and effective settings without exposing credentials."""
+    try:
+        providers, models = _catalog_snapshot()
+        return _resolve_response(_get_settings_store(user_id), providers, models)
+    except ValueError:
+        return _settings_error(422, "validation_error", "Invalid settings request", {})
+    except (SettingsConfigurationError, SettingsWriteError, SettingsResolutionError):
+        return _configuration_failure()
+
+
+@router.get("/model-catalog", response_model=None)
 async def model_catalog(
     user_id: str = Query("default_user"),
     max_models_per_provider: int | None = None,
     max_providers: int | None = None,
-) -> dict[str, Any]:
+) -> dict[str, Any] | JSONResponse:
     """Return the Settings provider-grouped model catalog."""
-    data = _read_settings(user_id)
-    providers = []
+    try:
+        catalog_providers, models = _catalog_snapshot()
+        resolved = _resolve_response(_get_settings_store(user_id), catalog_providers, models)
+    except ValueError:
+        return _settings_error(422, "validation_error", "Invalid settings request", {})
+    except (SettingsConfigurationError, SettingsWriteError, SettingsResolutionError):
+        return _configuration_failure()
 
-    for provider in _catalog_providers():
+    providers = []
+    for provider in catalog_providers:
         provider_id = provider["id"]
         provider_name = provider["name"]
-        key_source = _provider_key_source(provider_id, user_id, data)
-        all_provider_models = _provider_models(provider_id, provider_name)
+        status = resolved.provider_status[provider_id]
+        key_source = status.key_source
+        all_provider_models = models[provider_id]
         provider_model_count = len(all_provider_models)
         shown_models = (
             all_provider_models[:max_models_per_provider]
@@ -285,64 +329,81 @@ async def model_catalog(
     total_providers = len(providers)
     shown_providers = providers[:max_providers] if max_providers is not None else providers
     return {
-        "default_model": data.get("default_model"),
+        "revision": resolved.revision,
+        "default_model": resolved.effective.default_model,
         "total_providers": total_providers,
         "providers": shown_providers,
     }
 
 
-def _env_key_for_provider(provider_id: str) -> str | None:
-    mapping = {
-        "agnes": "AGNES_API_KEY",
-        "openai": "OPENAI_API_KEY",
-        "anthropic": "ANTHROPIC_API_KEY",
-        "gemini": "GOOGLE_API_KEY",
-        "ollama": "OLLAMA_API_KEY",
-        "ollama-cloud": "OLLAMA_API_KEY",
-        "groq": "GROQ_API_KEY",
-        "deepseek": "DEEPSEEK_API_KEY",
-        "together": "TOGETHER_API_KEY",
-        "openrouter": "OPENROUTER_API_KEY",
-    }
-    env_var = mapping.get(provider_id)
-    if env_var:
-        return os.environ.get(env_var)
-    return None
-
-
-@router.patch("")
+@router.patch("", response_model=UserSettingsResponse)
 async def update_settings(
-    body: UpdateSettingsRequest,
+    body: Any = Body(...),
     user_id: str = Query("default_user"),
-) -> dict[str, Any]:
-    """Update settings (default_model, etc.)."""
-    data = _read_settings(user_id)
-    if body.default_model is not None:
-        data["default_model"] = body.default_model
-    _write_settings(user_id, data)
-    _reset_user_loops(user_id)
-    return {"status": "updated"}
+) -> UserSettingsResponse | JSONResponse:
+    """Apply a revisioned settings patch, retaining omitted legacy revision support."""
+    try:
+        request = UpdateSettingsRequest.model_validate(body)
+        store = _get_settings_store(user_id)
+        expected_revision = request.expected_revision
+        if expected_revision is None:
+            expected_revision = store.load().revision
+        patch_payload: dict[str, Any] = {"expected_revision": expected_revision}
+        for field in ("default_model", "verification"):
+            if field in request.model_fields_set:
+                patch_payload[field] = getattr(request, field)
+        mutation = store.patch(UserSettingsPatch.model_validate(patch_payload))
+        if mutation.changed:
+            _reset_user_loops(user_id)
+        providers, models = _catalog_snapshot()
+        return _resolve_response(store, providers, models)
+    except RevisionConflict as exc:
+        return _settings_error(
+            409,
+            "revision_conflict",
+            "Settings revision conflict",
+            {"expected": exc.expected, "actual": exc.actual},
+        )
+    except (ValidationError, ValueError):
+        return _settings_error(422, "validation_error", "Invalid settings request", {})
+    except (SettingsConfigurationError, SettingsWriteError, SettingsResolutionError):
+        return _configuration_failure()
 
 
-@router.get("/api-keys")
-async def list_api_keys(user_id: str = Query("default_user")) -> dict[str, Any]:
+@router.get("/api-keys", response_model=None)
+async def list_api_keys(user_id: str = Query("default_user")) -> dict[str, bool] | JSONResponse:
     """List which providers have stored API keys (without revealing keys)."""
-    data = _read_settings(user_id)
-    keys = data.get("provider_keys", {})
-    return {pid: bool(val) for pid, val in keys.items()}
+    try:
+        saved = _get_settings_store(user_id).load()
+        return {provider: True for provider in saved.provider_keys}
+    except ValueError:
+        return _settings_error(422, "validation_error", "Invalid settings request", {})
+    except (SettingsConfigurationError, SettingsWriteError):
+        return _configuration_failure()
 
 
-@router.post("/api-keys")
+@router.post("/api-keys", response_model=None)
 async def set_api_key(
-    body: SetApiKeyRequest,
+    body: Any = Body(...),
     user_id: str = Query("default_user"),
-) -> dict[str, Any]:
+) -> dict[str, str | int] | JSONResponse:
     """Store an API key for a provider."""
-    data = _read_settings(user_id)
-    data.setdefault("provider_keys", {})[body.provider] = body.api_key
-    _write_settings(user_id, data)
-    _reset_user_loops(user_id)
-    return {"status": "stored", "provider": body.provider}
+    try:
+        request = SetApiKeyRequest.model_validate(body)
+        mutation = _get_settings_store(user_id).set_provider_key(
+            request.provider, request.api_key
+        )
+        if mutation.changed:
+            _reset_user_loops(user_id)
+        return {
+            "status": "stored",
+            "provider": request.provider,
+            "revision": mutation.settings.revision,
+        }
+    except (ValidationError, ValueError):
+        return _settings_error(422, "validation_error", "Invalid settings request", {})
+    except (SettingsConfigurationError, SettingsWriteError):
+        return _configuration_failure()
 
 
 @router.post("/test-key")
@@ -394,14 +455,22 @@ async def test_api_key(body: TestKeyRequest) -> dict[str, Any]:
         return {"valid": False, "error": f"Could not test key: {e}"}
 
 
-@router.delete("/api-keys/{provider}")
+@router.delete("/api-keys/{provider}", response_model=None)
 async def delete_api_key(
     provider: str,
     user_id: str = Query("default_user"),
-) -> dict[str, Any]:
+) -> dict[str, str | int] | JSONResponse:
     """Remove a stored API key for a provider."""
-    data = _read_settings(user_id)
-    data.get("provider_keys", {}).pop(provider, None)
-    _write_settings(user_id, data)
-    _reset_user_loops(user_id)
-    return {"status": "removed", "provider": provider}
+    try:
+        mutation = _get_settings_store(user_id).delete_provider_key(provider)
+        if mutation.changed:
+            _reset_user_loops(user_id)
+        return {
+            "status": "removed",
+            "provider": provider,
+            "revision": mutation.settings.revision,
+        }
+    except ValueError:
+        return _settings_error(422, "validation_error", "Invalid settings request", {})
+    except (SettingsConfigurationError, SettingsWriteError):
+        return _configuration_failure()
