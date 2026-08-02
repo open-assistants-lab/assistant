@@ -19,6 +19,8 @@ from coremem.types import SearchResult as _CoreMemResult
 from src.storage.paths import get_paths
 
 USER_LEVEL_CONTEXT = "user"
+SUMMARY_SOURCE = "summarization_middleware"
+SUMMARY_REASONS = {"threshold", "provider_overflow", "manual"}
 
 
 @dataclass
@@ -30,6 +32,7 @@ class Message:
     role: str
     content: str
     metadata: dict[str, Any] | None = None
+    session_id: str = ""
 
 
 @dataclass
@@ -84,6 +87,14 @@ class MessageStore:
             with self._core.db._connect() as cur:
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role)")
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_messages_session_ts "
+                    "ON messages(session_id, ts DESC)"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_messages_session_role_ts "
+                    "ON messages(session_id, role, ts DESC)"
+                )
         except Exception:
             pass
 
@@ -95,7 +106,7 @@ class MessageStore:
         # Start background observer and reflector workers
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self._core.start_pipelines())  # type: ignore[attr-defined]
+            loop.create_task(self._core.start_pipelines())
         except (RuntimeError, AttributeError):
             pass  # No event loop or no pipelines — feature not available
 
@@ -380,6 +391,68 @@ class MessageStore:
             role=m.role,
             content=m.content,
             metadata=m.metadata,
+            session_id=m.session_id or "",
+        )
+
+    @staticmethod
+    def _require_session_id(session_id: str) -> str:
+        session_id = session_id.strip()
+        if not session_id:
+            raise ValueError("session_id must be nonempty")
+        return session_id
+
+    @staticmethod
+    def _summary_provenance(
+        metadata: object,
+    ) -> tuple[set[str], set[str]] | None:
+        if not isinstance(metadata, dict):
+            return None
+        if metadata.get("source") != SUMMARY_SOURCE:
+            return None
+        if metadata.get("compression_reason") not in SUMMARY_REASONS:
+            return None
+        if "session_id" in metadata:
+            return None
+
+        summarized = metadata.get("summarized_message_ids")
+        preserved = metadata.get("preserved_message_ids")
+        if not isinstance(summarized, list) or not isinstance(preserved, list):
+            return None
+        if not summarized:
+            return None
+        if any(not isinstance(value, str) or not value.strip() for value in summarized + preserved):
+            return None
+
+        summarized_ids = set(summarized)
+        preserved_ids = set(preserved)
+        if len(summarized_ids) != len(summarized) or len(preserved_ids) != len(preserved):
+            return None
+        if summarized_ids & preserved_ids:
+            return None
+        return summarized_ids, preserved_ids
+
+    @staticmethod
+    def _memory_sort_key(memory: _CoreMem) -> tuple[float, str]:
+        timestamp = memory.ts
+        if timestamp is None:
+            return float("-inf"), memory.id
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=UTC)
+        return timestamp.timestamp(), memory.id
+
+    def _scoped_memories(self, session_id: str) -> list[_CoreMem]:
+        memories = self._core.fetch_all(session_id=session_id)
+        return [memory for memory in memories if (memory.session_id or "") == session_id]
+
+    def _newest_valid_summary(self, memories: list[_CoreMem]) -> _CoreMem | None:
+        summaries = sorted(
+            (memory for memory in memories if memory.role == "summary"),
+            key=self._memory_sort_key,
+            reverse=True,
+        )
+        return next(
+            (summary for summary in summaries if self._summary_provenance(summary.metadata)),
+            None,
         )
 
     @staticmethod
@@ -426,6 +499,9 @@ class MessageStore:
         return [self._to_msg(m) for m in reversed(memories)]
 
     def get_messages_by_session_id(self, session_id: str, limit: int = 50) -> list[Message]:
+        session_id = self._require_session_id(session_id)
+        if limit <= 0:
+            return []
         memories = self._core.fetch(limit=limit, session_id=session_id)
         return [self._to_msg(m) for m in reversed(memories)]
 
@@ -484,28 +560,67 @@ class MessageStore:
         memories = self._core.fetch(limit=count)
         return [self._to_msg(m) for m in reversed(memories)]
 
-    def get_messages_with_summary(self, limit: int = 50, workspace_id: str | None = None) -> list[Message]:
+    def get_messages_with_summary(self, session_id: str, limit: int = 50) -> list[Message]:
+        session_id = self._require_session_id(session_id)
         if limit <= 0:
             return []
-        summaries = self._core.fetch(limit=1, role="summary")
-        if not summaries:
-            memories = self._core.fetch(limit=limit)
-            return [self._to_msg(m) for m in reversed(memories)]
-        non_summaries = self._core.fetch(limit=limit)
-        non_summaries = [m for m in non_summaries if m.role != "summary"]
-        result: list[Message] = [self._to_msg(summaries[0])]
-        result += [self._to_msg(m) for m in non_summaries]
-        return result[:limit]
+        memories = self._scoped_memories(session_id)
+        summary = self._newest_valid_summary(memories)
+        if summary is None:
+            non_summaries = sorted(
+                (memory for memory in memories if memory.role != "summary"),
+                key=self._memory_sort_key,
+            )
+            return [self._to_msg(memory) for memory in non_summaries[-limit:]]
 
-    def add_summary_message(self, content: str) -> str:
-        return self.add_message("summary", content)
+        provenance = self._summary_provenance(summary.metadata)
+        if provenance is None:  # Guarded by _newest_valid_summary.
+            return []
+        summarized_ids, preserved_ids = provenance
+        summary_key = self._memory_sort_key(summary)
+        retained = sorted(
+            (
+                memory
+                for memory in memories
+                if memory.role != "summary"
+                and memory.id not in summarized_ids
+                and (
+                    memory.id in preserved_ids
+                    or self._memory_sort_key(memory)[0] > summary_key[0]
+                )
+            ),
+            key=self._memory_sort_key,
+        )
+        if limit == 1:
+            return [self._to_msg(summary)]
+        return [self._to_msg(summary)] + [
+            self._to_msg(memory) for memory in retained[-(limit - 1) :]
+        ]
 
-    def has_summary(self) -> bool:
-        return len(self._core.fetch(limit=1, role="summary")) > 0
+    def add_summary_message(
+        self, content: str, *, session_id: str, metadata: dict[str, Any]
+    ) -> str:
+        session_id = self._require_session_id(session_id)
+        if not content.strip():
+            raise ValueError("content must be nonblank")
+        if not isinstance(metadata, dict):
+            raise ValueError("metadata must be an object")
+        summary_metadata = dict(metadata)
+        summary_metadata["source"] = SUMMARY_SOURCE
+        summary_metadata.pop("session_id", None)
+        if self._summary_provenance(summary_metadata) is None:
+            raise ValueError("invalid summary metadata or compression_reason")
+        return self.add_message(
+            "summary", content, metadata=summary_metadata, session_id=session_id
+        )
+
+    def has_summary(self, session_id: str) -> bool:
+        session_id = self._require_session_id(session_id)
+        return self._newest_valid_summary(self._scoped_memories(session_id)) is not None
 
     def count_messages(self, start_date: date | None = None, end_date: date | None = None) -> int:
         if not start_date and not end_date:
-            return self._core.count()
+            return cast(int, self._core.count())
         ts_after = f"{start_date.isoformat()}T00:00:00" if start_date else None
         ts_before = f"{end_date.isoformat()}T23:59:59" if end_date else None
         try:
