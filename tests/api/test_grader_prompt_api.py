@@ -54,6 +54,13 @@ def _expected(content: str, source: str, revision: int) -> dict[str, object]:
     }
 
 
+VALIDATION_ERROR = {
+    "code": "validation_error",
+    "message": "Invalid settings request",
+    "details": {},
+}
+
+
 def test_get_first_access_seeds_exact_default_and_remains_stable(
     client, grader_prompt_api, test_user_id
 ):
@@ -108,12 +115,82 @@ def test_blank_put_is_secret_free_and_unchanged(client, grader_prompt_api, test_
     )
 
     assert response.status_code == 422
-    assert response.json() == {
-        "code": "validation_error",
-        "message": "Invalid settings request",
-        "details": {},
-    }
+    assert response.json() == VALIDATION_ERROR
     assert client.get("/user/grader-prompt", params={"user_id": test_user_id}).json() == before
+    assert grader_prompt_api["resets"] == []
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [("put", "/user/grader-prompt"), ("post", "/user/grader-prompt/reset")],
+)
+def test_missing_body_returns_canonical_validation_error(
+    client, grader_prompt_api, test_user_id, method, path
+):
+    response = client.request(method, path, params={"user_id": test_user_id}, content=b"")
+
+    assert response.status_code == 422
+    assert response.json() == VALIDATION_ERROR
+    assert grader_prompt_api["resets"] == []
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [("put", "/user/grader-prompt"), ("post", "/user/grader-prompt/reset")],
+)
+def test_malformed_json_returns_redacted_validation_error(
+    client, grader_prompt_api, test_user_id, method, path
+):
+    secret = "malformed-sensitive-prompt"
+    response = client.request(
+        method,
+        path,
+        params={"user_id": test_user_id},
+        content=f'{{"content":"{secret}"'.encode(),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == VALIDATION_ERROR
+    assert secret not in response.text
+    assert grader_prompt_api["resets"] == []
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [("put", "/user/grader-prompt"), ("post", "/user/grader-prompt/reset")],
+)
+def test_wrong_json_type_returns_redacted_validation_error(
+    client, grader_prompt_api, test_user_id, method, path
+):
+    secret = "wrong-type-sensitive-prompt"
+    response = client.request(
+        method,
+        path,
+        params={"user_id": test_user_id},
+        json=[secret],
+    )
+
+    assert response.status_code == 422
+    assert response.json() == VALIDATION_ERROR
+    assert secret not in response.text
+    assert grader_prompt_api["resets"] == []
+
+
+def test_invalid_put_never_echoes_sensitive_submitted_content(
+    client, grader_prompt_api, test_user_id
+):
+    secret = "valid-json-sensitive-prompt"
+
+    response = client.put(
+        "/user/grader-prompt",
+        params={"user_id": test_user_id},
+        json={"content": secret, "expected_revision": -1},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == VALIDATION_ERROR
+    assert secret not in response.text
     assert grader_prompt_api["resets"] == []
 
 
@@ -283,11 +360,7 @@ def test_traversal_user_is_controlled_without_escape(client, grader_prompt_api, 
     response = client.get("/user/grader-prompt", params={"user_id": "../escape-secret"})
 
     assert response.status_code == 422
-    assert response.json() == {
-        "code": "validation_error",
-        "message": "Invalid settings request",
-        "details": {},
-    }
+    assert response.json() == VALIDATION_ERROR
     assert "escape-secret" not in response.text
     assert not (tmp_path / "escape-secret").exists()
     assert grader_prompt_api["resets"] == []
@@ -313,12 +386,47 @@ def test_grader_prompt_store_factory_injects_host_default(monkeypatch):
     assert captured == {"user_id": "alice", "rubric": "host default"}
 
 
-def test_grader_prompt_route_endpoints_are_synchronous(app):
-    endpoints = {
-        route.path: route.endpoint
+@pytest.mark.parametrize(
+    ("operation", "method", "path"),
+    [
+        ("save_grader_prompt", "put", "/user/grader-prompt"),
+        ("reset_grader_prompt", "post", "/user/grader-prompt/reset"),
+    ],
+)
+def test_grader_prompt_mutations_use_threadpool(
+    client, grader_prompt_api, monkeypatch, test_user_id, operation, method, path
+):
+    if operation == "reset_grader_prompt":
+        grader_prompt_api["get_store"](test_user_id).save_grader_prompt(
+            user_prompt_router.GraderPromptUpdate(content="custom", expected_revision=0)
+        )
+        body = {"expected_revision": 1}
+    else:
+        body = {"content": "custom", "expected_revision": 0}
+    calls: list[str] = []
+
+    async def run_in_threadpool(function, *args):
+        calls.append(function.__name__)
+        return function(*args)
+
+    monkeypatch.setattr(user_prompt_router, "run_in_threadpool", run_in_threadpool)
+
+    response = client.request(method, path, params={"user_id": test_user_id}, json=body)
+
+    assert response.status_code == 200
+    assert calls == [operation]
+
+
+def test_grader_prompt_route_execution_models(app):
+    routes = [
+        route
         for route in app.routes
         if isinstance(route, APIRoute) and route.path.startswith("/user/grader-prompt")
-    }
+    ]
+    get_route = next(route for route in routes if route.path == "/user/grader-prompt" and "GET" in route.methods)
+    put_route = next(route for route in routes if route.path == "/user/grader-prompt" and "PUT" in route.methods)
+    reset_route = next(route for route in routes if route.path.endswith("/reset"))
 
-    assert set(endpoints) == {"/user/grader-prompt", "/user/grader-prompt/reset"}
-    assert all(not inspect.iscoroutinefunction(endpoint) for endpoint in endpoints.values())
+    assert not inspect.iscoroutinefunction(get_route.endpoint)
+    assert inspect.iscoroutinefunction(put_route.endpoint)
+    assert inspect.iscoroutinefunction(reset_route.endpoint)

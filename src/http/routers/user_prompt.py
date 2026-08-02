@@ -1,10 +1,12 @@
 """User prompt API endpoints."""
 
-from typing import Any, Literal
+from json import JSONDecodeError
+from typing import Literal
 
-from fastapi import APIRouter, Body, Query
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from src.config import get_settings
 from src.config.user_settings import (
@@ -94,14 +96,16 @@ def get_grader_prompt(
 
 
 @router.put("/grader-prompt", response_model=GraderPromptResponse)
-def set_grader_prompt(
-    body: Any = Body(...),
+async def set_grader_prompt(
+    request: Request,
     user_id: str = Query("default_user"),
 ) -> GraderPromptResponse | JSONResponse:
     """Replace the user's grader prompt when its revision is current."""
     try:
-        request = GraderPromptUpdate.model_validate(body)
-        mutation = _get_grader_prompt_store(user_id).save_grader_prompt(request)
+        payload = await request.json()
+        update = GraderPromptUpdate.model_validate(payload)
+        store = _get_grader_prompt_store(user_id)
+        mutation = await run_in_threadpool(store.save_grader_prompt, update)
         if mutation.changed:
             _reset_grader_prompt_loops(user_id)
         return mutation.response
@@ -112,21 +116,23 @@ def set_grader_prompt(
             "Settings revision conflict",
             {"expected": exc.expected, "actual": exc.actual},
         )
-    except (ValidationError, ValueError):
+    except (JSONDecodeError, UnicodeDecodeError, ValidationError, ValueError):
         return _grader_prompt_error(422, "validation_error", "Invalid settings request", {})
     except (SettingsConfigurationError, SettingsWriteError):
         return _grader_prompt_configuration_failure()
 
 
 @router.post("/grader-prompt/reset", response_model=GraderPromptResponse)
-def reset_grader_prompt(
-    body: Any = Body(...),
+async def reset_grader_prompt(
+    request: Request,
     user_id: str = Query("default_user"),
 ) -> GraderPromptResponse | JSONResponse:
     """Restore the packaged grader prompt when its revision is current."""
     try:
-        request = RevisionRequest.model_validate(body)
-        mutation = _get_grader_prompt_store(user_id).reset_grader_prompt(request)
+        payload = await request.json()
+        revision = RevisionRequest.model_validate(payload)
+        store = _get_grader_prompt_store(user_id)
+        mutation = await run_in_threadpool(store.reset_grader_prompt, revision)
         if mutation.changed:
             _reset_grader_prompt_loops(user_id)
         return mutation.response
@@ -137,7 +143,7 @@ def reset_grader_prompt(
             "Settings revision conflict",
             {"expected": exc.expected, "actual": exc.actual},
         )
-    except (ValidationError, ValueError):
+    except (JSONDecodeError, UnicodeDecodeError, ValidationError, ValueError):
         return _grader_prompt_error(422, "validation_error", "Invalid settings request", {})
     except (SettingsConfigurationError, SettingsWriteError):
         return _grader_prompt_configuration_failure()
