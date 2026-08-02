@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from functools import partial
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
@@ -23,6 +23,7 @@ from src.app_logging import get_logger
 from src.sdk.compression import (
     CompressionArtifact,
     CompressionContext,
+    CompressionMessage,
     CompressionResult,
     CompressionStatus,
     CompressionTelemetry,
@@ -246,7 +247,7 @@ class SummarizationMiddleware(Middleware):
         """Compress context without checking the automatic trigger."""
         result = await self._compress(state.messages, context, instructions=instructions)
         if result.compressed and result.artifact is not None:
-            state.messages = list(result.artifact.replacement_messages)
+            state.messages = self._materialize_messages(result.artifact.replacement_messages)
             state.extra["_compression_result"] = result
         return result
 
@@ -266,19 +267,34 @@ class SummarizationMiddleware(Middleware):
     async def abefore_model(self, state: AgentState) -> dict[str, Any] | None:
         """Async version — triggers summarization when threshold is met."""
         messages = state.messages
-        total_tokens = self.token_counter(messages)
         context = state.extra.get("_compression_context")
         if not isinstance(context, CompressionContext):
             return None
-        if not self._should_summarize(messages, total_tokens):
+        try:
+            total_tokens = self.token_counter(messages)
+        except Exception as exc:
             result = self._result_without_artifact(
-                context, CompressionStatus.SKIPPED, messages, error_code="trigger_not_met"
+                context,
+                messages,
+                status=CompressionStatus.FAILED,
+                tokens=0,
+                error_code="compression_preparation_error",
+                error_message=type(exc).__name__,
             )
         else:
-            result = await self._compress(messages, context)
+            if not self._should_summarize(messages, total_tokens):
+                result = self._result_without_artifact(
+                    context,
+                    messages,
+                    status=CompressionStatus.SKIPPED,
+                    tokens=total_tokens,
+                    error_code="trigger_not_met",
+                )
+            else:
+                result = await self._compress(messages, context)
         update: dict[str, Any] = {"extra": {"_compression_result": result}}
         if result.compressed and result.artifact is not None:
-            update["messages"] = list(result.artifact.replacement_messages)
+            update["messages"] = self._materialize_messages(result.artifact.replacement_messages)
         return update
 
     # -- Trigger evaluation --
@@ -485,22 +501,29 @@ class SummarizationMiddleware(Middleware):
     async def _acreate_summary(
         self, messages_to_summarize: list[Message], instructions: str | None = None
     ) -> tuple[str, UsageAggregate]:
-        if not messages_to_summarize:
-            raise _SummaryGenerationError("empty_input", "no messages were selected")
-
-        formatted = self._messages_to_conversation_text(messages_to_summarize)
-        if instructions:
-            formatted = f"[Focus: {instructions}]\n\n{formatted}"
-
-        prompt = self.summary_prompt.format(messages=formatted)
-
-        summary_messages = [
-            Message.system("You are a context extraction assistant."),
-            Message.user(prompt),
-        ]
         try:
+            if not messages_to_summarize:
+                raise _SummaryGenerationError("empty_input", "no messages were selected")
+            formatted = self._messages_to_conversation_text(messages_to_summarize)
+            if instructions:
+                formatted = f"[Focus: {instructions}]\n\n{formatted}"
+            prompt = self.summary_prompt.format(messages=formatted)
+            summary_messages = [
+                Message.system("You are a context extraction assistant."),
+                Message.user(prompt),
+            ]
             provider = self._get_summary_provider()
             response = await self._call_summary_provider(provider, summary_messages)
+            content = response.content if isinstance(response.content, str) else ""
+            content = content.strip()
+            if not content:
+                raise _SummaryGenerationError(
+                    "empty_response", "summary provider returned no content"
+                )
+            usage = self._usage_aggregate(getattr(response, "usage", None))
+            return content, usage
+        except _SummaryGenerationError:
+            raise
         except Exception as exc:
             logger.warning(
                 "summarization.generation_failed",
@@ -508,11 +531,6 @@ class SummarizationMiddleware(Middleware):
                 user_id=self.user_id,
             )
             raise _SummaryGenerationError("provider_error", "summary provider failed") from exc
-        content = response.content if isinstance(response.content, str) else ""
-        content = content.strip()
-        if not content:
-            raise _SummaryGenerationError("empty_response", "summary provider returned no content")
-        return content, self._usage_aggregate(getattr(response, "usage", None))
 
     def _get_summary_provider(self) -> Any:
         if self._summary_provider is None:
@@ -525,6 +543,8 @@ class SummarizationMiddleware(Middleware):
         return self._summary_provider
 
     async def _call_summary_provider(self, provider: Any, messages: list[Message]) -> Message:
+        response: Message | None = None
+        provider_call_started = False
         try:
             from src.sdk.langfuse_tracer import LangfuseTracer
 
@@ -536,19 +556,32 @@ class SummarizationMiddleware(Middleware):
                         name="SummarizationMiddleware_summary",
                         model=self.model,
                     ) as generation:
-                        response = await provider.chat(messages)
+                        original_chat = getattr(provider, "_original_chat", None)
+                        chat = original_chat if callable(original_chat) else provider.chat
+                        provider_call_started = True
+                        response = cast(Message, await chat(messages))
+                        try:
+                            generation.update(output=response.model_dump(mode="json"))
+                        except Exception:
+                            pass
                         usage = getattr(response, "usage", None)
                         if usage is not None:
-                            generation.update(
-                                usage_details={
-                                    "input": usage.input_tokens,
-                                    "output": usage.output_tokens,
-                                    "reasoning": usage.reasoning_tokens,
-                                }
-                            )
-                        return cast(Message, response)
-        except ImportError:
-            pass
+                            try:
+                                generation.update(
+                                    usage_details={
+                                        "input": usage.input_tokens,
+                                        "output": usage.output_tokens,
+                                        "reasoning": usage.reasoning_tokens,
+                                    }
+                                )
+                            except Exception:
+                                pass
+                        return response
+        except Exception:
+            if response is not None:
+                return response
+            if provider_call_started:
+                raise
         return cast(Message, await provider.chat(messages))
 
     def _usage_aggregate(self, usage: Usage | None) -> UsageAggregate:
@@ -572,23 +605,46 @@ class SummarizationMiddleware(Middleware):
         instructions: str | None = None,
     ) -> CompressionResult:
         before_count = len(messages)
-        before_tokens = self.token_counter(messages)
-        cutoff_index = self._determine_cutoff_index(messages)
+        before_tokens = 0
+        try:
+            before_tokens = self.token_counter(messages)
+            cutoff_index = self._determine_cutoff_index(messages)
+        except Exception as exc:
+            return self._result_without_artifact(
+                context,
+                messages,
+                status=CompressionStatus.FAILED,
+                tokens=before_tokens,
+                error_code="compression_preparation_error",
+                error_message=type(exc).__name__,
+            )
         if cutoff_index <= 0:
             return self._result_without_artifact(
                 context,
-                CompressionStatus.SKIPPED,
                 messages,
+                status=CompressionStatus.SKIPPED,
+                tokens=before_tokens,
                 error_code="no_cutoff",
             )
 
-        old_messages, recent_messages = self._partition_messages(messages, cutoff_index)
-        summarized_messages = self._trim_messages_for_summary(old_messages)
+        try:
+            old_messages, recent_messages = self._partition_messages(messages, cutoff_index)
+            summarized_messages = self._trim_messages_for_summary(old_messages)
+        except Exception as exc:
+            return self._result_without_artifact(
+                context,
+                messages,
+                status=CompressionStatus.FAILED,
+                tokens=before_tokens,
+                error_code="compression_preparation_error",
+                error_message=type(exc).__name__,
+            )
         if not summarized_messages:
             return self._result_without_artifact(
                 context,
-                CompressionStatus.SKIPPED,
                 messages,
+                status=CompressionStatus.SKIPPED,
+                tokens=before_tokens,
                 error_code="summary_budget_too_small",
             )
         old_remainder = old_messages[len(summarized_messages) :]
@@ -600,95 +656,118 @@ class SummarizationMiddleware(Middleware):
         except _SummaryGenerationError as exc:
             return self._result_without_artifact(
                 context,
-                CompressionStatus.FAILED,
                 messages,
+                status=CompressionStatus.FAILED,
+                tokens=before_tokens,
                 error_code=exc.code,
                 error_message=str(exc),
             )
 
-        summary_message = self._build_new_messages(summary)[0]
-        replacement_messages = (summary_message, *old_remainder, *recent_messages)
-        summarized_ids = self._storage_ids(summarized_messages)
-        preserved_ids = self._storage_ids([*old_remainder, *recent_messages])
-        persistence_eligible = len(summarized_ids) == len(summarized_messages)
-        artifact = CompressionArtifact(
-            summary=summary,
-            replacement_messages=replacement_messages,
-            summarized_message_ids=summarized_ids,
-            preserved_message_ids=preserved_ids,
-            persistence_eligible=persistence_eligible,
-        )
-        persistence = SummaryPersistenceResult(status=PersistenceStatus.NOT_REQUESTED)
+        try:
+            summary_message = self._build_new_messages(summary)[0]
+            replacement_messages = (summary_message, *old_remainder, *recent_messages)
+            replacement_snapshots = tuple(
+                CompressionMessage.from_message(message) for message in replacement_messages
+            )
+            summarized_ids = self._storage_ids(summarized_messages)
+            preserved_ids = self._storage_ids([*old_remainder, *recent_messages])
+            persistence_eligible = len(summarized_ids) == len(summarized_messages)
+            after_tokens = self.token_counter(list(replacement_messages))
+            after_context = self._after_context(context.before, after_tokens)
+            def prepared_result(
+                persistence: SummaryPersistenceResult,
+                persisted_summary_id: str | None = None,
+            ) -> CompressionResult:
+                return self._build_success_result(
+                    context=context,
+                    summary=summary,
+                    replacement_messages=replacement_snapshots,
+                    summarized_ids=summarized_ids,
+                    preserved_ids=preserved_ids,
+                    persistence_eligible=persistence_eligible,
+                    persistence=persistence,
+                    before_count=before_count,
+                    before_tokens=before_tokens,
+                    after_tokens=after_tokens,
+                    usage=usage,
+                    after_context=after_context,
+                    persisted_summary_id=persisted_summary_id,
+                )
 
-        if persistence_eligible and self._summary_sink is not None:
+            base_result = prepared_result(
+                SummaryPersistenceResult(status=PersistenceStatus.NOT_REQUESTED)
+            )
+            failed_persistence_result = prepared_result(
+                SummaryPersistenceResult(status=PersistenceStatus.FAILED)
+            )
+            success_template = None
+            if persistence_eligible:
+                success_template = prepared_result(
+                    SummaryPersistenceResult(
+                        status=PersistenceStatus.SUCCEEDED, summary_id="__prevalidated__"
+                    ),
+                    persisted_summary_id="__prevalidated__",
+                )
+            sink = self._summary_sink
+            sink_is_async = inspect.iscoroutinefunction(sink) if sink is not None else False
+        except Exception as exc:
+            return self._result_without_artifact(
+                context,
+                messages,
+                status=CompressionStatus.FAILED,
+                tokens=before_tokens,
+                error_code="compression_preparation_error",
+                error_message=type(exc).__name__,
+            )
+
+        if persistence_eligible and sink is not None:
             try:
-                sink_result = self._summary_sink(context, artifact)
-                if inspect.isawaitable(sink_result):
+                sink_artifact = base_result.artifact
+                assert sink_artifact is not None
+                sink_result = sink(context, sink_artifact)
+                if sink_is_async:
+                    sink_result = await cast(
+                        Awaitable[SummaryPersistenceResult], sink_result
+                    )
+                elif inspect.isawaitable(sink_result):
                     sink_result = await sink_result
-                if not isinstance(sink_result, SummaryPersistenceResult):
+                if not self._valid_sink_result(sink_result):
                     raise TypeError("summary sink must return SummaryPersistenceResult")
-                persistence = sink_result
             except Exception as exc:
                 logger.warning(
                     "summarization.persistence_failed",
                     {"error_type": type(exc).__name__},
                     user_id=self.user_id,
                 )
-                persistence = SummaryPersistenceResult(status=PersistenceStatus.FAILED)
+                return failed_persistence_result
+            if sink_result.status is PersistenceStatus.SUCCEEDED:
+                assert success_template is not None
+                return self._finalize_persisted_result(success_template, sink_result.summary_id)
+            if sink_result.status is PersistenceStatus.FAILED:
+                return failed_persistence_result
 
-        if persistence.status is PersistenceStatus.SUCCEEDED:
-            summary_message = summary_message.model_copy(
-                update={"storage_id": persistence.summary_id}
-            )
-            replacement_messages = (summary_message, *old_remainder, *recent_messages)
-            artifact = artifact.model_copy(
-                update={
-                    "replacement_messages": replacement_messages,
-                    "persisted_summary_id": persistence.summary_id,
-                }
-            )
-
-        after_messages = list(replacement_messages)
-        after_tokens = self.token_counter(after_messages)
-        after_context = self._after_context(context.before, after_tokens)
-        telemetry = CompressionTelemetry(
-            status=CompressionStatus.SUCCEEDED,
-            reason=context.reason,
-            before_message_count=before_count,
-            after_message_count=len(after_messages),
-            before_token_count=before_tokens,
-            after_token_count=after_tokens,
-            summarized_message_count=len(summarized_messages),
-            preserved_message_count=len(old_remainder) + len(recent_messages),
-            replacement_message_count=len(replacement_messages),
-            summary_model=self.model,
-            summarizer_usage=usage,
-            persistence=persistence,
-            before_context=context.before,
-            after_context=after_context,
-        )
         logger.info(
             "summarization.completed",
             {
                 "before_message_count": before_count,
-                "after_message_count": len(after_messages),
+                "after_message_count": len(replacement_snapshots),
                 "summarized_message_count": len(summarized_messages),
             },
             user_id=self.user_id,
         )
-        return CompressionResult(artifact=artifact, telemetry=telemetry)
+        return base_result
 
     def _result_without_artifact(
         self,
         context: CompressionContext,
-        status: CompressionStatus,
         messages: list[Message],
         *,
+        status: CompressionStatus,
+        tokens: int,
         error_code: str,
         error_message: str | None = None,
     ) -> CompressionResult:
         count = len(messages)
-        tokens = self.token_counter(messages)
         return CompressionResult(
             telemetry=CompressionTelemetry(
                 status=status,
@@ -705,6 +784,91 @@ class SummarizationMiddleware(Middleware):
                 before_context=context.before,
             )
         )
+
+    def _build_success_result(
+        self,
+        *,
+        context: CompressionContext,
+        summary: str,
+        replacement_messages: tuple[CompressionMessage, ...],
+        summarized_ids: tuple[str, ...],
+        preserved_ids: tuple[str, ...],
+        persistence_eligible: bool,
+        persistence: SummaryPersistenceResult,
+        before_count: int,
+        before_tokens: int,
+        after_tokens: int,
+        usage: UsageAggregate,
+        after_context: ContextSnapshot | None,
+        persisted_summary_id: str | None = None,
+    ) -> CompressionResult:
+        snapshots = replacement_messages
+        if persisted_summary_id is not None:
+            summary_data = dict(snapshots[0].__dict__)
+            summary_data["storage_id"] = persisted_summary_id
+            snapshots = (CompressionMessage(**summary_data), *snapshots[1:])
+        artifact = CompressionArtifact(
+            summary=summary,
+            replacement_messages=snapshots,
+            summarized_message_ids=summarized_ids,
+            preserved_message_ids=preserved_ids,
+            persistence_eligible=persistence_eligible,
+            persisted_summary_id=persisted_summary_id,
+        )
+        telemetry = CompressionTelemetry(
+            status=CompressionStatus.SUCCEEDED,
+            reason=context.reason,
+            before_message_count=before_count,
+            after_message_count=len(snapshots),
+            before_token_count=before_tokens,
+            after_token_count=after_tokens,
+            summarized_message_count=len(summarized_ids),
+            preserved_message_count=len(preserved_ids),
+            replacement_message_count=len(snapshots),
+            summary_model=self.model,
+            summarizer_usage=usage,
+            persistence=persistence,
+            before_context=context.before,
+            after_context=after_context,
+        )
+        return CompressionResult(artifact=artifact, telemetry=telemetry)
+
+    @staticmethod
+    def _valid_sink_result(value: Any) -> bool:
+        if not isinstance(value, SummaryPersistenceResult):
+            return False
+        if value.status is PersistenceStatus.SUCCEEDED:
+            return isinstance(value.summary_id, str) and bool(value.summary_id.strip())
+        return value.summary_id is None
+
+    @staticmethod
+    def _finalize_persisted_result(
+        template: CompressionResult, summary_id: str | None
+    ) -> CompressionResult:
+        assert template.artifact is not None
+        assert isinstance(summary_id, str) and summary_id.strip()
+        artifact = template.artifact
+        summary_snapshot = artifact.replacement_messages[0]
+        summary_data = dict(summary_snapshot.__dict__)
+        summary_data["storage_id"] = summary_id
+        persisted_snapshot = CompressionMessage.model_construct(**summary_data)
+        artifact_data = dict(artifact.__dict__)
+        artifact_data.update(
+            replacement_messages=(persisted_snapshot, *artifact.replacement_messages[1:]),
+            persisted_summary_id=summary_id,
+        )
+        persisted_artifact = CompressionArtifact.model_construct(**artifact_data)
+        persistence = SummaryPersistenceResult.model_construct(
+            status=PersistenceStatus.SUCCEEDED, summary_id=summary_id
+        )
+        telemetry_data = dict(template.telemetry.__dict__)
+        telemetry_data["persistence"] = persistence
+        telemetry = CompressionTelemetry.model_construct(**telemetry_data)
+        return CompressionResult.model_construct(artifact=persisted_artifact, telemetry=telemetry)
+
+    @staticmethod
+    def _materialize_messages(messages: Iterable[CompressionMessage]) -> list[Message]:
+        return [message.to_message() for message in messages]
 
     @staticmethod
     def _storage_ids(messages: Iterable[Message]) -> tuple[str, ...]:
