@@ -432,13 +432,15 @@ class MessageStore:
         return summarized_ids, preserved_ids
 
     @staticmethod
-    def _memory_sort_key(memory: _CoreMem) -> tuple[float, str]:
+    def _memory_temporal_key(memory: _CoreMem) -> tuple[datetime, str]:
         timestamp = memory.ts
         if timestamp is None:
-            return float("-inf"), memory.id
+            timestamp = datetime.min.replace(tzinfo=UTC)
         if timestamp.tzinfo is None:
             timestamp = timestamp.replace(tzinfo=UTC)
-        return timestamp.timestamp(), memory.id
+        else:
+            timestamp = timestamp.astimezone(UTC)
+        return timestamp, memory.id
 
     def _scoped_memories(self, session_id: str) -> list[_CoreMem]:
         memories = self._core.fetch_all(session_id=session_id)
@@ -447,7 +449,7 @@ class MessageStore:
     def _newest_valid_summary(self, memories: list[_CoreMem]) -> _CoreMem | None:
         summaries = sorted(
             (memory for memory in memories if memory.role == "summary"),
-            key=self._memory_sort_key,
+            key=self._memory_temporal_key,
             reverse=True,
         )
         return next(
@@ -503,6 +505,7 @@ class MessageStore:
         if limit <= 0:
             return []
         memories = self._core.fetch(limit=limit, session_id=session_id)
+        memories = [memory for memory in memories if (memory.session_id or "") == session_id]
         return [self._to_msg(m) for m in reversed(memories)]
 
     def get_sessions(self) -> list[dict[str, str]]:
@@ -569,7 +572,7 @@ class MessageStore:
         if summary is None:
             non_summaries = sorted(
                 (memory for memory in memories if memory.role != "summary"),
-                key=self._memory_sort_key,
+                key=self._memory_temporal_key,
             )
             return [self._to_msg(memory) for memory in non_summaries[-limit:]]
 
@@ -577,7 +580,7 @@ class MessageStore:
         if provenance is None:  # Guarded by _newest_valid_summary.
             return []
         summarized_ids, preserved_ids = provenance
-        summary_key = self._memory_sort_key(summary)
+        summary_key = self._memory_temporal_key(summary)
         retained = sorted(
             (
                 memory
@@ -586,10 +589,10 @@ class MessageStore:
                 and memory.id not in summarized_ids
                 and (
                     memory.id in preserved_ids
-                    or self._memory_sort_key(memory)[0] > summary_key[0]
+                    or self._memory_temporal_key(memory) > summary_key
                 )
             ),
-            key=self._memory_sort_key,
+            key=self._memory_temporal_key,
         )
         if limit == 1:
             return [self._to_msg(summary)]
