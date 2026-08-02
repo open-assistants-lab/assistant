@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
-from typing import Annotated, Any
+from typing import Annotated
 
 from pydantic import Field, StringConstraints, computed_field, field_validator, model_validator
 
@@ -140,10 +140,10 @@ class CompressionResult(ContractModel):
 
 
 SummarySink = Callable[
-    [CompressionArtifact, CompressionContext],
+    [CompressionContext, CompressionArtifact],
     SummaryPersistenceResult | Awaitable[SummaryPersistenceResult],
 ]
-CompressionObserver = Callable[[CompressionResult], Any | Awaitable[Any]]
+CompressionObserver = Callable[[CompressionTelemetry], Awaitable[None] | None]
 
 
 __all__ = [

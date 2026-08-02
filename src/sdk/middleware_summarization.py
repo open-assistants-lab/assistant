@@ -622,7 +622,7 @@ class SummarizationMiddleware(Middleware):
 
         if persistence_eligible and self._summary_sink is not None:
             try:
-                sink_result = self._summary_sink(artifact, context)
+                sink_result = self._summary_sink(context, artifact)
                 if inspect.isawaitable(sink_result):
                     sink_result = await sink_result
                 if not isinstance(sink_result, SummaryPersistenceResult):
