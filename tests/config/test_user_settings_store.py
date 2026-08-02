@@ -9,6 +9,7 @@ import os
 import stat
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1016,3 +1017,136 @@ def test_packaged_seed_change_updates_hash_and_marks_old_seed_customized(tmp_pat
     assert newly_seeded.content == "second seed"
     assert newly_seeded.content_hash != first.content_hash
     assert newly_seeded.source == "seeded"
+
+
+def _fail_nth_fsync(
+    monkeypatch: pytest.MonkeyPatch, nth_call: int
+) -> None:
+    from src.config import user_settings_store as store_module
+
+    real_fsync = store_module.os.fsync
+    calls = 0
+
+    def fail_once(descriptor: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == nth_call:
+            raise OSError(errno.EIO, "durability failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(store_module.os, "fsync", fail_once)
+
+
+@pytest.mark.parametrize("initially_existing", [False, True])
+def test_post_replace_prompt_durability_failure_restores_both_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    initially_existing: bool,
+) -> None:
+    store = _grader_store(tmp_path)
+    prompt_path = _paths(tmp_path).user_grader_prompt_path()
+    if initially_existing:
+        store.set_provider_key("openai", SECRET)
+        store.load_grader_prompt()
+        prompt_path.chmod(0o640)
+        store.path.chmod(0o640)
+    prompt_before = prompt_path.read_bytes() if prompt_path.exists() else None
+    settings_before = store.path.read_bytes() if store.path.exists() else None
+    prompt_mode_before = stat.S_IMODE(prompt_path.stat().st_mode) if prompt_path.exists() else None
+    settings_mode_before = stat.S_IMODE(store.path.stat().st_mode) if store.path.exists() else None
+    expected_revision = store.load().revision
+    _fail_nth_fsync(monkeypatch, 2)
+
+    with pytest.raises(SettingsWriteError, match="durability confirmation failed"):
+        store.save_grader_prompt(
+            GraderPromptUpdate(content="replacement rubric", expected_revision=expected_revision)
+        )
+
+    assert (prompt_path.read_bytes() if prompt_path.exists() else None) == prompt_before
+    assert (store.path.read_bytes() if store.path.exists() else None) == settings_before
+    assert (stat.S_IMODE(prompt_path.stat().st_mode) if prompt_path.exists() else None) == prompt_mode_before
+    assert (stat.S_IMODE(store.path.stat().st_mode) if store.path.exists() else None) == settings_mode_before
+    assert store.load().revision == expected_revision
+
+
+@pytest.mark.parametrize("initially_existing", [False, True])
+def test_post_replace_settings_durability_failure_restores_both_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    initially_existing: bool,
+) -> None:
+    store = _grader_store(tmp_path)
+    prompt_path = _paths(tmp_path).user_grader_prompt_path()
+    if initially_existing:
+        store.set_provider_key("openai", SECRET)
+        store.load_grader_prompt()
+        prompt_path.chmod(0o640)
+        store.path.chmod(0o640)
+    prompt_before = prompt_path.read_bytes() if prompt_path.exists() else None
+    settings_before = store.path.read_bytes() if store.path.exists() else None
+    prompt_mode_before = stat.S_IMODE(prompt_path.stat().st_mode) if prompt_path.exists() else None
+    settings_mode_before = stat.S_IMODE(store.path.stat().st_mode) if store.path.exists() else None
+    expected_revision = store.load().revision
+    _fail_nth_fsync(monkeypatch, 4)
+
+    with pytest.raises(SettingsWriteError, match="durability confirmation failed"):
+        store.save_grader_prompt(
+            GraderPromptUpdate(content="replacement rubric", expected_revision=expected_revision)
+        )
+
+    assert (prompt_path.read_bytes() if prompt_path.exists() else None) == prompt_before
+    assert (store.path.read_bytes() if store.path.exists() else None) == settings_before
+    assert (stat.S_IMODE(prompt_path.stat().st_mode) if prompt_path.exists() else None) == prompt_mode_before
+    assert (stat.S_IMODE(store.path.stat().st_mode) if store.path.exists() else None) == settings_mode_before
+    assert store.load().revision == expected_revision
+
+
+def test_default_seeding_post_replace_failure_restores_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _grader_store(tmp_path)
+    prompt_path = _paths(tmp_path).user_grader_prompt_path()
+    _fail_nth_fsync(monkeypatch, 2)
+
+    with pytest.raises(SettingsWriteError, match="durability confirmation failed"):
+        store.load_grader_prompt()
+
+    assert not prompt_path.exists()
+    assert not store.path.exists()
+
+
+def test_default_fallback_uses_loaded_settings_without_reading_cwd_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.config import settings as settings_module
+    from src.config import user_settings_store as store_module
+
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    (cwd / ".env").write_text(
+        "VERIFICATION__DEFAULT_RUBRIC=conflicting cwd rubric\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(cwd)
+    monkeypatch.setattr(
+        store_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            verification=SimpleNamespace(default_rubric="already loaded rubric")
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        settings_module.AppConfig,
+        "from_yaml",
+        lambda path: (_ for _ in ()).throw(AssertionError("must not reload settings")),
+    )
+    store = _grader_store(tmp_path, seed=None, legacy_default_rubric=None)
+    store = UserSettingsStore(
+        "alice",
+        paths=_paths(tmp_path),
+        grader_seed_path=store.grader_seed_path,
+    )
+
+    response = store.load_grader_prompt()
+
+    assert response.content == "already loaded rubric"

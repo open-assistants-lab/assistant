@@ -8,6 +8,7 @@ import io
 import json as json
 import os as os
 import platform as platform
+import stat
 import tempfile as tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,7 +18,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from src.app_logging import get_logger
-from src.config import settings as _settings
+from src.config.settings import get_settings
 from src.config.user_settings import (
     GraderPromptResponse,
     GraderPromptUpdate,
@@ -32,7 +33,6 @@ logger = get_logger()
 _DEFAULT_GRADER_SEED_PATH = (
     Path(__file__).resolve().parents[2] / "seeds" / "prompts" / "grader_prompt.md"
 )
-_HOST_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"
 _USE_HOST_DEFAULT = object()
 _UNSUPPORTED_DURABILITY_ERRNOS = {
     errno.EBADF,
@@ -74,6 +74,13 @@ class GraderPromptMutation:
     changed: bool
 
 
+@dataclass(frozen=True)
+class _FileSnapshot:
+    existed: bool
+    content: bytes | None
+    mode: int | None
+
+
 _LOCKS_GUARD = Lock()
 _PATH_LOCKS: dict[Path, RLock] = {}
 
@@ -107,7 +114,7 @@ class UserSettingsStore:
         self._grader_seed_path = grader_seed_path or _DEFAULT_GRADER_SEED_PATH
         self._grader_prompt_path = resolved_paths.user_grader_prompt_path()
         self._legacy_default_rubric = (
-            _settings.AppConfig.from_yaml(_HOST_CONFIG_PATH).verification.default_rubric
+            get_settings().verification.default_rubric
             if legacy_default_rubric is _USE_HOST_DEFAULT
             else legacy_default_rubric
         )
@@ -134,7 +141,12 @@ class UserSettingsStore:
             settings = self._load_locked()
             application_default = self._application_default_grader_prompt()
             if not self._grader_prompt_path.exists():
-                self._atomic_write_prompt(application_default)
+                snapshot = self._snapshot_file(self._grader_prompt_path)
+                try:
+                    self._atomic_write_prompt(application_default)
+                except SettingsWriteError:
+                    self._restore_snapshot(self._grader_prompt_path, snapshot)
+                    raise
             content = self._read_grader_prompt()
             return self._grader_prompt_response(content, application_default, settings.revision)
 
@@ -221,11 +233,14 @@ class UserSettingsStore:
         settings_payload = current_settings.model_dump(mode="json")
         settings_payload["revision"] = current_settings.revision + 1
         changed_settings = SavedUserSettings.model_validate(settings_payload)
-        self._atomic_write_prompt(content)
+        prompt_snapshot = self._snapshot_file(self._grader_prompt_path)
+        settings_snapshot = self._snapshot_file(self._path)
         try:
+            self._atomic_write_prompt(content)
             self._atomic_write(changed_settings)
         except SettingsWriteError:
-            self._restore_grader_prompt(previous, existed)
+            self._restore_snapshot(self._grader_prompt_path, prompt_snapshot)
+            self._restore_snapshot(self._path, settings_snapshot)
             raise
         return GraderPromptMutation(
             response=self._grader_prompt_response(
@@ -263,14 +278,65 @@ class UserSettingsStore:
             revision=revision,
         )
 
-    def _restore_grader_prompt(self, content: str, existed: bool) -> None:
+    @staticmethod
+    def _snapshot_file(path: Path) -> _FileSnapshot:
+        if not path.exists():
+            return _FileSnapshot(existed=False, content=None, mode=None)
+        return _FileSnapshot(
+            existed=True,
+            content=path.read_bytes(),
+            mode=stat.S_IMODE(path.stat().st_mode),
+        )
+
+    def _restore_snapshot(self, path: Path, snapshot: _FileSnapshot) -> None:
+        descriptor: int | None = None
+        temporary_path: Path | None = None
         try:
-            if existed:
-                self._atomic_write_prompt(content)
-            else:
-                self._grader_prompt_path.unlink(missing_ok=True)
-                self._fsync_parent(self._grader_prompt_path, "grader prompt")
-        except (OSError, SettingsWriteError):
+            if not snapshot.existed:
+                path.unlink(missing_ok=True)
+                self._best_effort_fsync_parent(path)
+                return
+
+            assert snapshot.content is not None
+            assert snapshot.mode is not None
+            path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{path.name}.rollback.",
+                suffix=".tmp",
+                dir=str(path.parent),
+            )
+            temporary_path = Path(temporary_name)
+            os.fchmod(descriptor, snapshot.mode)
+            file = os.fdopen(descriptor, "wb")
+            descriptor = None
+            with file:
+                file.write(snapshot.content)
+                file.flush()
+                try:
+                    os.fsync(file.fileno())
+                except OSError:
+                    pass
+            os.replace(temporary_path, path)
+            temporary_path = None
+            self._best_effort_fsync_parent(path)
+        except OSError:
+            pass
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def _best_effort_fsync_parent(self, path: Path) -> None:
+        try:
+            self._fsync_parent(path, "rollback")
+        except SettingsWriteError:
             pass
 
     @staticmethod
