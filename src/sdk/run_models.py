@@ -8,6 +8,7 @@ from typing import Annotated, Literal
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     StringConstraints,
@@ -16,13 +17,33 @@ from pydantic import (
 )
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+_CANONICAL_MODEL_PATTERN = r"^[^:/\s]+:\S+$"
 
 
-def _validate_canonical_model(value: str) -> str:
+def normalize_canonical_model(value: str) -> str:
+    """Normalize and validate a canonical provider:model identifier."""
+    if not isinstance(value, str):
+        raise ValueError("model must use canonical provider:model syntax")
     provider, separator, model = value.partition(":")
-    if not separator or not provider.strip() or not model.strip():
-        raise ValueError("model must use nonempty provider:model syntax")
-    return f"{provider.strip()}:{model.strip()}"
+    provider = provider.strip()
+    model = model.strip()
+    if (
+        not separator
+        or not provider
+        or "/" in provider
+        or any(character.isspace() for character in provider)
+        or not model
+        or any(character.isspace() for character in model)
+    ):
+        raise ValueError("model must use canonical provider:model syntax")
+    return f"{provider}:{model}"
+
+
+CanonicalModel = Annotated[
+    str,
+    StringConstraints(pattern=_CANONICAL_MODEL_PATTERN),
+    BeforeValidator(normalize_canonical_model),
+]
 
 
 class ContractModel(BaseModel):
@@ -87,17 +108,12 @@ class ContextFreshness(StrEnum):
 class UsageAggregate(ContractModel):
     available: bool = False
     calls: int = Field(default=0, ge=0)
-    models: tuple[str, ...] = ()
+    models: tuple[CanonicalModel, ...] = ()
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
     reasoning_tokens: int = Field(default=0, ge=0)
     cache_read_tokens: int = Field(default=0, ge=0)
     cache_creation_tokens: int = Field(default=0, ge=0)
-
-    @field_validator("models")
-    @classmethod
-    def _canonical_models(cls, models: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(_validate_canonical_model(model) for model in models)
 
     @model_validator(mode="after")
     def _validate_availability(self) -> UsageAggregate:
@@ -122,7 +138,7 @@ class RunUsage(ContractModel):
 
 
 class ContextSnapshot(ContractModel):
-    model: str
+    model: CanonicalModel
     attempt: int = Field(ge=1)
     llm_call_index: int = Field(ge=1)
     estimated_tokens: int | None = Field(default=None, ge=0)
@@ -131,12 +147,6 @@ class ContextSnapshot(ContractModel):
     source: ContextSource
     freshness: ContextFreshness
     estimated: bool
-
-    @field_validator("model")
-    @classmethod
-    def _canonical_model(cls, value: str) -> str:
-        return _validate_canonical_model(value)
-
 
 class CriterionEvaluation(ContractModel):
     name: NonEmptyString
@@ -259,7 +269,7 @@ class RunResult(ContractModel):
     session_id: NonEmptyString
     status: RunStatus
     attempt: int = Field(ge=1)
-    model: str
+    model: CanonicalModel
     response: str
     final_message_id: str | None = None
     usage: RunUsage
@@ -267,11 +277,6 @@ class RunResult(ContractModel):
     last_call_context: ContextSnapshot | None = None
     next_context: ContextSnapshot | None = None
     persisted_at: datetime | None = None
-
-    @field_validator("model")
-    @classmethod
-    def _canonical_model(cls, value: str) -> str:
-        return _validate_canonical_model(value)
 
     @field_validator("persisted_at")
     @classmethod
