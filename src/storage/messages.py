@@ -46,6 +46,17 @@ class SearchResult:
     score: float
 
 
+@dataclass(frozen=True)
+class _StoredMessage:
+    sequence: int
+    id: str
+    ts: datetime
+    role: str
+    content: str
+    metadata: dict[str, Any] | None
+    session_id: str
+
+
 class MessageStore:
     """Manages message storage via MemoryCore.
 
@@ -432,30 +443,131 @@ class MessageStore:
         return summarized_ids, preserved_ids
 
     @staticmethod
-    def _memory_temporal_key(memory: _CoreMem) -> tuple[datetime, str]:
-        timestamp = memory.ts
-        if timestamp is None:
-            timestamp = datetime.min.replace(tzinfo=UTC)
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=UTC)
+    def _parse_stored_timestamp(value: object) -> datetime:
+        if isinstance(value, datetime):
+            timestamp = value
+        elif isinstance(value, str):
+            try:
+                timestamp = datetime.fromisoformat(value)
+            except ValueError:
+                return datetime.min.replace(tzinfo=UTC)
         else:
-            timestamp = timestamp.astimezone(UTC)
-        return timestamp, memory.id
+            return datetime.min.replace(tzinfo=UTC)
+        if timestamp.tzinfo is None:
+            return timestamp.replace(tzinfo=UTC)
+        return timestamp.astimezone(UTC)
 
-    def _scoped_memories(self, session_id: str) -> list[_CoreMem]:
-        memories = self._core.fetch_all(session_id=session_id)
-        return [memory for memory in memories if (memory.session_id or "") == session_id]
+    @staticmethod
+    def _parse_stored_metadata(value: object) -> dict[str, Any] | None:
+        if isinstance(value, dict):
+            return value
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
-    def _newest_valid_summary(self, memories: list[_CoreMem]) -> _CoreMem | None:
-        summaries = sorted(
-            (memory for memory in memories if memory.role == "summary"),
-            key=self._memory_temporal_key,
-            reverse=True,
+    def _read_scoped_rows(
+        self, session_id: str, limit: int | None = None
+    ) -> list[_StoredMessage]:
+        columns = "rowid, id, ts, role, content, metadata, session_id"
+        params: list[str | int] = [session_id]
+        if limit is None:
+            query = f"SELECT {columns} FROM messages WHERE session_id = ? ORDER BY rowid ASC"
+        else:
+            query = (
+                f"SELECT {columns} FROM ("
+                f"SELECT {columns} FROM messages WHERE session_id = ? "
+                "ORDER BY rowid DESC LIMIT ?"
+                ") ORDER BY rowid ASC"
+            )
+            params.append(limit)
+        with self._core.db._connect() as cur:
+            rows = cur.execute(query, params).fetchall()
+        return [
+            _StoredMessage(
+                sequence=int(row[0]),
+                id=str(row[1]),
+                ts=self._parse_stored_timestamp(row[2]),
+                role=str(row[3]),
+                content=str(row[4] or ""),
+                metadata=self._parse_stored_metadata(row[5]),
+                session_id=str(row[6] or ""),
+            )
+            for row in rows
+        ]
+
+    @staticmethod
+    def _stored_to_message(row: _StoredMessage) -> Message:
+        return Message(
+            id=row.id,
+            ts=row.ts,
+            role=row.role,
+            content=row.content,
+            metadata=row.metadata,
+            session_id=row.session_id,
         )
-        return next(
-            (summary for summary in summaries if self._summary_provenance(summary.metadata)),
-            None,
-        )
+
+    def _validated_summary_provenance(
+        self,
+        summary: _StoredMessage,
+        rows_by_id: dict[str, _StoredMessage],
+        cache: dict[int, tuple[set[str], set[str]] | None],
+        visiting: set[int] | None = None,
+    ) -> tuple[set[str], set[str]] | None:
+        if summary.sequence in cache:
+            return cache[summary.sequence]
+        if summary.role != "summary":
+            return None
+        provenance = self._summary_provenance(summary.metadata)
+        if provenance is None:
+            cache[summary.sequence] = None
+            return None
+
+        visiting = set() if visiting is None else visiting
+        if summary.sequence in visiting:
+            cache[summary.sequence] = None
+            return None
+        visiting.add(summary.sequence)
+        summarized_ids, preserved_ids = provenance
+        for message_id in summarized_ids:
+            referenced = rows_by_id.get(message_id)
+            if referenced is None or referenced.sequence >= summary.sequence:
+                cache[summary.sequence] = None
+                visiting.remove(summary.sequence)
+                return None
+            if referenced.role == "summary" and self._validated_summary_provenance(
+                referenced, rows_by_id, cache, visiting
+            ) is None:
+                cache[summary.sequence] = None
+                visiting.remove(summary.sequence)
+                return None
+        for message_id in preserved_ids:
+            referenced = rows_by_id.get(message_id)
+            if (
+                referenced is None
+                or referenced.sequence >= summary.sequence
+                or referenced.role == "summary"
+            ):
+                cache[summary.sequence] = None
+                visiting.remove(summary.sequence)
+                return None
+        visiting.remove(summary.sequence)
+        cache[summary.sequence] = provenance
+        return provenance
+
+    def _newest_valid_summary(
+        self, rows: list[_StoredMessage]
+    ) -> tuple[_StoredMessage, tuple[set[str], set[str]]] | None:
+        rows_by_id = {row.id: row for row in rows}
+        cache: dict[int, tuple[set[str], set[str]] | None] = {}
+        for row in reversed(rows):
+            provenance = self._validated_summary_provenance(row, rows_by_id, cache)
+            if provenance is not None:
+                return row, provenance
+        return None
 
     @staticmethod
     def _to_sr(r: _CoreMemResult) -> SearchResult:
@@ -504,9 +616,10 @@ class MessageStore:
         session_id = self._require_session_id(session_id)
         if limit <= 0:
             return []
-        memories = self._core.fetch(limit=limit, session_id=session_id)
-        memories = [memory for memory in memories if (memory.session_id or "") == session_id]
-        return [self._to_msg(m) for m in reversed(memories)]
+        return [
+            self._stored_to_message(row)
+            for row in self._read_scoped_rows(session_id, limit=limit)
+        ]
 
     def get_sessions(self) -> list[dict[str, str]]:
         """List all chat sessions with titles.
@@ -567,37 +680,25 @@ class MessageStore:
         session_id = self._require_session_id(session_id)
         if limit <= 0:
             return []
-        memories = self._scoped_memories(session_id)
-        summary = self._newest_valid_summary(memories)
-        if summary is None:
-            non_summaries = sorted(
-                (memory for memory in memories if memory.role != "summary"),
-                key=self._memory_temporal_key,
-            )
-            return [self._to_msg(memory) for memory in non_summaries[-limit:]]
+        rows = self._read_scoped_rows(session_id)
+        valid_summary = self._newest_valid_summary(rows)
+        if valid_summary is None:
+            non_summaries = [row for row in rows if row.role != "summary"]
+            return [self._stored_to_message(row) for row in non_summaries[-limit:]]
 
-        provenance = self._summary_provenance(summary.metadata)
-        if provenance is None:  # Guarded by _newest_valid_summary.
-            return []
+        summary, provenance = valid_summary
         summarized_ids, preserved_ids = provenance
-        summary_key = self._memory_temporal_key(summary)
-        retained = sorted(
-            (
-                memory
-                for memory in memories
-                if memory.role != "summary"
-                and memory.id not in summarized_ids
-                and (
-                    memory.id in preserved_ids
-                    or self._memory_temporal_key(memory) > summary_key
-                )
-            ),
-            key=self._memory_temporal_key,
-        )
+        retained = [
+            row
+            for row in rows
+            if row.role != "summary"
+            and row.id not in summarized_ids
+            and (row.id in preserved_ids or row.sequence > summary.sequence)
+        ]
         if limit == 1:
-            return [self._to_msg(summary)]
-        return [self._to_msg(summary)] + [
-            self._to_msg(memory) for memory in retained[-(limit - 1) :]
+            return [self._stored_to_message(summary)]
+        return [self._stored_to_message(summary)] + [
+            self._stored_to_message(row) for row in retained[-(limit - 1) :]
         ]
 
     def add_summary_message(
@@ -613,13 +714,26 @@ class MessageStore:
         summary_metadata.pop("session_id", None)
         if self._summary_provenance(summary_metadata) is None:
             raise ValueError("invalid summary metadata or compression_reason")
+        rows = self._read_scoped_rows(session_id)
+        candidate = _StoredMessage(
+            sequence=(rows[-1].sequence + 1) if rows else 1,
+            id="",
+            ts=datetime.now(UTC),
+            role="summary",
+            content=content,
+            metadata=summary_metadata,
+            session_id=session_id,
+        )
+        rows_by_id = {row.id: row for row in rows}
+        if self._validated_summary_provenance(candidate, rows_by_id, {}) is None:
+            raise ValueError("invalid summary provenance")
         return self.add_message(
             "summary", content, metadata=summary_metadata, session_id=session_id
         )
 
     def has_summary(self, session_id: str) -> bool:
         session_id = self._require_session_id(session_id)
-        return self._newest_valid_summary(self._scoped_memories(session_id)) is not None
+        return self._newest_valid_summary(self._read_scoped_rows(session_id)) is not None
 
     def count_messages(self, start_date: date | None = None, end_date: date | None = None) -> int:
         if not start_date and not end_date:

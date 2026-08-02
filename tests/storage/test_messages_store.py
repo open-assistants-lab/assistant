@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import timedelta
 from unittest import mock
 
 import pytest
-from coremem.types import Memory as CoreMemory
 
 import src.storage.messages as messages_storage
 from src.storage.messages import MessageStore, get_message_store
@@ -34,6 +34,37 @@ def _summary_metadata(
     }
 
 
+def _insert_raw_messages(
+    store: MessageStore,
+    rows: list[tuple[str, str, str, str, dict[str, object] | None]],
+) -> None:
+    with store._core.db._connect() as cur:
+        cur.executemany(
+            "INSERT INTO messages (id, ts, role, content, metadata, session_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    message_id,
+                    "2026-08-03T12:00:00+00:00",
+                    role,
+                    content,
+                    json.dumps(metadata),
+                    session_id,
+                )
+                for message_id, role, content, session_id, metadata in rows
+            ],
+        )
+
+
+def _stored_summary_metadata(
+    summarized_message_ids: list[str], preserved_message_ids: list[str] | None = None
+) -> dict[str, object]:
+    return {
+        "source": "summarization_middleware",
+        **_summary_metadata(summarized_message_ids, preserved_message_ids),
+    }
+
+
 def test_message_session_id_is_preserved() -> None:
     store = _store()
     store.add_message("user", "hello", session_id="session-a")
@@ -43,17 +74,18 @@ def test_message_session_id_is_preserved() -> None:
     assert messages[0].session_id == "session-a"
 
 
-def test_get_messages_by_session_filters_backend_leakage_after_normalizing_session() -> None:
+def test_get_messages_by_session_queries_sql_and_ignores_coremem_backend() -> None:
     store = _store()
     store.add_message("user", "allowed", session_id="session-a")
     store.add_message("user", "leaked", session_id="session-b")
-    memories = store._core.fetch_all()
-    store._core.fetch = mock.Mock(return_value=memories)
+    store._core.fetch = mock.Mock(side_effect=AssertionError("fetch must not run"))
+    store._core.fetch_all = mock.Mock(side_effect=AssertionError("fetch_all must not run"))
 
     messages = store.get_messages_by_session_id(" session-a ")
 
     assert [message.content for message in messages] == ["allowed"]
-    store._core.fetch.assert_called_once_with(limit=50, session_id="session-a")
+    store._core.fetch.assert_not_called()
+    store._core.fetch_all.assert_not_called()
 
 
 @pytest.mark.parametrize("session_id", ["", " ", "\t\n"])
@@ -195,7 +227,8 @@ def test_add_summary_rejects_invalid_provenance_without_write(
 
 def test_add_summary_forces_source_and_does_not_duplicate_session_metadata() -> None:
     store = _store()
-    metadata = _summary_metadata(["message-1"])
+    source_id = store.add_message("user", "source", session_id="session-a")
+    metadata = _summary_metadata([source_id])
     metadata.update({"source": "caller", "session_id": "session-b"})
 
     summary_id = store.add_summary_message(
@@ -283,28 +316,17 @@ def test_summary_context_limit_one_returns_only_summary() -> None:
     assert [m.content for m in store.get_messages_with_summary("a", limit=1)] == ["summary"]
 
 
-def test_equal_timestamp_id_after_summary_is_included() -> None:
+def test_equal_timestamps_use_insertion_sequence_not_reversed_ids() -> None:
     store = _store()
-    instant = datetime(2026, 8, 3, 12, tzinfo=UTC)
-    summary = CoreMemory(
-        id="middle",
-        content="summary",
-        role="summary",
-        ts=instant,
-        session_id="a",
-        metadata={
-            "source": "summarization_middleware",
-            **_summary_metadata(["summarized"]),
-        },
+    _insert_raw_messages(
+        store,
+        [
+            ("source", "user", "source", "a", None),
+            ("z-before", "assistant", "before", "a", None),
+            ("middle", "summary", "summary", "a", _stored_summary_metadata(["source"])),
+            ("a-after", "assistant", "after", "a", None),
+        ],
     )
-    after = CoreMemory(
-        id="z-after",
-        content="after",
-        role="assistant",
-        ts=instant.astimezone(timezone(timedelta(hours=1))),
-        session_id="a",
-    )
-    store._scoped_memories = mock.Mock(return_value=[after, summary])
 
     assert [message.content for message in store.get_messages_with_summary("a")] == [
         "summary",
@@ -312,36 +334,146 @@ def test_equal_timestamp_id_after_summary_is_included() -> None:
     ]
 
 
-def test_equal_timestamp_id_before_summary_is_excluded_unless_preserved() -> None:
+def test_equal_timestamp_prior_record_is_included_only_when_preserved() -> None:
     store = _store()
-    instant = datetime(2026, 8, 3, 12, tzinfo=UTC)
-    before = CoreMemory(
-        id="a-before",
-        content="before",
-        role="assistant",
-        ts=instant,
-        session_id="a",
+    _insert_raw_messages(
+        store,
+        [
+            ("source", "user", "source", "a", None),
+            ("z-before", "assistant", "before", "a", None),
+            (
+                "middle",
+                "summary",
+                "summary",
+                "a",
+                _stored_summary_metadata(["source"], ["z-before"]),
+            ),
+        ],
     )
-    summary = CoreMemory(
-        id="middle",
-        content="summary",
-        role="summary",
-        ts=instant,
-        session_id="a",
-        metadata={
-            "source": "summarization_middleware",
-            **_summary_metadata(["summarized"]),
-        },
-    )
-    store._scoped_memories = mock.Mock(return_value=[summary, before])
 
-    assert [message.content for message in store.get_messages_with_summary("a")] == ["summary"]
-
-    summary.metadata["preserved_message_ids"] = ["a-before"]
     assert [message.content for message in store.get_messages_with_summary("a")] == [
         "summary",
         "before",
     ]
+
+
+def test_scoped_summary_reads_more_than_ten_thousand_rows_without_coremem() -> None:
+    store = _store()
+    rows = [("preserved", "user", "preserved", "a", None)]
+    rows.extend((f"bulk-{index}", "user", f"bulk-{index}", "a", None) for index in range(10001))
+    rows.append(
+        (
+            "latest-summary",
+            "summary",
+            "summary",
+            "a",
+            _stored_summary_metadata(["bulk-0"], ["preserved"]),
+        )
+    )
+    _insert_raw_messages(store, rows)
+    store._core.fetch = mock.Mock(side_effect=AssertionError("fetch must not run"))
+    store._core.fetch_all = mock.Mock(side_effect=AssertionError("fetch_all must not run"))
+
+    messages = store.get_messages_with_summary("a", limit=10)
+
+    assert [message.id for message in messages] == ["latest-summary", "preserved"]
+
+
+def test_many_newer_malformed_summaries_do_not_hide_older_valid_summary() -> None:
+    store = _store()
+    source_id = store.add_message("user", "source", session_id="a")
+    store.add_summary_message(
+        "valid", session_id="a", metadata=_summary_metadata([source_id])
+    )
+    _insert_raw_messages(
+        store,
+        [
+            (f"malformed-{index}", "summary", "malformed", "a", {})
+            for index in range(200)
+        ],
+    )
+
+    assert [message.content for message in store.get_messages_with_summary("a")] == ["valid"]
+
+
+def test_add_summary_rejects_missing_and_cross_session_ids() -> None:
+    store = _store()
+    cross_session_id = store.add_message("user", "cross", session_id="b")
+
+    with pytest.raises(ValueError, match="provenance"):
+        store.add_summary_message(
+            "missing", session_id="a", metadata=_summary_metadata(["missing"])
+        )
+    with pytest.raises(ValueError, match="provenance"):
+        store.add_summary_message(
+            "cross", session_id="a", metadata=_summary_metadata([cross_session_id])
+        )
+
+
+def test_add_summary_rejects_summary_as_preserved_or_invalid_prior_summary() -> None:
+    store = _store()
+    source_id = store.add_message("user", "source", session_id="a")
+    valid_summary_id = store.add_summary_message(
+        "valid", session_id="a", metadata=_summary_metadata([source_id])
+    )
+    malformed_summary_id = store.add_message("summary", "malformed", session_id="a", metadata={})
+
+    with pytest.raises(ValueError, match="provenance"):
+        store.add_summary_message(
+            "bad preserved",
+            session_id="a",
+            metadata=_summary_metadata([source_id], [valid_summary_id]),
+        )
+    with pytest.raises(ValueError, match="provenance"):
+        store.add_summary_message(
+            "bad summarized",
+            session_id="a",
+            metadata=_summary_metadata([malformed_summary_id]),
+        )
+
+
+def test_raw_summary_with_missing_cross_session_future_or_summary_preserved_is_invalid() -> None:
+    store = _store()
+    _insert_raw_messages(
+        store,
+        [
+            ("source", "user", "source", "a", None),
+            ("cross", "user", "cross", "b", None),
+            ("valid", "summary", "valid", "a", _stored_summary_metadata(["source"])),
+            ("missing", "summary", "missing", "a", _stored_summary_metadata(["absent"])),
+            ("cross-ref", "summary", "cross", "a", _stored_summary_metadata(["cross"])),
+            (
+                "wrong-preserved",
+                "summary",
+                "wrong preserved",
+                "a",
+                _stored_summary_metadata(["source"], ["valid"]),
+            ),
+            ("future-ref", "summary", "future", "a", _stored_summary_metadata(["future"])),
+            ("future", "assistant", "future record", "a", None),
+        ],
+    )
+
+    assert store.has_summary("a")
+    assert [message.content for message in store.get_messages_with_summary("a")] == [
+        "valid",
+        "future record",
+    ]
+
+
+def test_repeated_summary_can_summarize_prior_valid_summary() -> None:
+    store = _store()
+    source_id = store.add_message("user", "source", session_id="a")
+    first_summary_id = store.add_summary_message(
+        "first", session_id="a", metadata=_summary_metadata([source_id])
+    )
+
+    second_summary_id = store.add_summary_message(
+        "second", session_id="a", metadata=_summary_metadata([first_summary_id])
+    )
+
+    assert second_summary_id
+    assert [message.content for message in store.get_messages_with_summary("a")] == ["second"]
 
 
 def test_no_valid_summary_falls_back_to_latest_non_summary_messages() -> None:
