@@ -974,3 +974,84 @@ async def test_automatic_hook_stores_typed_result_for_every_outcome(outcome):
     ).abefore_model(state)
     assert update["extra"]["_compression_result"].telemetry.status == outcome
     assert ("messages" in update) is (outcome == "succeeded")
+
+
+@pytest.mark.asyncio
+async def test_manual_summarize_reports_before_and_after_history_tokens(monkeypatch):
+    from src.sdk.compression import (
+        CompressionArtifact,
+        CompressionMessage,
+        CompressionResult,
+        CompressionTelemetry,
+    )
+    from src.sdk.tools_core.summarize import summarize_session
+
+    replacement = (CompressionMessage.from_message(Message.user("summary")),)
+    artifact = CompressionArtifact(
+        summary="summary",
+        replacement_messages=replacement,
+        summarized_message_count=1,
+        preserved_message_count=0,
+        summarized_message_ids=("old-1",),
+        persistence_eligible=True,
+    )
+    telemetry = CompressionTelemetry(
+        status="succeeded",
+        reason="manual",
+        before_token_count=80,
+        after_token_count=30,
+        after_message_count=1,
+        summarized_message_count=1,
+        replacement_message_count=1,
+        summary_model="ollama-cloud:test",
+        persistence={"status": "not_requested"},
+    )
+    result = CompressionResult(artifact=artifact, telemetry=telemetry)
+
+    class Loop:
+        async def compress_context(self, reason, instructions=None):
+            assert reason == "manual"
+            assert instructions == "keep paths"
+            return result
+
+    monkeypatch.setattr("src.sdk.loop.get_current_agent_loop", lambda: Loop())
+    message = await summarize_session.ainvoke({"user_id": "user", "instructions": "keep paths"})
+    assert message == "Summarized conversation history from ~80 to ~30 tokens (saved ~50)."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        ("skipped", "Conversation was not summarized: not_compressed."),
+        ("failed", "Conversation summarization failed safely: not_compressed."),
+    ],
+)
+async def test_manual_summarize_reports_non_success_distinctly(monkeypatch, status, expected):
+    from src.sdk.compression import CompressionResult, CompressionTelemetry
+    from src.sdk.tools_core.summarize import summarize_session
+
+    result = CompressionResult(
+        telemetry=CompressionTelemetry(
+            status=status,
+            reason="manual",
+            summary_model="ollama-cloud:test",
+            persistence={"status": "not_requested"},
+            error_code="not_compressed",
+        )
+    )
+
+    class Loop:
+        async def compress_context(self, reason, instructions=None):
+            return result
+
+    monkeypatch.setattr("src.sdk.loop.get_current_agent_loop", lambda: Loop())
+    assert await summarize_session.ainvoke({"user_id": "user"}) == expected
+
+
+def test_manual_summarize_annotations_are_mutating_non_destructive():
+    from src.sdk.tools_core.summarize import summarize_session
+
+    assert summarize_session.annotations.read_only is False
+    assert summarize_session.annotations.idempotent is False
+    assert summarize_session.annotations.destructive is False

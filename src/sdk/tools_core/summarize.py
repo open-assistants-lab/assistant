@@ -1,6 +1,6 @@
 """Summarization tool — manual /summarize command for the agent loop."""
 
-from src.sdk.middleware_summarization import SummarizationMiddleware
+from src.sdk.compression import CompressionReason, CompressionStatus
 from src.sdk.tools import ToolAnnotations, tool
 
 
@@ -31,21 +31,23 @@ async def summarize_session(
     if loop is None:
         return "Error: No active agent session. Summarization is only available during a conversation."
 
-    summary_mw = loop.find_middleware(SummarizationMiddleware)
-    if summary_mw is None:
-        return "Error: No summarization middleware configured."
-
-    before_tokens = summary_mw.count_tokens(loop.state.messages)
-    success = await summary_mw.force_summarize(loop.state, instructions=instructions)
-    if not success:
-        return "Conversation too short to summarize meaningfully."
-    after_tokens = summary_mw.count_tokens(loop.state.messages)
-    saved = before_tokens - after_tokens
-    return f"Summarized. Saved ~{saved} tokens."
+    result = await loop.compress_context(CompressionReason.MANUAL, instructions)
+    telemetry = result.telemetry
+    if telemetry.status is CompressionStatus.SUCCEEDED:
+        saved = max(0, telemetry.before_token_count - telemetry.after_token_count)
+        return (
+            f"Summarized conversation history from ~{telemetry.before_token_count} to "
+            f"~{telemetry.after_token_count} tokens (saved ~{saved})."
+        )
+    reason = telemetry.error_code or "no eligible history"
+    if telemetry.status is CompressionStatus.SKIPPED:
+        return f"Conversation was not summarized: {reason}."
+    return f"Conversation summarization failed safely: {reason}."
 
 
 summarize_session.annotations = ToolAnnotations(
     title="Summarize / Compact Conversation",
-    read_only=True,
-    idempotent=True,
+    read_only=False,
+    idempotent=False,
+    destructive=False,
 )
