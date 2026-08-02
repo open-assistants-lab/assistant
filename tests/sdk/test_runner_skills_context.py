@@ -105,10 +105,22 @@ def test_get_skills_context_excludes_disabled_skills(monkeypatch):
 
 async def test_run_sdk_agent_stream_does_not_mutate_system_message(monkeypatch):
     recorded = []
+    flow = {}
 
     class FakeLoop:
+        model_id = "openai:gpt-4.1"
+        state = None
+        rubric = None
+        cancel_event = None
+
         async def run_stream(self, messages):
             recorded.extend(messages)
+            flow.update(
+                user_id=self._flow_user_id,
+                session_id=self._flow_session_id,
+                model=self._flow_model,
+                attempt=self._flow_attempt,
+            )
             if False:
                 yield None
 
@@ -126,11 +138,61 @@ async def test_run_sdk_agent_stream_does_not_mutate_system_message(monkeypatch):
         user_id="u",
         messages=[Message.system("base")],
         workspace_id="ws1",
+        model="ignored-request-model",
+        session_id="chat-1",
     )
     async for _ in chunks:
         pass
 
     assert recorded[0].content == "base"
+    assert flow == {
+        "user_id": "u",
+        "session_id": "chat-1",
+        "model": "openai:gpt-4.1",
+        "attempt": 1,
+    }
+
+
+async def test_run_sdk_agent_sets_canonical_flow_fields_before_invocation(monkeypatch):
+    flow = {}
+
+    class FakeLoop:
+        model_id = "openrouter:anthropic/claude-sonnet-4"
+        state = None
+        rubric = None
+
+        async def run(self, messages):
+            flow.update(
+                user_id=self._flow_user_id,
+                session_id=self._flow_session_id,
+                model=self._flow_model,
+                attempt=self._flow_attempt,
+            )
+            return messages
+
+    async def fake_get_sdk_loop(*args, **kwargs):
+        return FakeLoop()
+
+    monkeypatch.setattr(runner, "get_sdk_loop", fake_get_sdk_loop)
+    monkeypatch.setattr(runner, "_persist_run_outcome", lambda *args, **kwargs: _noop())
+
+    await runner.run_sdk_agent(
+        user_id="u",
+        messages=[Message.user("hello")],
+        model="ignored-request-model",
+        session_id=None,
+    )
+
+    assert flow == {
+        "user_id": "u",
+        "session_id": "default",
+        "model": "openrouter:anthropic/claude-sonnet-4",
+        "attempt": 1,
+    }
+
+
+async def _noop():
+    return None
 
 
 async def test_get_sdk_loop_reuses_provider_key_loop_for_runtime_state(monkeypatch):
@@ -203,6 +265,7 @@ async def test_create_sdk_loop_uses_user_level_runtime_context(monkeypatch, tmp_
         settings.memory.summarization.enabled = False
         settings.agent.model = "ollama:test-model"
         mock_provider = AsyncMock()
+        mock_provider.provider_id = "ollama"
         mock_provider.model = "ollama:test-model"
         mock_create_provider.return_value = mock_provider
 

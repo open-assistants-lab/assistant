@@ -3,85 +3,347 @@
 from __future__ import annotations
 
 import builtins
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.sdk.messages import Message, StreamChunk
 from src.sdk.state import AgentState
+from src.storage.messages import Message as StoredMessage
 
 
-@pytest.mark.asyncio
-async def test_create_sdk_loop_wires_on_summarize():
-    """Verify SummarizationMiddleware gets on_summarize callback when enabled."""
-    from src.sdk.runner import create_sdk_loop
+class _FakeIndex:
+    def count(self):
+        return 0
 
-    with (
-        patch("src.sdk.runner.get_settings") as mock_settings,
-        patch("src.sdk.runner.create_model_from_config") as mock_create_provider,
-        patch("src.sdk.runner.get_native_tools", return_value=[]),
-        patch("src.sdk.runner._seed_default_workspace"),
-        patch("src.sdk.runner._get_system_prompt", return_value="You are a test assistant."),
-        patch("src.storage.messages.get_message_store") as mock_get_store,
+    def clear(self):
+        pass
+
+    def index_tool(self, *args, **kwargs):
+        pass
+
+
+@pytest.fixture
+def loop_factory(monkeypatch):
+    from src.sdk import runner
+
+    settings = MagicMock()
+    settings.memory.summarization.enabled = True
+    settings.memory.summarization.get_trigger.return_value = ("messages", 2)
+    settings.memory.summarization.get_keep.return_value = ("messages", 1)
+    settings.memory.summarization.model = None
+    settings.memory.summarization.trim_tokens_to_summarize = 4000
+    settings.memory.summarization.prompt_file = None
+    settings.verification.enabled = False
+    settings.langfuse.enabled = False
+    monkeypatch.setattr(runner, "get_settings", lambda: settings)
+    monkeypatch.setattr(runner, "get_native_tools", lambda: [])
+    monkeypatch.setattr(runner, "_seed_default_workspace", lambda: None)
+    monkeypatch.setattr(runner, "_get_system_prompt", lambda *args, **kwargs: "prompt")
+    monkeypatch.setattr("src.sdk.tool_index.get_or_create_index", lambda *args, **kwargs: _FakeIndex())
+
+    async def create(
+        session_id=None,
+        *,
+        provider_id="openai",
+        provider_model="gpt-4.1",
+        user_id="test_user",
     ):
-        settings = mock_settings.return_value
-        settings.memory.summarization.enabled = True
-        settings.memory.summarization.get_trigger = lambda: ("tokens", 10)
-        settings.memory.summarization.get_keep = lambda: ("messages", 5)
-        settings.memory.summarization.model = "ollama:test-model"
-        settings.memory.summarization.trim_tokens_to_summarize = 4000
-        settings.memory.summarization.trigger_tokens = None
-        settings.memory.summarization.keep_tokens = None
-        settings.agent.model = "ollama:test-model"
+        provider = AsyncMock()
+        provider.provider_id = provider_id
+        provider.model = provider_model
+        monkeypatch.setattr(runner, "create_model_from_config", lambda *args, **kwargs: provider)
+        return await runner.create_sdk_loop(user_id=user_id, session_id=session_id)
 
-        mock_provider = AsyncMock()
-        mock_provider.model = "ollama:test-model"
-        mock_create_provider.return_value = mock_provider
+    return create
 
-        mock_store = MagicMock()
-        mock_get_store.return_value = mock_store
 
-        loop = await create_sdk_loop(user_id="test_user", workspace_id="personal")
+def _artifact(*, eligible=True):
+    from src.sdk.compression import CompressionArtifact, CompressionMessage
 
-        summarization_mw = None
-        for mw in loop.middlewares:
-            if mw.__class__.__name__ == "SummarizationMiddleware":
-                summarization_mw = mw
-                break
+    summary = Message(role="user", content="summary", source="summarization_middleware")
+    return CompressionArtifact(
+        summary="summary",
+        replacement_messages=(CompressionMessage.from_message(summary),),
+        summarized_message_count=2,
+        preserved_message_count=1,
+        summarized_message_ids=("m1", "m2") if eligible else (),
+        preserved_message_ids=("m3",),
+        persistence_eligible=eligible,
+    )
 
-        assert summarization_mw is not None
-        assert summarization_mw._on_summarize is not None
 
-        summarization_mw._acreate_summary = AsyncMock(
-            return_value=(
-                "This is a test summary of the conversation. It covers the key topics discussed "
-                "including user preferences, decisions made, and action items identified. "
-                "The user asked about various subjects and the assistant provided helpful responses. "
-                "Several important facts were established during this exchange. "
-                "The conversation covered multiple topics and reached several conclusions. "
-                "Key points included the user's preferences for concise answers and structured responses. "
-                "The assistant demonstrated the ability to handle complex queries. "
-                "Overall this was a productive exchange that achieved its objectives. "
-                "The summary captures all essential information for future reference. "
-                "Nothing important was omitted from this conversation summary."
-            )
-        )
+def _context(session_id="chat-1"):
+    from src.sdk.compression import CompressionContext, CompressionReason
 
-        msgs = [Message.user(f"Message number {i} about various topics.") for i in range(20)]
-        state = AgentState(messages=msgs)
-        result = await summarization_mw.abefore_model(state)
-
-        assert result is not None, "Summarization should have triggered"
-
-        mock_get_store.assert_called_with("test_user")
-        mock_store.add_summary_message.assert_called_once()
-        call_arg = mock_store.add_summary_message.call_args[0][0]
-        assert "test summary of the conversation" in call_arg
+    return CompressionContext(
+        session_id=session_id,
+        model="openai:gpt-4.1",
+        attempt=1,
+        llm_call_index=1,
+        reason=CompressionReason.THRESHOLD,
+    )
 
 
 @pytest.mark.asyncio
-async def test_create_sdk_loop_no_on_summarize_when_disabled():
-    """Verify SummarizationMiddleware has no on_summarize when disabled."""
+async def test_create_sdk_loop_wires_typed_summary_sink(loop_factory, monkeypatch):
+    from src.sdk.compression import PersistenceStatus
+
+    store = MagicMock()
+    store.add_summary_message.return_value = "summary-1"
+    monkeypatch.setattr("src.storage.messages.get_message_store", lambda user_id: store)
+    loop = await loop_factory("chat-1")
+    middleware = loop.middlewares[0]
+
+    result = await middleware._summary_sink(_context(), _artifact())
+
+    assert result.status is PersistenceStatus.SUCCEEDED
+    assert result.summary_id == "summary-1"
+    store.add_summary_message.assert_called_once_with(
+        "summary",
+        session_id="chat-1",
+        metadata={
+            "source": "summarization_middleware",
+            "compression_reason": "threshold",
+            "summarized_message_ids": ["m1", "m2"],
+            "preserved_message_ids": ["m3"],
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_summary_sink_rejects_session_mismatch(loop_factory, monkeypatch):
+    from src.sdk.compression import PersistenceStatus
+
+    store = MagicMock()
+    monkeypatch.setattr("src.storage.messages.get_message_store", lambda user_id: store)
+    loop = await loop_factory("chat-1")
+
+    result = await loop.middlewares[0]._summary_sink(_context("chat-2"), _artifact())
+
+    assert result.status is PersistenceStatus.FAILED
+    store.add_summary_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_summary_sink_skips_ineligible_artifact(loop_factory, monkeypatch):
+    from src.sdk.compression import PersistenceStatus
+
+    store = MagicMock()
+    monkeypatch.setattr("src.storage.messages.get_message_store", lambda user_id: store)
+    loop = await loop_factory("chat-1")
+
+    result = await loop.middlewares[0]._summary_sink(_context(), _artifact(eligible=False))
+
+    assert result.status is PersistenceStatus.NOT_REQUESTED
+    store.add_summary_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_summary_sink_returns_failed_for_empty_storage_id(loop_factory, monkeypatch):
+    from src.sdk.compression import PersistenceStatus
+
+    store = MagicMock()
+    store.add_summary_message.return_value = ""
+    monkeypatch.setattr("src.storage.messages.get_message_store", lambda user_id: store)
+    loop = await loop_factory("chat-1")
+
+    result = await loop.middlewares[0]._summary_sink(_context(), _artifact())
+
+    assert result.status is PersistenceStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_summary_sink_contains_store_exception(loop_factory, monkeypatch):
+    from src.sdk.compression import PersistenceStatus
+
+    store = MagicMock()
+    store.add_summary_message.side_effect = RuntimeError("database unavailable")
+    monkeypatch.setattr("src.storage.messages.get_message_store", lambda user_id: store)
+    loop = await loop_factory("chat-1")
+
+    result = await loop.middlewares[0]._summary_sink(_context(), _artifact())
+
+    assert result.status is PersistenceStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_two_loop_sinks_persist_to_owning_sessions(loop_factory, monkeypatch):
+    store = MagicMock()
+    store.add_summary_message.side_effect = ["summary-a", "summary-b"]
+    monkeypatch.setattr("src.storage.messages.get_message_store", lambda user_id: store)
+    loop_a = await loop_factory("chat-a")
+    loop_b = await loop_factory("chat-b")
+
+    result_a = await loop_a.middlewares[0]._summary_sink(_context("chat-a"), _artifact())
+    result_b = await loop_b.middlewares[0]._summary_sink(_context("chat-b"), _artifact())
+
+    assert (result_a.summary_id, result_b.summary_id) == ("summary-a", "summary-b")
+    assert [call.kwargs["session_id"] for call in store.add_summary_message.call_args_list] == [
+        "chat-a",
+        "chat-b",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_persisted_summary_id_is_applied_by_middleware(loop_factory, monkeypatch):
+    from src.sdk.compression import CompressionContext, CompressionReason
+    from src.sdk.run_models import UsageAggregate
+
+    store = MagicMock()
+    store.add_summary_message.return_value = "stored-summary"
+    monkeypatch.setattr("src.storage.messages.get_message_store", lambda user_id: store)
+    loop = await loop_factory("chat-1")
+    middleware = loop.middlewares[0]
+    middleware._acreate_summary = AsyncMock(return_value=("summary", UsageAggregate()))
+    messages = [
+        Message(role="user", content="old", storage_id="m1"),
+        Message(role="assistant", content="reply", storage_id="m2"),
+        Message(role="user", content="recent", storage_id="m3"),
+    ]
+    context = CompressionContext(
+        session_id="chat-1",
+        model="openai:gpt-4.1",
+        attempt=1,
+        llm_call_index=1,
+        reason=CompressionReason.MANUAL,
+    )
+
+    result = await middleware.force_summarize(AgentState(messages=messages), context)
+
+    assert result.artifact is not None
+    assert result.artifact.persisted_summary_id == "stored-summary"
+    assert result.artifact.replacement_messages[0].storage_id == "stored-summary"
+
+
+@pytest.mark.asyncio
+async def test_get_sdk_loop_forwards_normalized_default_session(monkeypatch):
+    from src.sdk import runner
+
+    runner._loop_cache.clear()
+    create = AsyncMock(return_value=object())
+    monkeypatch.setattr(runner, "create_sdk_loop", create)
+
+    await runner.get_sdk_loop("u", session_id=None)
+
+    assert create.call_args.kwargs["session_id"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_get_sdk_loop_keeps_sessions_in_separate_cache_entries(monkeypatch):
+    from src.sdk import runner
+
+    runner._loop_cache.clear()
+    create = AsyncMock(side_effect=[object(), object()])
+    monkeypatch.setattr(runner, "create_sdk_loop", create)
+
+    first = await runner.get_sdk_loop("u", session_id="chat-1")
+    second = await runner.get_sdk_loop("u", session_id="chat-2")
+
+    assert first is not second
+    assert [call.kwargs["session_id"] for call in create.call_args_list] == ["chat-1", "chat-2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_id", "provider_model", "expected"),
+    [
+        ("openai", "gpt-4.1", "openai:gpt-4.1"),
+        ("ollama", "qwen3:8b", "ollama:qwen3:8b"),
+        ("openrouter", "anthropic/claude-sonnet-4", "openrouter:anthropic/claude-sonnet-4"),
+    ],
+)
+async def test_create_sdk_loop_uses_canonical_provider_model_id(
+    loop_factory, provider_id, provider_model, expected
+):
+    loop = await loop_factory(
+        "chat-1", provider_id=provider_id, provider_model=provider_model
+    )
+
+    assert loop.model_id == expected
+
+
+def test_messages_from_conversation_preserves_user_storage_identity():
+    from src.sdk.runner import _messages_from_conversation
+
+    ts = datetime(2026, 8, 3, 1, 2, 3, tzinfo=UTC)
+    converted = _messages_from_conversation(
+        [StoredMessage("user-1", ts, "user", "hello", session_id="chat-1")]
+    )
+
+    assert converted[0].storage_id == "user-1"
+    assert converted[0].storage_ts == ts.isoformat()
+    assert converted[0].storage_session_id == "chat-1"
+
+
+def test_messages_from_conversation_preserves_persisted_summary_source_and_identity():
+    from src.sdk.runner import _messages_from_conversation
+
+    ts = datetime(2026, 8, 3, tzinfo=UTC)
+    stored = StoredMessage(
+        "summary-1",
+        ts,
+        "summary",
+        "compressed",
+        metadata={"source": "persisted_compression"},
+        session_id="chat-1",
+    )
+
+    converted = _messages_from_conversation([stored])
+
+    assert converted[0].role == "user"
+    assert converted[0].source == "persisted_compression"
+    assert converted[0].storage_id == "summary-1"
+    assert converted[0].storage_session_id == "chat-1"
+
+
+def test_messages_from_conversation_summary_source_falls_back_to_middleware():
+    from src.sdk.runner import _messages_from_conversation
+
+    converted = _messages_from_conversation(
+        [StoredMessage("summary-1", datetime.now(UTC), "summary", "compressed", session_id="chat")]
+    )
+
+    assert converted[0].source == "summarization_middleware"
+
+
+def test_messages_from_conversation_preserves_tool_storage_identity():
+    from src.sdk.runner import _messages_from_conversation
+
+    stored = StoredMessage(
+        "tool-1",
+        datetime.now(UTC),
+        "tool",
+        "result",
+        metadata={"tool_name": "time_get", "tool_call_id": "call-1"},
+        session_id="chat",
+    )
+
+    converted = _messages_from_conversation([stored])
+
+    assert converted[0].storage_id == "tool-1"
+    assert converted[0].storage_session_id == "chat"
+
+
+def test_messages_from_conversation_assistant_identity_is_authoritative_over_reasoning():
+    from src.sdk.runner import _messages_from_conversation
+
+    ts = datetime.now(UTC)
+    converted = _messages_from_conversation(
+        [
+            StoredMessage("reason-1", ts, "reasoning", "thinking", session_id="chat"),
+            StoredMessage("assistant-1", ts, "assistant", "answer", session_id="chat"),
+        ]
+    )
+
+    assert converted[0].reasoning == "thinking"
+    assert converted[0].storage_id == "assistant-1"
+    assert converted[0].storage_session_id == "chat"
+
+
+@pytest.mark.asyncio
+async def test_create_sdk_loop_has_no_summary_middleware_when_disabled():
     from src.sdk.runner import create_sdk_loop
 
     with (
@@ -96,6 +358,7 @@ async def test_create_sdk_loop_no_on_summarize_when_disabled():
         settings.agent.model = "ollama:test-model"
 
         mock_provider = AsyncMock()
+        mock_provider.provider_id = "ollama"
         mock_provider.model = "ollama:test-model"
         mock_create_provider.return_value = mock_provider
 
@@ -126,6 +389,7 @@ async def test_create_sdk_loop_passes_user_id_to_provider_factory():
         settings.memory.summarization.enabled = False
         settings.agent.model = "openai:gpt-4.1"
         mock_provider = AsyncMock()
+        mock_provider.provider_id = "openai"
         mock_provider.model = "openai:gpt-4.1"
         mock_create_provider.return_value = mock_provider
 
@@ -149,6 +413,7 @@ async def test_create_sdk_loop_passes_explicit_model_to_provider_factory():
         settings.memory.summarization.enabled = False
         settings.agent.model = "ollama:fallback"
         mock_provider = AsyncMock()
+        mock_provider.provider_id = "openai"
         mock_provider.model = "openai:gpt-4.1"
         mock_create_provider.return_value = mock_provider
 
@@ -167,6 +432,7 @@ async def test_run_sdk_agent_stream_triggers_summarization():
     reset_sdk_loop("test_stream_user")
 
     class MockStreamProvider:
+        provider_id = "ollama"
         model = "test-model"
 
         async def chat_stream(self, messages, tools=None, model=None, provider_options=None):
@@ -193,10 +459,15 @@ async def test_run_sdk_agent_stream_triggers_summarization():
         mock_create_provider.return_value = MockStreamProvider()
 
         mock_store = MagicMock()
+        mock_store.add_summary_message.return_value = "summary-stream"
         mock_get_store.return_value = mock_store
 
         # Pre-create the loop so we can mock _acreate_summary on the middleware
-        loop = await get_sdk_loop(user_id="test_stream_user", workspace_id="personal")
+        loop = await get_sdk_loop(
+            user_id="test_stream_user",
+            workspace_id="personal",
+            session_id="stream-chat",
+        )
 
         summarization_mw = None
         for mw in loop.middlewares:
@@ -217,21 +488,30 @@ async def test_run_sdk_agent_stream_triggers_summarization():
             "The summary captures all essential information for future reference. "
             "Nothing important was omitted from this conversation summary."
         )
-        summarization_mw._acreate_summary = AsyncMock(return_value=summary_text)
+        from src.sdk.run_models import UsageAggregate
 
-        long_msgs = [Message.user(f"Message number {i} about various topics.") for i in range(30)]
+        summarization_mw._acreate_summary = AsyncMock(
+            return_value=(summary_text, UsageAggregate())
+        )
+
+        long_msgs = [
+            Message(role="user", content=f"Message number {i} about various topics.", storage_id=f"m{i}")
+            for i in range(30)
+        ]
 
         chunks = []
         async for chunk in run_sdk_agent_stream(
             user_id="test_stream_user",
             messages=long_msgs,
             workspace_id="personal",
+            session_id="stream-chat",
         ):
             chunks.append(chunk)
 
         assert mock_store.add_summary_message.called, (
             "add_summary_message should have been called when summarization triggered"
         )
+        assert mock_store.add_summary_message.call_args.kwargs["session_id"] == "stream-chat"
 
 
 class _ItemScopesImported(BaseException):
@@ -277,6 +557,7 @@ async def test_create_sdk_loop_does_not_import_item_scopes(monkeypatch):
         settings.memory.summarization.enabled = False
         settings.agent.model = "ollama:test-model"
         mock_provider = AsyncMock()
+        mock_provider.provider_id = "ollama"
         mock_provider.model = "ollama:test-model"
         mock_create_provider.return_value = mock_provider
 
@@ -551,6 +832,7 @@ async def test_create_sdk_loop_excludes_disabled_tools_from_core_and_index(monke
         settings.memory.summarization.enabled = False
         settings.agent.model = "ollama:test-model"
         mock_provider = AsyncMock()
+        mock_provider.provider_id = "ollama"
         mock_provider.model = "ollama:test-model"
         mock_create_provider.return_value = mock_provider
 
@@ -616,6 +898,7 @@ async def test_create_sdk_loop_rebuilds_tool_index_when_capabilities_change(monk
         settings.memory.summarization.enabled = False
         settings.agent.model = "ollama:test-model"
         mock_provider = AsyncMock()
+        mock_provider.provider_id = "ollama"
         mock_provider.model = "ollama:test-model"
         mock_create_provider.return_value = mock_provider
 
@@ -726,11 +1009,14 @@ async def test_runner_wraps_loop_with_langfuse(monkeypatch):
     monkeypatch.setattr(LangfuseTracer, "wrap_loop", tracking_wrap)
 
     from src.sdk.runner import create_sdk_loop
-    await create_sdk_loop("lf_test_user", model="ollama-cloud:test-model")
+    await create_sdk_loop(
+        "lf_test_user", model="ollama-cloud:test-model", session_id="lf-chat"
+    )
 
     assert LangfuseTracer.is_enabled() is True
     assert len(wrap_calls) == 1
     assert wrap_calls[0]["user_id"] == "lf_test_user"
+    assert wrap_calls[0]["session_id"] == "lf-chat"
 
     LangfuseTracer._client = None
     _cfg._config = None

@@ -26,6 +26,12 @@ from typing import Any, cast
 from src.app_logging import get_logger
 from src.config import get_settings
 from src.sdk.capabilities import load_user_capabilities, resource_enabled
+from src.sdk.compression import (
+    CompressionArtifact,
+    CompressionContext,
+    PersistenceStatus,
+    SummaryPersistenceResult,
+)
 from src.sdk.loop import AgentLoop
 from src.sdk.messages import Message, StreamChunk
 from src.sdk.middleware_summarization import SummarizationMiddleware
@@ -300,23 +306,32 @@ def _get_connector_context(user_id: str) -> str:
         return ""
 
 
-async def create_sdk_loop(user_id: str, workspace_id: str = "personal", model: str | None = None, provider_keys: dict[str, str] | None = None) -> AgentLoop:
+async def create_sdk_loop(
+    user_id: str,
+    workspace_id: str = "personal",
+    model: str | None = None,
+    provider_keys: dict[str, str] | None = None,
+    session_id: str | None = None,
+) -> AgentLoop:
     """Create an AgentLoop for a user with all wiring."""
     import time
 
     del workspace_id
     runtime_workspace_id = "personal"
+    runtime_session_id = session_id or "default"
     _seed_default_workspace()
     t0 = time.monotonic()
     settings = get_settings()
 
     provider = create_model_from_config(model, provider_keys=provider_keys, user_id=user_id)
-    model_str: str = cast(
+    provider_model: str = cast(
         str,
         getattr(provider, "model", None)
         or model
         or getattr(settings.agent, "model", "ollama:minimax-m2.5"),
     )
+    provider_id = str(getattr(provider, "provider_id", None) or "ollama")
+    model_id = f"{provider_id}:{provider_model}"
     t1 = time.monotonic()
 
     caps = _load_user_capabilities(user_id)
@@ -454,31 +469,71 @@ async def create_sdk_loop(user_id: str, workspace_id: str = "personal", model: s
     if summary_config.enabled:
         from src.storage.messages import get_message_store
 
-        async def _persist_summary(content: str) -> None:
-            try:
-                store = get_message_store(user_id)
-                store.add_summary_message(content)
-                logger.info(
-                    "summarization.persisted",
-                    {"summary_length": len(content)},
-                    user_id=user_id,
-                )
-            except Exception as e:
+        async def _persist_summary(
+            context: CompressionContext, artifact: CompressionArtifact
+        ) -> SummaryPersistenceResult:
+            if context.session_id != runtime_session_id:
                 logger.warning(
                     "summarization.persist_failed",
-                    {"error": str(e)},
+                    {
+                        "status": PersistenceStatus.FAILED.value,
+                        "summarized_count": artifact.summarized_message_count,
+                        "preserved_count": artifact.preserved_message_count,
+                        "error_type": "session_mismatch",
+                    },
                     user_id=user_id,
                 )
+                return SummaryPersistenceResult(status=PersistenceStatus.FAILED)
+            if not artifact.persistence_eligible:
+                return SummaryPersistenceResult(status=PersistenceStatus.NOT_REQUESTED)
+            try:
+                store = get_message_store(user_id)
+                summary_id = store.add_summary_message(
+                    artifact.summary,
+                    session_id=runtime_session_id,
+                    metadata={
+                        "source": "summarization_middleware",
+                        "compression_reason": context.reason.value,
+                        "summarized_message_ids": list(artifact.summarized_message_ids),
+                        "preserved_message_ids": list(artifact.preserved_message_ids),
+                    },
+                )
+                if not summary_id:
+                    raise ValueError("summary store returned an empty ID")
+                logger.info(
+                    "summarization.persisted",
+                    {
+                        "status": PersistenceStatus.SUCCEEDED.value,
+                        "summarized_count": artifact.summarized_message_count,
+                        "preserved_count": artifact.preserved_message_count,
+                    },
+                    user_id=user_id,
+                )
+                return SummaryPersistenceResult(
+                    status=PersistenceStatus.SUCCEEDED, summary_id=summary_id
+                )
+            except Exception as exc:
+                logger.warning(
+                    "summarization.persist_failed",
+                    {
+                        "status": PersistenceStatus.FAILED.value,
+                        "summarized_count": artifact.summarized_message_count,
+                        "preserved_count": artifact.preserved_message_count,
+                        "error_type": type(exc).__name__,
+                    },
+                    user_id=user_id,
+                )
+                return SummaryPersistenceResult(status=PersistenceStatus.FAILED)
 
         middlewares.append(
             SummarizationMiddleware(
-                model=summary_config.model or model_str,
+                model=summary_config.model or model_id,
                 trigger=summary_config.get_trigger(),
                 keep=summary_config.get_keep(),
                 trim_tokens_to_summarize=summary_config.trim_tokens_to_summarize,
                 prompt_file=summary_config.prompt_file,
                 user_id=user_id,
-                on_summarize=_persist_summary,
+                summary_sink=_persist_summary,
             )
         )
 
@@ -487,7 +542,7 @@ async def create_sdk_loop(user_id: str, workspace_id: str = "personal", model: s
     if verification_config.enabled is True:
         from src.sdk.middleware_rubric import RubricMiddleware
 
-        grader_model = verification_config.grader_model or model_str
+        grader_model = verification_config.grader_model or model_id
         grader_provider = create_model_from_config(
             grader_model, provider_keys=provider_keys, user_id=user_id
         )
@@ -516,6 +571,7 @@ async def create_sdk_loop(user_id: str, workspace_id: str = "personal", model: s
         middlewares=middlewares,
         user_id=user_id,
         workspace_id=runtime_workspace_id,
+        model_id=model_id,
     )
 
     loop._tool_index = idx
@@ -577,7 +633,9 @@ async def create_sdk_loop(user_id: str, workspace_id: str = "personal", model: s
                 host=lf_settings.langfuse.host,
             )
         if LangfuseTracer.is_enabled():
-            loop = LangfuseTracer.wrap_loop(loop, user_id=user_id, session_id="default")
+            loop = LangfuseTracer.wrap_loop(
+                loop, user_id=user_id, session_id=runtime_session_id
+            )
 
     return loop
 
@@ -590,10 +648,15 @@ async def get_sdk_loop(user_id: str, workspace_id: str = "personal", model: str 
     clobbered across concurrent run_stream calls.
     """
     cache_key = _loop_cache_key(user_id, workspace_id, model, provider_keys, session_id)
+    runtime_session_id = session_id or "default"
     async with _loop_lock:
         if cache_key not in _loop_cache:
             _loop_cache[cache_key] = await create_sdk_loop(
-                user_id, workspace_id, model=model, provider_keys=provider_keys
+                user_id,
+                workspace_id,
+                model=model,
+                provider_keys=provider_keys,
+                session_id=runtime_session_id,
             )
             logger.info("sdk_runner.loop_created", {"user_id": user_id, "workspace_id": workspace_id, "model": model, "session_id": session_id}, user_id=user_id)
             _loop_cache.move_to_end(cache_key)
@@ -649,19 +712,31 @@ def _messages_from_conversation(messages: list[Any]) -> list[Message]:
         content = getattr(m, "content", "")
         meta = getattr(m, "metadata", {}) or {}
         source = meta.get("source")
+        ts = getattr(m, "ts", None)
+        storage_identity = {
+            "storage_id": getattr(m, "id", ""),
+            "storage_ts": str(ts.isoformat()) if ts is not None else "",
+            "storage_session_id": getattr(m, "session_id", ""),
+        }
         if role == "user":
-            if source:
-                sdk_messages.append(Message(role="user", content=content, source=source))
-            else:
-                sdk_messages.append(Message.user(content))
+            sdk_messages.append(
+                Message(role="user", content=content, source=source, **storage_identity)
+            )
             pending_reasoning = None
             last_assistant_had_tool_calls = False
         elif role == "summary":
-            sdk_messages.append(Message(role="user", content=f"[SUMMARY OF PREVIOUS CONVERSATION]\n{content}", source="summarization_middleware"))
+            sdk_messages.append(
+                Message(
+                    role="user",
+                    content=f"[SUMMARY OF PREVIOUS CONVERSATION]\n{content}",
+                    source=source or "summarization_middleware",
+                    **storage_identity,
+                )
+            )
             pending_reasoning = None
             last_assistant_had_tool_calls = False
         elif role == "system":
-            sdk_messages.append(Message.system(content))
+            sdk_messages.append(Message(role="system", content=content, **storage_identity))
             pending_reasoning = None
             last_assistant_had_tool_calls = False
         elif role == "tool":
@@ -670,17 +745,34 @@ def _messages_from_conversation(messages: list[Any]) -> list[Message]:
             tool_call_id = meta.get("tool_call_id") or meta.get("call_id") or ""
             if last_assistant_had_tool_calls:
                 sdk_messages.append(
-                    Message.tool_result(tool_call_id, content=str(content or ""), name=tool_name)
+                    Message(
+                        role="tool",
+                        tool_call_id=tool_call_id,
+                        content=str(content or ""),
+                        name=tool_name,
+                        **storage_identity,
+                    )
                 )
             else:
-                sdk_messages.append(Message.user(f"[TOOL RESULT: {tool_name}]\n{content}"))
+                sdk_messages.append(
+                    Message(
+                        role="user",
+                        content=f"[TOOL RESULT: {tool_name}]\n{content}",
+                        **storage_identity,
+                    )
+                )
             pending_reasoning = None
             last_assistant_had_tool_calls = False
         elif role == "reasoning":
             pending_reasoning = content or None
         else:
             sdk_messages.append(
-                Message.assistant(content, reasoning=pending_reasoning)
+                Message(
+                    role="assistant",
+                    content=content,
+                    reasoning=pending_reasoning,
+                    **storage_identity,
+                )
             )
             pending_reasoning = None
             last_assistant_had_tool_calls = False
@@ -713,9 +805,10 @@ async def run_sdk_agent(
     loop = await get_sdk_loop(user_id, workspace_id, model=model, provider_keys=provider_keys, session_id=session_id)
     register_user_loop(user_id, loop, session_id=session_id)
     loop.rubric = rubric
-    loop._flow_user_id = user_id
-    loop._flow_session_id = session_id or "default"
-    loop._flow_model = model
+    loop._flow_user_id = user_id  # type: ignore[attr-defined]
+    loop._flow_session_id = session_id or "default"  # type: ignore[attr-defined]
+    loop._flow_model = loop.model_id  # type: ignore[attr-defined]
+    loop._flow_attempt = 1  # type: ignore[attr-defined]
     # Store user_id/session_id on loop state for middleware to use in rerun triggers
     try:
         result = await loop.run(messages)
@@ -753,13 +846,13 @@ async def run_sdk_agent(
     finally:
         # Store verification verdict on loop before unregister so router can read it
         if loop.state and loop.state.extra.get("_rubric_status"):
-            loop._verification_verdict = {
+            loop._verification_verdict = {  # type: ignore[attr-defined]
                 "status": loop.state.extra.get("_rubric_status"),
                 "iterations": loop.state.extra.get("_rubric_iterations", 0),
                 "evaluations": loop.state.extra.get("_rubric_evaluations", []),
             }
         else:
-            loop._verification_verdict = None
+            loop._verification_verdict = None  # type: ignore[attr-defined]
         loop.rubric = None
         unregister_user_loop(user_id, loop, session_id=session_id)
 
@@ -777,6 +870,10 @@ async def run_sdk_agent_stream(
     loop = await get_sdk_loop(user_id, workspace_id, model=model, provider_keys=provider_keys, session_id=session_id)
     loop.cancel_event = cancel_event
     loop.rubric = rubric
+    loop._flow_user_id = user_id  # type: ignore[attr-defined]
+    loop._flow_session_id = session_id or "default"  # type: ignore[attr-defined]
+    loop._flow_model = loop.model_id  # type: ignore[attr-defined]
+    loop._flow_attempt = 1  # type: ignore[attr-defined]
     register_user_loop(user_id, loop, session_id=session_id)
 
     try:
@@ -876,7 +973,7 @@ async def _persist_run_outcome(
 
         verification_status: str | None = None
         verification_iterations = 0
-        verification_evaluations: list[dict] = []
+        verification_evaluations: list[dict[str, Any]] = []
         if loop.state and loop.state.extra:
             verification_status = loop.state.extra.get("_rubric_status")
             verification_iterations = loop.state.extra.get("_rubric_iterations", 0)
