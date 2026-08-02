@@ -5,28 +5,40 @@ a threshold is reached, preserving recent messages and maintaining context
 continuity by ensuring AI/Tool message pairs remain together.
 
 Extensions over LangChain:
-- on_summarize callback (persist summary to conversation store)
+- typed summary sink (persist lossless compression artifacts)
 - force_summarize() (overflow recovery + manual /summarize)
 - Settings-based config (config.yaml + env vars)
 """
 
 from __future__ import annotations
 
+import inspect
 import json
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from functools import partial
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, cast
 
 from src.app_logging import get_logger
-from src.sdk.messages import Message
+from src.sdk.compression import (
+    CompressionArtifact,
+    CompressionContext,
+    CompressionResult,
+    CompressionStatus,
+    CompressionTelemetry,
+    PersistenceStatus,
+    SummaryPersistenceResult,
+    SummarySink,
+)
+from src.sdk.messages import Message, Usage
 from src.sdk.middleware import Middleware
+from src.sdk.run_models import ContextSnapshot, UsageAggregate
 from src.sdk.state import AgentState
 
 logger = get_logger()
 
-SummaryCallback = Callable[[str], Awaitable[None]] | Callable[[str], Any]
 TokenCounter = Callable[[Iterable[Message]], int]
+SummaryProviderFactory = Callable[[], Any]
 
 DEFAULT_SUMMARY_PROMPT = """<role>
 Context Extraction Assistant
@@ -78,6 +90,12 @@ Messages to summarize:
 _DEFAULT_MESSAGES_TO_KEEP = 20
 _DEFAULT_TRIM_TOKEN_LIMIT = 4000
 _DEFAULT_FALLBACK_MESSAGE_COUNT = 15
+
+
+class _SummaryGenerationError(Exception):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 # ---------------------------------------------------------------------------
@@ -181,14 +199,18 @@ class SummarizationMiddleware(Middleware):
         prompt_file: str | None = None,
         user_id: str | None = None,
         trim_tokens_to_summarize: int | None = _DEFAULT_TRIM_TOKEN_LIMIT,
-        on_summarize: SummaryCallback | None = None,
+        summary_sink: SummarySink | None = None,
+        summary_provider_factory: SummaryProviderFactory | None = None,
     ) -> None:
         self.model = model
         self.trigger = trigger
         self.keep = self._validate_context_size(keep, "keep")
         self.trim_tokens_to_summarize = trim_tokens_to_summarize
-        self._on_summarize = on_summarize
+        self._summary_sink = summary_sink
+        self._summary_provider_factory = summary_provider_factory
+        self._summary_provider: Any | None = None
         self._prompt_file = prompt_file
+        self.user_id = user_id or "default_user"
 
         # Load summary prompt: explicit param > file (seeded per user) > built-in default
         if summary_prompt is not None:
@@ -215,37 +237,18 @@ class SummarizationMiddleware(Middleware):
         """Public token count for a list of messages."""
         return self.token_counter(messages)
 
-    async def force_summarize(self, state: AgentState, instructions: str | None = None) -> bool:
-        """Force summarization, bypassing trigger check.
-
-        Used by overflow recovery in AgentLoop and manual /summarize tool.
-        If instructions are provided, they are prepended to focus the summary.
-        Returns True if summarization was performed.
-        """
-        messages = state.messages
-        if len(messages) < 2:
-            return False
-
-        cutoff_index = self._determine_cutoff_index(messages)
-        if cutoff_index <= 0:
-            return False
-
-        messages_to_summarize, preserved_messages = self._partition_messages(messages, cutoff_index)
-        if not messages_to_summarize:
-            return False
-
-        summary = await self._acreate_summary(messages_to_summarize, instructions=instructions)
-        new_messages = self._build_new_messages(summary)
-        state.messages = new_messages
-
-        await self._fire_callback(summary)
-
-        logger.info(
-            "summarization.force_completed",
-            {"old_msg_count": len(messages), "new_msg_count": len(new_messages), "summary_length": len(summary)},
-            user_id="system",
-        )
-        return True
+    async def force_summarize(
+        self,
+        state: AgentState,
+        context: CompressionContext,
+        instructions: str | None = None,
+    ) -> CompressionResult:
+        """Compress context without checking the automatic trigger."""
+        result = await self._compress(state.messages, context, instructions=instructions)
+        if result.compressed and result.artifact is not None:
+            state.messages = list(result.artifact.replacement_messages)
+            state.extra["_compression_result"] = result
+        return result
 
     # -- Hooks --
 
@@ -264,36 +267,19 @@ class SummarizationMiddleware(Middleware):
         """Async version — triggers summarization when threshold is met."""
         messages = state.messages
         total_tokens = self.token_counter(messages)
-
+        context = state.extra.get("_compression_context")
+        if not isinstance(context, CompressionContext):
+            return None
         if not self._should_summarize(messages, total_tokens):
-            return None
-
-        cutoff_index = self._determine_cutoff_index(messages)
-        if cutoff_index <= 0:
-            return None
-
-        messages_to_summarize, preserved_messages = self._partition_messages(messages, cutoff_index)
-        if not messages_to_summarize:
-            return None
-
-        logger.info(
-            "summarization.triggered",
-            {"total_tokens": total_tokens, "msg_count": len(messages), "cutoff": cutoff_index},
-            user_id="system",
-        )
-
-        summary = await self._acreate_summary(messages_to_summarize)
-        new_messages = self._build_new_messages(summary) + list(preserved_messages)
-
-        logger.info(
-            "summarization.completed",
-            {"old_msg_count": len(messages), "new_msg_count": len(new_messages), "summary_length": len(summary)},
-            user_id="system",
-        )
-
-        await self._fire_callback(summary)
-
-        return {"messages": new_messages}
+            result = self._result_without_artifact(
+                context, CompressionStatus.SKIPPED, messages, error_code="trigger_not_met"
+            )
+        else:
+            result = await self._compress(messages, context)
+        update: dict[str, Any] = {"extra": {"_compression_result": result}}
+        if result.compressed and result.artifact is not None:
+            update["messages"] = list(result.artifact.replacement_messages)
+        return update
 
     # -- Trigger evaluation --
 
@@ -304,11 +290,12 @@ class SummarizationMiddleware(Middleware):
         for clause in self._trigger_clauses:
             clause_met = True
             for kind, value in clause.items():
-                if kind == "messages" and len(messages) < value:
+                numeric_value = cast(int | float, value)
+                if kind == "messages" and len(messages) < int(numeric_value):
                     clause_met = False
                     break
                 if kind == "tokens":
-                    threshold = float(value)
+                    threshold = float(numeric_value)
                     if (
                         total_tokens < threshold
                         and not self._should_summarize_based_on_reported_tokens(messages, threshold)
@@ -320,7 +307,7 @@ class SummarizationMiddleware(Middleware):
                     if max_input is None:
                         clause_met = False
                         break
-                    threshold = int(max_input * value)
+                    threshold = int(max_input * float(numeric_value))
                     if threshold <= 0:
                         threshold = 1
                     if (
@@ -432,8 +419,9 @@ class SummarizationMiddleware(Middleware):
         tool_call_ids: set[str] = set()
         idx = cutoff_index
         while idx < len(messages) and messages[idx].role == "tool":
-            if messages[idx].tool_call_id:
-                tool_call_ids.add(messages[idx].tool_call_id)
+            tool_call_id = messages[idx].tool_call_id
+            if tool_call_id:
+                tool_call_ids.add(tool_call_id)
             idx += 1
 
         # Search backward for AIMessage with matching tool_calls
@@ -457,31 +445,29 @@ class SummarizationMiddleware(Middleware):
 
     @staticmethod
     def _build_new_messages(summary: str) -> list[Message]:
-        return [
-            Message(
-                role="user",
-                content=f"Here is a summary of the conversation to date:\n\n{summary}",
-                source="summarization_middleware",
-            )
-        ]
+        message = Message(
+            role="user",
+            content=f"Here is a summary of the conversation to date:\n\n{summary}",
+        )
+        return [message.model_copy(update={"source": "summarization_middleware"})]
 
     # -- Message trimming --
 
     def _trim_messages_for_summary(self, messages: list[Message]) -> list[Message]:
-        """Trim messages to fit within trim_tokens_to_summarize."""
+        """Return the largest safe chronological prefix within the summary budget."""
         if self.trim_tokens_to_summarize is None:
             return messages
         total = 0
-        cutoff = 0
-        for i in range(len(messages) - 1, -1, -1):
-            t = self._count_message_tokens(messages[i])
-            if total + t > self.trim_tokens_to_summarize:
-                cutoff = i + 1
+        end = 0
+        for message in messages:
+            message_tokens = self._count_message_tokens(message)
+            if total + message_tokens > self.trim_tokens_to_summarize:
                 break
-            total += t
-        else:
-            cutoff = 0
-        return messages[cutoff:] if cutoff > 0 else messages
+            total += message_tokens
+            end += 1
+        if end and end < len(messages) and messages[end].role == "tool":
+            end = min(end, self._find_safe_cutoff_point(messages, end))
+        return messages[:end]
 
     def _count_message_tokens(self, msg: Message) -> int:
         return self.token_counter([msg])
@@ -498,90 +484,249 @@ class SummarizationMiddleware(Middleware):
 
     async def _acreate_summary(
         self, messages_to_summarize: list[Message], instructions: str | None = None
-    ) -> str:
+    ) -> tuple[str, UsageAggregate]:
         if not messages_to_summarize:
-            return "No previous conversation history."
+            raise _SummaryGenerationError("empty_input", "no messages were selected")
 
-        trimmed = self._trim_messages_for_summary(messages_to_summarize)
-        if not trimmed:
-            return "Previous conversation was too long to summarize."
-
-        formatted = self._messages_to_conversation_text(trimmed)
+        formatted = self._messages_to_conversation_text(messages_to_summarize)
         if instructions:
             formatted = f"[Focus: {instructions}]\n\n{formatted}"
 
         prompt = self.summary_prompt.format(messages=formatted)
 
+        summary_messages = [
+            Message.system("You are a context extraction assistant."),
+            Message.user(prompt),
+        ]
         try:
-            from src.sdk.loop import get_current_agent_loop
-            from src.sdk.providers.factory import create_model_from_config
+            provider = self._get_summary_provider()
+            response = await self._call_summary_provider(provider, summary_messages)
+        except Exception as exc:
+            logger.warning(
+                "summarization.generation_failed",
+                {"error_type": type(exc).__name__},
+                user_id=self.user_id,
+            )
+            raise _SummaryGenerationError("provider_error", "summary provider failed") from exc
+        content = response.content if isinstance(response.content, str) else ""
+        content = content.strip()
+        if not content:
+            raise _SummaryGenerationError("empty_response", "summary provider returned no content")
+        return content, self._usage_aggregate(getattr(response, "usage", None))
 
-            # Prefer the current loop's provider (already Langfuse-wrapped with active trace context)
-            loop = get_current_agent_loop()
-            if loop is not None and hasattr(loop.provider, "chat"):
-                provider = loop.provider
+    def _get_summary_provider(self) -> Any:
+        if self._summary_provider is None:
+            if self._summary_provider_factory is not None:
+                self._summary_provider = self._summary_provider_factory()
             else:
-                provider = create_model_from_config(self.model)
+                from src.sdk.providers.factory import create_model_from_config
 
-            # Create a Langfuse generation observation if Langfuse is active
-            summary_messages = [
-                Message.system("You are a context extraction assistant."),
-                Message.user(prompt),
-            ]
+                self._summary_provider = create_model_from_config(self.model, user_id=self.user_id)
+        return self._summary_provider
 
+    async def _call_summary_provider(self, provider: Any, messages: list[Message]) -> Message:
+        try:
+            from src.sdk.langfuse_tracer import LangfuseTracer
+
+            if LangfuseTracer.is_enabled():
+                client = LangfuseTracer._get_client()
+                if client:
+                    with client.start_as_current_observation(
+                        as_type="generation",
+                        name="SummarizationMiddleware_summary",
+                        model=self.model,
+                    ) as generation:
+                        response = await provider.chat(messages)
+                        usage = getattr(response, "usage", None)
+                        if usage is not None:
+                            generation.update(
+                                usage_details={
+                                    "input": usage.input_tokens,
+                                    "output": usage.output_tokens,
+                                    "reasoning": usage.reasoning_tokens,
+                                }
+                            )
+                        return cast(Message, response)
+        except ImportError:
+            pass
+        return cast(Message, await provider.chat(messages))
+
+    def _usage_aggregate(self, usage: Usage | None) -> UsageAggregate:
+        if usage is None:
+            return UsageAggregate()
+        return UsageAggregate(
+            available=True,
+            calls=1,
+            models=(self.model,),
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_creation_tokens=usage.cache_creation_tokens,
+        )
+
+    async def _compress(
+        self,
+        messages: list[Message],
+        context: CompressionContext,
+        instructions: str | None = None,
+    ) -> CompressionResult:
+        before_count = len(messages)
+        before_tokens = self.token_counter(messages)
+        cutoff_index = self._determine_cutoff_index(messages)
+        if cutoff_index <= 0:
+            return self._result_without_artifact(
+                context,
+                CompressionStatus.SKIPPED,
+                messages,
+                error_code="no_cutoff",
+            )
+
+        old_messages, recent_messages = self._partition_messages(messages, cutoff_index)
+        summarized_messages = self._trim_messages_for_summary(old_messages)
+        if not summarized_messages:
+            return self._result_without_artifact(
+                context,
+                CompressionStatus.SKIPPED,
+                messages,
+                error_code="summary_budget_too_small",
+            )
+        old_remainder = old_messages[len(summarized_messages) :]
+
+        try:
+            summary, usage = await self._acreate_summary(
+                summarized_messages, instructions=instructions
+            )
+        except _SummaryGenerationError as exc:
+            return self._result_without_artifact(
+                context,
+                CompressionStatus.FAILED,
+                messages,
+                error_code=exc.code,
+                error_message=str(exc),
+            )
+
+        summary_message = self._build_new_messages(summary)[0]
+        replacement_messages = (summary_message, *old_remainder, *recent_messages)
+        summarized_ids = self._storage_ids(summarized_messages)
+        preserved_ids = self._storage_ids([*old_remainder, *recent_messages])
+        persistence_eligible = len(summarized_ids) == len(summarized_messages)
+        artifact = CompressionArtifact(
+            summary=summary,
+            replacement_messages=replacement_messages,
+            summarized_message_ids=summarized_ids,
+            preserved_message_ids=preserved_ids,
+            persistence_eligible=persistence_eligible,
+        )
+        persistence = SummaryPersistenceResult(status=PersistenceStatus.NOT_REQUESTED)
+
+        if persistence_eligible and self._summary_sink is not None:
             try:
-                from src.sdk.langfuse_tracer import LangfuseTracer
-                if LangfuseTracer.is_enabled():
-                    client = LangfuseTracer._get_client()
-                    if client:
-                        with client.start_as_current_observation(
-                            as_type="generation",
-                            name="SummarizationMiddleware_summary",
-                            model=self.model,
-                        ) as gen:
-                            try:
-                                gen.update(input=[m.model_dump() if hasattr(m, "model_dump") else str(m) for m in summary_messages])
-                            except Exception:
-                                pass
-                            # Call the original (unwrapped) chat to avoid double-tracing
-                            original_chat = getattr(provider, "_original_chat", None)
-                            if original_chat:
-                                response = await original_chat(summary_messages)
-                            else:
-                                response = await provider.chat(summary_messages)
-                            try:
-                                gen.update(output=response.model_dump() if hasattr(response, "model_dump") else str(response))
-                                if hasattr(response, "usage") and response.usage:
-                                    gen.update(usage_details={
-                                        "input": response.usage.input_tokens,
-                                        "output": response.usage.output_tokens,
-                                        "reasoning": response.usage.reasoning_tokens,
-                                    })
-                            except Exception:
-                                pass
-                            content = response.content if isinstance(response.content, str) else str(response.content)
-                            return content.strip()
-            except ImportError:
-                pass
+                sink_result = self._summary_sink(artifact, context)
+                if inspect.isawaitable(sink_result):
+                    sink_result = await sink_result
+                if not isinstance(sink_result, SummaryPersistenceResult):
+                    raise TypeError("summary sink must return SummaryPersistenceResult")
+                persistence = sink_result
+            except Exception as exc:
+                logger.warning(
+                    "summarization.persistence_failed",
+                    {"error_type": type(exc).__name__},
+                    user_id=self.user_id,
+                )
+                persistence = SummaryPersistenceResult(status=PersistenceStatus.FAILED)
 
-            # No Langfuse — just call provider directly
-            response = await provider.chat(summary_messages)
-            content = response.content if isinstance(response.content, str) else str(response.content)
-            return content.strip()
-        except Exception as e:
-            logger.warning("summarization.generation_failed", {"error": str(e)}, user_id="system")
-            return f"Error generating summary: {e!s}"
+        if persistence.status is PersistenceStatus.SUCCEEDED:
+            summary_message = summary_message.model_copy(
+                update={"storage_id": persistence.summary_id}
+            )
+            replacement_messages = (summary_message, *old_remainder, *recent_messages)
+            artifact = artifact.model_copy(
+                update={
+                    "replacement_messages": replacement_messages,
+                    "persisted_summary_id": persistence.summary_id,
+                }
+            )
 
-    # -- Callback --
+        after_messages = list(replacement_messages)
+        after_tokens = self.token_counter(after_messages)
+        after_context = self._after_context(context.before, after_tokens)
+        telemetry = CompressionTelemetry(
+            status=CompressionStatus.SUCCEEDED,
+            reason=context.reason,
+            before_message_count=before_count,
+            after_message_count=len(after_messages),
+            before_token_count=before_tokens,
+            after_token_count=after_tokens,
+            summarized_message_count=len(summarized_messages),
+            preserved_message_count=len(old_remainder) + len(recent_messages),
+            replacement_message_count=len(replacement_messages),
+            summary_model=self.model,
+            summarizer_usage=usage,
+            persistence=persistence,
+            before_context=context.before,
+            after_context=after_context,
+        )
+        logger.info(
+            "summarization.completed",
+            {
+                "before_message_count": before_count,
+                "after_message_count": len(after_messages),
+                "summarized_message_count": len(summarized_messages),
+            },
+            user_id=self.user_id,
+        )
+        return CompressionResult(artifact=artifact, telemetry=telemetry)
 
-    async def _fire_callback(self, summary: str) -> None:
-        if self._on_summarize is not None:
-            try:
-                result = self._on_summarize(summary)
-                if hasattr(result, "__await__"):
-                    await result
-            except Exception as e:
-                logger.warning("summarization.callback_failed", {"error": str(e)}, user_id="system")
+    def _result_without_artifact(
+        self,
+        context: CompressionContext,
+        status: CompressionStatus,
+        messages: list[Message],
+        *,
+        error_code: str,
+        error_message: str | None = None,
+    ) -> CompressionResult:
+        count = len(messages)
+        tokens = self.token_counter(messages)
+        return CompressionResult(
+            telemetry=CompressionTelemetry(
+                status=status,
+                reason=context.reason,
+                before_message_count=count,
+                after_message_count=count,
+                before_token_count=tokens,
+                after_token_count=tokens,
+                preserved_message_count=count,
+                summary_model=self.model,
+                persistence=SummaryPersistenceResult(status=PersistenceStatus.NOT_REQUESTED),
+                error_code=error_code,
+                error_message=error_message,
+                before_context=context.before,
+            )
+        )
+
+    @staticmethod
+    def _storage_ids(messages: Iterable[Message]) -> tuple[str, ...]:
+        ids: list[str] = []
+        for message in messages:
+            storage_id = getattr(message, "storage_id", None)
+            if isinstance(storage_id, str) and storage_id.strip() and storage_id not in ids:
+                ids.append(storage_id)
+        return tuple(ids)
+
+    @staticmethod
+    def _after_context(before: ContextSnapshot | None, tokens: int) -> ContextSnapshot | None:
+        if before is None:
+            return None
+        percentage = tokens / before.context_window * 100 if before.context_window else None
+        return ContextSnapshot.model_validate(
+            {
+                **before.model_dump(),
+                "estimated_tokens": tokens,
+                "percentage": percentage,
+            }
+        )
 
     # -- Trigger normalization --
 
@@ -594,9 +739,9 @@ class SummarizationMiddleware(Middleware):
 
         def _tuple_to_clause(t: ContextSize) -> TriggerClause:
             kind, value = self._validate_context_size(t, "trigger")
-            return {kind: value}  # type: ignore[return-value]
+            return cast(TriggerClause, {kind: value})
 
-        def _validate_mapping(m: dict[str, Any]) -> TriggerClause:
+        def _validate_mapping(m: Mapping[str, Any]) -> TriggerClause:
             if not m:
                 raise ValueError("trigger clause must specify at least one of 'tokens', 'messages', 'fraction'")
             out: dict[str, int | float] = {}
@@ -612,7 +757,7 @@ class SummarizationMiddleware(Middleware):
                     raise ValueError(f"{k} trigger values must be integers, got {v!r}")
                 self._validate_context_size((k, v), "trigger")  # type: ignore[arg-type]
                 out[k] = v
-            return out  # type: ignore[return-value]
+            return cast(TriggerClause, out)
 
         clauses: list[TriggerClause] = []
         if isinstance(trigger, dict):
