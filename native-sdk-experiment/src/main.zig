@@ -2858,7 +2858,6 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
 
     children[child_count] = ui.el(.card, .{
         .padding = 12,
-        .height = textarea_height + 6 + 32 + 24 + 20,
         .style_tokens = .{ .background = .surface_subtle, .radius = .md },
     }, .{
         ui.column(.{ .gap = 6 }, .{
