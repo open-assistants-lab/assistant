@@ -292,6 +292,39 @@ async def get_conversation(
     }
 
 
+@router.get("/conversation/turns")
+async def get_conversation_turns(
+    user_id: str = "default_user",
+    session_id: str | None = None,
+    limit: int = 50,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    """Get conversation turns grouped by run_id."""
+    conversation = get_message_store(user_id)
+    sid = session_id or "default"
+    turns, next_cursor = conversation.get_turns(sid, limit=limit, cursor=cursor)
+    return {
+        "turns": [
+            {
+                "run_id": t["run_id"],
+                "metadata": t["metadata"],
+                "messages": [
+                    {
+                        "role": m.role,
+                        "content": m.content,
+                        "source": m.metadata.get("source") if m.metadata else None,
+                        "timestamp": m.ts.isoformat() if m.ts else None,
+                        "metadata": m.metadata,
+                    }
+                    for m in t["messages"]
+                ],
+            }
+            for t in turns
+        ],
+        "next_cursor": next_cursor,
+    }
+
+
 @router.get("/conversation/sessions")
 async def list_sessions(user_id: str = "default_user") -> dict[str, Any]:
     """List all chat sessions with titles derived from first user message."""

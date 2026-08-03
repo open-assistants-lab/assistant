@@ -889,3 +889,99 @@ def test_persist_run_rejects_blank_session() -> None:
             audit_records=[],
             metadata={},
         )
+
+
+def test_get_turns_empty_session() -> None:
+    store = _store()
+    turns, cursor = store.get_turns("a")
+    assert turns == []
+    assert cursor is None
+
+
+def test_get_turns_groups_by_run_id() -> None:
+    store = _store()
+    store.add_message("user", "hello", metadata={"run_id": "run-1"}, session_id="a")
+    store.persist_run(
+        run_id="run-1", session_id="a", user_message_id="msg-1",
+        final_answer=Message(id="", ts=datetime.now(UTC), role="assistant", content="hi", session_id="a"),
+        audit_records=[], metadata={"model": "test:model"},
+    )
+    store.add_message("user", "again", metadata={"run_id": "run-2"}, session_id="a")
+    store.persist_run(
+        run_id="run-2", session_id="a", user_message_id="msg-2",
+        final_answer=Message(id="", ts=datetime.now(UTC), role="assistant", content="ok", session_id="a"),
+        audit_records=[], metadata={"model": "test:model"},
+    )
+    turns, cursor = store.get_turns("a", limit=10)
+    assert len(turns) == 2
+    assert turns[0]["run_id"] == "run-1"
+    assert turns[1]["run_id"] == "run-2"
+    assert cursor is None
+
+
+def test_get_turns_legacy_messages_without_run_id() -> None:
+    store = _store()
+    store.add_message("user", "hello", session_id="a")
+    store.add_message("assistant", "hi", session_id="a")
+    store.add_message("user", "again", session_id="a")
+    store.add_message("assistant", "ok", session_id="a")
+    turns, cursor = store.get_turns("a", limit=10)
+    assert len(turns) == 2
+    assert turns[0]["run_id"] is None
+    assert len(turns[0]["messages"]) == 2
+    assert turns[1]["run_id"] is None
+    assert len(turns[1]["messages"]) == 2
+    assert cursor is None
+
+
+def test_get_turns_cursor_pagination_does_not_split_turns() -> None:
+    store = _store()
+    store.add_message("user", "q1", metadata={"run_id": "run-1"}, session_id="a")
+    store.persist_run(
+        run_id="run-1", session_id="a", user_message_id="m1",
+        final_answer=Message(id="", ts=datetime.now(UTC), role="assistant", content="a1", session_id="a"),
+        audit_records=[], metadata={},
+    )
+    store.add_message("user", "q2", metadata={"run_id": "run-2"}, session_id="a")
+    store.persist_run(
+        run_id="run-2", session_id="a", user_message_id="m2",
+        final_answer=Message(id="", ts=datetime.now(UTC), role="assistant", content="a2", session_id="a"),
+        audit_records=[], metadata={},
+    )
+    store.add_message("user", "q3", metadata={"run_id": "run-3"}, session_id="a")
+    store.persist_run(
+        run_id="run-3", session_id="a", user_message_id="m3",
+        final_answer=Message(id="", ts=datetime.now(UTC), role="assistant", content="a3", session_id="a"),
+        audit_records=[], metadata={},
+    )
+    turns, cursor = store.get_turns("a", limit=2)
+    assert len(turns) == 2
+    assert turns[0]["run_id"] == "run-1"
+    assert turns[1]["run_id"] == "run-2"
+    assert cursor is not None
+    turns2, cursor2 = store.get_turns("a", limit=2, cursor=cursor)
+    assert len(turns2) == 1
+    assert turns2[0]["run_id"] == "run-3"
+    assert cursor2 is None
+
+
+def test_get_turns_metadata_from_final_assistant() -> None:
+    store = _store()
+    store.add_message("user", "hello", metadata={"run_id": "run-1"}, session_id="a")
+    store.persist_run(
+        run_id="run-1", session_id="a", user_message_id="m1",
+        final_answer=Message(id="", ts=datetime.now(UTC), role="assistant", content="hi", session_id="a"),
+        audit_records=[], metadata={"model": "test:model", "custom": "value"},
+    )
+    turns, _ = store.get_turns("a", limit=10)
+    assert len(turns) == 1
+    assert turns[0]["metadata"].get("model") == "test:model"
+    assert turns[0]["metadata"].get("custom") == "value"
+
+
+def test_get_turns_limit_zero() -> None:
+    store = _store()
+    store.add_message("user", "hello", session_id="a")
+    turns, cursor = store.get_turns("a", limit=0)
+    assert turns == []
+    assert cursor is None

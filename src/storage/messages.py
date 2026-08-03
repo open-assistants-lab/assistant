@@ -5,6 +5,7 @@ Message/SearchResult dataclasses and public API for callers.
 """
 
 import asyncio
+import base64
 import json
 import sqlite3
 import uuid
@@ -1027,6 +1028,112 @@ class MessageStore:
 
     def clear(self) -> None:
         self._core.clear()
+
+    def get_turns(
+        self, session_id: str, limit: int = 50, cursor: str | None = None
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Return complete turns grouped by run_id, with cursor pagination.
+
+        Each turn is a dict with:
+          - run_id: str | None (None for legacy messages without run_id)
+          - messages: list[Message] in chronological order
+          - metadata: dict (run-level metadata from the final assistant message)
+
+        Returns (turns, next_cursor). next_cursor is None when no more pages.
+        Cursor is an opaque string (base64-encoded rowid of the last returned message).
+        """
+        session_id = self._require_session_id(session_id)
+        if limit <= 0:
+            return [], None
+
+        start_rowid = 0
+        if cursor:
+            try:
+                start_rowid = int(base64.b64decode(cursor).decode("utf-8"))
+            except Exception:
+                start_rowid = 0
+
+        with self._core.db._connect() as cur:
+            rows_raw = cur.execute(
+                "SELECT rowid, id, ts, role, content, metadata, session_id "
+                "FROM messages "
+                "WHERE session_id = ? AND rowid > ? "
+                "ORDER BY rowid ASC LIMIT ?",
+                [session_id, start_rowid, limit * 5],
+            ).fetchall()
+
+        if not rows_raw:
+            return [], None
+
+        rows = [
+            _StoredMessage(
+                sequence=int(r[0]),
+                id=str(r[1]),
+                ts=self._parse_stored_timestamp(r[2]),
+                role=str(r[3]),
+                content=str(r[4] or ""),
+                metadata=self._parse_stored_metadata(r[5]),
+                session_id=str(r[6] or ""),
+            )
+            for r in rows_raw
+        ]
+
+        turns: list[dict[str, Any]] = []
+        current_run_id: str | None = None
+        current_turn: list[Message] = []
+        last_turn_rowid = 0
+
+        for row in rows:
+            msg = self._stored_to_message(row)
+            run_id = None
+            if row.metadata:
+                run_id = row.metadata.get("run_id")
+
+            should_split = False
+            if run_id != current_run_id and current_turn:
+                should_split = True
+            elif run_id is None and current_run_id is None and current_turn:
+                last_role = current_turn[-1].role
+                if msg.role == "user" and last_role in ("assistant", "tool", "reasoning"):
+                    should_split = True
+
+            if should_split:
+                turns.append(self._build_turn(current_run_id, current_turn))
+                current_turn = []
+
+            current_run_id = run_id
+            current_turn.append(msg)
+            last_turn_rowid = row.sequence
+
+        if current_turn:
+            turns.append(self._build_turn(current_run_id, current_turn))
+
+        next_cursor = None
+        if len(turns) > limit:
+            last_turn_rowid = turns[limit - 1]["messages"][-1].id
+            with self._core.db._connect() as cur:
+                row = cur.execute(
+                    "SELECT rowid FROM messages WHERE session_id = ? AND id = ?",
+                    [session_id, last_turn_rowid],
+                ).fetchone()
+            if row is not None:
+                next_cursor = base64.b64encode(str(row[0]).encode("utf-8")).decode("utf-8")
+            turns = turns[:limit]
+
+        return turns, next_cursor
+
+    @staticmethod
+    def _build_turn(run_id: str | None, messages: list[Message]) -> dict[str, Any]:
+        metadata: dict[str, Any] = {}
+        for msg in reversed(messages):
+            if msg.role == "assistant" and msg.metadata:
+                metadata = msg.metadata
+                break
+        return {
+            "run_id": run_id,
+            "messages": messages,
+            "metadata": metadata,
+        }
 
     def delete_session(self, session_id: str) -> int:
         """Delete all messages in a specific chat session."""
