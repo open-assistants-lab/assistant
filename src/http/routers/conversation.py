@@ -37,12 +37,15 @@ from src.sdk.runner import (
     run_sdk_agent,
     run_sdk_agent_stream,
 )
+from src.sdk.run_service import RunService
+from src.sdk.session_worker import SessionBusyError, SessionWorkerRegistry
 from src.storage.messages import get_message_store
 
 _pending_approvals: dict[str, dict[str, Any]] = {}
 _pending_interrupts: dict[str, dict[str, Any]] = {}
 _cancel_flags: dict[str, bool] = {}
 _active_streams: dict[str, asyncio.Event] = {}
+_session_registry = SessionWorkerRegistry()
 
 router = APIRouter(tags=["conversation"])
 logger = get_logger()
@@ -511,192 +514,42 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
 
         conversation = get_message_store(user_id)
         session_id = _normalized_session_id(req.session_id)
-        conversation.add_message("user", req.message, metadata={}, session_id=session_id)
 
-        # Resolve rubric for verification
-        rubric = None
-        if req.verification and req.verification.rubric:
-            rubric = req.verification.rubric
-        else:
-            settings = get_settings()
-            if settings.verification.enabled and settings.verification.default_rubric:
-                rubric = settings.verification.default_rubric
+        try:
+            run_service = RunService(user_id, _session_registry, conversation)
+            result = await run_service.execute(
+                session_id=session_id,
+                prompt=req.message,
+                model=req.model,
+                provider_keys=req.provider_keys,
+            )
+        except SessionBusyError:
+            return MessageResponse(response="", error="Session already has an active run")
 
-        recent_messages = conversation.get_messages_with_summary(session_id=session_id, limit=50)
-        sdk_messages = _messages_from_conversation(recent_messages)
+        response = result.response
+        reasoning_text = None
+        usage_data = None
+        if result.usage.agent.available:
+            usage_data = {
+                "input_tokens": result.usage.agent.input_tokens,
+                "output_tokens": result.usage.agent.output_tokens,
+                "reasoning_tokens": result.usage.agent.reasoning_tokens,
+            }
 
-        logger = get_logger()
-        verbose_data: dict[str, Any] | None = None
-        tool_events: list[dict[str, Any]] = []
-        ai_content_parts: list[str] = []
-        last_ai: Message | None = None
-        reasoning_parts: list[str] = []
-        seen_canonical_text: set[str] = set()
-        seen_canonical_reasoning: set[str] = set()
-        seen_canonical_tool_starts: set[str] = set()
-
-        with timer(
-            "agent",
-            {"message": msg_content, "user_id": user_id, "verbose": req.verbose},
-            channel="http",
-        ):
-            if req.verbose:
-                error_content = ""
-                async for chunk in run_sdk_agent_stream(
-                    user_id=user_id,
-                    messages=sdk_messages,
-                    session_id=session_id,
-                    model=req.model,
-                    provider_keys=req.provider_keys,
-                    rubric=rubric,
-                ):
-                    event = adapt_stream_chunk(chunk)
-                    is_compat_alias = chunk.type != event.kind
-                    if event.kind == "text_delta" and event.content:
-                        if is_compat_alias and event.content in seen_canonical_text:
-                            continue
-                        ai_content_parts.append(event.content)
-                        if not is_compat_alias:
-                            seen_canonical_text.add(event.content)
-                    elif event.kind == "reasoning_delta" and event.content:
-                        if is_compat_alias and event.content in seen_canonical_reasoning:
-                            continue
-                        reasoning_parts.append(event.content)
-                        if not is_compat_alias:
-                            seen_canonical_reasoning.add(event.content)
-                    elif event.kind == "tool_input_start" and event.tool:
-                        call_id = event.call_id or ""
-                        if is_compat_alias and call_id in seen_canonical_tool_starts:
-                            continue
-                        if not is_compat_alias:
-                            seen_canonical_tool_starts.add(call_id)
-                        tool_events.append(
-                            {"tool": event.tool, "stage": "start", "call_id": event.call_id}
-                        )
-                    elif event.kind == "tool_result" and event.tool:
-                        tool_events.append(
-                            {
-                                "tool": event.tool,
-                                "stage": "end",
-                                "call_id": event.call_id,
-                                "output": (event.result_preview or "")[:2000],
-                            }
-                        )
-                    elif event.kind == "error":
-                        error_content = event.content or "Agent error"
-                        break
-
-                if error_content:
-                    _persist_tool_messages(conversation, tool_events, session_id=session_id)
-                    if reasoning_parts:
-                        persist_reasoning_message(
-                            conversation, "".join(reasoning_parts), session_id=session_id
-                        )
-                    if ai_content_parts:
-                        persist_assistant_message(
-                            conversation,
-                            "".join(ai_content_parts).strip(),
-                            metadata={"stream": True},
-                            session_id=session_id,
-                        )
-                    return MessageResponse(
-                        response="",
-                        error=error_content,
-                        verbose_data={"tool_events": tool_events},
-                    )
-
-                verbose_data = {"tool_events": tool_events}
-
-                response = ""
-                if tool_events:
-                    tool_outputs = [
-                        t["output"]
-                        for t in tool_events
-                        if t.get("stage") == "end" and t.get("output")
-                    ]
-                    if tool_outputs:
-                        response = "\n".join(tool_outputs)
-                if not response and ai_content_parts:
-                    response = "".join(ai_content_parts)
-                if not response:
-                    response = "Task completed."
-
-                _persist_tool_messages(conversation, tool_events, session_id=session_id)
-                if reasoning_parts:
-                    persist_reasoning_message(
-                        conversation, "".join(reasoning_parts), session_id=session_id
-                    )
-            else:
-                result_messages = await run_sdk_agent(
-                    user_id=user_id, messages=sdk_messages,
-                    session_id=session_id,
-                    model=req.model, provider_keys=req.provider_keys,
-                    rubric=rubric,
+        verification_verdict = None
+        if result.verification.availability.value == "on":
+            latest = result.verification.evaluations[-1] if result.verification.evaluations else None
+            if latest:
+                verification_verdict = VerificationVerdict(
+                    status=result.verification.status.value,
+                    attempts=result.verification.attempts,
+                    max_attempts=result.verification.max_attempts,
+                    explanation=latest.explanation,
+                    criteria=[{"name": c.name, "passed": c.passed, "gap": c.gap} for c in latest.criteria],
                 )
-
-                tool_contents = []
-                for m in result_messages:
-                    if m.role == "tool" and m.content:
-                        content = m.content if isinstance(m.content, str) else str(m.content)
-                        tool_contents.append(content)
-                        persist_tool_message(
-                            conversation,
-                            content,
-                            session_id=session_id,
-                            tool_name=m.name or "unknown",
-                            tool_call_id=m.tool_call_id or "",
-                        )
-
-                response = ""
-                last_ai = None
-                for m in reversed(result_messages):
-                    if m.role == "assistant" and m.content:
-                        last_ai = m
-                        break
-
-                if last_ai and last_ai.reasoning:
-                    persist_reasoning_message(conversation, last_ai.reasoning, session_id=session_id)
-
-                if (
-                    last_ai
-                    and last_ai.content
-                    and (
-                        last_ai.content
-                        if isinstance(last_ai.content, str)
-                        else str(last_ai.content)
-                    ).strip()
-                ):
-                    response = (
-                        last_ai.content
-                        if isinstance(last_ai.content, str)
-                        else str(last_ai.content)
-                    )
-                elif tool_contents:
-                    response = "\n".join(tool_contents)
-
-                if not response:
-                    response = "Task completed."
 
         canvas_blocks = _extract_surfaces(response)
         response = _strip_canvas_fences(response)
-
-        tool_calls_list = None
-        if req.verbose:
-            seen_call_ids: set[str] = set()
-            tool_calls_list = []
-            for t in tool_events:
-                call_id = t.get("call_id", "")
-                tool_name = t.get("tool", "")
-                if tool_name and call_id not in seen_call_ids:
-                    seen_call_ids.add(call_id)
-                    tool_calls_list.append({"name": tool_name, "tool_call_id": call_id})
-
-        assistant_metadata: dict[str, Any] = {}
-        if verbose_data and verbose_data.get("tool_events"):
-            assistant_metadata["tool_events"] = verbose_data["tool_events"]
-        persist_assistant_message(
-            conversation, response, metadata=assistant_metadata, session_id=session_id
-        )
 
         logger.info(
             "agent.response",
@@ -705,40 +558,10 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
             channel="http",
         )
 
-        if verbose_data is None:
-            verbose_data = {}
-        verbose_data["canvas_blocks"] = canvas_blocks
-
-        # Extract reasoning and usage from last assistant message
-        reasoning_text = None
-        usage_data = None
-        if last_ai is not None:
-            if last_ai.reasoning:
-                reasoning_text = last_ai.reasoning
-            if last_ai.usage:
-                usage_data = {
-                    "input_tokens": last_ai.usage.input_tokens,
-                    "output_tokens": last_ai.usage.output_tokens,
-                    "reasoning_tokens": last_ai.usage.reasoning_tokens,
-                    "cache_read_tokens": last_ai.usage.cache_read_tokens,
-                    "cache_creation_tokens": last_ai.usage.cache_creation_tokens,
-                }
-
-        # Extract verification verdict from cached loop
-        verification_verdict = None
-        from src.sdk.runner import _loop_cache, _loop_cache_key
-        cache_key = _loop_cache_key(user_id, "personal", req.model, req.provider_keys, session_id)
-        cached_loop = _loop_cache.get(cache_key)
-        if cached_loop and hasattr(cached_loop, "_verification_verdict"):
-            verdict_data = cached_loop._verification_verdict
-            if verdict_data:
-                verification_verdict = VerificationVerdict(**verdict_data)
-
         return MessageResponse(
             response=response,
             reasoning=reasoning_text,
-            verbose_data=verbose_data,
-            tool_calls=tool_calls_list,
+            verbose_data={"canvas_blocks": canvas_blocks},
             verification=verification_verdict,
             usage=usage_data,
         )

@@ -3,6 +3,9 @@
 Replaces the old RubricMiddleware class. The bounded rubric orchestration
 in RunService calls grade_response per attempt instead of relying on
 recursive rerun-trigger grading.
+
+Backward-compat: RubricMiddleware is re-exported for the runner until
+it migrates to RunService.
 """
 
 from __future__ import annotations
@@ -18,6 +21,12 @@ from src.app_logging import get_logger
 from src.sdk.messages import Message
 
 logger = get_logger()
+
+# Backward-compat alias for runner.py
+class RubricMiddleware:
+    """Deprecated. Rubric orchestration is now handled by RunService."""
+    def __init__(self, *args, **kwargs):
+        pass
 
 GRADER_SYSTEM_PROMPT = """You are a grader. You evaluate whether the work in <transcript> satisfies every criterion in <rubric>.
 
