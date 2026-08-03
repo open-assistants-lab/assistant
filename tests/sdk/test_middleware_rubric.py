@@ -1,5 +1,7 @@
 """Unit tests for RubricMiddleware."""
 
+from __future__ import annotations
+
 import json
 
 import pytest
@@ -8,14 +10,17 @@ from src.sdk.messages import Message
 from src.sdk.middleware_rubric import (
     GraderResponse,
     RubricMiddleware,
+    _build_grader_transcript,
+    _parse_grader_response,
+    _revision_prompt,
 )
-from src.sdk.state import AgentState
 
 
 class FakeGraderProvider:
     def __init__(self, response_json: str):
         self._response_json = response_json
         self.call_count = 0
+        self.model_id = "test:grader"
 
     async def chat(self, messages, tools=None, model=None, provider_options=None, **kwargs):
         self.call_count += 1
@@ -28,117 +33,49 @@ class FakeGraderProvider:
         return []
 
 
-def _make_state(rubric: str | None = None, messages: list[Message] | None = None) -> AgentState:
-    state = AgentState(messages=messages or [Message.user("write a haiku")])
-    if rubric:
-        state.extra["rubric"] = rubric
-    return state
-
-
 @pytest.mark.asyncio
-async def test_no_rubric_is_noop():
-    provider = FakeGraderProvider('{"result":"satisfied","explanation":"ok","criteria":[]}')
-    mw = RubricMiddleware(grader_provider=provider)
-    state = _make_state(rubric=None)
-    await mw.aafter_agent(state)
-    assert provider.call_count == 0
-    assert not state.extra.get("_needs_rerun")
-
-
-@pytest.mark.asyncio
-async def test_satisfied_does_not_rerun():
+async def test_rubric_middleware_grade_returns_satisfied():
     provider = FakeGraderProvider(json.dumps({
         "result": "satisfied", "explanation": "all good",
         "criteria": [{"name": "three lines", "passed": True}]
     }))
-    mw = RubricMiddleware(grader_provider=provider)
-    state = _make_state(rubric="- Three lines")
-    await mw.aafter_agent(state)
+    mw = RubricMiddleware(provider, "- Three lines")
+    result = await mw.grade([Message.user("write a haiku")], 0)
+    assert result["result"] == "satisfied"
     assert provider.call_count == 1
-    assert not state.extra.get("_needs_rerun")
-    assert state.extra["_rubric_status"] == "satisfied"
+    assert "grading_run_id" in result
 
 
 @pytest.mark.asyncio
-async def test_needs_revision_injects_feedback_and_sets_rerun():
+async def test_rubric_middleware_grade_returns_needs_revision():
     provider = FakeGraderProvider(json.dumps({
         "result": "needs_revision", "explanation": "not enough lines",
         "criteria": [{"name": "three lines", "passed": False, "gap": "only two lines"}]
     }))
-    mw = RubricMiddleware(grader_provider=provider)
-    state = _make_state(rubric="- Three lines")
-    await mw.aafter_agent(state)
-    assert provider.call_count == 1
-    assert state.extra["_rubric_status"] == "needs_revision"
-    # Rerun event is queued instead of _needs_rerun flag
-    rerun_events = state.extra.get("_pending_rerun_events", [])
-    assert len(rerun_events) == 1
-    assert rerun_events[0].trigger_type == "rerun"
-    assert "three lines" in rerun_events[0].message.lower()
+    mw = RubricMiddleware(provider, "- Three lines")
+    result = await mw.grade([Message.user("write a haiku")], 0)
+    assert result["result"] == "needs_revision"
+    assert "grading_run_id" in result
 
 
 @pytest.mark.asyncio
-async def test_max_iterations_reached():
-    provider = FakeGraderProvider(json.dumps({
-        "result": "needs_revision", "explanation": "still wrong",
-        "criteria": [{"name": "three lines", "passed": False, "gap": "still wrong"}]
-    }))
-    mw = RubricMiddleware(grader_provider=provider, max_iterations=1)
-    state = _make_state(rubric="- Three lines")
-    state.extra["_rubric_iterations"] = 0
-    await mw.aafter_agent(state)
-    assert state.extra["_rubric_status"] == "max_iterations_reached"
-    assert not state.extra.get("_pending_rerun_events")
-
-
-@pytest.mark.asyncio
-async def test_grader_error_on_malformed_json():
+async def test_rubric_middleware_grade_returns_grader_error_on_malformed_json():
     provider = FakeGraderProvider("this is not json")
-    mw = RubricMiddleware(grader_provider=provider)
-    state = _make_state(rubric="- Three lines")
-    await mw.aafter_agent(state)
-    assert state.extra["_rubric_status"] == "grader_error"
-    assert not state.extra.get("_needs_rerun")
+    mw = RubricMiddleware(provider, "- Three lines")
+    result = await mw.grade([Message.user("write a haiku")], 0)
+    assert result["result"] == "grader_error"
+    assert "grading_run_id" in result
 
 
 @pytest.mark.asyncio
-async def test_failed_verdict_no_rerun():
-    provider = FakeGraderProvider(json.dumps({
-        "result": "failed", "explanation": "rubric is contradictory", "criteria": []
-    }))
-    mw = RubricMiddleware(grader_provider=provider)
-    state = _make_state(rubric="- Must be empty AND non-empty")
-    await mw.aafter_agent(state)
-    assert state.extra["_rubric_status"] == "failed"
-    assert not state.extra.get("_needs_rerun")
+async def test_rubric_middleware_grade_returns_grader_error_on_provider_exception():
+    class FailingProvider:
+        async def chat(self, messages, **kwargs):
+            raise RuntimeError("provider down")
 
-
-@pytest.mark.asyncio
-async def test_pending_stream_events_appended():
-    provider = FakeGraderProvider(json.dumps({
-        "result": "satisfied", "explanation": "ok",
-        "criteria": [{"name": "lines", "passed": True}]
-    }))
-    mw = RubricMiddleware(grader_provider=provider)
-    state = _make_state(rubric="- Three lines")
-    await mw.aafter_agent(state)
-    events = state.extra.get("_pending_stream_events", [])
-    types = [e.type for e in events]
-    assert "rubric_evaluation_start" in types
-    assert "rubric_evaluation_end" in types
-
-
-@pytest.mark.asyncio
-async def test_on_evaluation_callback_fires():
-    provider = FakeGraderProvider(json.dumps({
-        "result": "satisfied", "explanation": "ok", "criteria": []
-    }))
-    evaluations = []
-    mw = RubricMiddleware(grader_provider=provider, on_evaluation=evaluations.append)
-    state = _make_state(rubric="- Three lines")
-    await mw.aafter_agent(state)
-    assert len(evaluations) == 1
-    assert evaluations[0]["result"] == "satisfied"
+    mw = RubricMiddleware(FailingProvider(), "- Three lines")
+    result = await mw.grade([Message.user("hi")], 0)
+    assert result["result"] == "grader_error"
 
 
 def test_grader_response_consistency_validator():
@@ -155,27 +92,42 @@ def test_grader_response_consistency_validator():
         })
 
 
-@pytest.mark.asyncio
-async def test_rubric_sends_score_to_langfuse_when_enabled(monkeypatch):
-    from src.sdk.langfuse_tracer import LangfuseTracer
+def test_parse_grader_response_strips_code_fence():
+    content = '```json\n{"result": "satisfied", "explanation": "ok", "criteria": []}\n```'
+    result = _parse_grader_response(content)
+    assert result.result == "satisfied"
 
-    score_calls = []
 
-    def fake_score_current_trace(name, value, data_type="BOOLEAN", comment=""):
-        score_calls.append({"name": name, "value": value, "data_type": data_type, "comment": comment})
+def test_revision_prompt_includes_failing_criteria():
+    evaluation = {
+        "result": "needs_revision",
+        "explanation": "not enough lines",
+        "criteria": [{"name": "three lines", "passed": False, "gap": "only two lines"}],
+    }
+    prompt = _revision_prompt(evaluation)
+    assert "three lines" in prompt
+    assert "only two lines" in prompt
 
-    monkeypatch.setattr(LangfuseTracer, "is_enabled", lambda: True)
-    monkeypatch.setattr(LangfuseTracer, "score_current_trace", fake_score_current_trace)
 
-    provider = FakeGraderProvider(json.dumps({
-        "result": "satisfied", "explanation": "ok",
-        "criteria": [{"name": "lines", "passed": True}]
-    }))
-    mw = RubricMiddleware(grader_provider=provider)
-    state = _make_state(rubric="- Three lines")
-    await mw.aafter_agent(state)
+def test_build_grader_transcript_empty():
+    assert _build_grader_transcript([]) == "(empty transcript)"
 
-    assert len(score_calls) == 1
-    assert score_calls[0]["name"] == "rubric_satisfied"
-    assert score_calls[0]["value"] == 1.0
-    assert score_calls[0]["data_type"] == "BOOLEAN"
+
+def test_build_grader_transcript_includes_messages():
+    messages = [
+        Message.user("write a haiku"),
+        Message.assistant(content="a haiku here"),
+    ]
+    transcript = _build_grader_transcript(messages)
+    assert "write a haiku" in transcript
+    assert "a haiku here" in transcript
+
+
+def test_rubric_middleware_max_iterations():
+    mw = RubricMiddleware(FakeGraderProvider("{}"), "- Three lines", max_iterations=5)
+    assert mw.max_iterations == 5
+
+
+def test_rubric_middleware_default_max_iterations():
+    mw = RubricMiddleware(FakeGraderProvider("{}"), "- Three lines")
+    assert mw.max_iterations == 3

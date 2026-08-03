@@ -218,14 +218,15 @@ async def test_persisted_summary_id_is_applied_by_middleware(loop_factory, monke
 
 
 @pytest.mark.asyncio
-async def test_get_sdk_loop_forwards_normalized_default_session(monkeypatch):
+@pytest.mark.parametrize("session_id", [None, "", "   "])
+async def test_get_sdk_loop_forwards_normalized_default_session(monkeypatch, session_id):
     from src.sdk import runner
 
     runner._loop_cache.clear()
     create = AsyncMock(return_value=object())
     monkeypatch.setattr(runner, "create_sdk_loop", create)
 
-    await runner.get_sdk_loop("u", session_id=None)
+    await runner.get_sdk_loop("u", session_id=session_id)
 
     assert create.call_args.kwargs["session_id"] == "default"
 
@@ -749,6 +750,23 @@ def test_default_active_loop_does_not_clobber_named_sessions():
     runner.unregister_user_loop("u", session_id="chat-1")
 
     assert runner.get_user_loop("u", session_id="chat-1") is None
+
+
+def test_whitespace_session_id_uses_default_identity():
+    from src.sdk import runner
+
+    loop = object()
+    runner._user_loops.clear()
+
+    runner.register_user_loop("u", loop, session_id="   ")
+
+    assert runner.get_user_loop("u", session_id="default") is loop
+    assert runner._loop_cache_key("u", "personal", None, session_id="   ").endswith(
+        ":session:default"
+    )
+
+    runner._loop_cache["u:model:default:session:default"] = object()
+    assert runner.reset_sdk_loop("u", session_id="   ") == 1
 
 
 def test_get_user_loop_without_session_does_not_choose_among_multiple_sessions():

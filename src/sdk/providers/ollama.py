@@ -55,10 +55,13 @@ class OllamaCloud(LLMProvider):
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
             self._http_client = httpx.AsyncClient(
-                timeout=httpx.Timeout(self.timeout),
                 headers=headers,
+                timeout=httpx.Timeout(self.timeout),
             )
         return self._http_client
+
+    def get_client(self) -> httpx.AsyncClient | None:
+        return self._get_client()
 
     def _build_payload(
         self,

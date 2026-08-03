@@ -16,6 +16,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+import src.config.user_settings_store as _user_settings_store
+import src.sdk.context_measurement as _context_measurement
+import src.sdk.run_models as _run_models
 from src.app_logging import get_logger, timer
 from src.config import get_settings
 from src.http.auth import require_auth
@@ -34,12 +37,15 @@ from src.sdk.runner import (
     run_sdk_agent,
     run_sdk_agent_stream,
 )
+from src.sdk.run_service import RunService
+from src.sdk.session_worker import SessionBusyError, SessionWorkerRegistry
 from src.storage.messages import get_message_store
 
 _pending_approvals: dict[str, dict[str, Any]] = {}
 _pending_interrupts: dict[str, dict[str, Any]] = {}
 _cancel_flags: dict[str, bool] = {}
 _active_streams: dict[str, asyncio.Event] = {}
+_session_registry = SessionWorkerRegistry()
 
 router = APIRouter(tags=["conversation"])
 logger = get_logger()
@@ -48,6 +54,11 @@ logger = get_logger()
 def _stream_key(user_id: str, session_id: str | None) -> str:
     """Composite key for per-session stream tracking (enables concurrent sessions per user)."""
     return f"{user_id}:{session_id or 'default'}"
+
+
+def _normalized_session_id(session_id: str | None) -> str:
+    """Return the nonempty session boundary used for scoped history reads."""
+    return session_id.strip() if session_id and session_id.strip() else "default"
 
 
 def sse(event_type: str, data: dict[str, Any]) -> str:
@@ -193,38 +204,50 @@ def _persist_collected_stream_state(
 
 
 @router.get("/context-info")
-async def get_context_info(
+def get_context_info(
     user_id: str = "default_user",
     session_id: str | None = None,
     model: str | None = None,
 ) -> dict[str, Any]:
-    """Get context window info: model's max tokens, current usage, and summarization threshold."""
-    from src.config import get_settings
-    from src.sdk.middleware_summarization import count_tokens_approximately
-    from src.sdk.registry import get_model_info
-
+    """Estimate persisted session history without running or mutating the agent."""
     settings = get_settings()
+    if model is not None:
+        try:
+            model_str = _run_models.normalize_canonical_model(model)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Invalid model identifier") from exc
+    else:
+        saved_model = None
+        try:
+            saved_model = _user_settings_store.UserSettingsStore(user_id).load().default_model
+        except (_user_settings_store.UserSettingsStoreError, OSError, ValueError) as exc:
+            logger.warning(
+                "context_info.user_settings_load_failed",
+                {"error_type": type(exc).__name__},
+                user_id=user_id,
+            )
+        if saved_model:
+            model_str = saved_model
+        else:
+            host_model = settings.agent.model.strip()
+            if ":" not in host_model:
+                if "/" in host_model:
+                    provider, model_id = host_model.split("/", 1)
+                    host_model = f"{provider}:{model_id}"
+                else:
+                    host_model = f"ollama:{host_model}"
+            try:
+                model_str = _run_models.normalize_canonical_model(host_model)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="Invalid host model identifier") from exc
 
-    # Resolve model
-    model_str = model or settings.agent.model
-
-    # Get model context window from registry
-    context_window = None
-    try:
-        info = get_model_info(model_str)
-        if info and info.context_window:
-            context_window = info.context_window
-    except Exception:
-        pass
-
-    # Get current conversation token count
+    context_window = _context_measurement.resolve_context_window(model_str)
     conversation = get_message_store(user_id)
-    sid = session_id or "default"
-    recent = conversation.get_messages_by_session_id(sid, 100)
+    sid = _normalized_session_id(session_id)
+    recent = conversation.get_messages_with_summary(session_id=sid, limit=100)
     sdk_msgs = _messages_from_conversation(recent)
-    current_tokens = count_tokens_approximately(sdk_msgs) if sdk_msgs else 0
+    current_tokens = _context_measurement.estimate_message_tokens(sdk_msgs)
 
-    # Get summarization config
     sum_config = settings.memory.summarization
     trigger = sum_config.get_trigger()
     trigger_tokens = None
@@ -237,7 +260,10 @@ async def get_context_info(
         "current_tokens": current_tokens,
         "summarization_threshold": trigger_tokens,
         "summarization_enabled": sum_config.enabled,
-        "context_percentage": round((current_tokens / context_window * 100), 1) if context_window else None,
+        "context_percentage": current_tokens / context_window * 100 if context_window else None,
+        "source": "history_estimate",
+        "freshness": "stale",
+        "estimated": True,
     }
 
 
@@ -263,6 +289,39 @@ async def get_conversation(
             }
             for m in messages
         ]
+    }
+
+
+@router.get("/conversation/turns")
+async def get_conversation_turns(
+    user_id: str = "default_user",
+    session_id: str | None = None,
+    limit: int = 50,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    """Get conversation turns grouped by run_id."""
+    conversation = get_message_store(user_id)
+    sid = session_id or "default"
+    turns, next_cursor = conversation.get_turns(sid, limit=limit, cursor=cursor)
+    return {
+        "turns": [
+            {
+                "run_id": t["run_id"],
+                "metadata": t["metadata"],
+                "messages": [
+                    {
+                        "role": m.role,
+                        "content": m.content,
+                        "source": m.metadata.get("source") if m.metadata else None,
+                        "timestamp": m.ts.isoformat() if m.ts else None,
+                        "metadata": m.metadata,
+                    }
+                    for m in t["messages"]
+                ],
+            }
+            for t in turns
+        ],
+        "next_cursor": next_cursor,
     }
 
 
@@ -487,193 +546,43 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
             return MessageResponse(response=f"{tool_name} approved (execution pending).")
 
         conversation = get_message_store(user_id)
-        session_id = req.session_id or "default"
-        conversation.add_message("user", req.message, metadata={}, session_id=session_id)
+        session_id = _normalized_session_id(req.session_id)
 
-        # Resolve rubric for verification
-        rubric = None
-        if req.verification and req.verification.rubric:
-            rubric = req.verification.rubric
-        else:
-            settings = get_settings()
-            if settings.verification.enabled and settings.verification.default_rubric:
-                rubric = settings.verification.default_rubric
+        try:
+            run_service = RunService(user_id, _session_registry, conversation)
+            result = await run_service.execute(
+                session_id=session_id,
+                prompt=req.message,
+                model=req.model,
+                provider_keys=req.provider_keys,
+            )
+        except SessionBusyError:
+            return MessageResponse(response="", error="Session already has an active run")
 
-        recent_messages = conversation.get_messages_by_session_id(session_id, 50)
-        sdk_messages = _messages_from_conversation(recent_messages)
+        response = result.response
+        reasoning_text = None
+        usage_data = None
+        if result.usage.agent.available:
+            usage_data = {
+                "input_tokens": result.usage.agent.input_tokens,
+                "output_tokens": result.usage.agent.output_tokens,
+                "reasoning_tokens": result.usage.agent.reasoning_tokens,
+            }
 
-        logger = get_logger()
-        verbose_data: dict[str, Any] | None = None
-        tool_events: list[dict[str, Any]] = []
-        ai_content_parts: list[str] = []
-        last_ai: Message | None = None
-        reasoning_parts: list[str] = []
-        seen_canonical_text: set[str] = set()
-        seen_canonical_reasoning: set[str] = set()
-        seen_canonical_tool_starts: set[str] = set()
-
-        with timer(
-            "agent",
-            {"message": msg_content, "user_id": user_id, "verbose": req.verbose},
-            channel="http",
-        ):
-            if req.verbose:
-                error_content = ""
-                async for chunk in run_sdk_agent_stream(
-                    user_id=user_id,
-                    messages=sdk_messages,
-                    session_id=session_id,
-                    model=req.model,
-                    provider_keys=req.provider_keys,
-                    rubric=rubric,
-                ):
-                    event = adapt_stream_chunk(chunk)
-                    is_compat_alias = chunk.type != event.kind
-                    if event.kind == "text_delta" and event.content:
-                        if is_compat_alias and event.content in seen_canonical_text:
-                            continue
-                        ai_content_parts.append(event.content)
-                        if not is_compat_alias:
-                            seen_canonical_text.add(event.content)
-                    elif event.kind == "reasoning_delta" and event.content:
-                        if is_compat_alias and event.content in seen_canonical_reasoning:
-                            continue
-                        reasoning_parts.append(event.content)
-                        if not is_compat_alias:
-                            seen_canonical_reasoning.add(event.content)
-                    elif event.kind == "tool_input_start" and event.tool:
-                        call_id = event.call_id or ""
-                        if is_compat_alias and call_id in seen_canonical_tool_starts:
-                            continue
-                        if not is_compat_alias:
-                            seen_canonical_tool_starts.add(call_id)
-                        tool_events.append(
-                            {"tool": event.tool, "stage": "start", "call_id": event.call_id}
-                        )
-                    elif event.kind == "tool_result" and event.tool:
-                        tool_events.append(
-                            {
-                                "tool": event.tool,
-                                "stage": "end",
-                                "call_id": event.call_id,
-                                "output": (event.result_preview or "")[:2000],
-                            }
-                        )
-                    elif event.kind == "error":
-                        error_content = event.content or "Agent error"
-                        break
-
-                if error_content:
-                    _persist_tool_messages(conversation, tool_events, session_id=session_id)
-                    if reasoning_parts:
-                        persist_reasoning_message(
-                            conversation, "".join(reasoning_parts), session_id=session_id
-                        )
-                    if ai_content_parts:
-                        persist_assistant_message(
-                            conversation,
-                            "".join(ai_content_parts).strip(),
-                            metadata={"stream": True},
-                            session_id=session_id,
-                        )
-                    return MessageResponse(
-                        response="",
-                        error=error_content,
-                        verbose_data={"tool_events": tool_events},
-                    )
-
-                verbose_data = {"tool_events": tool_events}
-
-                response = ""
-                if tool_events:
-                    tool_outputs = [
-                        t["output"]
-                        for t in tool_events
-                        if t.get("stage") == "end" and t.get("output")
-                    ]
-                    if tool_outputs:
-                        response = "\n".join(tool_outputs)
-                if not response and ai_content_parts:
-                    response = "".join(ai_content_parts)
-                if not response:
-                    response = "Task completed."
-
-                _persist_tool_messages(conversation, tool_events, session_id=session_id)
-                if reasoning_parts:
-                    persist_reasoning_message(
-                        conversation, "".join(reasoning_parts), session_id=session_id
-                    )
-            else:
-                result_messages = await run_sdk_agent(
-                    user_id=user_id, messages=sdk_messages,
-                    session_id=session_id,
-                    model=req.model, provider_keys=req.provider_keys,
-                    rubric=rubric,
+        verification_verdict = None
+        if result.verification.availability.value == "on":
+            latest = result.verification.evaluations[-1] if result.verification.evaluations else None
+            if latest:
+                verification_verdict = VerificationVerdict(
+                    status=result.verification.status.value,
+                    attempts=result.verification.attempts,
+                    max_attempts=result.verification.max_attempts,
+                    explanation=latest.explanation,
+                    criteria=[{"name": c.name, "passed": c.passed, "gap": c.gap} for c in latest.criteria],
                 )
-
-                tool_contents = []
-                for m in result_messages:
-                    if m.role == "tool" and m.content:
-                        content = m.content if isinstance(m.content, str) else str(m.content)
-                        tool_contents.append(content)
-                        persist_tool_message(
-                            conversation,
-                            content,
-                            session_id=session_id,
-                            tool_name=m.name or "unknown",
-                            tool_call_id=m.tool_call_id or "",
-                        )
-
-                response = ""
-                last_ai = None
-                for m in reversed(result_messages):
-                    if m.role == "assistant" and m.content:
-                        last_ai = m
-                        break
-
-                if last_ai and last_ai.reasoning:
-                    persist_reasoning_message(conversation, last_ai.reasoning, session_id=session_id)
-
-                if (
-                    last_ai
-                    and last_ai.content
-                    and (
-                        last_ai.content
-                        if isinstance(last_ai.content, str)
-                        else str(last_ai.content)
-                    ).strip()
-                ):
-                    response = (
-                        last_ai.content
-                        if isinstance(last_ai.content, str)
-                        else str(last_ai.content)
-                    )
-                elif tool_contents:
-                    response = "\n".join(tool_contents)
-
-                if not response:
-                    response = "Task completed."
 
         canvas_blocks = _extract_surfaces(response)
         response = _strip_canvas_fences(response)
-
-        tool_calls_list = None
-        if req.verbose:
-            seen_call_ids: set[str] = set()
-            tool_calls_list = []
-            for t in tool_events:
-                call_id = t.get("call_id", "")
-                tool_name = t.get("tool", "")
-                if tool_name and call_id not in seen_call_ids:
-                    seen_call_ids.add(call_id)
-                    tool_calls_list.append({"name": tool_name, "tool_call_id": call_id})
-
-        assistant_metadata: dict[str, Any] = {}
-        if verbose_data and verbose_data.get("tool_events"):
-            assistant_metadata["tool_events"] = verbose_data["tool_events"]
-        persist_assistant_message(
-            conversation, response, metadata=assistant_metadata, session_id=session_id
-        )
 
         logger.info(
             "agent.response",
@@ -682,40 +591,10 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
             channel="http",
         )
 
-        if verbose_data is None:
-            verbose_data = {}
-        verbose_data["canvas_blocks"] = canvas_blocks
-
-        # Extract reasoning and usage from last assistant message
-        reasoning_text = None
-        usage_data = None
-        if last_ai is not None:
-            if last_ai.reasoning:
-                reasoning_text = last_ai.reasoning
-            if last_ai.usage:
-                usage_data = {
-                    "input_tokens": last_ai.usage.input_tokens,
-                    "output_tokens": last_ai.usage.output_tokens,
-                    "reasoning_tokens": last_ai.usage.reasoning_tokens,
-                    "cache_read_tokens": last_ai.usage.cache_read_tokens,
-                    "cache_creation_tokens": last_ai.usage.cache_creation_tokens,
-                }
-
-        # Extract verification verdict from cached loop
-        verification_verdict = None
-        from src.sdk.runner import _loop_cache, _loop_cache_key
-        cache_key = _loop_cache_key(user_id, "personal", req.model, req.provider_keys, session_id)
-        cached_loop = _loop_cache.get(cache_key)
-        if cached_loop and hasattr(cached_loop, "_verification_verdict"):
-            verdict_data = cached_loop._verification_verdict
-            if verdict_data:
-                verification_verdict = VerificationVerdict(**verdict_data)
-
         return MessageResponse(
             response=response,
             reasoning=reasoning_text,
-            verbose_data=verbose_data,
-            tool_calls=tool_calls_list,
+            verbose_data={"canvas_blocks": canvas_blocks},
             verification=verification_verdict,
             usage=usage_data,
         )
@@ -732,30 +611,17 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
     """Send a message and stream response using SSE (SDK-powered)."""
     try:
         user_id = req.user_id or "default_user"
-        session_id = req.session_id or "default"
+        session_id = _normalized_session_id(req.session_id)
         skey = _stream_key(user_id, session_id)
 
         conversation = get_message_store(user_id)
-        conversation.add_message("user", req.message, metadata={}, session_id=session_id)
 
         # Set up cancellation for this session's stream
         _cancel_flags[skey] = False
         cancel_event = asyncio.Event()
         _active_streams[skey] = cancel_event
 
-        # Resolve rubric for verification
-        stream_rubric = None
-        if req.verification and req.verification.rubric:
-            stream_rubric = req.verification.rubric
-        else:
-            stream_settings = get_settings()
-            if stream_settings.verification.enabled and stream_settings.verification.default_rubric:
-                stream_rubric = stream_settings.verification.default_rubric
-
-        recent_messages = conversation.get_messages_by_session_id(session_id, 50)
-        sdk_messages = _messages_from_conversation(recent_messages)
-
-        logger = get_logger()
+        run_service = RunService(user_id, _session_registry, conversation)
 
         async def generate() -> AsyncGenerator[str, None]:
             ai_content_parts: list[str] = []
@@ -765,21 +631,14 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
             response = ""
             aborted = False
             persisted = False
-            seen_canonical_text: set[str] = set()
-            seen_canonical_reasoning: set[str] = set()
-            seen_canonical_tool_starts: set[str] = set()
 
             try:
-                async for chunk in run_sdk_agent_stream(
-                    user_id=user_id,
-                    messages=sdk_messages,
+                async for event in run_service.execute_stream(
+                    session_id=session_id,
+                    prompt=req.message,
                     model=req.model,
                     provider_keys=req.provider_keys,
-                    cancel_event=cancel_event,
-                    session_id=session_id,
-                    rubric=stream_rubric,
                 ):
-                    # Check cancel flag between chunks (fast path)
                     if _cancel_flags.get(skey, False) or cancel_event.is_set():
                         _persist_collected_stream_state(
                             conversation,
@@ -793,67 +652,46 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                         aborted = True
                         yield sse("cancelled", {"content": "Cancelled"})
                         break
-                    event = adapt_stream_chunk(chunk)
-                    is_compat_alias = chunk.type != event.kind
 
-                    if event.kind == "text_delta" and event.content:
-                        if is_compat_alias and event.content in seen_canonical_text:
-                            continue
-                        ai_content_parts.append(event.content)
-                        yield sse("messages", {"content": event.content})
-                        if not is_compat_alias:
-                            seen_canonical_text.add(event.content)
+                    event_type = event.type
+                    data = event.model_dump(mode="json")
 
-                    elif event.kind == "tool_input_start" and event.tool:
-                        call_id = event.call_id or ""
-                        if is_compat_alias and call_id in seen_canonical_tool_starts:
-                            continue
-                        if not is_compat_alias:
-                            seen_canonical_tool_starts.add(call_id)
+                    if event_type == "text_delta":
+                        delta = data.get("data", {}).get("delta", "")
+                        if delta:
+                            ai_content_parts.append(delta)
+                            yield sse("text_delta", data)
+
+                    elif event_type == "reasoning_delta":
+                        delta = data.get("data", {}).get("delta", "")
+                        if delta:
+                            reasoning_parts.append(delta)
+                            yield sse("reasoning_delta", data)
+
+                    elif event_type == "tool_input_start":
+                        tool_data = data.get("data", {})
                         tool_metadata_list.append(
-                            {"tool_name": event.tool, "tool_call_id": event.call_id or ""}
+                            {"tool_name": tool_data.get("name", ""), "tool_call_id": tool_data.get("tool_call_id", "")}
                         )
-                        yield sse("tool_start", {
-                            "tool": event.tool,
-                            "call_id": event.call_id or "",
-                            "args": event.args or {},
-                        })
+                        yield sse("tool_input_start", data)
 
-                    elif event.kind == "tool_result" and event.tool:
-                        output = (event.result_preview or "")[:500]
+                    elif event_type == "tool_result":
+                        tool_data = data.get("data", {})
+                        output = tool_data.get("content", "")
                         if output:
-                            tool_results[event.call_id or ""] = output
-                            yield sse("tool_result", {
-                                "tool": event.tool,
-                                "call_id": event.call_id or "",
-                                "result": output,
-                            })
+                            tool_results[tool_data.get("tool_call_id", "")] = str(output)[:500]
+                        yield sse("tool_result", data)
 
-                    elif event.kind == "reasoning_delta" and event.content:
-                        if is_compat_alias and event.content in seen_canonical_reasoning:
-                            continue
-                        reasoning_parts.append(event.content)
-                        yield sse("reasoning", {"content": event.content})
-                        if not is_compat_alias:
-                            seen_canonical_reasoning.add(event.content)
-
-                    elif event.kind == "reasoning_start":
-                        pass  # reasoning_start just signals a new reasoning block; the native app creates a bubble on first reasoning delta
-
-                    elif event.kind == "interrupt":
+                    elif event_type == "interrupt":
                         _pending_interrupts[skey] = {
-                            "tool": event.tool,
-                            "call_id": event.call_id,
-                            "args": event.args or {},
+                            "tool": data.get("data", {}).get("tool", ""),
+                            "call_id": data.get("data", {}).get("call_id", ""),
+                            "args": data.get("data", {}).get("args", {}),
                             "model": req.model,
                             "provider_keys": req.provider_keys,
                             "session_id": session_id,
                         }
-                        yield sse("interrupt", {
-                            "tool": event.tool,
-                            "call_id": event.call_id,
-                            "args": event.args,
-                        })
+                        yield sse("interrupt", data)
                         _persist_collected_stream_state(
                             conversation,
                             session_id=session_id,
@@ -866,7 +704,7 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                         aborted = True
                         break
 
-                    elif event.kind == "error":
+                    elif event_type == "error":
                         _persist_collected_stream_state(
                             conversation,
                             session_id=session_id,
@@ -877,27 +715,23 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                         )
                         persisted = True
                         aborted = True
-                        yield sse("error", {"content": event.content})
+                        yield sse("error", data)
                         break
 
-                    elif event.kind == "rubric_evaluation_start":
-                        yield sse("rubric_evaluation_start", json.loads(event.content) if event.content else {})
+                    elif event_type == "rubric_evaluation_start":
+                        yield sse("rubric_evaluation_start", data)
 
-                    elif event.kind == "rubric_evaluation_end":
-                        yield sse("rubric_evaluation_end", json.loads(event.content) if event.content else {})
+                    elif event_type == "rubric_evaluation_end":
+                        yield sse("rubric_evaluation_end", data)
 
-                    elif event.kind == "usage" and chunk.usage:
-                        yield sse("usage", {
-                            "input_tokens": chunk.usage.input_tokens,
-                            "output_tokens": chunk.usage.output_tokens,
-                            "reasoning_tokens": chunk.usage.reasoning_tokens,
-                        })
+                    elif event_type == "usage":
+                        yield sse("usage", data)
 
-                    elif event.kind == "done" and event.content:
-                        # Only emit done content as messages if no streaming text was received
-                        if not ai_content_parts:
-                            ai_content_parts.append(event.content)
-                            yield sse("messages", {"content": event.content})
+                    elif event_type == "done":
+                        result = data.get("data", {}).get("result", {})
+                        response = result.get("response", "")
+                        if not ai_content_parts and response:
+                            ai_content_parts.append(response)
 
                 if aborted:
                     return
@@ -908,8 +742,6 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                 if not response:
                     response = "Task completed."
 
-                # Store messages immediately — before any yields
-                # (client may disconnect, preventing post-yield storage)
                 for tm in tool_metadata_list:
                     call_id = tm.get("tool_call_id", "")
                     output = tool_results.get(call_id, "")
@@ -942,8 +774,9 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                         break
                 response = _strip_canvas_fences(response)
 
+            except SessionBusyError:
+                yield sse("error", {"code": "session_busy", "message": "Session already has an active run"})
             except GeneratorExit:
-                # Client disconnected — still store what we have
                 if not persisted:
                     _persist_collected_stream_state(
                         conversation,
@@ -960,7 +793,6 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                     )
                 raise
             except asyncio.CancelledError:
-                # asyncio cancellation — still store what we have
                 if not persisted:
                     _persist_collected_stream_state(
                         conversation,
@@ -977,7 +809,6 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                     )
                 raise
             finally:
-                # Clean up cancel tracking
                 _active_streams.pop(skey, None)
                 _cancel_flags.pop(skey, None)
 
@@ -1019,7 +850,7 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
     instruction appended. The response is a text/event-stream identical in shape
     to POST /message/stream so existing SSE clients can consume it unchanged.
     """
-    session_id = req.session_id or "default"
+    session_id = _normalized_session_id(req.session_id)
     skey = _stream_key(req.user_id, session_id)
     pending = _pending_interrupts.pop(skey, None)
     if not pending and req.session_id is None:
@@ -1034,7 +865,7 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
         _pending_interrupts[skey] = pending
         raise HTTPException(status_code=409, detail="Pending tool call does not match call_id")
     tool_name = pending.get("tool", "unknown")
-    session_id = pending.get("session_id") or session_id
+    session_id = _normalized_session_id(pending.get("session_id") or session_id)
     skey = _stream_key(req.user_id, session_id)
     model = pending.get("model")
     provider_keys = pending.get("provider_keys")
@@ -1065,7 +896,7 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
         seen_canonical_reasoning: set[str] = set()
         seen_canonical_tool_starts: set[str] = set()
         try:
-            recent = conversation.get_messages_by_session_id(session_id, 50)
+            recent = conversation.get_messages_with_summary(session_id=session_id, limit=50)
             retry_msgs = _messages_from_conversation(recent)
             retry_msgs.append(Message.user(f"approve: please proceed with {tool_name}"))
 

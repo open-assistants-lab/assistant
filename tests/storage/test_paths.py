@@ -84,3 +84,33 @@ def test_user_scoped_dirs_are_distinct_per_user(tmp_path):
 
     assert alice.files_dir() == tmp_path / "data" / "Users" / "alice_test" / "Files"
     assert bob.files_dir() == tmp_path / "data" / "Users" / "bob_test" / "Files"
+
+
+def test_named_user_settings_paths_are_user_scoped(tmp_path):
+    ea_root = tmp_path / "data"
+    alice = DataPaths(ea_root=str(ea_root), user_id="alice")
+    bob = DataPaths(ea_root=str(ea_root), user_id="bob")
+
+    assert alice.user_settings_path() == ea_root / "Users" / "alice" / "settings.json"
+    assert alice.user_grader_prompt_path() == ea_root / "Users" / "alice" / "grader_prompt.md"
+    assert alice.user_settings_path() != bob.user_settings_path()
+    assert alice.user_grader_prompt_path() != bob.user_grader_prompt_path()
+
+
+def test_default_user_settings_paths_are_under_ea_root(tmp_path):
+    ea_root = tmp_path / "data"
+    paths = DataPaths(ea_root=str(ea_root))
+
+    assert paths.user_settings_path() == ea_root / "settings.json"
+    assert paths.user_grader_prompt_path() == ea_root / "grader_prompt.md"
+
+
+def test_user_settings_path_helpers_do_not_create_files(tmp_path):
+    paths = DataPaths(ea_root=str(tmp_path / "data"), user_id="alice")
+
+    settings_path = paths.user_settings_path()
+    grader_prompt_path = paths.user_grader_prompt_path()
+
+    assert paths.user_dir.exists()
+    assert not settings_path.exists()
+    assert not grader_prompt_path.exists()

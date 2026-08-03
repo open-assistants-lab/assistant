@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+
+UTC = timezone.utc
 from unittest import mock
 
 import pytest
 
 import src.storage.messages as messages_storage
-from src.storage.messages import MessageStore, get_message_store
+from src.storage.messages import Message, MessageStore, get_message_store
 from src.storage.paths import DataPaths
 
 
@@ -804,3 +806,243 @@ def test_date_filters_work() -> None:
 
     filtered = store.get_messages(start_date=ts.date() + timedelta(days=1))
     assert len(filtered) == 0
+
+
+def test_persist_run_stores_final_answer_with_run_id() -> None:
+    store = _store()
+    store.add_message("user", "hello", session_id="a")
+    answer = Message(id="", ts=datetime.now(UTC), role="assistant", content="world", session_id="a")
+    mid = store.persist_run(
+        run_id="run-1",
+        session_id="a",
+        user_message_id="msg-1",
+        final_answer=answer,
+        audit_records=[],
+        metadata={"model": "test:model"},
+    )
+    assert mid
+    messages = store.get_messages_by_session_id("a", limit=100)
+    persisted = [m for m in messages if m.id == mid]
+    assert len(persisted) == 1
+    assert persisted[0].content == "world"
+    assert persisted[0].metadata.get("run_id") == "run-1"
+
+
+def test_persist_run_stores_audit_records_with_include_in_model_context_false() -> None:
+    store = _store()
+    store.add_message("user", "hello", session_id="a")
+    answer = Message(id="", ts=datetime.now(UTC), role="assistant", content="answer", session_id="a")
+    audit = [
+        Message(id="", ts=datetime.now(UTC), role="reasoning", content="thinking...", session_id="a"),
+        Message(id="", ts=datetime.now(UTC), role="tool", content='{"result": "ok"}', session_id="a"),
+    ]
+    store.persist_run(
+        run_id="run-2",
+        session_id="a",
+        user_message_id="msg-1",
+        final_answer=answer,
+        audit_records=audit,
+        metadata={"model": "test:model"},
+    )
+    messages = store.get_messages_by_session_id("a", limit=100)
+    audit_persisted = [m for m in messages if m.metadata.get("run_id") == "run-2" and m.role != "assistant"]
+    assert len(audit_persisted) == 2
+    for m in audit_persisted:
+        assert m.metadata.get("include_in_model_context") is False
+
+
+def test_persist_run_is_idempotent_on_run_id() -> None:
+    store = _store()
+    store.add_message("user", "hello", session_id="a")
+    answer = Message(id="", ts=datetime.now(UTC), role="assistant", content="answer", session_id="a")
+    mid1 = store.persist_run(
+        run_id="run-3",
+        session_id="a",
+        user_message_id="msg-1",
+        final_answer=answer,
+        audit_records=[],
+        metadata={"model": "test:model"},
+    )
+    mid2 = store.persist_run(
+        run_id="run-3",
+        session_id="a",
+        user_message_id="msg-1",
+        final_answer=answer,
+        audit_records=[],
+        metadata={"model": "test:model"},
+    )
+    assert mid1 == mid2
+    messages = store.get_messages_by_session_id("a", limit=100)
+    run_messages = [m for m in messages if m.metadata.get("run_id") == "run-3"]
+    assert len(run_messages) == 1
+
+
+def test_persist_run_rejects_blank_session() -> None:
+    store = _store()
+    answer = Message(id="", ts=datetime.now(UTC), role="assistant", content="x", session_id="")
+    with pytest.raises(ValueError, match="session_id must be nonempty"):
+        store.persist_run(
+            run_id="run-4",
+            session_id="",
+            user_message_id="msg-1",
+            final_answer=answer,
+            audit_records=[],
+            metadata={},
+        )
+
+
+def test_get_turns_empty_session() -> None:
+    store = _store()
+    turns, cursor = store.get_turns("a")
+    assert turns == []
+    assert cursor is None
+
+
+def test_get_turns_groups_by_run_id() -> None:
+    store = _store()
+    store.add_message("user", "hello", metadata={"run_id": "run-1"}, session_id="a")
+    store.persist_run(
+        run_id="run-1", session_id="a", user_message_id="msg-1",
+        final_answer=Message(id="", ts=datetime.now(UTC), role="assistant", content="hi", session_id="a"),
+        audit_records=[], metadata={"model": "test:model"},
+    )
+    store.add_message("user", "again", metadata={"run_id": "run-2"}, session_id="a")
+    store.persist_run(
+        run_id="run-2", session_id="a", user_message_id="msg-2",
+        final_answer=Message(id="", ts=datetime.now(UTC), role="assistant", content="ok", session_id="a"),
+        audit_records=[], metadata={"model": "test:model"},
+    )
+    turns, cursor = store.get_turns("a", limit=10)
+    assert len(turns) == 2
+    assert turns[0]["run_id"] == "run-1"
+    assert turns[1]["run_id"] == "run-2"
+    assert cursor is None
+
+
+def test_get_turns_legacy_messages_without_run_id() -> None:
+    store = _store()
+    store.add_message("user", "hello", session_id="a")
+    store.add_message("assistant", "hi", session_id="a")
+    store.add_message("user", "again", session_id="a")
+    store.add_message("assistant", "ok", session_id="a")
+    turns, cursor = store.get_turns("a", limit=10)
+    assert len(turns) == 2
+    assert turns[0]["run_id"] is None
+    assert len(turns[0]["messages"]) == 2
+    assert turns[1]["run_id"] is None
+    assert len(turns[1]["messages"]) == 2
+    assert cursor is None
+
+
+def test_get_turns_cursor_pagination_does_not_split_turns() -> None:
+    store = _store()
+    store.add_message("user", "q1", metadata={"run_id": "run-1"}, session_id="a")
+    store.persist_run(
+        run_id="run-1", session_id="a", user_message_id="m1",
+        final_answer=Message(id="", ts=datetime.now(UTC), role="assistant", content="a1", session_id="a"),
+        audit_records=[], metadata={},
+    )
+    store.add_message("user", "q2", metadata={"run_id": "run-2"}, session_id="a")
+    store.persist_run(
+        run_id="run-2", session_id="a", user_message_id="m2",
+        final_answer=Message(id="", ts=datetime.now(UTC), role="assistant", content="a2", session_id="a"),
+        audit_records=[], metadata={},
+    )
+    store.add_message("user", "q3", metadata={"run_id": "run-3"}, session_id="a")
+    store.persist_run(
+        run_id="run-3", session_id="a", user_message_id="m3",
+        final_answer=Message(id="", ts=datetime.now(UTC), role="assistant", content="a3", session_id="a"),
+        audit_records=[], metadata={},
+    )
+    turns, cursor = store.get_turns("a", limit=2)
+    assert len(turns) == 2
+    assert turns[0]["run_id"] == "run-1"
+    assert turns[1]["run_id"] == "run-2"
+    assert cursor is not None
+    turns2, cursor2 = store.get_turns("a", limit=2, cursor=cursor)
+    assert len(turns2) == 1
+    assert turns2[0]["run_id"] == "run-3"
+    assert cursor2 is None
+
+
+def test_get_turns_metadata_from_final_assistant() -> None:
+    store = _store()
+    store.add_message("user", "hello", metadata={"run_id": "run-1"}, session_id="a")
+    store.persist_run(
+        run_id="run-1", session_id="a", user_message_id="m1",
+        final_answer=Message(id="", ts=datetime.now(UTC), role="assistant", content="hi", session_id="a"),
+        audit_records=[], metadata={"model": "test:model", "custom": "value"},
+    )
+    turns, _ = store.get_turns("a", limit=10)
+    assert len(turns) == 1
+    assert turns[0]["metadata"].get("model") == "test:model"
+    assert turns[0]["metadata"].get("custom") == "value"
+
+
+def test_get_turns_limit_zero() -> None:
+    store = _store()
+    store.add_message("user", "hello", session_id="a")
+    turns, cursor = store.get_turns("a", limit=0)
+    assert turns == []
+    assert cursor is None
+
+
+def test_get_turns_malformed_cursor_falls_back_to_start() -> None:
+    store = _store()
+    store.add_message("user", "hello", session_id="a")
+    store.add_message("assistant", "hi", session_id="a")
+    turns, cursor = store.get_turns("a", limit=10, cursor="!!!invalid-base64!!!")
+    assert len(turns) == 1
+    assert cursor is None
+
+
+def test_get_turns_empty_cursor_falls_back_to_start() -> None:
+    store = _store()
+    store.add_message("user", "hello", session_id="a")
+    store.add_message("assistant", "hi", session_id="a")
+    turns, cursor = store.get_turns("a", limit=10, cursor="")
+    assert len(turns) == 1
+    assert cursor is None
+
+
+def test_get_turns_mixed_run_id_and_legacy() -> None:
+    store = _store()
+    # Legacy turn
+    store.add_message("user", "q1", session_id="a")
+    store.add_message("assistant", "a1", session_id="a")
+    # Run-id turn
+    store.add_message("user", "q2", metadata={"run_id": "run-1"}, session_id="a")
+    store.persist_run(
+        run_id="run-1", session_id="a", user_message_id="m1",
+        final_answer=Message(id="", ts=datetime.now(UTC), role="assistant", content="a2", session_id="a"),
+        audit_records=[], metadata={},
+    )
+    turns, cursor = store.get_turns("a", limit=10)
+    assert len(turns) == 2
+    assert turns[0]["run_id"] is None
+    assert turns[1]["run_id"] == "run-1"
+
+
+def test_get_turns_turn_with_only_user_message() -> None:
+    store = _store()
+    store.add_message("user", "hello", session_id="a")
+    turns, cursor = store.get_turns("a", limit=10)
+    assert len(turns) == 1
+    assert turns[0]["run_id"] is None
+    assert len(turns[0]["messages"]) == 1
+
+
+def test_get_turns_turn_with_tool_messages() -> None:
+    store = _store()
+    store.add_message("user", "search", metadata={"run_id": "run-1"}, session_id="a")
+    store.add_message("tool", '{"result": "ok"}', metadata={"run_id": "run-1", "tool_name": "web_search"}, session_id="a")
+    store.persist_run(
+        run_id="run-1", session_id="a", user_message_id="m1",
+        final_answer=Message(id="", ts=datetime.now(UTC), role="assistant", content="found it", session_id="a"),
+        audit_records=[], metadata={},
+    )
+    turns, cursor = store.get_turns("a", limit=10)
+    assert len(turns) == 1
+    assert turns[0]["run_id"] == "run-1"
+    assert len(turns[0]["messages"]) == 3
+    assert turns[0]["messages"][1].role == "tool"

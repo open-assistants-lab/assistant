@@ -6,16 +6,20 @@ dynamically. Falls back to hardcoded defaults for well-known providers.
 
 from __future__ import annotations
 
-import json
 import os
-from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
+import src.config.user_settings_store as _user_settings_store
+from src.app_logging import get_logger
+from src.config.user_settings import SavedUserSettings
 from src.sdk.providers.anthropic import AnthropicProvider
 from src.sdk.providers.base import LLMProvider
 from src.sdk.providers.gemini import GeminiProvider
 from src.sdk.providers.ollama import OllamaCloud
 from src.sdk.providers.openai import OpenAIProvider
+
+logger = get_logger()
 
 _PROVIDER_CLASSES: dict[str, type[LLMProvider]] = {
     "openai": OpenAIProvider,
@@ -203,36 +207,41 @@ def _default_provider_options(provider_id: str) -> dict[str, Any]:
     return {}
 
 
-def _load_stored_key(provider_type: str, user_id: str = "default_user") -> str | None:
-    """Check per-user settings store for a provider API key."""
+def _load_user_settings(user_id: str) -> SavedUserSettings | None:
+    """Load one canonical settings snapshot, falling back safely on known failures."""
     try:
-        from src.config.settings import get_settings
-        root = get_settings().data_path or "data"
-        settings_path = Path(f"{root}/users/{user_id}/settings.json")
-        if settings_path.exists():
-            stored: dict[str, Any] = json.loads(settings_path.read_text())
-            keys: dict[str, Any] = stored.get("provider_keys", {})
-            value = keys.get(provider_type)
-            return str(value) if value is not None else None
-    except Exception:
-        pass
-    return None
+        return _user_settings_store.UserSettingsStore(user_id).load()
+    except (_user_settings_store.UserSettingsStoreError, OSError, ValueError) as exc:
+        logger.warning(
+            "provider.user_settings_load_failed",
+            {"error_type": type(exc).__name__},
+            user_id=user_id,
+        )
+        return None
+
+
+def _provider_key(keys: Mapping[str, str] | None, provider_type: str) -> str | None:
+    if not keys:
+        return None
+    value = keys.get(provider_type)
+    if value:
+        return value
+    return next(
+        (value for provider, value in keys.items() if provider.lower() == provider_type and value),
+        None,
+    )
+
+
+def _load_stored_key(provider_type: str, user_id: str = "default_user") -> str | None:
+    """Check the canonical per-user settings store for a provider API key."""
+    saved = _load_user_settings(user_id)
+    return _provider_key(saved.provider_keys, provider_type.lower()) if saved is not None else None
 
 
 def _load_stored_default_model(user_id: str = "default_user") -> str | None:
-    """Check per-user settings store for a default model override."""
-    try:
-        from src.config.settings import get_settings
-
-        root = get_settings().data_path or "data"
-        settings_path = Path(f"{root}/users/{user_id}/settings.json")
-        if settings_path.exists():
-            stored: dict[str, Any] = json.loads(settings_path.read_text())
-            value = stored.get("default_model")
-            return str(value) if value else None
-    except Exception:
-        pass
-    return None
+    """Check the canonical per-user settings store for a default model override."""
+    saved = _load_user_settings(user_id)
+    return saved.default_model if saved is not None else None
 
 
 def create_model_from_config(
@@ -243,29 +252,29 @@ def create_model_from_config(
     from src.config import get_settings
 
     settings = get_settings()
-    model_str = config_model or _load_stored_default_model(user_id) or settings.agent.model
+    saved: SavedUserSettings | None = None
+    settings_loaded = False
+    model_str = config_model
+    if not model_str:
+        saved = _load_user_settings(user_id)
+        settings_loaded = True
+        model_str = (saved.default_model if saved else None) or settings.agent.model
 
     provider_type, model_name = _parse_model_string(model_str)
+    normalized_model_ref = _normalized_model_ref(model_str, provider_type, model_name)
 
-    resolved_key = None
-    if provider_keys:
-        resolved_key = provider_keys.get(provider_type) or provider_keys.get(provider_type.lower(), "")
-        if not resolved_key:
-            resolved_key = None
-
+    resolved_key = _provider_key(provider_keys, provider_type)
     if not resolved_key:
-        resolved_key = _load_stored_key(provider_type, user_id)
+        if not settings_loaded:
+            saved = _load_user_settings(user_id)
+            settings_loaded = True
+        resolved_key = _provider_key(saved.provider_keys, provider_type) if saved else None
 
-    registry_provider = create_provider_from_registry_model(model_str, api_key=resolved_key)
+    registry_provider = create_provider_from_registry_model(
+        normalized_model_ref, api_key=resolved_key
+    )
     if registry_provider is not None:
-        if resolved_key and hasattr(registry_provider, '_api_key'):
-            registry_provider._api_key = resolved_key
-        elif resolved_key:
-            provider_type = getattr(registry_provider, 'provider_type', 'openai-compatible')
-            base_url = getattr(registry_provider, 'base_url', None)
-            provider = create_provider(provider_type, model=model_name, api_key=resolved_key, base_url=base_url)
-        else:
-            provider = registry_provider
+        provider = registry_provider
     else:
         provider = create_provider(provider_type, model=model_name, api_key=resolved_key)
 
@@ -292,8 +301,16 @@ def create_model_from_config(
 def _parse_model_string(model_str: str) -> tuple[str, str]:
     if ":" in model_str:
         provider, model_name = model_str.split(":", 1)
-        return provider.strip(), model_name.strip()
+        return provider.strip().lower(), model_name.strip()
     if "/" in model_str:
         provider, model_name = model_str.split("/", 1)
-        return provider.strip(), model_name.strip()
+        return provider.strip().lower(), model_name.strip()
     return "ollama", model_str.strip()
+
+
+def _normalized_model_ref(model_str: str, provider_type: str, model_name: str) -> str:
+    if ":" in model_str:
+        return f"{provider_type}:{model_name}"
+    if "/" in model_str:
+        return f"{provider_type}/{model_name}"
+    return model_name

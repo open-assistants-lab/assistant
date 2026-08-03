@@ -20,6 +20,8 @@ const delete_key: u64 = 7;
 const title_key: u64 = 8;
 const models_key: u64 = 9;
 const settings_key: u64 = 10;
+const settings_general_key: u64 = 11;
+const grader_prompt_key: u64 = 12;
 
 const max_providers = 128;
 const max_provider_models = 512;
@@ -65,6 +67,12 @@ const SettingsState = struct {
     key_visible: bool = false,
     key_error: []const u8 = "",
     key_testing: bool = false,
+    rubric_enabled: bool = false,
+    rubric_max_iterations: u32 = 3,
+    grader_prompt: []const u8 = "",
+    grader_prompt_loading: bool = false,
+    saving_general: bool = false,
+    reduced_motion: bool = false,
 };
 
 const ModelOption = struct {
@@ -130,6 +138,15 @@ pub const ChatMessage = struct {
     }
 };
 
+pub const ContextInfo = struct {
+    model: []const u8 = "",
+    input_tokens: u32 = 0,
+    output_tokens: u32 = 0,
+    context_window: u32 = 0,
+    context_percentage: f32 = 0,
+    freshness: []const u8 = "live",
+};
+
 pub const Chat = struct {
     id: u64,
     session_id: [32]u8 = undefined,
@@ -156,6 +173,10 @@ pub const Chat = struct {
     transcript_scroll_generation: u64 = 0,
     last_textarea_height: f32 = 0,
     created_at: []const u8 = "",
+    rubric_status: []const u8 = "",
+    rubric_attempts: u32 = 0,
+    compression_animation_ticks: u32 = 0,
+    context_info: ContextInfo = .{},
 
     pub fn hasUnread(self: *const Chat) bool {
         return self.unread_count > 0;
@@ -217,6 +238,10 @@ pub const Msg = union(enum) {
     settings_providers_models,
     settings_general,
     settings_loaded: native_sdk.EffectResponse,
+    settings_general_loaded: native_sdk.EffectResponse,
+    grader_prompt_loaded: native_sdk.EffectResponse,
+    settings_general_saved: native_sdk.EffectResponse,
+    grader_prompt_saved: native_sdk.EffectResponse,
     settings_search: canvas.TextInputEvent,
     select_model: usize,
     model_selected: native_sdk.EffectResponse,
@@ -229,6 +254,12 @@ pub const Msg = union(enum) {
     key_saved: native_sdk.EffectResponse,
     key_deleted: native_sdk.EffectResponse,
     remove_key: usize,
+    toggle_rubric,
+    toggle_reduced_motion,
+    rubric_iterations_increment,
+    rubric_iterations_decrement,
+    save_general_settings,
+    grader_prompt_input: canvas.TextInputEvent,
 
     pub const view_unbound = .{
         "stream_line",
@@ -249,6 +280,10 @@ pub const Msg = union(enum) {
         "title_generated",
         "models_loaded",
         "cycle_model",
+        "settings_general_loaded",
+        "grader_prompt_loaded",
+        "settings_general_saved",
+        "grader_prompt_saved",
     };
 };
 
@@ -330,6 +365,14 @@ pub const Model = struct {
         var i: usize = 0;
         while (i < self.chat_count) : (i += 1) {
             if (self.chats[i].streaming) return true;
+        }
+        return false;
+    }
+
+    pub fn anyCompressionAnimation(self: *const Model) bool {
+        var i: usize = 0;
+        while (i < self.chat_count) : (i += 1) {
+            if (self.chats[i].compression_animation_ticks > 0) return true;
         }
         return false;
     }
@@ -455,7 +498,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                         model.chats[i].fetch_key = fetch_key;
                         const url = std.fmt.allocPrint(
                             model.allocator,
-                            "http://127.0.0.1:8080/conversation?user_id=native_sdk_chat&session_id={s}&limit=100",
+                            "http://127.0.0.1:8080/conversation/turns?user_id=native_sdk_chat&session_id={s}&limit=50",
                             .{model.chats[i].sessionId()},
                         ) catch return;
                         fx.fetch(.{
@@ -739,25 +782,25 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const event_type = root.object.get("type") orelse return;
             const data = root.object.get("data") orelse return;
 
-            if (std.mem.eql(u8, event_type.string, "messages")) {
-                const content = data.object.get("content") orelse return;
+            if (std.mem.eql(u8, event_type.string, "text_delta")) {
+                const delta = data.object.get("delta") orelse return;
                 if (!std.mem.eql(u8, chat.open_bubble_type, "assistant")) {
-                    addMessage(chat, model.allocator, "assistant", trimLeadingMessageWhitespace(content.string));
+                    addMessage(chat, model.allocator, "assistant", trimLeadingMessageWhitespace(delta.string));
                     chat.open_bubble_type = "assistant";
                 } else {
-                    appendToLastMessage(chat, model.allocator, "assistant", content.string);
+                    appendToLastMessage(chat, model.allocator, "assistant", delta.string);
                 }
-            } else if (std.mem.eql(u8, event_type.string, "reasoning")) {
-                const content = data.object.get("content") orelse return;
+            } else if (std.mem.eql(u8, event_type.string, "reasoning_delta")) {
+                const delta = data.object.get("delta") orelse return;
                 removeTrailingEmptyAssistant(chat);
                 if (!std.mem.eql(u8, chat.open_bubble_type, "reasoning")) {
-                    addMessage(chat, model.allocator, "reasoning", content.string);
+                    addMessage(chat, model.allocator, "reasoning", delta.string);
                     chat.open_bubble_type = "reasoning";
                 } else {
-                    appendToLastMessage(chat, model.allocator, "reasoning", content.string);
+                    appendToLastMessage(chat, model.allocator, "reasoning", delta.string);
                 }
-            } else if (std.mem.eql(u8, event_type.string, "tool_start")) {
-                const tool = data.object.get("tool") orelse return;
+            } else if (std.mem.eql(u8, event_type.string, "tool_input_start")) {
+                const name = data.object.get("name") orelse return;
                 removeTrailingEmptyAssistant(chat);
                 const args_val = data.object.get("args");
                 const args_str = if (args_val) |v| blk: {
@@ -770,42 +813,114 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                         else => break :blk "",
                     }
                 } else "";
-                addToolMessage(chat, model.allocator, tool.string, args_str);
+                addToolMessage(chat, model.allocator, name.string, args_str);
                 chat.open_bubble_type = "tool";
-                chat.status_text = std.fmt.allocPrint(model.allocator, "{s}: running...", .{tool.string}) catch tool.string;
+                chat.status_text = std.fmt.allocPrint(model.allocator, "{s}: running...", .{name.string}) catch name.string;
             } else if (std.mem.eql(u8, event_type.string, "tool_result")) {
-                const result = data.object.get("result") orelse return;
-                const tool = data.object.get("tool") orelse return;
+                const content = data.object.get("content") orelse return;
+                const name = data.object.get("name") orelse return;
                 if (findRunningToolBubble(chat)) |tb| {
                     tb.tool_status = model.allocator.dupe(u8, "done") catch return;
-                    tb.tool_result = model.allocator.dupe(u8, result.string) catch return;
-                    tb.collapsed = true; // collapsed by default — one-line preview
+                    tb.tool_result = model.allocator.dupe(u8, content.string) catch return;
+                    tb.collapsed = true;
                 }
-                chat.status_text = std.fmt.allocPrint(model.allocator, "{s}: done", .{tool.string}) catch tool.string;
+                chat.status_text = std.fmt.allocPrint(model.allocator, "{s}: done", .{name.string}) catch name.string;
             } else if (std.mem.eql(u8, event_type.string, "interrupt")) {
                 const tool = data.object.get("tool") orelse return;
                 const call_id = data.object.get("call_id") orelse return;
                 chat.has_pending = true;
                 chat.pending_tool = model.allocator.dupe(u8, tool.string) catch return;
                 chat.pending_call_id = model.allocator.dupe(u8, call_id.string) catch return;
-            } else if (std.mem.eql(u8, event_type.string, "cancelled")) {
-                chat.streaming = false;
-                chat.open_bubble_type = "";
-                chat.status_text = "";
-                // Remove empty assistant typing indicator
+            } else if (std.mem.eql(u8, event_type.string, "rubric_evaluation_start")) {
+                chat.status_text = "Checking rubric...";
+            } else if (std.mem.eql(u8, event_type.string, "rubric_evaluation_end")) {
+                const result = data.object.get("result") orelse {
+                    chat.status_text = "";
+                    return;
+                };
+                chat.rubric_status = model.allocator.dupe(u8, result.string) catch "";
+                chat.rubric_attempts += 1;
+                if (std.mem.eql(u8, result.string, "satisfied")) {
+                    chat.status_text = "Rubric passed";
+                } else if (std.mem.eql(u8, result.string, "needs_revision")) {
+                    chat.status_text = std.fmt.allocPrint(model.allocator, "Revising... ({d})", .{chat.rubric_attempts}) catch "Revising...";
+                } else if (std.mem.eql(u8, result.string, "grader_error")) {
+                    chat.status_text = "Rubric check failed";
+                } else if (std.mem.eql(u8, result.string, "invalid_rubric")) {
+                    chat.status_text = "Rubric configuration invalid";
+                } else {
+                    chat.status_text = "";
+                }
+            } else if (std.mem.eql(u8, event_type.string, "response_revision_start")) {
+                // Remove last assistant bubble for revision
                 if (chat.msg_count > 0) {
-                    const last = &chat._messages[chat.msg_count - 1];
-                    if (std.mem.eql(u8, last.role, "assistant") and last.content.len == 0) {
-                        chat.msg_count -= 1;
-                        chat.messages = chat._messages[0..chat.msg_count];
+                    var i: usize = chat.msg_count;
+                    while (i > 0) {
+                        i -= 1;
+                        if (std.mem.eql(u8, chat._messages[i].role, "assistant")) {
+                            chat.msg_count = i;
+                            chat.messages = chat._messages[0..chat.msg_count];
+                            break;
+                        }
                     }
                 }
+                chat.open_bubble_type = "";
+                chat.status_text = "Revising...";
+            } else if (std.mem.eql(u8, event_type.string, "context_compressed")) {
+                chat.compression_animation_ticks = 8;
+            } else if (std.mem.eql(u8, event_type.string, "usage")) {
+                const usage_data = data.object.get("usage") orelse return;
+                if (usage_data.object.get("input_tokens")) |it| {
+                    chat.context_info.input_tokens = @intCast(it.integer);
+                }
+                if (usage_data.object.get("output_tokens")) |ot| {
+                    chat.context_info.output_tokens = @intCast(ot.integer);
+                }
+            } else if (std.mem.eql(u8, event_type.string, "done")) {
+                // Extract RunResult from done event
+                const result_data = data.object.get("result") orelse return;
+                if (result_data.object.get("verification")) |verification| {
+                    const status_val = verification.object.get("status") orelse return;
+                    const status_str = switch (status_val) {
+                        .string => |s| s,
+                        else => return,
+                    };
+                    if (std.mem.eql(u8, status_str, "satisfied")) {
+                        chat.rubric_status = "Rubric passed";
+                    } else if (std.mem.eql(u8, status_str, "max_attempts_reached")) {
+                        chat.rubric_status = "Max revisions reached";
+                    } else if (std.mem.eql(u8, status_str, "grader_error")) {
+                        chat.rubric_status = "Rubric check failed";
+                    } else if (std.mem.eql(u8, status_str, "invalid_rubric")) {
+                        chat.rubric_status = "Rubric configuration invalid";
+                    } else if (std.mem.eql(u8, status_str, "cancelled")) {
+                        chat.rubric_status = "Rubric cancelled";
+                    }
+                }
+                if (result_data.object.get("model")) |model_val| {
+                    chat.context_info.model = model.allocator.dupe(u8, model_val.string) catch "";
+                }
             } else if (std.mem.eql(u8, event_type.string, "error")) {
-                const content = data.object.get("content") orelse return;
+                const message = data.object.get("message") orelse {
+                    const code = data.object.get("code") orelse return;
+                    if (std.mem.eql(u8, code.string, "cancelled")) {
+                        chat.streaming = false;
+                        chat.open_bubble_type = "";
+                        chat.status_text = "";
+                        if (chat.msg_count > 0) {
+                            const last = &chat._messages[chat.msg_count - 1];
+                            if (std.mem.eql(u8, last.role, "assistant") and last.content.len == 0) {
+                                chat.msg_count -= 1;
+                                chat.messages = chat._messages[0..chat.msg_count];
+                            }
+                        }
+                    }
+                    return;
+                };
                 if (chat.open_bubble_type.len > 0 and chat.msg_count > 0) {
-                    appendToLastMessage(chat, model.allocator, chat.open_bubble_type, content.string);
+                    appendToLastMessage(chat, model.allocator, chat.open_bubble_type, message.string);
                 } else {
-                    addMessage(chat, model.allocator, "system", content.string);
+                    addMessage(chat, model.allocator, "system", message.string);
                 }
             }
         },
@@ -876,10 +991,18 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .tick => {
             // Advance pulse phase for streaming dot animation
-            model.pulse_phase += 0.15;
-            if (model.pulse_phase > std.math.tau) model.pulse_phase -= std.math.tau;
-            // Reschedule timer if any chat is still streaming
-            if (model.anyStreaming()) {
+            if (!model.settings.reduced_motion) {
+                model.pulse_phase += 0.15;
+                if (model.pulse_phase > std.math.tau) model.pulse_phase -= std.math.tau;
+            }
+            // Decrement compression animation ticks for all chats
+            for (0..model.chat_count) |i| {
+                if (model.chats[i].compression_animation_ticks > 0) {
+                    model.chats[i].compression_animation_ticks -= 1;
+                }
+            }
+            // Reschedule timer if any chat is still streaming or has animation
+            if (model.anyStreaming() or model.anyCompressionAnimation()) {
                 fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
             }
         },
@@ -896,8 +1019,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
             defer parsed.deinit();
             const root = parsed.value;
-            const messages_arr = root.object.get("messages") orelse return;
-            const arr = switch (messages_arr) {
+            const turns_arr = root.object.get("turns") orelse return;
+            const arr = switch (turns_arr) {
                 .array => |a| a,
                 else => return,
             };
@@ -906,8 +1029,22 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             chat.history_loading = false;
             chat.msg_count = 0;
             chat.messages = chat._messages[0..0];
-            for (arr.items) |item| {
-                addHistoryMessage(chat, model.allocator, item);
+            for (arr.items) |turn_item| {
+                const turn = turn_item.object;
+                const messages_arr = turn.get("messages") orelse continue;
+                const msgs = switch (messages_arr) {
+                    .array => |a| a,
+                    else => continue,
+                };
+                for (msgs.items) |item| {
+                    addHistoryMessage(chat, model.allocator, item);
+                }
+                // Extract model and rubric status from turn metadata
+                if (turn.get("metadata")) |meta| {
+                    if (meta.object.get("model")) |m| {
+                        chat.context_info.model = model.allocator.dupe(u8, m.string) catch "";
+                    }
+                }
             }
             if (chat.msg_count > 0 and !chat.title_generated) {
                 const first = chat._messages[0];
@@ -932,16 +1069,29 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
             defer parsed.deinit();
             const root = parsed.value;
-            const messages_arr = root.object.get("messages") orelse return;
-            const arr = switch (messages_arr) {
+            const turns_arr = root.object.get("turns") orelse return;
+            const arr = switch (turns_arr) {
                 .array => |a| a,
                 else => return,
             };
             chat.history_loaded = true;
             chat.msg_count = 0;
             chat.messages = chat._messages[0..0];
-            for (arr.items) |item| {
-                addHistoryMessage(chat, model.allocator, item);
+            for (arr.items) |turn_item| {
+                const turn = turn_item.object;
+                const messages_arr = turn.get("messages") orelse continue;
+                const msgs = switch (messages_arr) {
+                    .array => |a| a,
+                    else => continue,
+                };
+                for (msgs.items) |item| {
+                    addHistoryMessage(chat, model.allocator, item);
+                }
+                if (turn.get("metadata")) |meta| {
+                    if (meta.object.get("model")) |m| {
+                        chat.context_info.model = model.allocator.dupe(u8, m.string) catch "";
+                    }
+                }
             }
             if (chat.msg_count > 0 and !chat.title_generated) {
                 const first = chat._messages[0];
@@ -1046,6 +1196,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.settings.key_modal_visible = false;
             model.settings.key_input = "";
             model.settings.key_error = "";
+            model.settings.grader_prompt_loading = false;
             fx.fetch(.{
                 .key = settings_key,
                 .url = "http://127.0.0.1:8080/settings/model-catalog?user_id=native_sdk_chat&max_models_per_provider=20&max_providers=64",
@@ -1053,6 +1204,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .headers = &.{.{ .name = "Accept", .value = "application/json" }},
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.settings_loaded),
+            });
+            fx.fetch(.{
+                .key = settings_general_key,
+                .url = "http://127.0.0.1:8080/settings?user_id=native_sdk_chat",
+                .method = .GET,
+                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.settings_general_loaded),
             });
         },
         .close_settings => {
@@ -1063,6 +1222,17 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .settings_general => {
             model.settings.section = .general;
+            if (!model.settings.grader_prompt_loading) {
+                model.settings.grader_prompt_loading = true;
+                fx.fetch(.{
+                    .key = grader_prompt_key,
+                    .url = "http://127.0.0.1:8080/settings/grader-prompt?user_id=native_sdk_chat",
+                    .method = .GET,
+                    .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                    .response = .buffered,
+                    .on_response = Effects.responseMsg(.grader_prompt_loaded),
+                });
+            }
         },
         .settings_loaded => |response| {
             model.settings.loading = false;
@@ -1155,6 +1325,37 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 }
                 sortSettingsProviders(&model.settings);
             }
+        },
+        .settings_general_loaded => |response| {
+            if (response.outcome != .ok) return;
+            const body = response.body;
+            if (body.len == 0) return;
+            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
+            defer parsed.deinit();
+            const root = parsed.value;
+            if (root.object.get("verification")) |v| {
+                if (v.object.get("enabled")) |e| model.settings.rubric_enabled = e.bool;
+                if (v.object.get("max_iterations")) |mi| model.settings.rubric_max_iterations = @intCast(mi.integer);
+            }
+        },
+        .grader_prompt_loaded => |response| {
+            model.settings.grader_prompt_loading = false;
+            if (response.outcome != .ok) return;
+            const body = response.body;
+            if (body.len == 0) return;
+            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
+            defer parsed.deinit();
+            const root = parsed.value;
+            if (root.object.get("content")) |c| {
+                model.settings.grader_prompt = model.allocator.dupe(u8, c.string) catch "";
+            }
+        },
+        .settings_general_saved => |response| {
+            model.settings.saving_general = false;
+            _ = response;
+        },
+        .grader_prompt_saved => |response| {
+            _ = response;
         },
         .settings_search => |event| {
             if (model.settings.search_runtime_text_synced and event != .set_selection) {
@@ -1450,6 +1651,66 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 }
             }
         },
+        .toggle_rubric => {
+            model.settings.rubric_enabled = !model.settings.rubric_enabled;
+        },
+        .toggle_reduced_motion => {
+            model.settings.reduced_motion = !model.settings.reduced_motion;
+            if (model.settings.reduced_motion) {
+                model.pulse_phase = 0;
+            }
+        },
+        .rubric_iterations_increment => {
+            if (model.settings.rubric_max_iterations < 10) {
+                model.settings.rubric_max_iterations += 1;
+            }
+        },
+        .rubric_iterations_decrement => {
+            if (model.settings.rubric_max_iterations > 1) {
+                model.settings.rubric_max_iterations -= 1;
+            }
+        },
+        .save_general_settings => {
+            if (model.settings.saving_general) return;
+            model.settings.saving_general = true;
+            const escaped_prompt = escapeJsonString(model.allocator, model.settings.grader_prompt) catch return;
+            const settings_body = std.fmt.allocPrint(
+                model.allocator,
+                "{{\"verification\":{{\"enabled\":{s},\"max_iterations\":{d}}}}}",
+                .{ if (model.settings.rubric_enabled) "true" else "false", model.settings.rubric_max_iterations },
+            ) catch return;
+            const prompt_body = std.fmt.allocPrint(
+                model.allocator,
+                "{{\"content\":\"{s}\"}}",
+                .{escaped_prompt},
+            ) catch return;
+            fx.fetch(.{
+                .key = settings_general_key,
+                .url = "http://127.0.0.1:8080/settings?user_id=native_sdk_chat",
+                .method = .PUT,
+                .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+                .body = settings_body,
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.settings_general_saved),
+            });
+            fx.fetch(.{
+                .key = grader_prompt_key,
+                .url = "http://127.0.0.1:8080/settings/grader-prompt?user_id=native_sdk_chat",
+                .method = .PUT,
+                .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+                .body = prompt_body,
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.grader_prompt_saved),
+            });
+        },
+        .grader_prompt_input => |event| {
+            const output = model.allocator.alloc(u8, model.settings.grader_prompt.len + 256) catch return;
+            const next = (canvas.TextEditState{
+                .text = model.settings.grader_prompt,
+                .selection = .{ .anchor = model.settings.grader_prompt.len, .focus = model.settings.grader_prompt.len },
+            }).apply(event, output) catch return;
+            model.settings.grader_prompt = next.text;
+        },
     }
 }
 
@@ -1711,7 +1972,7 @@ fn queueHistoryFetch(model: *Model, chat: *Chat, fx: *Effects) void {
     chat.history_loading = true;
     const url = std.fmt.allocPrint(
         model.allocator,
-        "http://127.0.0.1:8080/conversation?user_id=native_sdk_chat&session_id={s}&limit=100",
+        "http://127.0.0.1:8080/conversation/turns?user_id=native_sdk_chat&session_id={s}&limit=50",
         .{chat.sessionId()},
     ) catch return;
     fx.fetch(.{
@@ -2274,6 +2535,44 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     }
 
     if (model.settings.section == .general) {
+    // Rubric settings
+    content_children[content_count] = ui.el(.card, .{
+        .padding = 16,
+        .style_tokens = .{ .background = .surface, .radius = .md },
+    }, .{
+        ui.column(.{ .gap = 8 }, .{
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Rubric"),
+            ui.row(.{ .gap = 12, .cross = .center }, .{
+                ui.text(.{}, "Enable rubric check"),
+                ui.spacer(1),
+                ui.button(.{
+                    .on_press = .toggle_rubric,
+                    .variant = if (model.settings.rubric_enabled) .primary else .secondary,
+                }, if (model.settings.rubric_enabled) "On" else "Off"),
+            }),
+            ui.row(.{ .gap = 12, .cross = .center }, .{
+                ui.text(.{}, "Max iterations"),
+                ui.spacer(1),
+                ui.button(.{ .on_press = .rubric_iterations_decrement, .variant = .ghost }, "−"),
+                ui.text(.{}, std.fmt.allocPrint(ui.arena, "{d}", .{model.settings.rubric_max_iterations}) catch "3"),
+                ui.button(.{ .on_press = .rubric_iterations_increment, .variant = .ghost }, "+"),
+            }),
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Grader prompt"),
+            ui.el(.textarea, .{
+                .text = model.settings.grader_prompt,
+                .placeholder = "Enter rubric criteria...",
+                .on_input = AppUi.inputMsg(.grader_prompt_input),
+                .height = 100,
+                .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
+            }, .{}),
+            if (model.settings.saving_general)
+                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Saving...")
+            else
+                ui.button(.{ .on_press = .save_general_settings, .variant = .primary }, "Save"),
+        }),
+    });
+    content_count += 1;
+
     // Appearance
     content_children[content_count] = ui.el(.card, .{
         .padding = 16,
@@ -2291,6 +2590,14 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                     .dark => "Switch to Light",
                     .light => "Switch to Dark",
                 }),
+            }),
+            ui.row(.{ .gap = 12, .cross = .center }, .{
+                ui.text(.{}, "Reduced motion"),
+                ui.spacer(1),
+                ui.button(.{
+                    .on_press = .toggle_reduced_motion,
+                    .variant = if (model.settings.reduced_motion) .primary else .secondary,
+                }, if (model.settings.reduced_motion) "On" else "Off"),
             }),
         }),
     });
@@ -2527,13 +2834,36 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         send_button,
     });
 
+    // Context rail: model, tokens, percentage, freshness
+    const ci = &active_chat.context_info;
+    const context_rail = ui.row(.{
+        .gap = 8,
+        .padding = 0,
+        .cross = .center,
+        .style_tokens = .{ .foreground = .text_muted },
+    }, .{
+        ui.text(.{ .size = .sm }, ci.model),
+        if (ci.model.len > 0) ui.text(.{ .size = .sm }, "•") else ui.text(.{}, ""),
+        ui.text(.{ .size = .sm }, std.fmt.allocPrint(ui.arena, "{d}K in / {d}K out", .{ ci.input_tokens / 1000, ci.output_tokens / 1000 }) catch ""),
+        ui.text(.{ .size = .sm }, "•"),
+        if (ci.context_window > 0) blk: {
+            const pct = @as(u32, @intFromFloat(ci.context_percentage));
+            break :blk ui.text(.{ .size = .sm }, std.fmt.allocPrint(ui.arena, "{d}%", .{pct}) catch "");
+        } else ui.text(.{ .size = .sm }, "—"),
+        ui.text(.{ .size = .sm }, "•"),
+        ui.text(.{ .size = .sm, .style_tokens = .{
+            .foreground = if (std.mem.eql(u8, ci.freshness, "live")) .success else .text_muted,
+        } }, ci.freshness),
+    });
+
     children[child_count] = ui.el(.card, .{
         .padding = 12,
-        .height = textarea_height + 6 + 32 + 24,
+        .height = textarea_height + 6 + 32 + 24 + 20,
         .style_tokens = .{ .background = .surface_subtle, .radius = .md },
     }, .{
         ui.column(.{ .gap = 6 }, .{
             composer_textarea,
+            context_rail,
             composer_bottom_row,
         }),
     });

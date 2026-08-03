@@ -209,6 +209,7 @@ async def test_run_outcome_persisted_in_stream_path(monkeypatch, tmp_path):
         state = AgentState(messages=[Message.assistant(content="streamed response")])
         rubric = None
         cancel_event = None
+        model_id = "test:model"
         async def run_stream(self, messages):
             yield StreamChunk(type="text_delta", content="streamed response")
             yield StreamChunk(type="done", content="streamed response")
@@ -259,6 +260,7 @@ async def test_run_outcome_persisted_in_non_stream_path(monkeypatch, tmp_path):
     class FakeLoop:
         state = AgentState(messages=[Message.assistant(content="response")])
         rubric = None
+        model_id = "test:model"
         async def run(self, messages):
             return [Message.assistant(content="response")]
 

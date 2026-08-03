@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import math
+import re
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Literal
 
@@ -18,6 +20,11 @@ from pydantic import (
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 _CANONICAL_MODEL_PATTERN = r"^[^:/\s]+:\S+$"
+_RFC3339_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$"
+)
+# Percentages are wire values, so only insignificant floating-point rounding is tolerated.
+CONTEXT_PERCENTAGE_ABS_TOLERANCE = 1e-9
 
 
 def normalize_canonical_model(value: str) -> str:
@@ -142,11 +149,30 @@ class ContextSnapshot(ContractModel):
     attempt: int = Field(ge=1)
     llm_call_index: int = Field(ge=1)
     estimated_tokens: int | None = Field(default=None, ge=0)
-    context_window: int | None = Field(default=None, ge=1)
+    context_window: int | None = Field(default=None, ge=0)
     percentage: float | None = Field(default=None, ge=0)
     source: ContextSource
     freshness: ContextFreshness
     estimated: bool
+
+    @model_validator(mode="after")
+    def _validate_percentage(self) -> ContextSnapshot:
+        if self.estimated_tokens is None or not self.context_window:
+            if self.percentage is not None:
+                raise ValueError("percentage must be null when token inputs are unknown")
+            return self
+        if self.percentage is None:
+            raise ValueError("percentage is required when token inputs are known")
+        expected = self.estimated_tokens / self.context_window * 100
+        if not math.isclose(
+            self.percentage,
+            expected,
+            rel_tol=0.0,
+            abs_tol=CONTEXT_PERCENTAGE_ABS_TOLERANCE,
+        ):
+            raise ValueError("percentage must equal estimated_tokens / context_window * 100")
+        return self
+
 
 class CriterionEvaluation(ContractModel):
     name: NonEmptyString
@@ -278,9 +304,33 @@ class RunResult(ContractModel):
     next_context: ContextSnapshot | None = None
     persisted_at: datetime | None = None
 
+    @field_validator(
+        "persisted_at", mode="before", json_schema_input_type=datetime | str | None
+    )
+    @classmethod
+    def _persisted_at_input(cls, value: object) -> object:
+        if value is None or isinstance(value, datetime):
+            return value
+        if not isinstance(value, str) or _RFC3339_PATTERN.fullmatch(value) is None:
+            raise ValueError("persisted_at must be a datetime or RFC3339 string")
+        try:
+            return datetime.fromisoformat(value[:-1] + "+00:00" if value[-1] in "Zz" else value)
+        except ValueError as exc:
+            raise ValueError("persisted_at must be a datetime or RFC3339 string") from exc
+
     @field_validator("persisted_at")
     @classmethod
     def _timezone_aware_persisted_at(cls, value: datetime | None) -> datetime | None:
         if value is not None and value.utcoffset() is None:
             raise ValueError("persisted_at must be timezone-aware")
-        return value
+        return value.astimezone(UTC) if value is not None else None
+
+    @model_validator(mode="after")
+    def _contexts_match_run(self) -> RunResult:
+        for field_name in ("last_call_context", "next_context"):
+            context = getattr(self, field_name)
+            if context is not None and (
+                context.model != self.model or context.attempt != self.attempt
+            ):
+                raise ValueError(f"{field_name} model and attempt must match run")
+        return self

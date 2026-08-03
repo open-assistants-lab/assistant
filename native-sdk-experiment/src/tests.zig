@@ -326,18 +326,18 @@ test "messages event creates assistant bubble" {
     const fk = sendAndStartStream(&model, &fx, "Hi");
     const chat = model.activeChat();
 
-    // First messages event creates assistant bubble
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"Hello\"}}" } }, &fx);
+    // First text_delta event creates assistant bubble
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"text_delta\",\"data\":{\"delta\":\"Hello\"}}" } }, &fx);
     try testing.expectEqual(@as(usize, 2), chat.msg_count); // user + assistant
     try testing.expectEqualStrings("assistant", chat._messages[1].role);
     try testing.expectEqualStrings("Hello", chat._messages[1].content);
 
-    // Second messages event appends
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\" world\"}}" } }, &fx);
+    // Second text_delta event appends
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"text_delta\",\"data\":{\"delta\":\" world\"}}" } }, &fx);
     try testing.expectEqualStrings("Hello world", chat._messages[1].content);
 }
 
-test "reasoning event creates reasoning bubble" {
+test "reasoning_delta event creates reasoning bubble" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -348,17 +348,17 @@ test "reasoning event creates reasoning bubble" {
     const fk = sendAndStartStream(&model, &fx, "test");
     const chat = model.activeChat();
 
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"reasoning\",\"data\":{\"content\":\"I need to think...\"}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"reasoning_delta\",\"data\":{\"delta\":\"I need to think...\"}}" } }, &fx);
     try testing.expectEqual(@as(usize, 2), chat.msg_count); // user + reasoning (empty assistant removed)
     try testing.expectEqualStrings("reasoning", chat._messages[1].role);
     try testing.expectEqualStrings("I need to think...", chat._messages[1].content);
 
-    // Second reasoning delta appends
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"reasoning\",\"data\":{\"content\":\" about this.\"}}" } }, &fx);
+    // Second reasoning_delta appends
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"reasoning_delta\",\"data\":{\"delta\":\" about this.\"}}" } }, &fx);
     try testing.expectEqualStrings("I need to think... about this.", chat._messages[1].content);
 }
 
-test "tool_start creates tool bubble with running status" {
+test "tool_input_start creates tool bubble with running status" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -369,7 +369,7 @@ test "tool_start creates tool bubble with running status" {
     const fk = sendAndStartStream(&model, &fx, "test");
     const chat = model.activeChat();
 
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_start\",\"data\":{\"tool\":\"time_get\",\"call_id\":\"call_1\",\"args\":{}}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_input_start\",\"data\":{\"name\":\"time_get\",\"tool_call_id\":\"call_1\",\"args\":{}}}" } }, &fx);
     try testing.expectEqual(@as(usize, 2), chat.msg_count); // user + tool (empty assistant removed)
     try testing.expectEqualStrings("tool", chat._messages[1].role);
     try testing.expectEqualStrings("time_get", chat._messages[1].tool_name);
@@ -387,12 +387,12 @@ test "tool_result updates tool bubble in place" {
     const fk = sendAndStartStream(&model, &fx, "test");
     const chat = model.activeChat();
 
-    // tool_start
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_start\",\"data\":{\"tool\":\"time_get\",\"call_id\":\"call_1\",\"args\":{}}}" } }, &fx);
+    // tool_input_start
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_input_start\",\"data\":{\"name\":\"time_get\",\"tool_call_id\":\"call_1\",\"args\":{}}}" } }, &fx);
     try testing.expectEqual(@as(usize, 2), chat.msg_count);
 
     // tool_result updates in place — no new bubble
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_result\",\"data\":{\"tool\":\"time_get\",\"call_id\":\"call_1\",\"result\":\"Current time: 12:00 UTC\"}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_result\",\"data\":{\"name\":\"time_get\",\"tool_call_id\":\"call_1\",\"content\":\"Current time: 12:00 UTC\"}}" } }, &fx);
     try testing.expectEqual(@as(usize, 2), chat.msg_count); // still 2, no new bubble
     try testing.expectEqualStrings("done", chat._messages[1].tool_status);
     try testing.expectEqualStrings("Current time: 12:00 UTC", chat._messages[1].tool_result);
@@ -409,9 +409,9 @@ test "assistant response after tool trims leading stream whitespace" {
     const fk = sendAndStartStream(&model, &fx, "find news");
     const chat = model.activeChat();
 
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_start\",\"data\":{\"tool\":\"web_search\",\"call_id\":\"call_1\",\"args\":{}}}" } }, &fx);
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_result\",\"data\":{\"tool\":\"web_search\",\"call_id\":\"call_1\",\"result\":\"results\"}}" } }, &fx);
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"\\n\\nHere are the latest news\"}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_input_start\",\"data\":{\"name\":\"web_search\",\"tool_call_id\":\"call_1\",\"args\":{}}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_result\",\"data\":{\"name\":\"web_search\",\"tool_call_id\":\"call_1\",\"content\":\"results\"}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"text_delta\",\"data\":{\"delta\":\"\\n\\nHere are the latest news\"}}" } }, &fx);
 
     try testing.expectEqual(@as(usize, 3), chat.msg_count);
     try testing.expectEqualStrings("assistant", chat._messages[2].role);
@@ -430,19 +430,19 @@ test "multiple reasoning segments create separate bubbles" {
     const chat = model.activeChat();
 
     // First reasoning
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"reasoning\",\"data\":{\"content\":\"thinking 1\"}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"reasoning_delta\",\"data\":{\"delta\":\"thinking 1\"}}" } }, &fx);
     try testing.expectEqual(@as(usize, 2), chat.msg_count);
 
     // Tool call (closes reasoning bubble)
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_start\",\"data\":{\"tool\":\"time_get\",\"call_id\":\"call_1\",\"args\":{}}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_input_start\",\"data\":{\"name\":\"time_get\",\"tool_call_id\":\"call_1\",\"args\":{}}}" } }, &fx);
     try testing.expectEqual(@as(usize, 3), chat.msg_count);
 
     // tool_result
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_result\",\"data\":{\"tool\":\"time_get\",\"call_id\":\"call_1\",\"result\":\"12:00\"}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_result\",\"data\":{\"name\":\"time_get\",\"tool_call_id\":\"call_1\",\"content\":\"12:00\"}}" } }, &fx);
     try testing.expectEqual(@as(usize, 3), chat.msg_count);
 
     // Second reasoning — new bubble
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"reasoning\",\"data\":{\"content\":\"thinking 2\"}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"reasoning_delta\",\"data\":{\"delta\":\"thinking 2\"}}" } }, &fx);
     try testing.expectEqual(@as(usize, 4), chat.msg_count);
     try testing.expectEqualStrings("reasoning", chat._messages[3].role);
     try testing.expectEqualStrings("thinking 2", chat._messages[3].content);
@@ -460,9 +460,9 @@ test "done finalizes and collapses reasoning bubbles" {
     const chat = model.activeChat();
 
     // reasoning
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"reasoning\",\"data\":{\"content\":\"thinking...\"}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"reasoning_delta\",\"data\":{\"delta\":\"thinking...\"}}" } }, &fx);
     // assistant
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"Answer\"}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"text_delta\",\"data\":{\"delta\":\"Answer\"}}" } }, &fx);
 
     try testing.expect(!chat._messages[1].collapsed); // reasoning not collapsed during stream
 
@@ -489,7 +489,7 @@ test "stream done queues history reconciliation" {
 
     try testing.expectEqual(@as(usize, 3), fx.pendingFetchCount());
     const request = fx.pendingFetchAt(1).?;
-    try testing.expect(std.mem.indexOf(u8, request.url, "/conversation?") != null);
+    try testing.expect(std.mem.indexOf(u8, request.url, "/conversation/turns?") != null);
     try testing.expect(std.mem.indexOf(u8, request.url, chat.sessionId()) != null);
 }
 
@@ -527,11 +527,11 @@ test "history reconciliation replaces stale streamed content" {
     const fk = sendAndStartStream(&model, &fx, "time in shanghai");
     const chat = model.activeChat();
 
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"The current time is 1 AM\"}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"text_delta\",\"data\":{\"delta\":\"The current time is 1 AM\"}}" } }, &fx);
     main.update(&model, .{ .stream_done = .{ .key = fk } }, &fx);
 
     const history_body =
-        \\{"messages":[{"role":"user","content":"time in shanghai","timestamp":"2026-07-19T16:49:00Z","metadata":{}},{"role":"assistant","content":"The current time is 1 AM).","timestamp":"2026-07-19T16:50:00Z","metadata":{}}]}
+        \\{"turns":[{"run_id":"run-1","messages":[{"role":"user","content":"time in shanghai","timestamp":"2026-07-19T16:49:00Z","metadata":{}},{"role":"assistant","content":"The current time is 1 AM).","timestamp":"2026-07-19T16:50:00Z","metadata":{}}],"metadata":{"model":"test:model"}}]}
     ;
     main.update(&model, .{ .chat_history_loaded = .{
         .key = chat.fetch_key,
@@ -555,7 +555,7 @@ test "title generation fires after first exchange" {
     const chat = model.activeChat();
 
     // assistant response
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"It is hot and humid.\"}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"text_delta\",\"data\":{\"delta\":\"It is hot and humid.\"}}" } }, &fx);
     main.update(&model, .{ .stream_done = .{ .key = fk } }, &fx);
 
     // Title generation should have fired (stream + history reconcile + title = 3)
@@ -576,7 +576,7 @@ test "title generation does not fire for short first message" {
     const fk = sendAndStartStream(&model, &fx, "hi");
     const chat = model.activeChat();
 
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"Hello!\"}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"text_delta\",\"data\":{\"delta\":\"Hello!\"}}" } }, &fx);
     main.update(&model, .{ .stream_done = .{ .key = fk } }, &fx);
 
     // Title generation should NOT fire (user message < 5 chars).
@@ -596,7 +596,7 @@ test "title generation does not fire on second exchange" {
 
     // First exchange
     const fk1 = sendAndStartStream(&model, &fx, "What is the weather?");
-    main.update(&model, .{ .stream_line = .{ .key = fk1, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"Hot.\"}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk1, .line = "data: {\"type\":\"text_delta\",\"data\":{\"delta\":\"Hot.\"}}" } }, &fx);
     main.update(&model, .{ .stream_done = .{ .key = fk1 } }, &fx);
     const fetch_count_after_first = fx.pendingFetchCount();
 
@@ -604,7 +604,7 @@ test "title generation does not fire on second exchange" {
     model.activeChat().draft_text = "Thanks";
     model.activeChat().streaming = false;
     const fk2 = sendAndStartStream(&model, &fx, "Thanks");
-    main.update(&model, .{ .stream_line = .{ .key = fk2, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"You're welcome.\"}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk2, .line = "data: {\"type\":\"text_delta\",\"data\":{\"delta\":\"You're welcome.\"}}" } }, &fx);
     main.update(&model, .{ .stream_done = .{ .key = fk2 } }, &fx);
 
     // Title generation should NOT fire on second exchange (2 user messages now).
@@ -623,7 +623,7 @@ test "title_generated updates chat title" {
     const fk = sendAndStartStream(&model, &fx, "What is the weather in Shanghai?");
     const chat = model.activeChat();
 
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"messages\",\"data\":{\"content\":\"Hot and humid.\"}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"text_delta\",\"data\":{\"delta\":\"Hot and humid.\"}}" } }, &fx);
     main.update(&model, .{ .stream_done = .{ .key = fk } }, &fx);
     // Note: title fetch is queued but we don't need to clear it
 
@@ -679,7 +679,7 @@ test "toggle_bubble flips collapsed state" {
     const fk = sendAndStartStream(&model, &fx, "test");
     const chat = model.activeChat();
 
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"reasoning\",\"data\":{\"content\":\"thinking...\"}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"reasoning_delta\",\"data\":{\"delta\":\"thinking...\"}}" } }, &fx);
     main.update(&model, .{ .stream_done = .{ .key = fk } }, &fx);
     try testing.expect(chat._messages[1].collapsed);
 
