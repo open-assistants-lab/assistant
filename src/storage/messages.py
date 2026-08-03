@@ -953,6 +953,78 @@ class MessageStore:
             pass
         return cast(int, count)
 
+    def persist_run(
+        self,
+        run_id: str,
+        session_id: str,
+        user_message_id: str,
+        final_answer: Message,
+        audit_records: list[Message],
+        metadata: dict[str, Any],
+    ) -> str:
+        """Persist a completed run's final answer and audit records.
+
+        The final answer is persisted with run_id in metadata.
+        Audit records (reasoning, tools, rubric feedback) are stored with
+        include_in_model_context: false so they are excluded from future
+        model context loading.
+
+        Idempotent on run_id — retry after uncertain disconnect reads
+        existing run instead of writing duplicates.
+        """
+        session_id = self._require_session_id(session_id)
+        with self._core.db._connect() as cur:
+            cur.execute("BEGIN IMMEDIATE")
+            try:
+                existing = cur.execute(
+                    "SELECT id FROM messages WHERE session_id = ? AND json_extract(metadata, '$.run_id') = ? AND role = ?",
+                    [session_id, run_id, final_answer.role],
+                ).fetchone()
+                if existing is not None:
+                    cur.execute("COMMIT")
+                    return str(existing[0])
+
+                answer_metadata = dict(metadata)
+                answer_metadata["run_id"] = run_id
+                answer_metadata["include_in_model_context"] = True
+                answer_mid = str(uuid.uuid4())[:12]
+                cur.execute(
+                    "INSERT INTO messages (id, role, content, session_id, metadata, ts) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    [
+                        answer_mid,
+                        final_answer.role,
+                        final_answer.content or "(empty)",
+                        session_id,
+                        json.dumps(answer_metadata),
+                        datetime.now(UTC).isoformat(),
+                    ],
+                )
+
+                for record in audit_records:
+                    record_metadata = dict(metadata)
+                    record_metadata["run_id"] = run_id
+                    record_metadata["include_in_model_context"] = False
+                    record_mid = str(uuid.uuid4())[:12]
+                    cur.execute(
+                        "INSERT INTO messages (id, role, content, session_id, metadata, ts) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        [
+                            record_mid,
+                            record.role,
+                            record.content or "(empty)",
+                            session_id,
+                            json.dumps(record_metadata),
+                            datetime.now(UTC).isoformat(),
+                        ],
+                    )
+
+                cur.execute("COMMIT")
+                return answer_mid
+            except Exception:
+                cur.execute("ROLLBACK")
+                raise
+
     def clear(self) -> None:
         self._core.clear()
 
