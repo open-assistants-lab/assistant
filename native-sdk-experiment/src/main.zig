@@ -72,6 +72,7 @@ const SettingsState = struct {
     grader_prompt: []const u8 = "",
     grader_prompt_loading: bool = false,
     saving_general: bool = false,
+    reduced_motion: bool = false,
 };
 
 const ModelOption = struct {
@@ -174,6 +175,7 @@ pub const Chat = struct {
     created_at: []const u8 = "",
     rubric_status: []const u8 = "",
     rubric_attempts: u32 = 0,
+    compression_animation_ticks: u32 = 0,
     context_info: ContextInfo = .{},
 
     pub fn hasUnread(self: *const Chat) bool {
@@ -253,6 +255,7 @@ pub const Msg = union(enum) {
     key_deleted: native_sdk.EffectResponse,
     remove_key: usize,
     toggle_rubric,
+    toggle_reduced_motion,
     rubric_iterations_increment,
     rubric_iterations_decrement,
     save_general_settings,
@@ -362,6 +365,14 @@ pub const Model = struct {
         var i: usize = 0;
         while (i < self.chat_count) : (i += 1) {
             if (self.chats[i].streaming) return true;
+        }
+        return false;
+    }
+
+    pub fn anyCompressionAnimation(self: *const Model) bool {
+        var i: usize = 0;
+        while (i < self.chat_count) : (i += 1) {
+            if (self.chats[i].compression_animation_ticks > 0) return true;
         }
         return false;
     }
@@ -855,6 +866,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 }
                 chat.open_bubble_type = "";
                 chat.status_text = "Revising...";
+            } else if (std.mem.eql(u8, event_type.string, "context_compressed")) {
+                chat.compression_animation_ticks = 8;
             } else if (std.mem.eql(u8, event_type.string, "usage")) {
                 const usage_data = data.object.get("usage") orelse return;
                 if (usage_data.object.get("input_tokens")) |it| {
@@ -978,10 +991,18 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .tick => {
             // Advance pulse phase for streaming dot animation
-            model.pulse_phase += 0.15;
-            if (model.pulse_phase > std.math.tau) model.pulse_phase -= std.math.tau;
-            // Reschedule timer if any chat is still streaming
-            if (model.anyStreaming()) {
+            if (!model.settings.reduced_motion) {
+                model.pulse_phase += 0.15;
+                if (model.pulse_phase > std.math.tau) model.pulse_phase -= std.math.tau;
+            }
+            // Decrement compression animation ticks for all chats
+            for (0..model.chat_count) |i| {
+                if (model.chats[i].compression_animation_ticks > 0) {
+                    model.chats[i].compression_animation_ticks -= 1;
+                }
+            }
+            // Reschedule timer if any chat is still streaming or has animation
+            if (model.anyStreaming() or model.anyCompressionAnimation()) {
                 fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
             }
         },
@@ -1632,6 +1653,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .toggle_rubric => {
             model.settings.rubric_enabled = !model.settings.rubric_enabled;
+        },
+        .toggle_reduced_motion => {
+            model.settings.reduced_motion = !model.settings.reduced_motion;
+            if (model.settings.reduced_motion) {
+                model.pulse_phase = 0;
+            }
         },
         .rubric_iterations_increment => {
             if (model.settings.rubric_max_iterations < 10) {
@@ -2563,6 +2590,14 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                     .dark => "Switch to Light",
                     .light => "Switch to Dark",
                 }),
+            }),
+            ui.row(.{ .gap = 12, .cross = .center }, .{
+                ui.text(.{}, "Reduced motion"),
+                ui.spacer(1),
+                ui.button(.{
+                    .on_press = .toggle_reduced_motion,
+                    .variant = if (model.settings.reduced_motion) .primary else .secondary,
+                }, if (model.settings.reduced_motion) "On" else "Off"),
             }),
         }),
     });
