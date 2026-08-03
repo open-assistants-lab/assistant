@@ -615,26 +615,13 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
         skey = _stream_key(user_id, session_id)
 
         conversation = get_message_store(user_id)
-        conversation.add_message("user", req.message, metadata={}, session_id=session_id)
 
         # Set up cancellation for this session's stream
         _cancel_flags[skey] = False
         cancel_event = asyncio.Event()
         _active_streams[skey] = cancel_event
 
-        # Resolve rubric for verification
-        stream_rubric = None
-        if req.verification and req.verification.rubric:
-            stream_rubric = req.verification.rubric
-        else:
-            stream_settings = get_settings()
-            if stream_settings.verification.enabled and stream_settings.verification.default_rubric:
-                stream_rubric = stream_settings.verification.default_rubric
-
-        recent_messages = conversation.get_messages_with_summary(session_id=session_id, limit=50)
-        sdk_messages = _messages_from_conversation(recent_messages)
-
-        logger = get_logger()
+        run_service = RunService(user_id, _session_registry, conversation)
 
         async def generate() -> AsyncGenerator[str, None]:
             ai_content_parts: list[str] = []
@@ -644,21 +631,14 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
             response = ""
             aborted = False
             persisted = False
-            seen_canonical_text: set[str] = set()
-            seen_canonical_reasoning: set[str] = set()
-            seen_canonical_tool_starts: set[str] = set()
 
             try:
-                async for chunk in run_sdk_agent_stream(
-                    user_id=user_id,
-                    messages=sdk_messages,
+                async for event in run_service.execute_stream(
+                    session_id=session_id,
+                    prompt=req.message,
                     model=req.model,
                     provider_keys=req.provider_keys,
-                    cancel_event=cancel_event,
-                    session_id=session_id,
-                    rubric=stream_rubric,
                 ):
-                    # Check cancel flag between chunks (fast path)
                     if _cancel_flags.get(skey, False) or cancel_event.is_set():
                         _persist_collected_stream_state(
                             conversation,
@@ -672,67 +652,46 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                         aborted = True
                         yield sse("cancelled", {"content": "Cancelled"})
                         break
-                    event = adapt_stream_chunk(chunk)
-                    is_compat_alias = chunk.type != event.kind
 
-                    if event.kind == "text_delta" and event.content:
-                        if is_compat_alias and event.content in seen_canonical_text:
-                            continue
-                        ai_content_parts.append(event.content)
-                        yield sse("messages", {"content": event.content})
-                        if not is_compat_alias:
-                            seen_canonical_text.add(event.content)
+                    event_type = event.type
+                    data = event.model_dump(mode="json")
 
-                    elif event.kind == "tool_input_start" and event.tool:
-                        call_id = event.call_id or ""
-                        if is_compat_alias and call_id in seen_canonical_tool_starts:
-                            continue
-                        if not is_compat_alias:
-                            seen_canonical_tool_starts.add(call_id)
+                    if event_type == "text_delta":
+                        delta = data.get("data", {}).get("delta", "")
+                        if delta:
+                            ai_content_parts.append(delta)
+                            yield sse("text_delta", data)
+
+                    elif event_type == "reasoning_delta":
+                        delta = data.get("data", {}).get("delta", "")
+                        if delta:
+                            reasoning_parts.append(delta)
+                            yield sse("reasoning_delta", data)
+
+                    elif event_type == "tool_input_start":
+                        tool_data = data.get("data", {})
                         tool_metadata_list.append(
-                            {"tool_name": event.tool, "tool_call_id": event.call_id or ""}
+                            {"tool_name": tool_data.get("name", ""), "tool_call_id": tool_data.get("tool_call_id", "")}
                         )
-                        yield sse("tool_start", {
-                            "tool": event.tool,
-                            "call_id": event.call_id or "",
-                            "args": event.args or {},
-                        })
+                        yield sse("tool_input_start", data)
 
-                    elif event.kind == "tool_result" and event.tool:
-                        output = (event.result_preview or "")[:500]
+                    elif event_type == "tool_result":
+                        tool_data = data.get("data", {})
+                        output = tool_data.get("content", "")
                         if output:
-                            tool_results[event.call_id or ""] = output
-                            yield sse("tool_result", {
-                                "tool": event.tool,
-                                "call_id": event.call_id or "",
-                                "result": output,
-                            })
+                            tool_results[tool_data.get("tool_call_id", "")] = str(output)[:500]
+                        yield sse("tool_result", data)
 
-                    elif event.kind == "reasoning_delta" and event.content:
-                        if is_compat_alias and event.content in seen_canonical_reasoning:
-                            continue
-                        reasoning_parts.append(event.content)
-                        yield sse("reasoning", {"content": event.content})
-                        if not is_compat_alias:
-                            seen_canonical_reasoning.add(event.content)
-
-                    elif event.kind == "reasoning_start":
-                        pass  # reasoning_start just signals a new reasoning block; the native app creates a bubble on first reasoning delta
-
-                    elif event.kind == "interrupt":
+                    elif event_type == "interrupt":
                         _pending_interrupts[skey] = {
-                            "tool": event.tool,
-                            "call_id": event.call_id,
-                            "args": event.args or {},
+                            "tool": data.get("data", {}).get("tool", ""),
+                            "call_id": data.get("data", {}).get("call_id", ""),
+                            "args": data.get("data", {}).get("args", {}),
                             "model": req.model,
                             "provider_keys": req.provider_keys,
                             "session_id": session_id,
                         }
-                        yield sse("interrupt", {
-                            "tool": event.tool,
-                            "call_id": event.call_id,
-                            "args": event.args,
-                        })
+                        yield sse("interrupt", data)
                         _persist_collected_stream_state(
                             conversation,
                             session_id=session_id,
@@ -745,7 +704,7 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                         aborted = True
                         break
 
-                    elif event.kind == "error":
+                    elif event_type == "error":
                         _persist_collected_stream_state(
                             conversation,
                             session_id=session_id,
@@ -756,27 +715,23 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                         )
                         persisted = True
                         aborted = True
-                        yield sse("error", {"content": event.content})
+                        yield sse("error", data)
                         break
 
-                    elif event.kind == "rubric_evaluation_start":
-                        yield sse("rubric_evaluation_start", json.loads(event.content) if event.content else {})
+                    elif event_type == "rubric_evaluation_start":
+                        yield sse("rubric_evaluation_start", data)
 
-                    elif event.kind == "rubric_evaluation_end":
-                        yield sse("rubric_evaluation_end", json.loads(event.content) if event.content else {})
+                    elif event_type == "rubric_evaluation_end":
+                        yield sse("rubric_evaluation_end", data)
 
-                    elif event.kind == "usage" and chunk.usage:
-                        yield sse("usage", {
-                            "input_tokens": chunk.usage.input_tokens,
-                            "output_tokens": chunk.usage.output_tokens,
-                            "reasoning_tokens": chunk.usage.reasoning_tokens,
-                        })
+                    elif event_type == "usage":
+                        yield sse("usage", data)
 
-                    elif event.kind == "done" and event.content:
-                        # Only emit done content as messages if no streaming text was received
-                        if not ai_content_parts:
-                            ai_content_parts.append(event.content)
-                            yield sse("messages", {"content": event.content})
+                    elif event_type == "done":
+                        result = data.get("data", {}).get("result", {})
+                        response = result.get("response", "")
+                        if not ai_content_parts and response:
+                            ai_content_parts.append(response)
 
                 if aborted:
                     return
@@ -787,8 +742,6 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                 if not response:
                     response = "Task completed."
 
-                # Store messages immediately — before any yields
-                # (client may disconnect, preventing post-yield storage)
                 for tm in tool_metadata_list:
                     call_id = tm.get("tool_call_id", "")
                     output = tool_results.get(call_id, "")
@@ -821,8 +774,9 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                         break
                 response = _strip_canvas_fences(response)
 
+            except SessionBusyError:
+                yield sse("error", {"code": "session_busy", "message": "Session already has an active run"})
             except GeneratorExit:
-                # Client disconnected — still store what we have
                 if not persisted:
                     _persist_collected_stream_state(
                         conversation,
@@ -839,7 +793,6 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                     )
                 raise
             except asyncio.CancelledError:
-                # asyncio cancellation — still store what we have
                 if not persisted:
                     _persist_collected_stream_state(
                         conversation,
@@ -856,7 +809,6 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                     )
                 raise
             finally:
-                # Clean up cancel tracking
                 _active_streams.pop(skey, None)
                 _cancel_flags.pop(skey, None)
 
