@@ -52,11 +52,15 @@ from src.sdk.runner import (
     get_sdk_loop,
     run_sdk_agent_stream,
 )
+from src.sdk.run_service import RunService
+from src.sdk.session_worker import SessionBusyError, SessionWorkerRegistry
 from src.storage.messages import get_message_store
 
 logger = get_logger()
 
 router = APIRouter(tags=["websocket"])
+
+_session_registry = SessionWorkerRegistry()
 
 
 def _persist_ws_conversation_message(
@@ -110,20 +114,15 @@ async def _run_agent_stream(
     emitted_tool_results: set[str] = set()
     skill_load_names: dict[str, str] = {}
     persisted = False
-    seen_canonical_text: set[str] = set()
-    seen_canonical_reasoning: set[str] = set()
-    seen_canonical_tool_starts: set[str] = set()
+
+    run_service = RunService(user_id, _session_registry, conversation)
 
     try:
-        async for chunk in run_sdk_agent_stream(
-            user_id=user_id,
-            messages=sdk_messages,
-            workspace_id=workspace_id,
+        async for event in run_service.execute_stream(
             session_id=session_id,
+            prompt=sdk_messages[-1].content if sdk_messages else "",
             model=model,
             provider_keys=provider_keys,
-            cancel_event=cancel_event,
-            rubric=rubric,
         ):
             if cancel_event is not None and cancel_event.is_set():
                 if not persisted:
@@ -137,62 +136,56 @@ async def _run_agent_stream(
                     )
                     persisted = True
                 break
-            event = adapt_stream_chunk(chunk)
-            is_compat_alias = chunk.type != event.kind
 
-            if event.kind == "text_delta" and event.content:
-                if is_compat_alias and event.content in seen_canonical_text:
-                    continue
-                ai_content_parts.append(event.content)
-                await websocket.send_json(_with_workspace(chunk.to_ws_message()))
-                if not is_compat_alias:
-                    seen_canonical_text.add(event.content)
+            event_type = event.type
+            data = event.model_dump(mode="json")
+            event_data = data.get("data", {})
 
-            elif event.kind == "text_start" and not is_compat_alias:
-                await websocket.send_json(_with_workspace(chunk.to_ws_message()))
+            if event_type == "text_delta":
+                delta = event_data.get("delta", "")
+                if delta:
+                    ai_content_parts.append(delta)
+                    await websocket.send_json(_with_workspace(data))
 
-            elif event.kind == "text_end" and not is_compat_alias:
-                await websocket.send_json(_with_workspace(chunk.to_ws_message()))
+            elif event_type == "reasoning_delta":
+                delta = event_data.get("delta", "")
+                if delta:
+                    reasoning_parts.append(delta)
+                    await websocket.send_json(_with_workspace(data))
 
-            elif event.kind == "tool_input_start":
-                tool_name = event.tool or "unknown"
-                call_id = event.call_id or str(_uuid.uuid4())[:8]
-                if is_compat_alias and call_id in seen_canonical_tool_starts:
-                    continue
-                if not is_compat_alias:
-                    seen_canonical_tool_starts.add(call_id)
+            elif event_type == "tool_input_start":
+                tool_name = event_data.get("name", "unknown")
+                call_id = event_data.get("tool_call_id", str(_uuid.uuid4())[:8])
                 tool_metadata_list.append(
                     {"tool_name": tool_name, "tool_call_id": call_id}
                 )
                 if tool_name == "skills_load":
-                    skill_load_names[call_id] = (event.args or {}).get("name", "unknown")
-                await websocket.send_json(_with_workspace(chunk.to_ws_message()))
+                    skill_load_names[call_id] = (event_data.get("args", {}) or {}).get("name", "unknown")
+                await websocket.send_json(_with_workspace(data))
 
-            elif event.kind == "tool_input_delta":
-                await websocket.send_json(_with_workspace(chunk.to_ws_message()))
+            elif event_type == "tool_input_delta":
+                await websocket.send_json(_with_workspace(data))
 
-            elif event.kind == "tool_input_end":
-                await websocket.send_json(_with_workspace(chunk.to_ws_message()))
+            elif event_type == "tool_input_end":
+                await websocket.send_json(_with_workspace(data))
 
-            elif event.kind == "reasoning_start" and not is_compat_alias:
-                await websocket.send_json(_with_workspace(chunk.to_ws_message()))
+            elif event_type == "reasoning_start":
+                await websocket.send_json(_with_workspace(data))
 
-            elif event.kind == "reasoning_delta":
-                if is_compat_alias and event.content in seen_canonical_reasoning:
-                    continue
-                reasoning_parts.append(event.content)
-                await websocket.send_json(_with_workspace(chunk.to_ws_message()))
-                if not is_compat_alias:
-                    seen_canonical_reasoning.add(event.content)
+            elif event_type == "reasoning_end":
+                await websocket.send_json(_with_workspace(data))
 
-            elif event.kind == "reasoning_end" and not is_compat_alias:
-                await websocket.send_json(_with_workspace(chunk.to_ws_message()))
+            elif event_type == "text_start":
+                await websocket.send_json(_with_workspace(data))
 
-            elif event.kind == "tool_result":
-                tool_name = event.tool or "unknown"
-                call_id = event.call_id or "unknown"
-                result_preview = event.result_preview or ""
-                tool_results[call_id] = result_preview[:500]
+            elif event_type == "text_end":
+                await websocket.send_json(_with_workspace(data))
+
+            elif event_type == "tool_result":
+                tool_name = event_data.get("name", "unknown")
+                call_id = event_data.get("tool_call_id", "unknown")
+                content = event_data.get("content", "")
+                tool_results[call_id] = str(content)[:500]
                 if call_id in emitted_tool_results:
                     continue
                 emitted_tool_results.add(call_id)
@@ -202,7 +195,7 @@ async def _run_agent_stream(
                     ToolResultMessage(
                         tool=tool_name,
                         call_id=call_id,
-                        result_preview=result_preview[:500],
+                        result_preview=str(content)[:500],
                     ).model_dump() | {"workspace_id": workspace_id}
                 )
 
@@ -213,17 +206,17 @@ async def _run_agent_stream(
                         | {"workspace_id": workspace_id}
                     )
 
-            elif event.kind == "interrupt":
+            elif event_type == "interrupt":
                 if pending_ref is not None:
                     pending_ref[0] = {
-                        "tool": event.tool or "unknown",
-                        "call_id": event.call_id or "unknown",
-                        "args": event.args or {},
+                        "tool": event_data.get("tool", "unknown"),
+                        "call_id": event_data.get("call_id", "unknown"),
+                        "args": event_data.get("args", {}),
                         "model": model,
                         "provider_keys": provider_keys,
                         "session_id": session_id,
                     }
-                await websocket.send_json(_with_workspace(chunk.to_ws_message()))
+                await websocket.send_json(_with_workspace(data))
                 _persist_collected_stream_state(
                     conversation,
                     session_id=session_id,
@@ -235,8 +228,11 @@ async def _run_agent_stream(
                 persisted = True
                 break
 
-            elif event.kind == "done":
-                response = "".join(ai_content_parts) if ai_content_parts else event.content
+            elif event_type == "done":
+                result = event_data.get("result", {})
+                response = result.get("response", "")
+                if not ai_content_parts and response:
+                    ai_content_parts.append(response)
 
                 canvas_blocks = _extract_surfaces(response)
                 for surface in canvas_blocks:
@@ -290,7 +286,7 @@ async def _run_agent_stream(
                     ).model_dump() | {"workspace_id": workspace_id}
                 )
 
-            elif event.kind == "error":
+            elif event_type == "error":
                 _persist_collected_stream_state(
                     conversation,
                     session_id=session_id,
@@ -301,23 +297,27 @@ async def _run_agent_stream(
                 )
                 persisted = True
                 await websocket.send_json(
-                    ErrorMessage(message=str(event.content), code="AGENT_ERROR").model_dump()
+                    ErrorMessage(message=str(event_data.get("message", "")), code="AGENT_ERROR").model_dump()
                     | {"workspace_id": workspace_id}
                 )
                 break
 
-            elif event.kind == "rubric_evaluation_start":
+            elif event_type == "rubric_evaluation_start":
                 await websocket.send_json(
-                    {"type": "rubric_evaluation_start", "data": json.loads(event.content) if event.content else {}}
+                    {"type": "rubric_evaluation_start", "data": event_data}
                     | {"workspace_id": workspace_id}
                 )
 
-            elif event.kind == "rubric_evaluation_end":
+            elif event_type == "rubric_evaluation_end":
                 await websocket.send_json(
-                    {"type": "rubric_evaluation_end", "data": json.loads(event.content) if event.content else {}}
+                    {"type": "rubric_evaluation_end", "data": event_data}
                     | {"workspace_id": workspace_id}
                 )
 
+    except SessionBusyError:
+        await websocket.send_json(
+            ErrorMessage(message="Session already has an active run", code="SESSION_BUSY").model_dump()
+        )
     except asyncio.CancelledError:
         if not persisted:
             _persist_collected_stream_state(
