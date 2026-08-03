@@ -985,3 +985,64 @@ def test_get_turns_limit_zero() -> None:
     turns, cursor = store.get_turns("a", limit=0)
     assert turns == []
     assert cursor is None
+
+
+def test_get_turns_malformed_cursor_falls_back_to_start() -> None:
+    store = _store()
+    store.add_message("user", "hello", session_id="a")
+    store.add_message("assistant", "hi", session_id="a")
+    turns, cursor = store.get_turns("a", limit=10, cursor="!!!invalid-base64!!!")
+    assert len(turns) == 1
+    assert cursor is None
+
+
+def test_get_turns_empty_cursor_falls_back_to_start() -> None:
+    store = _store()
+    store.add_message("user", "hello", session_id="a")
+    store.add_message("assistant", "hi", session_id="a")
+    turns, cursor = store.get_turns("a", limit=10, cursor="")
+    assert len(turns) == 1
+    assert cursor is None
+
+
+def test_get_turns_mixed_run_id_and_legacy() -> None:
+    store = _store()
+    # Legacy turn
+    store.add_message("user", "q1", session_id="a")
+    store.add_message("assistant", "a1", session_id="a")
+    # Run-id turn
+    store.add_message("user", "q2", metadata={"run_id": "run-1"}, session_id="a")
+    store.persist_run(
+        run_id="run-1", session_id="a", user_message_id="m1",
+        final_answer=Message(id="", ts=datetime.now(UTC), role="assistant", content="a2", session_id="a"),
+        audit_records=[], metadata={},
+    )
+    turns, cursor = store.get_turns("a", limit=10)
+    assert len(turns) == 2
+    assert turns[0]["run_id"] is None
+    assert turns[1]["run_id"] == "run-1"
+
+
+def test_get_turns_turn_with_only_user_message() -> None:
+    store = _store()
+    store.add_message("user", "hello", session_id="a")
+    turns, cursor = store.get_turns("a", limit=10)
+    assert len(turns) == 1
+    assert turns[0]["run_id"] is None
+    assert len(turns[0]["messages"]) == 1
+
+
+def test_get_turns_turn_with_tool_messages() -> None:
+    store = _store()
+    store.add_message("user", "search", metadata={"run_id": "run-1"}, session_id="a")
+    store.add_message("tool", '{"result": "ok"}', metadata={"run_id": "run-1", "tool_name": "web_search"}, session_id="a")
+    store.persist_run(
+        run_id="run-1", session_id="a", user_message_id="m1",
+        final_answer=Message(id="", ts=datetime.now(UTC), role="assistant", content="found it", session_id="a"),
+        audit_records=[], metadata={},
+    )
+    turns, cursor = store.get_turns("a", limit=10)
+    assert len(turns) == 1
+    assert turns[0]["run_id"] == "run-1"
+    assert len(turns[0]["messages"]) == 3
+    assert turns[0]["messages"][1].role == "tool"

@@ -1053,74 +1053,83 @@ class MessageStore:
             except Exception:
                 start_rowid = 0
 
-        with self._core.db._connect() as cur:
-            rows_raw = cur.execute(
-                "SELECT rowid, id, ts, role, content, metadata, session_id "
-                "FROM messages "
-                "WHERE session_id = ? AND rowid > ? "
-                "ORDER BY rowid ASC LIMIT ?",
-                [session_id, start_rowid, limit * 5],
-            ).fetchall()
-
-        if not rows_raw:
-            return [], None
-
-        rows = [
-            _StoredMessage(
-                sequence=int(r[0]),
-                id=str(r[1]),
-                ts=self._parse_stored_timestamp(r[2]),
-                role=str(r[3]),
-                content=str(r[4] or ""),
-                metadata=self._parse_stored_metadata(r[5]),
-                session_id=str(r[6] or ""),
-            )
-            for r in rows_raw
-        ]
-
         turns: list[dict[str, Any]] = []
-        current_run_id: str | None = None
-        current_turn: list[Message] = []
-        last_turn_rowid = 0
+        last_msg_id: str | None = None
+        fetch_size = limit * 5
 
-        for row in rows:
-            msg = self._stored_to_message(row)
-            run_id = None
-            if row.metadata:
-                run_id = row.metadata.get("run_id")
+        while len(turns) < limit:
+            with self._core.db._connect() as cur:
+                rows_raw = cur.execute(
+                    "SELECT rowid, id, ts, role, content, metadata, session_id "
+                    "FROM messages "
+                    "WHERE session_id = ? AND rowid > ? "
+                    "ORDER BY rowid ASC LIMIT ?",
+                    [session_id, start_rowid, fetch_size],
+                ).fetchall()
 
-            should_split = False
-            if run_id != current_run_id and current_turn:
-                should_split = True
-            elif run_id is None and current_run_id is None and current_turn:
-                last_role = current_turn[-1].role
-                if msg.role == "user" and last_role in ("assistant", "tool", "reasoning"):
+            if not rows_raw:
+                break
+
+            rows = [
+                _StoredMessage(
+                    sequence=int(r[0]),
+                    id=str(r[1]),
+                    ts=self._parse_stored_timestamp(r[2]),
+                    role=str(r[3]),
+                    content=str(r[4] or ""),
+                    metadata=self._parse_stored_metadata(r[5]),
+                    session_id=str(r[6] or ""),
+                )
+                for r in rows_raw
+            ]
+
+            current_run_id: str | None = None
+            current_turn: list[Message] = []
+
+            for row in rows:
+                msg = self._stored_to_message(row)
+                run_id = None
+                if row.metadata:
+                    run_id = row.metadata.get("run_id")
+
+                should_split = False
+                if run_id != current_run_id and current_turn:
                     should_split = True
+                elif run_id is None and current_run_id is None and current_turn:
+                    last_role = current_turn[-1].role
+                    if msg.role == "user" and last_role in ("assistant", "tool", "reasoning"):
+                        should_split = True
 
-            if should_split:
+                if should_split:
+                    turns.append(self._build_turn(current_run_id, current_turn))
+                    current_turn = []
+                    if len(turns) >= limit:
+                        last_msg_id = row.id
+                        break
+
+                current_run_id = run_id
+                current_turn.append(msg)
+                last_msg_id = row.id
+
+            if current_turn and len(turns) < limit:
                 turns.append(self._build_turn(current_run_id, current_turn))
-                current_turn = []
 
-            current_run_id = run_id
-            current_turn.append(msg)
-            last_turn_rowid = row.sequence
+            if len(rows_raw) < fetch_size:
+                break
 
-        if current_turn:
-            turns.append(self._build_turn(current_run_id, current_turn))
+            start_rowid = rows_raw[-1][0]
 
         next_cursor = None
-        if len(turns) > limit:
-            last_turn_rowid = turns[limit - 1]["messages"][-1].id
+        if last_msg_id is not None and len(turns) >= limit:
             with self._core.db._connect() as cur:
                 row = cur.execute(
                     "SELECT rowid FROM messages WHERE session_id = ? AND id = ?",
-                    [session_id, last_turn_rowid],
+                    [session_id, last_msg_id],
                 ).fetchone()
             if row is not None:
                 next_cursor = base64.b64encode(str(row[0]).encode("utf-8")).decode("utf-8")
-            turns = turns[:limit]
 
-        return turns, next_cursor
+        return turns[:limit], next_cursor
 
     @staticmethod
     def _build_turn(run_id: str | None, messages: list[Message]) -> dict[str, Any]:
