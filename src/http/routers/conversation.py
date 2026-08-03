@@ -46,7 +46,6 @@ _pending_interrupts: dict[str, dict[str, Any]] = {}
 _cancel_flags: dict[str, bool] = {}
 _active_streams: dict[str, asyncio.Event] = {}
 _session_registry = SessionWorkerRegistry()
-_session_registry = SessionWorkerRegistry()
 
 router = APIRouter(tags=["conversation"])
 logger = get_logger()
