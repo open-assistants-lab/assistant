@@ -26,6 +26,9 @@ from src.sdk.run_events import (
     ErrorEvent,
     InterruptData,
     InterruptEvent,
+    ReasoningDeltaEvent,
+    ReasoningEndEvent,
+    ReasoningStartEvent,
     RevisionStartData,
     RevisionStartEvent,
     RubricEndData,
@@ -33,6 +36,7 @@ from src.sdk.run_events import (
     RubricStartData,
     RubricStartEvent,
     RunEvent,
+    SingleCallUsage,
     TextDeltaEvent,
     TextEndEvent,
     TextStartEvent,
@@ -70,7 +74,6 @@ logger = get_logger()
 
 def _stream_chunk_to_event(
     chunk: StreamChunk,
-    envelope: Any,
     emit: Any,
     attempt: int,
 ) -> RunEvent:
@@ -83,11 +86,11 @@ def _stream_chunk_to_event(
     elif ct == "text_end":
         return emit(TextEndEvent, BlockData(block_id="").model_dump(), attempt)
     elif ct == "reasoning_start":
-        return emit(TextStartEvent, BlockData(block_id=chunk.call_id or str(uuid.uuid4())).model_dump(), attempt)
+        return emit(ReasoningStartEvent, BlockData(block_id=chunk.call_id or str(uuid.uuid4())).model_dump(), attempt)
     elif ct == "reasoning_delta":
-        return emit(TextDeltaEvent, BlockDeltaData(block_id="", delta=chunk.content).model_dump(), attempt)
+        return emit(ReasoningDeltaEvent, BlockDeltaData(block_id="", delta=chunk.content).model_dump(), attempt)
     elif ct == "reasoning_end":
-        return emit(TextEndEvent, BlockData(block_id="").model_dump(), attempt)
+        return emit(ReasoningEndEvent, BlockData(block_id="").model_dump(), attempt)
     elif ct == "tool_input_start":
         return emit(ToolInputStartEvent, ToolStartData(
             block_id=chunk.call_id or str(uuid.uuid4()),
@@ -298,7 +301,7 @@ class RunService:
                         elif chunk.type == "error":
                             run_status = RunStatus.FAILED
                             break
-                        yield _stream_chunk_to_event(chunk, _envelope, _emit, attempt)
+                        yield _stream_chunk_to_event(chunk, _emit, attempt)
                 except Exception as exc:
                     logger.error("run_service.agent_error", {"error": str(exc)}, user_id=self._user_id)
                     run_status = RunStatus.FAILED

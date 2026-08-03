@@ -292,6 +292,7 @@ def test_run_event_schema_has_exact_canonical_discriminator_values() -> None:
         "context_compressed",
         "done",
         "error",
+        "interrupt",
     }
 
 
