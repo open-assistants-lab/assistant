@@ -20,6 +20,8 @@ const delete_key: u64 = 7;
 const title_key: u64 = 8;
 const models_key: u64 = 9;
 const settings_key: u64 = 10;
+const settings_general_key: u64 = 11;
+const grader_prompt_key: u64 = 12;
 
 const max_providers = 128;
 const max_provider_models = 512;
@@ -65,6 +67,11 @@ const SettingsState = struct {
     key_visible: bool = false,
     key_error: []const u8 = "",
     key_testing: bool = false,
+    rubric_enabled: bool = false,
+    rubric_max_iterations: u32 = 3,
+    grader_prompt: []const u8 = "",
+    grader_prompt_loading: bool = false,
+    saving_general: bool = false,
 };
 
 const ModelOption = struct {
@@ -229,6 +236,10 @@ pub const Msg = union(enum) {
     settings_providers_models,
     settings_general,
     settings_loaded: native_sdk.EffectResponse,
+    settings_general_loaded: native_sdk.EffectResponse,
+    grader_prompt_loaded: native_sdk.EffectResponse,
+    settings_general_saved: native_sdk.EffectResponse,
+    grader_prompt_saved: native_sdk.EffectResponse,
     settings_search: canvas.TextInputEvent,
     select_model: usize,
     model_selected: native_sdk.EffectResponse,
@@ -241,6 +252,10 @@ pub const Msg = union(enum) {
     key_saved: native_sdk.EffectResponse,
     key_deleted: native_sdk.EffectResponse,
     remove_key: usize,
+    toggle_rubric,
+    rubric_iterations_increment,
+    rubric_iterations_decrement,
+    save_general_settings,
 
     pub const view_unbound = .{
         "stream_line",
@@ -261,6 +276,10 @@ pub const Msg = union(enum) {
         "title_generated",
         "models_loaded",
         "cycle_model",
+        "settings_general_loaded",
+        "grader_prompt_loaded",
+        "settings_general_saved",
+        "grader_prompt_saved",
     };
 };
 
@@ -1172,6 +1191,17 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .settings_general => {
             model.settings.section = .general;
+            if (!model.settings.grader_prompt_loading) {
+                model.settings.grader_prompt_loading = true;
+                fx.fetch(.{
+                    .key = grader_prompt_key,
+                    .url = "http://127.0.0.1:8080/settings/grader-prompt?user_id=native_sdk_chat",
+                    .method = .GET,
+                    .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                    .response = .buffered,
+                    .on_response = Effects.responseMsg(.grader_prompt_loaded),
+                });
+            }
         },
         .settings_loaded => |response| {
             model.settings.loading = false;
@@ -1264,6 +1294,37 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 }
                 sortSettingsProviders(&model.settings);
             }
+        },
+        .settings_general_loaded => |response| {
+            if (response.outcome != .ok) return;
+            const body = response.body;
+            if (body.len == 0) return;
+            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
+            defer parsed.deinit();
+            const root = parsed.value;
+            if (root.object.get("verification")) |v| {
+                if (v.object.get("enabled")) |e| model.settings.rubric_enabled = e.bool;
+                if (v.object.get("max_iterations")) |mi| model.settings.rubric_max_iterations = @intCast(mi.integer);
+            }
+        },
+        .grader_prompt_loaded => |response| {
+            model.settings.grader_prompt_loading = false;
+            if (response.outcome != .ok) return;
+            const body = response.body;
+            if (body.len == 0) return;
+            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
+            defer parsed.deinit();
+            const root = parsed.value;
+            if (root.object.get("content")) |c| {
+                model.settings.grader_prompt = model.allocator.dupe(u8, c.string) catch "";
+            }
+        },
+        .settings_general_saved => |response| {
+            model.settings.saving_general = false;
+            _ = response;
+        },
+        .grader_prompt_saved => |response| {
+            _ = response;
         },
         .settings_search => |event| {
             if (model.settings.search_runtime_text_synced and event != .set_selection) {
@@ -1558,6 +1619,52 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     break;
                 }
             }
+        },
+        .toggle_rubric => {
+            model.settings.rubric_enabled = !model.settings.rubric_enabled;
+        },
+        .rubric_iterations_increment => {
+            if (model.settings.rubric_max_iterations < 10) {
+                model.settings.rubric_max_iterations += 1;
+            }
+        },
+        .rubric_iterations_decrement => {
+            if (model.settings.rubric_max_iterations > 1) {
+                model.settings.rubric_max_iterations -= 1;
+            }
+        },
+        .save_general_settings => {
+            if (model.settings.saving_general) return;
+            model.settings.saving_general = true;
+            const escaped_prompt = escapeJsonString(model.allocator, model.settings.grader_prompt) catch return;
+            const settings_body = std.fmt.allocPrint(
+                model.allocator,
+                "{{\"verification\":{{\"enabled\":{s},\"max_iterations\":{d}}}}}",
+                .{ if (model.settings.rubric_enabled) "true" else "false", model.settings.rubric_max_iterations },
+            ) catch return;
+            const prompt_body = std.fmt.allocPrint(
+                model.allocator,
+                "{{\"content\":\"{s}\"}}",
+                .{escaped_prompt},
+            ) catch return;
+            fx.fetch(.{
+                .key = settings_general_key,
+                .url = "http://127.0.0.1:8080/settings?user_id=native_sdk_chat",
+                .method = .PUT,
+                .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+                .body = settings_body,
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.settings_general_saved),
+            });
+            fx.fetch(.{
+                .key = grader_prompt_key,
+                .url = "http://127.0.0.1:8080/settings/grader-prompt?user_id=native_sdk_chat",
+                .method = .PUT,
+                .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+                .body = prompt_body,
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.grader_prompt_saved),
+            });
         },
     }
 }
@@ -2383,6 +2490,43 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     }
 
     if (model.settings.section == .general) {
+    // Rubric settings
+    content_children[content_count] = ui.el(.card, .{
+        .padding = 16,
+        .style_tokens = .{ .background = .surface, .radius = .md },
+    }, .{
+        ui.column(.{ .gap = 8 }, .{
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Rubric"),
+            ui.row(.{ .gap = 12, .cross = .center }, .{
+                ui.text(.{}, "Enable rubric check"),
+                ui.spacer(1),
+                ui.button(.{
+                    .on_press = .toggle_rubric,
+                    .variant = if (model.settings.rubric_enabled) .primary else .secondary,
+                }, if (model.settings.rubric_enabled) "On" else "Off"),
+            }),
+            ui.row(.{ .gap = 12, .cross = .center }, .{
+                ui.text(.{}, "Max iterations"),
+                ui.spacer(1),
+                ui.button(.{ .on_press = .rubric_iterations_decrement, .variant = .ghost }, "−"),
+                ui.text(.{}, std.fmt.allocPrint(ui.arena, "{d}", .{model.settings.rubric_max_iterations}) catch "3"),
+                ui.button(.{ .on_press = .rubric_iterations_increment, .variant = .ghost }, "+"),
+            }),
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Grader prompt"),
+            ui.el(.textarea, .{
+                .text = model.settings.grader_prompt,
+                .placeholder = "Enter rubric criteria...",
+                .height = 100,
+                .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
+            }, .{}),
+            if (model.settings.saving_general)
+                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Saving...")
+            else
+                ui.button(.{ .on_press = .save_general_settings, .variant = .primary }, "Save"),
+        }),
+    });
+    content_count += 1;
+
     // Appearance
     content_children[content_count] = ui.el(.card, .{
         .padding = 16,
