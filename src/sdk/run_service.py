@@ -8,7 +8,6 @@ Routers do not write conversation records directly.
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -18,6 +17,37 @@ from src.app_logging import get_logger
 from src.sdk.loop import AgentLoop
 from src.sdk.messages import Message, StreamChunk
 from src.sdk.middleware_rubric import RubricMiddleware
+from src.sdk.run_events import (
+    BlockData,
+    BlockDeltaData,
+    DoneData,
+    DoneEvent,
+    ErrorData,
+    ErrorEvent,
+    InterruptData,
+    InterruptEvent,
+    RevisionStartData,
+    RevisionStartEvent,
+    RubricEndData,
+    RubricEndEvent,
+    RubricStartData,
+    RubricStartEvent,
+    RunEvent,
+    TextDeltaEvent,
+    TextEndEvent,
+    TextStartEvent,
+    ToolDeltaData,
+    ToolEndData,
+    ToolInputDeltaEvent,
+    ToolInputEndEvent,
+    ToolInputStartEvent,
+    ToolResultData,
+    ToolResultEvent,
+    ToolStartData,
+    UsageEvent,
+    UsageEventData,
+    parse_run_event,
+)
 from src.sdk.run_models import (
     ContextSnapshot,
     CriterionEvaluation,
@@ -36,6 +66,70 @@ from src.sdk.session_worker import SessionBusyError, SessionLock, SessionWorkerR
 from src.storage.messages import MessageStore
 
 logger = get_logger()
+
+
+def _stream_chunk_to_event(
+    chunk: StreamChunk,
+    envelope: Any,
+    emit: Any,
+    attempt: int,
+) -> RunEvent:
+    """Convert a StreamChunk to the corresponding RunEvent."""
+    ct = chunk.canonical_type
+    if ct == "text_start":
+        return emit(TextStartEvent, BlockData(block_id=chunk.call_id or str(uuid.uuid4())).model_dump(), attempt)
+    elif ct == "text_delta":
+        return emit(TextDeltaEvent, BlockDeltaData(block_id="", delta=chunk.content).model_dump(), attempt)
+    elif ct == "text_end":
+        return emit(TextEndEvent, BlockData(block_id="").model_dump(), attempt)
+    elif ct == "reasoning_start":
+        return emit(TextStartEvent, BlockData(block_id=chunk.call_id or str(uuid.uuid4())).model_dump(), attempt)
+    elif ct == "reasoning_delta":
+        return emit(TextDeltaEvent, BlockDeltaData(block_id="", delta=chunk.content).model_dump(), attempt)
+    elif ct == "reasoning_end":
+        return emit(TextEndEvent, BlockData(block_id="").model_dump(), attempt)
+    elif ct == "tool_input_start":
+        return emit(ToolInputStartEvent, ToolStartData(
+            block_id=chunk.call_id or str(uuid.uuid4()),
+            tool_call_id=chunk.call_id or "",
+            name=chunk.tool or "unknown",
+        ).model_dump(), attempt)
+    elif ct == "tool_input_delta":
+        return emit(ToolInputDeltaEvent, ToolDeltaData(
+            block_id="", tool_call_id=chunk.call_id or "", delta=chunk.content,
+        ).model_dump(), attempt)
+    elif ct == "tool_input_end":
+        return emit(ToolInputEndEvent, ToolEndData(
+            block_id="", tool_call_id=chunk.call_id or "", arguments={},
+        ).model_dump(), attempt)
+    elif ct == "tool_result":
+        return emit(ToolResultEvent, ToolResultData(
+            block_id=chunk.call_id or str(uuid.uuid4()),
+            tool_call_id=chunk.call_id or "",
+            name=chunk.tool or "unknown",
+            status="completed",
+            content=chunk.result_preview or "",
+        ).model_dump(), attempt)
+    elif ct == "interrupt":
+        return emit(InterruptEvent, InterruptData(
+            tool=chunk.tool or "unknown",
+            call_id=chunk.call_id or "",
+            args=chunk.args or {},
+        ).model_dump(), attempt)
+    elif ct == "usage" and chunk.usage:
+        return emit(UsageEvent, UsageEventData(
+            category="agent",
+            model="",
+            llm_call_index=1,
+            usage={
+                "input_tokens": chunk.usage.input_tokens or 0,
+                "output_tokens": chunk.usage.output_tokens or 0,
+                "reasoning_tokens": chunk.usage.reasoning_tokens or 0,
+                "cache_read_tokens": chunk.usage.cache_read_tokens or 0,
+                "cache_creation_tokens": chunk.usage.cache_creation_tokens or 0,
+            },
+        ).model_dump(), attempt)
+    return emit(TextDeltaEvent, BlockDeltaData(block_id="", delta=chunk.content).model_dump(), attempt)
 
 
 class RunService:
@@ -73,12 +167,12 @@ class RunService:
         prompt: str,
         model: str | None = None,
         provider_keys: dict[str, str] | None = None,
-    ) -> AsyncIterator[StreamChunk]:
-        """Streaming execution. Yields StreamChunk events in real-time."""
+    ) -> AsyncIterator[RunEvent]:
+        """Streaming execution. Yields RunEvent envelopes."""
         lock = await self._registry.acquire(session_id)
         try:
-            async for chunk in self._run_stream(session_id, prompt, model, provider_keys, lock):
-                yield chunk
+            async for event in self._run_stream(session_id, prompt, model, provider_keys, lock):
+                yield event
         finally:
             await self._registry.release(session_id)
 
@@ -135,8 +229,27 @@ class RunService:
         model: str | None,
         provider_keys: dict[str, str] | None,
         lock: SessionLock,
-    ) -> AsyncIterator[StreamChunk]:
+    ) -> AsyncIterator[RunEvent]:
         run_id = str(uuid.uuid4())
+        sequence = 0
+
+        def _envelope(event_cls: type[RunEvent], data: Any, attempt: int = 1) -> dict[str, Any]:
+            nonlocal sequence
+            sequence += 1
+            return {
+                "schema_version": 1,
+                "event_id": str(uuid.uuid4()),
+                "sequence": sequence,
+                "timestamp": datetime.now(UTC),
+                "session_id": session_id,
+                "run_id": run_id,
+                "attempt": attempt,
+                "type": event_cls.model_fields["type"].default,
+                "data": data,
+            }
+
+        def _emit(event_cls: type[RunEvent], data: Any, attempt: int = 1) -> RunEvent:
+            return parse_run_event(_envelope(event_cls, data, attempt))
 
         user_msg_id = self._message_store.add_message(
             "user", prompt, metadata={"run_id": run_id}, session_id=session_id
@@ -185,7 +298,7 @@ class RunService:
                         elif chunk.type == "error":
                             run_status = RunStatus.FAILED
                             break
-                        yield chunk
+                        yield _stream_chunk_to_event(chunk, _envelope, _emit, attempt)
                 except Exception as exc:
                     logger.error("run_service.agent_error", {"error": str(exc)}, user_id=self._user_id)
                     run_status = RunStatus.FAILED
@@ -202,10 +315,10 @@ class RunService:
                     rubric_status = TerminalRubricStatus.CANCELLED
                     break
 
-                yield StreamChunk(type="rubric_evaluation_start", content=json.dumps({
-                    "grading_run_id": str(uuid.uuid4()),
-                    "max_attempts": max_attempts,
-                }))
+                yield _emit(RubricStartEvent, RubricStartData(
+                    grading_run_id=str(uuid.uuid4()),
+                    max_attempts=max_attempts,
+                ).model_dump(), attempt)
 
                 grading_messages = list(messages) + [Message.assistant(content=final_response)]
                 evaluation_result = await rubric_mw.grade(grading_messages, attempt - 1)
@@ -230,14 +343,10 @@ class RunService:
                 )
                 evaluations.append(evaluation)
 
-                yield StreamChunk(type="rubric_evaluation_end", content=json.dumps({
-                    "grading_run_id": evaluation.grading_run_id,
-                    "attempt": attempt,
-                    "result": evaluation.result.value,
-                    "explanation": evaluation.explanation,
-                    "criteria": [c.model_dump() for c in evaluation.criteria],
-                    "max_attempts": max_attempts,
-                }))
+                yield _emit(RubricEndEvent, RubricEndData(
+                    evaluation=evaluation,
+                    max_attempts=max_attempts,
+                ).model_dump(), attempt)
 
                 if evaluation.result in (
                     RubricEvaluationResult.SATISFIED,
@@ -255,11 +364,11 @@ class RunService:
                     rubric_status = TerminalRubricStatus.MAX_ATTEMPTS_REACHED
                     break
 
-                yield StreamChunk(type="response_revision_start", content=json.dumps({
-                    "previous_attempt": attempt,
-                    "new_attempt": attempt + 1,
-                    "max_attempts": max_attempts,
-                }))
+                yield _emit(RevisionStartEvent, RevisionStartData(
+                    previous_attempt=attempt,
+                    new_attempt=attempt + 1,
+                    max_attempts=max_attempts,
+                ).model_dump(), attempt + 1)
 
                 feedback = _revision_prompt(evaluation_result)
                 messages = list(messages) + [Message.user(content=feedback, source="rubric_middleware")]
@@ -293,26 +402,26 @@ class RunService:
                 ),
                 persisted_at=datetime.now(UTC),
             )
-            yield StreamChunk(type="done", content=json.dumps({"result": run_result.model_dump(mode="json")}))
+            yield _emit(DoneEvent, DoneData(result=run_result).model_dump())
         except SessionBusyError:
-            yield StreamChunk(type="error", content=json.dumps({
-                "code": "session_busy",
-                "message": "Session already has an active run",
-                "retryable": True,
-            }))
+            yield _emit(ErrorEvent, ErrorData(
+                code="session_busy",
+                message="Session already has an active run",
+                retryable=True,
+            ).model_dump())
         except asyncio.CancelledError:
-            yield StreamChunk(type="error", content=json.dumps({
-                "code": "cancelled",
-                "message": "Run was cancelled",
-                "retryable": False,
-            }))
+            yield _emit(ErrorEvent, ErrorData(
+                code="cancelled",
+                message="Run was cancelled",
+                retryable=False,
+            ).model_dump())
         except Exception as exc:
             logger.error("run_service.error", {"error": str(exc)}, user_id=self._user_id)
-            yield StreamChunk(type="error", content=json.dumps({
-                "code": "internal_error",
-                "message": str(exc),
-                "retryable": False,
-            }))
+            yield _emit(ErrorEvent, ErrorData(
+                code="internal_error",
+                message=str(exc),
+                retryable=False,
+            ).model_dump())
         finally:
             unregister_user_loop(self._user_id, loop, session_id=session_id)
 

@@ -169,6 +169,12 @@ class ErrorData(ContractModel):
     result: RunResult | None = None
 
 
+class InterruptData(ContractModel):
+    tool: NonEmptyString
+    call_id: NonEmptyString
+    args: Mapping[str, object] = Field(default_factory=dict)
+
+
 EventDataT = TypeVar("EventDataT", bound=ContractModel)
 
 
@@ -334,6 +340,10 @@ class ErrorEvent(RunEventBase[ErrorData]):
         return self
 
 
+class InterruptEvent(RunEventBase[InterruptData]):
+    type: Literal["interrupt"] = "interrupt"
+
+
 RunEvent = Annotated[
     TextStartEvent
     | TextDeltaEvent
@@ -352,7 +362,8 @@ RunEvent = Annotated[
     | ContextSnapshotEvent
     | ContextCompressedEvent
     | DoneEvent
-    | ErrorEvent,
+    | ErrorEvent
+    | InterruptEvent,
     Field(discriminator="type"),
 ]
 
