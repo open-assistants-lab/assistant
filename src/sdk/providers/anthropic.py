@@ -54,10 +54,13 @@ class AnthropicProvider(LLMProvider):
                 "content-type": "application/json",
             }
             self._http_client = httpx.AsyncClient(
-                timeout=httpx.Timeout(self.timeout),
                 headers=headers,
+                timeout=httpx.Timeout(self.timeout),
             )
         return self._http_client
+
+    def get_client(self) -> httpx.AsyncClient | None:
+        return self._get_client()
 
     def _build_payload(
         self,

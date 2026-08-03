@@ -8,6 +8,7 @@ import pytest
 
 from src.config.user_settings import UserSettingsPatch, VerificationOverrides
 from src.config.user_settings_store import (
+    GraderPromptUnavailableError,
     SettingsConfigurationError,
     SettingsWriteError,
     UserSettingsStore,
@@ -137,7 +138,7 @@ def test_get_settings_treats_missing_default_prompt_as_unavailable(
         store,
         "load_grader_prompt",
         lambda: (_ for _ in ()).throw(
-            SettingsConfigurationError("No default grader prompt is configured")
+            GraderPromptUnavailableError("No default grader prompt is configured")
         ),
     )
 

@@ -155,6 +155,10 @@ class LLMProvider(ABC):
     def provider_id(self) -> str:
         """Unique identifier for this provider (e.g., 'ollama', 'openai', 'anthropic')."""
 
+    def get_client(self) -> Any | None:
+        """Return the underlying HTTP client, if available, for connection testing."""
+        return None
+
     def _extract_provider_options(
         self, provider_options: dict[str, dict[str, Any]] | None
     ) -> dict[str, Any]:

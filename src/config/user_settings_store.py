@@ -58,6 +58,10 @@ class SettingsConfigurationError(UserSettingsStoreError):
     """Raised when persisted settings cannot be safely interpreted."""
 
 
+class GraderPromptUnavailableError(SettingsConfigurationError):
+    """Raised when no grader prompt is available (not configured or blank)."""
+
+
 class SettingsWriteError(UserSettingsStoreError):
     """Raised when settings cannot be atomically persisted."""
 
@@ -272,7 +276,7 @@ class UserSettingsStore:
             return content
         if isinstance(self._legacy_default_rubric, str) and self._legacy_default_rubric.strip():
             return self._legacy_default_rubric
-        raise SettingsConfigurationError("No default grader prompt is configured")
+        raise GraderPromptUnavailableError("No default grader prompt is configured")
 
     def _read_grader_prompt(self) -> str:
         try:
@@ -280,7 +284,7 @@ class UserSettingsStore:
         except (OSError, UnicodeError):
             raise SettingsConfigurationError("User grader prompt is invalid") from None
         if not content.strip():
-            raise SettingsConfigurationError("User grader prompt is blank")
+            raise GraderPromptUnavailableError("User grader prompt is blank")
         return content
 
     @staticmethod
@@ -397,6 +401,8 @@ class UserSettingsStore:
                 raise ValueError
             if os.name != "nt" and stat.S_IMODE(journal_stat.st_mode) != 0o600:
                 raise ValueError
+            if os.name != "nt" and journal_stat.st_uid != os.getuid():
+                raise ValueError
             payload = json.loads(self._journal_path.read_text(encoding="utf-8"))
             if not isinstance(payload, dict) or set(payload) != {
                 "version",
@@ -444,7 +450,7 @@ class UserSettingsStore:
             journal_content = self._journal_path.read_text(encoding="utf-8")
             self._journal_path.unlink()
             self._fsync_parent(self._journal_path, "grader prompt transaction journal")
-        except Exception:
+        except OSError:
             if not self._journal_exists() and "journal_content" in locals():
                 try:
                     self._atomic_write_text(
@@ -694,7 +700,7 @@ class UserSettingsStore:
             self._fsync_parent(path, subject)
         except SettingsWriteError:
             raise
-        except Exception:
+        except OSError:
             raise SettingsWriteError(f"Unable to persist {subject}") from None
         finally:
             if descriptor is not None:

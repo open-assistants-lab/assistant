@@ -33,6 +33,7 @@ from src.config.user_settings_service import (
     resolve_provider_statuses,
 )
 from src.config.user_settings_store import (
+    GraderPromptUnavailableError,
     RevisionConflict,
     SettingsConfigurationError,
     SettingsWriteError,
@@ -81,11 +82,10 @@ def _key_test_error(status: int | None, err_body: object) -> dict[str, Any]:
 
 
 async def _test_http_provider_key(prov: Any, provider: str, api_key: str) -> dict[str, Any] | None:
-    if not hasattr(prov, "_get_client"):
+    client = prov.get_client() if hasattr(prov, "get_client") else None
+    if client is None:
         return None
-
     base_url = getattr(prov, "base_url", "").rstrip("/")
-    client = prov._get_client()
     if provider == "anthropic":
         response = await client.get(f"{base_url}/v1/models")
     elif provider == "gemini":
@@ -213,6 +213,7 @@ def _catalog_providers() -> list[dict[str, Any]]:
                 "type": provider.get("type", "openai-compatible"),
             }
     except Exception:
+        logger.warning("settings.catalog_providers_failed", {})
         pass
     return sorted(providers_by_id.values(), key=lambda provider: provider["name"].lower())
 
@@ -235,6 +236,7 @@ def _provider_models(provider_id: str, provider_name: str) -> list[dict[str, str
             for model in list_models(provider=provider_id)
         ]
     except Exception:
+        logger.warning("settings.provider_models_failed", {"provider_id": provider_id})
         models = []
 
     deduped: dict[str, dict[str, str]] = {}
@@ -303,12 +305,7 @@ def _preflight_settings(
     )
     try:
         prompt = store.load_grader_prompt()
-    except SettingsConfigurationError as exc:
-        if str(exc) not in {
-            "No default grader prompt is configured",
-            "User grader prompt is blank",
-        }:
-            raise
+    except GraderPromptUnavailableError:
         prompt = None
 
     host = get_host_settings()
