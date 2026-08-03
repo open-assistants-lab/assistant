@@ -80,8 +80,13 @@ def _stream_chunk_to_event(
     emit: Any,
     attempt: int,
     model_id: str = "",
+    accumulated_args: dict[str, str] | None = None,
 ) -> RunEvent:
-    """Convert a StreamChunk to the corresponding RunEvent."""
+    """Convert a StreamChunk to the corresponding RunEvent.
+
+    accumulated_args is a mutable dict keyed by call_id for tracking
+    tool_input_delta arguments across chunks.
+    """
     ct = chunk.canonical_type
     if ct == "text_start":
         return emit(TextStartEvent, BlockData(block_id=chunk.call_id or str(uuid.uuid4())).model_dump(), attempt)
@@ -102,12 +107,22 @@ def _stream_chunk_to_event(
             name=chunk.tool or "unknown",
         ).model_dump(), attempt)
     elif ct == "tool_input_delta":
+        call_id = chunk.call_id or ""
+        if call_id:
+            accumulated_args[call_id] = accumulated_args.get(call_id, "") + (chunk.content or "")
         return emit(ToolInputDeltaEvent, ToolDeltaData(
-            block_id="", tool_call_id=chunk.call_id or "", delta=chunk.content,
+            block_id="", tool_call_id=call_id, delta=chunk.content,
         ).model_dump(), attempt)
     elif ct == "tool_input_end":
+        call_id = chunk.call_id or ""
+        args_str = accumulated_args.pop(call_id, "")
+        import json
+        try:
+            args = json.loads(args_str) if args_str else {}
+        except json.JSONDecodeError:
+            args = {}
         return emit(ToolInputEndEvent, ToolEndData(
-            block_id="", tool_call_id=chunk.call_id or "", arguments={},
+            block_id="", tool_call_id=call_id, arguments=args,
         ).model_dump(), attempt)
     elif ct == "tool_result":
         return emit(ToolResultEvent, ToolResultData(
@@ -282,6 +297,7 @@ class RunService:
             rubric_availability = RubricAvailability.OFF
             agent_usage = UsageAggregate()
             grader_usage = UsageAggregate()
+            accumulated_args: dict[str, str] = {}
 
             for attempt in range(1, max_attempts + 1):
                 if lock.cancelled:
@@ -305,7 +321,7 @@ class RunService:
                         elif chunk.type == "error":
                             run_status = RunStatus.FAILED
                             break
-                        yield _stream_chunk_to_event(chunk, _emit, attempt, loop.model_id)
+                        yield _stream_chunk_to_event(chunk, _emit, attempt, loop.model_id, accumulated_args)
                 except Exception as exc:
                     logger.error("run_service.agent_error", {"error": str(exc)}, user_id=self._user_id)
                     run_status = RunStatus.FAILED
@@ -498,9 +514,7 @@ class RunService:
             grading_messages = list(messages) + [last_assistant]
             evaluation_result = await rubric_mw.grade(grading_messages, attempt - 1)
 
-            grader_usage = UsageAggregate()
-            if rubric_enabled and rubric_mw is not None:
-                grader_usage = UsageAggregate(available=True, calls=1, models=(rubric_mw.grader_model_id,))
+            grader_usage = UsageAggregate(available=True, calls=1, models=(rubric_mw.grader_model_id,))
 
             evaluation = RubricEvaluation(
                 grading_run_id=evaluation_result["grading_run_id"],
