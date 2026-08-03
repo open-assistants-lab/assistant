@@ -7,6 +7,7 @@ Message/SearchResult dataclasses and public API for callers.
 import asyncio
 import json
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -33,6 +34,7 @@ class Message:
     content: str
     metadata: dict[str, Any] | None = None
     session_id: str = ""
+    source: str | None = None
 
 
 @dataclass
@@ -507,6 +509,9 @@ class MessageStore:
 
     @staticmethod
     def _stored_to_message(row: _StoredMessage) -> Message:
+        source = None
+        if row.metadata:
+            source = row.metadata.get("source")
         return Message(
             id=row.id,
             ts=row.ts,
@@ -514,6 +519,7 @@ class MessageStore:
             content=row.content,
             metadata=row.metadata,
             session_id=row.session_id,
+            source=source,
         )
 
     def _validated_summary_provenance(
@@ -682,18 +688,134 @@ class MessageStore:
         memories = self._core.fetch(limit=count)
         return [self._to_msg(m) for m in reversed(memories)]
 
+    def _find_newest_summary_rowid(self, session_id: str) -> int | None:
+        """Find the rowid of the newest valid summary using indexed queries.
+
+        Two-phase: first find candidate summary rowids, then validate
+        provenance against only the rows needed. Avoids loading all rows.
+        Scans backwards in batches to handle many invalid summaries.
+        """
+        with self._core.db._connect() as cur:
+            min_rowid = cur.execute(
+                "SELECT MIN(rowid) FROM messages WHERE session_id = ?",
+                [session_id],
+            ).fetchone()[0]
+            if min_rowid is None:
+                return None
+            max_rowid = cur.execute(
+                "SELECT MAX(rowid) FROM messages WHERE session_id = ?",
+                [session_id],
+            ).fetchone()[0]
+        batch_size = 100
+        current_max = max_rowid
+        while current_max >= min_rowid:
+            batch_min = max(current_max - batch_size + 1, min_rowid)
+            with self._core.db._connect() as cur:
+                candidate_rows = cur.execute(
+                    "SELECT rowid, id, ts, role, content, metadata, session_id "
+                    "FROM messages "
+                    "WHERE session_id = ? AND role = 'summary' "
+                    "AND rowid BETWEEN ? AND ? "
+                    "ORDER BY rowid DESC",
+                    [session_id, batch_min, current_max],
+                ).fetchall()
+            if candidate_rows:
+                candidates = [
+                    _StoredMessage(
+                        sequence=int(r[0]),
+                        id=str(r[1]),
+                        ts=self._parse_stored_timestamp(r[2]),
+                        role=str(r[3]),
+                        content=str(r[4] or ""),
+                        metadata=self._parse_stored_metadata(r[5]),
+                        session_id=str(r[6] or ""),
+                    )
+                    for r in candidate_rows
+                ]
+                newest_sequence = candidates[0].sequence
+                columns = "rowid, id, ts, role, content, metadata, session_id"
+                with self._core.db._connect() as cur:
+                    all_rows_raw = cur.execute(
+                        f"SELECT {columns} FROM messages "
+                        "WHERE session_id = ? AND rowid <= ? ORDER BY rowid ASC",
+                        [session_id, newest_sequence],
+                    ).fetchall()
+                all_rows = [
+                    _StoredMessage(
+                        sequence=int(r[0]),
+                        id=str(r[1]),
+                        ts=self._parse_stored_timestamp(r[2]),
+                        role=str(r[3]),
+                        content=str(r[4] or ""),
+                        metadata=self._parse_stored_metadata(r[5]),
+                        session_id=str(r[6] or ""),
+                    )
+                    for r in all_rows_raw
+                ]
+                rows_by_id = {row.id: row for row in all_rows}
+                cache: dict[int, tuple[set[str], set[str]] | None] = {}
+                for candidate in candidates:
+                    if self._validated_summary_provenance(candidate, rows_by_id, cache) is not None:
+                        return candidate.sequence
+            current_max = batch_min - 1
+        return None
+
     def get_messages_with_summary(self, session_id: str, limit: int = 50) -> list[Message]:
         session_id = self._require_session_id(session_id)
         if limit <= 0:
             return []
-        rows = self._read_scoped_rows(session_id)
-        valid_summary = self._newest_valid_summary(rows)
-        if valid_summary is None:
-            non_summaries = [row for row in rows if row.role != "summary"]
-            return [self._stored_to_message(row) for row in non_summaries[-limit:]]
+        summary_sequence = self._find_newest_summary_rowid(session_id)
+        if summary_sequence is None:
+            with self._core.db._connect() as cur:
+                rows_raw = cur.execute(
+                    "SELECT rowid, id, ts, role, content, metadata, session_id "
+                    "FROM messages "
+                    "WHERE session_id = ? AND role != 'summary' "
+                    "ORDER BY rowid DESC LIMIT ?",
+                    [session_id, limit],
+                ).fetchall()
+            rows = [
+                _StoredMessage(
+                    sequence=int(r[0]),
+                    id=str(r[1]),
+                    ts=self._parse_stored_timestamp(r[2]),
+                    role=str(r[3]),
+                    content=str(r[4] or ""),
+                    metadata=self._parse_stored_metadata(r[5]),
+                    session_id=str(r[6] or ""),
+                )
+                for r in reversed(rows_raw)
+            ]
+            return [self._stored_to_message(row) for row in rows]
 
-        summary, provenance = valid_summary
-        summarized_ids, preserved_ids = provenance
+        # Load rows up to summary_sequence + extra after it
+        with self._core.db._connect() as cur:
+            rows_raw = cur.execute(
+                "SELECT rowid, id, ts, role, content, metadata, session_id "
+                "FROM messages "
+                "WHERE session_id = ? AND rowid <= ? "
+                "ORDER BY rowid ASC",
+                [session_id, summary_sequence + limit],
+            ).fetchall()
+        rows = [
+            _StoredMessage(
+                sequence=int(r[0]),
+                id=str(r[1]),
+                ts=self._parse_stored_timestamp(r[2]),
+                role=str(r[3]),
+                content=str(r[4] or ""),
+                metadata=self._parse_stored_metadata(r[5]),
+                session_id=str(r[6] or ""),
+            )
+            for r in rows_raw
+        ]
+        summary = next(r for r in rows if r.sequence == summary_sequence)
+        provenance = self._validated_summary_provenance(
+            summary,
+            {row.id: row for row in rows},
+            {},
+        )
+        summarized_ids, preserved_ids = provenance or (set(), set())
         retained = [
             row
             for row in rows
@@ -720,22 +842,57 @@ class MessageStore:
         summary_metadata.pop("session_id", None)
         if self._summary_provenance(summary_metadata) is None:
             raise ValueError("invalid summary metadata or compression_reason")
-        rows = self._read_scoped_rows(session_id)
-        candidate = _StoredMessage(
-            sequence=(rows[-1].sequence + 1) if rows else 1,
-            id="",
-            ts=datetime.now(UTC),
-            role="summary",
-            content=content,
-            metadata=summary_metadata,
-            session_id=session_id,
-        )
-        rows_by_id = {row.id: row for row in rows}
-        if self._validated_summary_provenance(candidate, rows_by_id, {}) is None:
-            raise ValueError("invalid summary provenance")
-        return self.add_message(
-            "summary", content, metadata=summary_metadata, session_id=session_id
-        )
+        # Validate and write in a transaction to prevent TOCTOU races
+        with self._core.db._connect() as cur:
+            cur.execute("BEGIN IMMEDIATE")
+            try:
+                rows_raw = cur.execute(
+                    "SELECT rowid, id, ts, role, content, metadata, session_id "
+                    "FROM messages WHERE session_id = ? ORDER BY rowid ASC",
+                    [session_id],
+                ).fetchall()
+                rows = [
+                    _StoredMessage(
+                        sequence=int(r[0]),
+                        id=str(r[1]),
+                        ts=self._parse_stored_timestamp(r[2]),
+                        role=str(r[3]),
+                        content=str(r[4] or ""),
+                        metadata=self._parse_stored_metadata(r[5]),
+                        session_id=str(r[6] or ""),
+                    )
+                    for r in rows_raw
+                ]
+                candidate = _StoredMessage(
+                    sequence=(rows[-1].sequence + 1) if rows else 1,
+                    id="",
+                    ts=datetime.now(UTC),
+                    role="summary",
+                    content=content,
+                    metadata=summary_metadata,
+                    session_id=session_id,
+                )
+                rows_by_id = {row.id: row for row in rows}
+                if self._validated_summary_provenance(candidate, rows_by_id, {}) is None:
+                    raise ValueError("invalid summary provenance")
+                mid = str(uuid.uuid4())[:12]
+                cur.execute(
+                    "INSERT INTO messages (id, role, content, session_id, metadata, ts) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    [
+                        mid,
+                        "summary",
+                        content or "(empty)",
+                        session_id,
+                        json.dumps(summary_metadata),
+                        datetime.now(UTC).isoformat(),
+                    ],
+                )
+                cur.execute("COMMIT")
+                return mid
+            except Exception:
+                cur.execute("ROLLBACK")
+                raise
 
     def has_summary(self, session_id: str) -> bool:
         session_id = self._require_session_id(session_id)

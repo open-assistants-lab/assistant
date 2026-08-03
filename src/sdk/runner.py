@@ -724,6 +724,10 @@ def _messages_from_conversation(messages: list[Any]) -> list[Message]:
     """
     sdk_messages: list[Message] = []
     pending_reasoning: str | None = None
+    pending_reasoning_storage_id: str | None = None
+    pending_reasoning_storage_ts: str | None = None
+    pending_reasoning_storage_session_id: str | None = None
+    pending_reasoning_source: str | None = None
     last_assistant_had_tool_calls = False
     for m in messages:
         role = getattr(m, "role", "user")
@@ -732,7 +736,7 @@ def _messages_from_conversation(messages: list[Any]) -> list[Message]:
         source = meta.get("source")
         ts = getattr(m, "ts", None)
         storage_id = getattr(m, "id", "")
-        storage_ts = str(ts.isoformat()) if ts is not None else ""
+        storage_ts = str(ts.isoformat()) if ts is not None else None
         storage_session_id = getattr(m, "session_id", "")
         if role == "user":
             sdk_messages.append(
@@ -746,6 +750,10 @@ def _messages_from_conversation(messages: list[Any]) -> list[Message]:
                 )
             )
             pending_reasoning = None
+            pending_reasoning_storage_id = None
+            pending_reasoning_storage_ts = None
+            pending_reasoning_storage_session_id = None
+            pending_reasoning_source = None
             last_assistant_had_tool_calls = False
         elif role == "summary":
             sdk_messages.append(
@@ -759,18 +767,27 @@ def _messages_from_conversation(messages: list[Any]) -> list[Message]:
                 )
             )
             pending_reasoning = None
+            pending_reasoning_storage_id = None
+            pending_reasoning_storage_ts = None
+            pending_reasoning_storage_session_id = None
+            pending_reasoning_source = None
             last_assistant_had_tool_calls = False
         elif role == "system":
             sdk_messages.append(
                 Message(
                     role="system",
                     content=content,
+                    source=source,
                     storage_id=storage_id,
                     storage_ts=storage_ts,
                     storage_session_id=storage_session_id,
                 )
             )
             pending_reasoning = None
+            pending_reasoning_storage_id = None
+            pending_reasoning_storage_ts = None
+            pending_reasoning_storage_session_id = None
+            pending_reasoning_source = None
             last_assistant_had_tool_calls = False
         elif role == "tool":
             meta = getattr(m, "metadata", {}) or {}
@@ -783,6 +800,7 @@ def _messages_from_conversation(messages: list[Any]) -> list[Message]:
                         tool_call_id=tool_call_id,
                         content=str(content or ""),
                         name=tool_name,
+                        source=source,
                         storage_id=storage_id,
                         storage_ts=storage_ts,
                         storage_session_id=storage_session_id,
@@ -793,27 +811,41 @@ def _messages_from_conversation(messages: list[Any]) -> list[Message]:
                     Message(
                         role="user",
                         content=f"[TOOL RESULT: {tool_name}]\n{content}",
+                        source=source,
                         storage_id=storage_id,
                         storage_ts=storage_ts,
                         storage_session_id=storage_session_id,
                     )
                 )
             pending_reasoning = None
+            pending_reasoning_storage_id = None
+            pending_reasoning_storage_ts = None
+            pending_reasoning_storage_session_id = None
+            pending_reasoning_source = None
             last_assistant_had_tool_calls = False
         elif role == "reasoning":
             pending_reasoning = content or None
+            pending_reasoning_storage_id = storage_id
+            pending_reasoning_storage_ts = storage_ts
+            pending_reasoning_storage_session_id = storage_session_id
+            pending_reasoning_source = source
         else:
             sdk_messages.append(
                 Message(
                     role="assistant",
                     content=content,
                     reasoning=pending_reasoning,
-                    storage_id=storage_id,
-                    storage_ts=storage_ts,
-                    storage_session_id=storage_session_id,
+                    source=source or pending_reasoning_source,
+                    storage_id=storage_id or pending_reasoning_storage_id,
+                    storage_ts=storage_ts or pending_reasoning_storage_ts,
+                    storage_session_id=storage_session_id or pending_reasoning_storage_session_id,
                 )
             )
             pending_reasoning = None
+            pending_reasoning_storage_id = None
+            pending_reasoning_storage_ts = None
+            pending_reasoning_storage_session_id = None
+            pending_reasoning_source = None
             last_assistant_had_tool_calls = False
     return sdk_messages
 
