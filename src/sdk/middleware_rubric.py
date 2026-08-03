@@ -1,11 +1,9 @@
-"""Stateless grader for rubric evaluation.
+"""RubricMiddleware — verification loop that grades agent responses.
 
-Replaces the old RubricMiddleware class. The bounded rubric orchestration
-in RunService calls grade_response per attempt instead of relying on
-recursive rerun-trigger grading.
-
-Backward-compat: RubricMiddleware is re-exported for the runner until
-it migrates to RunService.
+Triggered after the main agent loop completes (when rubric is enabled).
+Runs a cut-down agent loop (separate from the main runner) to evaluate
+the agent's output against the rubric. Points back to the trigger of the
+runner — does not use a needs_rerun flag.
 """
 
 from __future__ import annotations
@@ -21,12 +19,6 @@ from src.app_logging import get_logger
 from src.sdk.messages import Message
 
 logger = get_logger()
-
-# Backward-compat alias for runner.py
-class RubricMiddleware:
-    """Deprecated. Rubric orchestration is now handled by RunService."""
-    def __init__(self, *args, **kwargs):
-        pass
 
 GRADER_SYSTEM_PROMPT = """You are a grader. You evaluate whether the work in <transcript> satisfies every criterion in <rubric>.
 
@@ -174,42 +166,70 @@ def _revision_prompt(evaluation: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-async def grade_response(
-    grader_provider: Any,
-    grader_prompt: str,
-    messages: list[Message],
-    iteration: int,
-) -> dict[str, Any]:
-    """Grade an agent response against the rubric. No rerun triggering.
+class RubricMiddleware:
+    """Verification loop that grades agent responses after the main agent runs.
 
-    Returns a dict with keys: grading_run_id, iteration, result, explanation, criteria.
-    On grader error, result is 'grader_error'.
+    Runs a cut-down agent loop (separate from the main runner) to evaluate
+    the agent's output against the rubric. Points back to the trigger of the
+    runner — does not use a needs_rerun flag.
+
+    The caller (RunService) is responsible for:
+    - Running the main agent loop
+    - Calling grade() with the agent's output messages
+    - Appending revision feedback and re-running if needed
     """
-    import uuid
 
-    grading_run_id = str(uuid.uuid4())
-    try:
-        payload = _build_grader_payload(messages, grader_prompt, iteration)
-        grader_messages = [
-            Message.system(GRADER_SYSTEM_PROMPT),
-            Message.user(payload),
-        ]
-        response = await grader_provider.chat(grader_messages)
-        content = response.content if isinstance(response.content, str) else str(response.content)
-        graded = _parse_grader_response(content)
-        return {
-            "grading_run_id": grading_run_id,
-            "iteration": iteration,
-            "result": graded.result,
-            "explanation": graded.explanation,
-            "criteria": [dict(c) for c in graded.criteria],
-        }
-    except Exception as exc:
-        logger.warning("rubric.grade_error", {"error": str(exc)})
-        return {
-            "grading_run_id": grading_run_id,
-            "iteration": iteration,
-            "result": "grader_error",
-            "explanation": f"Grader raised {type(exc).__name__}: {exc}",
-            "criteria": [],
-        }
+    def __init__(
+        self,
+        grader_provider: Any,
+        grader_prompt: str,
+        max_iterations: int = 3,
+    ) -> None:
+        self._grader_provider = grader_provider
+        self._grader_prompt = grader_prompt
+        self._max_iterations = max_iterations
+
+    async def grade(
+        self,
+        messages: list[Message],
+        iteration: int,
+    ) -> dict[str, Any]:
+        """Grade the agent's response against the rubric.
+
+        messages should include the agent's output (the assistant message
+        produced by the main loop). Returns a dict with keys:
+        grading_run_id, iteration, result, explanation, criteria.
+        On grader error, result is 'grader_error'.
+        """
+        import uuid
+
+        grading_run_id = str(uuid.uuid4())
+        try:
+            payload = _build_grader_payload(messages, self._grader_prompt, iteration)
+            grader_messages = [
+                Message.system(GRADER_SYSTEM_PROMPT),
+                Message.user(payload),
+            ]
+            response = await self._grader_provider.chat(grader_messages)
+            content = response.content if isinstance(response.content, str) else str(response.content)
+            graded = _parse_grader_response(content)
+            return {
+                "grading_run_id": grading_run_id,
+                "iteration": iteration,
+                "result": graded.result,
+                "explanation": graded.explanation,
+                "criteria": [dict(c) for c in graded.criteria],
+            }
+        except Exception as exc:
+            logger.warning("rubric.grade_error", {"error": str(exc)})
+            return {
+                "grading_run_id": grading_run_id,
+                "iteration": iteration,
+                "result": "grader_error",
+                "explanation": f"Grader raised {type(exc).__name__}: {exc}",
+                "criteria": [],
+            }
+
+    @property
+    def max_iterations(self) -> int:
+        return self._max_iterations

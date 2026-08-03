@@ -17,7 +17,7 @@ from typing import Any
 from src.app_logging import get_logger
 from src.sdk.loop import AgentLoop
 from src.sdk.messages import Message, StreamChunk
-from src.sdk.middleware_rubric import grade_response
+from src.sdk.middleware_rubric import RubricMiddleware
 from src.sdk.run_models import (
     ContextSnapshot,
     CriterionEvaluation,
@@ -150,11 +150,9 @@ class RunService:
             history = self._message_store.get_messages_with_summary(session_id, limit=50)
             messages = list(history) + [Message.user(prompt)]
 
-            rubric_config = self._load_rubric_config(loop)
-            rubric_enabled = rubric_config["enabled"]
-            max_attempts = rubric_config["max_attempts"]
-            grader_provider = rubric_config["grader_provider"]
-            grader_prompt = rubric_config["grader_prompt"]
+            rubric_mw = self._load_rubric_middleware(loop)
+            rubric_enabled = rubric_mw is not None
+            max_attempts = rubric_mw.max_iterations if rubric_mw else 1
 
             evaluations: list[RubricEvaluation] = []
             final_response = ""
@@ -196,7 +194,7 @@ class RunService:
                 if run_status == RunStatus.FAILED:
                     break
 
-                if not rubric_enabled or not grader_provider or not grader_prompt:
+                if not rubric_enabled:
                     break
 
                 rubric_availability = RubricAvailability.ON
@@ -209,11 +207,10 @@ class RunService:
                     "max_attempts": max_attempts,
                 }))
 
-                evaluation_result = await grade_response(
-                    grader_provider, grader_prompt, messages, attempt - 1
-                )
+                grading_messages = list(messages) + [Message.assistant(content=final_response)]
+                evaluation_result = await rubric_mw.grade(grading_messages, attempt - 1)
 
-                grader_usage = UsageAggregate(available=True, calls=1, models=(grader_provider.model_id,))
+                grader_usage = UsageAggregate(available=True, calls=1, models=(rubric_mw._grader_provider.model_id,))
 
                 evaluation = RubricEvaluation(
                     grading_run_id=evaluation_result["grading_run_id"],
@@ -319,37 +316,6 @@ class RunService:
         finally:
             unregister_user_loop(self._user_id, loop, session_id=session_id)
 
-    def _load_rubric_config(self, loop: AgentLoop) -> dict[str, Any]:
-        """Load rubric configuration from settings."""
-        config = {
-            "enabled": False,
-            "max_attempts": 1,
-            "grader_provider": None,
-            "grader_prompt": "",
-        }
-        try:
-            from src.config import get_settings
-            from src.sdk.providers.factory import create_model_from_config
-
-            settings = get_settings()
-            vc = settings.verification
-            if vc.enabled is True:
-                config["enabled"] = True
-                config["max_attempts"] = vc.max_iterations
-                grader_model = vc.grader_model or loop.model_id
-                config["grader_provider"] = create_model_from_config(
-                    grader_model, user_id=self._user_id
-                )
-                try:
-                    from src.config.user_settings_store import UserSettingsStore
-                    store = UserSettingsStore(self._user_id)
-                    config["grader_prompt"] = store.load_grader_prompt()
-                except Exception:
-                    config["grader_prompt"] = vc.default_rubric or ""
-        except Exception:
-            pass
-        return config
-
     async def _run_bounded_orchestration(
         self,
         loop: AgentLoop,
@@ -358,11 +324,9 @@ class RunService:
         session_id: str,
         lock: SessionLock,
     ) -> RunResult:
-        rubric_config = self._load_rubric_config(loop)
-        rubric_enabled = rubric_config["enabled"]
-        max_attempts = rubric_config["max_attempts"]
-        grader_provider = rubric_config["grader_provider"]
-        grader_prompt = rubric_config["grader_prompt"]
+        rubric_mw = self._load_rubric_middleware(loop)
+        rubric_enabled = rubric_mw is not None
+        max_attempts = rubric_mw.max_iterations if rubric_mw else 1
 
         evaluations: list[RubricEvaluation] = []
         final_response = ""
@@ -407,7 +371,7 @@ class RunService:
                     reasoning_tokens=last_assistant.usage.reasoning_tokens or 0,
                 )
 
-            if not rubric_enabled or not grader_provider or not grader_prompt:
+            if not rubric_enabled:
                 break
 
             rubric_availability = RubricAvailability.ON
@@ -415,11 +379,10 @@ class RunService:
                 rubric_status = TerminalRubricStatus.CANCELLED
                 break
 
-            evaluation_result = await grade_response(
-                grader_provider, grader_prompt, messages, attempt - 1
-            )
+            grading_messages = list(messages) + [last_assistant]
+            evaluation_result = await rubric_mw.grade(grading_messages, attempt - 1)
 
-            grader_usage = UsageAggregate(available=True, calls=1, models=(grader_provider.model_id,))
+            grader_usage = UsageAggregate(available=True, calls=1, models=(rubric_mw._grader_provider.model_id,))
 
             evaluation = RubricEvaluation(
                 grading_run_id=evaluation_result["grading_run_id"],
@@ -477,6 +440,41 @@ class RunService:
                 evaluations=tuple(evaluations),
             ),
         )
+
+    def _load_rubric_middleware(self, loop: AgentLoop) -> RubricMiddleware | None:
+        """Load rubric configuration and create RubricMiddleware if enabled."""
+        try:
+            from src.config import get_settings
+            from src.sdk.providers.factory import create_model_from_config
+
+            settings = get_settings()
+            vc = settings.verification
+            if vc.enabled is not True:
+                return None
+
+            grader_model = vc.grader_model or loop.model_id
+            grader_provider = create_model_from_config(grader_model, user_id=self._user_id)
+
+            grader_prompt: str | None = None
+            try:
+                from src.config.user_settings_store import UserSettingsStore
+                store = UserSettingsStore(self._user_id)
+                grader_prompt = store.load_grader_prompt()
+            except Exception:
+                grader_prompt = vc.default_rubric or None
+
+            if not grader_prompt:
+                logger.warning("rubric.no_prompt", {}, user_id=self._user_id)
+                return None
+
+            return RubricMiddleware(
+                grader_provider=grader_provider,
+                grader_prompt=grader_prompt,
+                max_iterations=vc.max_iterations,
+            )
+        except Exception as exc:
+            logger.warning("rubric.load_failed", {"error": str(exc)}, user_id=self._user_id)
+            return None
 
 
 def _revision_prompt(evaluation: dict[str, Any]) -> str:
