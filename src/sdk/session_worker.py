@@ -31,22 +31,26 @@ class SessionWorkerRegistry:
 
     def __init__(self) -> None:
         self._locks: dict[str, SessionLock] = {}
+        self._mutex = asyncio.Lock()
 
-    def acquire(self, session_id: str) -> SessionLock:
+    async def acquire(self, session_id: str) -> SessionLock:
         """Acquire exclusive session lock. Raises SessionBusy if held."""
-        if session_id in self._locks:
-            raise SessionBusyError(f"Session {session_id} already has an active run")
-        lock = SessionLock()
-        self._locks[session_id] = lock
-        return lock
+        async with self._mutex:
+            if session_id in self._locks:
+                raise SessionBusyError(f"Session {session_id} already has an active run")
+            lock = SessionLock()
+            self._locks[session_id] = lock
+            return lock
 
-    def release(self, session_id: str) -> None:
+    async def release(self, session_id: str) -> None:
         """Release session lock."""
-        self._locks.pop(session_id, None)
+        async with self._mutex:
+            self._locks.pop(session_id, None)
 
-    def stop(self, session_id: str) -> None:
+    async def stop(self, session_id: str) -> None:
         """Request cancellation of the active run in this session."""
-        lock = self._locks.get(session_id)
+        async with self._mutex:
+            lock = self._locks.get(session_id)
         if lock is not None:
             lock.request_cancel()
 
