@@ -36,7 +36,6 @@ from src.sdk.run_events import (
     RubricStartData,
     RubricStartEvent,
     RunEvent,
-    SingleCallUsage,
     TextDeltaEvent,
     TextEndEvent,
     TextStartEvent,
@@ -53,14 +52,13 @@ from src.sdk.run_events import (
     parse_run_event,
 )
 from src.sdk.run_models import (
-    ContextSnapshot,
     CriterionEvaluation,
-    RunResult,
-    RunStatus,
-    RunUsage,
     RubricAvailability,
     RubricEvaluation,
     RubricEvaluationResult,
+    RunResult,
+    RunStatus,
+    RunUsage,
     TerminalRubricStatus,
     UsageAggregate,
     VerificationOutcome,
@@ -72,10 +70,16 @@ from src.storage.messages import MessageStore
 logger = get_logger()
 
 
+def _revision_prompt(evaluation: dict[str, Any]) -> str:
+    from src.sdk.middleware_rubric import _revision_prompt as _rp
+    return _rp(evaluation)
+
+
 def _stream_chunk_to_event(
     chunk: StreamChunk,
     emit: Any,
     attempt: int,
+    model_id: str = "",
 ) -> RunEvent:
     """Convert a StreamChunk to the corresponding RunEvent."""
     ct = chunk.canonical_type
@@ -122,7 +126,7 @@ def _stream_chunk_to_event(
     elif ct == "usage" and chunk.usage:
         return emit(UsageEvent, UsageEventData(
             category="agent",
-            model="",
+            model=model_id,
             llm_call_index=1,
             usage={
                 "input_tokens": chunk.usage.input_tokens or 0,
@@ -202,7 +206,7 @@ class RunService:
 
             result = await self._run_bounded_orchestration(loop, messages, run_id, session_id, lock)
 
-            answer_mid = self._message_store.persist_run(
+            _ = self._message_store.persist_run(
                 run_id=run_id,
                 session_id=session_id,
                 user_message_id=user_msg_id,
@@ -301,7 +305,7 @@ class RunService:
                         elif chunk.type == "error":
                             run_status = RunStatus.FAILED
                             break
-                        yield _stream_chunk_to_event(chunk, _emit, attempt)
+                        yield _stream_chunk_to_event(chunk, _emit, attempt, loop.model_id)
                 except Exception as exc:
                     logger.error("run_service.agent_error", {"error": str(exc)}, user_id=self._user_id)
                     run_status = RunStatus.FAILED
@@ -326,7 +330,7 @@ class RunService:
                 grading_messages = list(messages) + [Message.assistant(content=final_response)]
                 evaluation_result = await rubric_mw.grade(grading_messages, attempt - 1)
 
-                grader_usage = UsageAggregate(available=True, calls=1, models=(rubric_mw._grader_provider.model_id,))
+                grader_usage = UsageAggregate(available=True, calls=1, models=(rubric_mw.grader_model_id,))
 
                 evaluation = RubricEvaluation(
                     grading_run_id=evaluation_result["grading_run_id"],
@@ -379,7 +383,7 @@ class RunService:
             if rubric_status == TerminalRubricStatus.NOT_RUN and rubric_availability == RubricAvailability.ON:
                 rubric_status = TerminalRubricStatus.SATISFIED
 
-            answer_mid = self._message_store.persist_run(
+            _ = self._message_store.persist_run(
                 run_id=run_id,
                 session_id=session_id,
                 user_message_id=user_msg_id,
@@ -494,7 +498,9 @@ class RunService:
             grading_messages = list(messages) + [last_assistant]
             evaluation_result = await rubric_mw.grade(grading_messages, attempt - 1)
 
-            grader_usage = UsageAggregate(available=True, calls=1, models=(rubric_mw._grader_provider.model_id,))
+            grader_usage = UsageAggregate()
+            if rubric_enabled and rubric_mw is not None:
+                grader_usage = UsageAggregate(available=True, calls=1, models=(rubric_mw.grader_model_id,))
 
             evaluation = RubricEvaluation(
                 grading_run_id=evaluation_result["grading_run_id"],

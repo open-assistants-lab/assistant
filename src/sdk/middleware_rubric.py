@@ -256,3 +256,7 @@ class RubricMiddleware:
     @property
     def max_iterations(self) -> int:
         return self._max_iterations
+
+    @property
+    def grader_model_id(self) -> str:
+        return self._grader_provider.model_id

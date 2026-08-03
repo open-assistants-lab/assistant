@@ -563,8 +563,7 @@ async def create_sdk_loop(
 
         rubric_mw = RubricMiddleware(
             grader_provider=grader_provider,
-            system_prompt=verification_config.grader_system_prompt or None,
-            grader_tools=grader_tool_defs or None,
+            grader_prompt=verification_config.grader_system_prompt or "",
             max_iterations=verification_config.max_iterations,
         )
         middlewares.append(rubric_mw)
