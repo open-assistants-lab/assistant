@@ -843,6 +843,30 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 if (usage_data.object.get("output_tokens")) |ot| {
                     chat.context_info.output_tokens = @intCast(ot.integer);
                 }
+            } else if (std.mem.eql(u8, event_type.string, "done")) {
+                // Extract RunResult from done event
+                const result_data = data.object.get("result") orelse return;
+                if (result_data.object.get("verification")) |verification| {
+                    const status_val = verification.object.get("status") orelse return;
+                    const status_str = switch (status_val) {
+                        .string => |s| s,
+                        else => return,
+                    };
+                    if (std.mem.eql(u8, status_str, "satisfied")) {
+                        chat.rubric_status = "Rubric passed";
+                    } else if (std.mem.eql(u8, status_str, "max_attempts_reached")) {
+                        chat.rubric_status = "Max revisions reached";
+                    } else if (std.mem.eql(u8, status_str, "grader_error")) {
+                        chat.rubric_status = "Rubric check failed";
+                    } else if (std.mem.eql(u8, status_str, "invalid_rubric")) {
+                        chat.rubric_status = "Rubric configuration invalid";
+                    } else if (std.mem.eql(u8, status_str, "cancelled")) {
+                        chat.rubric_status = "Rubric cancelled";
+                    }
+                }
+                if (result_data.object.get("model")) |model_val| {
+                    chat.context_info.model = model.allocator.dupe(u8, model_val.string) catch "";
+                }
             } else if (std.mem.eql(u8, event_type.string, "error")) {
                 const message = data.object.get("message") orelse {
                     const code = data.object.get("code") orelse return;
@@ -1796,7 +1820,7 @@ fn queueHistoryFetch(model: *Model, chat: *Chat, fx: *Effects) void {
     chat.history_loading = true;
     const url = std.fmt.allocPrint(
         model.allocator,
-        "http://127.0.0.1:8080/conversation?user_id=native_sdk_chat&session_id={s}&limit=100",
+        "http://127.0.0.1:8080/conversation/turns?user_id=native_sdk_chat&session_id={s}&limit=50",
         .{chat.sessionId()},
     ) catch return;
     fx.fetch(.{
@@ -2612,13 +2636,36 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         send_button,
     });
 
+    // Context rail: model, tokens, percentage, freshness
+    const ci = &active_chat.context_info;
+    const context_rail = ui.row(.{
+        .gap = 8,
+        .padding = 0,
+        .cross = .center,
+        .style_tokens = .{ .foreground = .text_muted },
+    }, .{
+        ui.text(.{ .size = .sm }, ci.model),
+        if (ci.model.len > 0) ui.text(.{ .size = .sm }, "•") else ui.text(.{}, ""),
+        ui.text(.{ .size = .sm }, std.fmt.allocPrint(ui.arena, "{d}K in / {d}K out", .{ ci.input_tokens / 1000, ci.output_tokens / 1000 }) catch ""),
+        ui.text(.{ .size = .sm }, "•"),
+        if (ci.context_window > 0) blk: {
+            const pct = @as(u32, @intFromFloat(ci.context_percentage));
+            break :blk ui.text(.{ .size = .sm }, std.fmt.allocPrint(ui.arena, "{d}%", .{pct}) catch "");
+        } else ui.text(.{ .size = .sm }, "—"),
+        ui.text(.{ .size = .sm }, "•"),
+        ui.text(.{ .size = .sm, .style_tokens = .{
+            .foreground = if (std.mem.eql(u8, ci.freshness, "live")) .success else .text_muted,
+        } }, ci.freshness),
+    });
+
     children[child_count] = ui.el(.card, .{
         .padding = 12,
-        .height = textarea_height + 6 + 32 + 24,
+        .height = textarea_height + 6 + 32 + 24 + 20,
         .style_tokens = .{ .background = .surface_subtle, .radius = .md },
     }, .{
         ui.column(.{ .gap = 6 }, .{
             composer_textarea,
+            context_rail,
             composer_bottom_row,
         }),
     });
