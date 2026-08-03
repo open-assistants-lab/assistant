@@ -130,6 +130,15 @@ pub const ChatMessage = struct {
     }
 };
 
+pub const ContextInfo = struct {
+    model: []const u8 = "",
+    input_tokens: u32 = 0,
+    output_tokens: u32 = 0,
+    context_window: u32 = 0,
+    context_percentage: f32 = 0,
+    freshness: []const u8 = "live",
+};
+
 pub const Chat = struct {
     id: u64,
     session_id: [32]u8 = undefined,
@@ -156,6 +165,9 @@ pub const Chat = struct {
     transcript_scroll_generation: u64 = 0,
     last_textarea_height: f32 = 0,
     created_at: []const u8 = "",
+    rubric_status: []const u8 = "",
+    rubric_attempts: u32 = 0,
+    context_info: ContextInfo = .{},
 
     pub fn hasUnread(self: *const Chat) bool {
         return self.unread_count > 0;
@@ -455,7 +467,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                         model.chats[i].fetch_key = fetch_key;
                         const url = std.fmt.allocPrint(
                             model.allocator,
-                            "http://127.0.0.1:8080/conversation?user_id=native_sdk_chat&session_id={s}&limit=100",
+                            "http://127.0.0.1:8080/conversation/turns?user_id=native_sdk_chat&session_id={s}&limit=50",
                             .{model.chats[i].sessionId()},
                         ) catch return;
                         fx.fetch(.{
@@ -739,25 +751,25 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const event_type = root.object.get("type") orelse return;
             const data = root.object.get("data") orelse return;
 
-            if (std.mem.eql(u8, event_type.string, "messages")) {
-                const content = data.object.get("content") orelse return;
+            if (std.mem.eql(u8, event_type.string, "text_delta")) {
+                const delta = data.object.get("delta") orelse return;
                 if (!std.mem.eql(u8, chat.open_bubble_type, "assistant")) {
-                    addMessage(chat, model.allocator, "assistant", trimLeadingMessageWhitespace(content.string));
+                    addMessage(chat, model.allocator, "assistant", trimLeadingMessageWhitespace(delta.string));
                     chat.open_bubble_type = "assistant";
                 } else {
-                    appendToLastMessage(chat, model.allocator, "assistant", content.string);
+                    appendToLastMessage(chat, model.allocator, "assistant", delta.string);
                 }
-            } else if (std.mem.eql(u8, event_type.string, "reasoning")) {
-                const content = data.object.get("content") orelse return;
+            } else if (std.mem.eql(u8, event_type.string, "reasoning_delta")) {
+                const delta = data.object.get("delta") orelse return;
                 removeTrailingEmptyAssistant(chat);
                 if (!std.mem.eql(u8, chat.open_bubble_type, "reasoning")) {
-                    addMessage(chat, model.allocator, "reasoning", content.string);
+                    addMessage(chat, model.allocator, "reasoning", delta.string);
                     chat.open_bubble_type = "reasoning";
                 } else {
-                    appendToLastMessage(chat, model.allocator, "reasoning", content.string);
+                    appendToLastMessage(chat, model.allocator, "reasoning", delta.string);
                 }
-            } else if (std.mem.eql(u8, event_type.string, "tool_start")) {
-                const tool = data.object.get("tool") orelse return;
+            } else if (std.mem.eql(u8, event_type.string, "tool_input_start")) {
+                const name = data.object.get("name") orelse return;
                 removeTrailingEmptyAssistant(chat);
                 const args_val = data.object.get("args");
                 const args_str = if (args_val) |v| blk: {
@@ -770,42 +782,88 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                         else => break :blk "",
                     }
                 } else "";
-                addToolMessage(chat, model.allocator, tool.string, args_str);
+                addToolMessage(chat, model.allocator, name.string, args_str);
                 chat.open_bubble_type = "tool";
-                chat.status_text = std.fmt.allocPrint(model.allocator, "{s}: running...", .{tool.string}) catch tool.string;
+                chat.status_text = std.fmt.allocPrint(model.allocator, "{s}: running...", .{name.string}) catch name.string;
             } else if (std.mem.eql(u8, event_type.string, "tool_result")) {
-                const result = data.object.get("result") orelse return;
-                const tool = data.object.get("tool") orelse return;
+                const content = data.object.get("content") orelse return;
+                const name = data.object.get("name") orelse return;
                 if (findRunningToolBubble(chat)) |tb| {
                     tb.tool_status = model.allocator.dupe(u8, "done") catch return;
-                    tb.tool_result = model.allocator.dupe(u8, result.string) catch return;
-                    tb.collapsed = true; // collapsed by default — one-line preview
+                    tb.tool_result = model.allocator.dupe(u8, content.string) catch return;
+                    tb.collapsed = true;
                 }
-                chat.status_text = std.fmt.allocPrint(model.allocator, "{s}: done", .{tool.string}) catch tool.string;
+                chat.status_text = std.fmt.allocPrint(model.allocator, "{s}: done", .{name.string}) catch name.string;
             } else if (std.mem.eql(u8, event_type.string, "interrupt")) {
                 const tool = data.object.get("tool") orelse return;
                 const call_id = data.object.get("call_id") orelse return;
                 chat.has_pending = true;
                 chat.pending_tool = model.allocator.dupe(u8, tool.string) catch return;
                 chat.pending_call_id = model.allocator.dupe(u8, call_id.string) catch return;
-            } else if (std.mem.eql(u8, event_type.string, "cancelled")) {
-                chat.streaming = false;
-                chat.open_bubble_type = "";
-                chat.status_text = "";
-                // Remove empty assistant typing indicator
+            } else if (std.mem.eql(u8, event_type.string, "rubric_evaluation_start")) {
+                chat.status_text = "Checking rubric...";
+            } else if (std.mem.eql(u8, event_type.string, "rubric_evaluation_end")) {
+                const result = data.object.get("result") orelse {
+                    chat.status_text = "";
+                    return;
+                };
+                chat.rubric_status = model.allocator.dupe(u8, result.string) catch "";
+                chat.rubric_attempts += 1;
+                if (std.mem.eql(u8, result.string, "satisfied")) {
+                    chat.status_text = "Rubric passed";
+                } else if (std.mem.eql(u8, result.string, "needs_revision")) {
+                    chat.status_text = std.fmt.allocPrint(model.allocator, "Revising... ({d})", .{chat.rubric_attempts}) catch "Revising...";
+                } else if (std.mem.eql(u8, result.string, "grader_error")) {
+                    chat.status_text = "Rubric check failed";
+                } else if (std.mem.eql(u8, result.string, "invalid_rubric")) {
+                    chat.status_text = "Rubric configuration invalid";
+                } else {
+                    chat.status_text = "";
+                }
+            } else if (std.mem.eql(u8, event_type.string, "response_revision_start")) {
+                // Remove last assistant bubble for revision
                 if (chat.msg_count > 0) {
-                    const last = &chat._messages[chat.msg_count - 1];
-                    if (std.mem.eql(u8, last.role, "assistant") and last.content.len == 0) {
-                        chat.msg_count -= 1;
-                        chat.messages = chat._messages[0..chat.msg_count];
+                    var i: usize = chat.msg_count;
+                    while (i > 0) {
+                        i -= 1;
+                        if (std.mem.eql(u8, chat._messages[i].role, "assistant")) {
+                            chat.msg_count = i;
+                            chat.messages = chat._messages[0..chat.msg_count];
+                            break;
+                        }
                     }
                 }
+                chat.open_bubble_type = "";
+                chat.status_text = "Revising...";
+            } else if (std.mem.eql(u8, event_type.string, "usage")) {
+                const usage_data = data.object.get("usage") orelse return;
+                if (usage_data.object.get("input_tokens")) |it| {
+                    chat.context_info.input_tokens = @intCast(it.integer);
+                }
+                if (usage_data.object.get("output_tokens")) |ot| {
+                    chat.context_info.output_tokens = @intCast(ot.integer);
+                }
             } else if (std.mem.eql(u8, event_type.string, "error")) {
-                const content = data.object.get("content") orelse return;
+                const message = data.object.get("message") orelse {
+                    const code = data.object.get("code") orelse return;
+                    if (std.mem.eql(u8, code.string, "cancelled")) {
+                        chat.streaming = false;
+                        chat.open_bubble_type = "";
+                        chat.status_text = "";
+                        if (chat.msg_count > 0) {
+                            const last = &chat._messages[chat.msg_count - 1];
+                            if (std.mem.eql(u8, last.role, "assistant") and last.content.len == 0) {
+                                chat.msg_count -= 1;
+                                chat.messages = chat._messages[0..chat.msg_count];
+                            }
+                        }
+                    }
+                    return;
+                };
                 if (chat.open_bubble_type.len > 0 and chat.msg_count > 0) {
-                    appendToLastMessage(chat, model.allocator, chat.open_bubble_type, content.string);
+                    appendToLastMessage(chat, model.allocator, chat.open_bubble_type, message.string);
                 } else {
-                    addMessage(chat, model.allocator, "system", content.string);
+                    addMessage(chat, model.allocator, "system", message.string);
                 }
             }
         },
@@ -896,8 +954,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
             defer parsed.deinit();
             const root = parsed.value;
-            const messages_arr = root.object.get("messages") orelse return;
-            const arr = switch (messages_arr) {
+            const turns_arr = root.object.get("turns") orelse return;
+            const arr = switch (turns_arr) {
                 .array => |a| a,
                 else => return,
             };
@@ -906,8 +964,22 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             chat.history_loading = false;
             chat.msg_count = 0;
             chat.messages = chat._messages[0..0];
-            for (arr.items) |item| {
-                addHistoryMessage(chat, model.allocator, item);
+            for (arr.items) |turn_item| {
+                const turn = turn_item.object;
+                const messages_arr = turn.get("messages") orelse continue;
+                const msgs = switch (messages_arr) {
+                    .array => |a| a,
+                    else => continue,
+                };
+                for (msgs.items) |item| {
+                    addHistoryMessage(chat, model.allocator, item);
+                }
+                // Extract model and rubric status from turn metadata
+                if (turn.get("metadata")) |meta| {
+                    if (meta.object.get("model")) |m| {
+                        chat.context_info.model = model.allocator.dupe(u8, m.string) catch "";
+                    }
+                }
             }
             if (chat.msg_count > 0 and !chat.title_generated) {
                 const first = chat._messages[0];
@@ -932,16 +1004,29 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
             defer parsed.deinit();
             const root = parsed.value;
-            const messages_arr = root.object.get("messages") orelse return;
-            const arr = switch (messages_arr) {
+            const turns_arr = root.object.get("turns") orelse return;
+            const arr = switch (turns_arr) {
                 .array => |a| a,
                 else => return,
             };
             chat.history_loaded = true;
             chat.msg_count = 0;
             chat.messages = chat._messages[0..0];
-            for (arr.items) |item| {
-                addHistoryMessage(chat, model.allocator, item);
+            for (arr.items) |turn_item| {
+                const turn = turn_item.object;
+                const messages_arr = turn.get("messages") orelse continue;
+                const msgs = switch (messages_arr) {
+                    .array => |a| a,
+                    else => continue,
+                };
+                for (msgs.items) |item| {
+                    addHistoryMessage(chat, model.allocator, item);
+                }
+                if (turn.get("metadata")) |meta| {
+                    if (meta.object.get("model")) |m| {
+                        chat.context_info.model = model.allocator.dupe(u8, m.string) catch "";
+                    }
+                }
             }
             if (chat.msg_count > 0 and !chat.title_generated) {
                 const first = chat._messages[0];
