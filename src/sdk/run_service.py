@@ -176,11 +176,11 @@ class RunService:
                             if chunk.usage:
                                 agent_usage = UsageAggregate(
                                     available=True,
-                                    calls=1,
+                                    calls=agent_usage.calls + 1,
                                     models=(loop.model_id,),
-                                    input_tokens=chunk.usage.input_tokens or 0,
-                                    output_tokens=chunk.usage.output_tokens or 0,
-                                    reasoning_tokens=chunk.usage.reasoning_tokens or 0,
+                                    input_tokens=agent_usage.input_tokens + (chunk.usage.input_tokens or 0),
+                                    output_tokens=agent_usage.output_tokens + (chunk.usage.output_tokens or 0),
+                                    reasoning_tokens=agent_usage.reasoning_tokens + (chunk.usage.reasoning_tokens or 0),
                                 )
                         elif chunk.type == "error":
                             run_status = RunStatus.FAILED
@@ -364,11 +364,11 @@ class RunService:
             if last_assistant.usage:
                 agent_usage = UsageAggregate(
                     available=True,
-                    calls=1,
+                    calls=agent_usage.calls + 1,
                     models=(loop.model_id,),
-                    input_tokens=last_assistant.usage.input_tokens or 0,
-                    output_tokens=last_assistant.usage.output_tokens or 0,
-                    reasoning_tokens=last_assistant.usage.reasoning_tokens or 0,
+                    input_tokens=agent_usage.input_tokens + (last_assistant.usage.input_tokens or 0),
+                    output_tokens=agent_usage.output_tokens + (last_assistant.usage.output_tokens or 0),
+                    reasoning_tokens=agent_usage.reasoning_tokens + (last_assistant.usage.reasoning_tokens or 0),
                 )
 
             if not rubric_enabled:
