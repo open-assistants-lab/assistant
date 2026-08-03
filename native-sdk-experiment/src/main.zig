@@ -256,6 +256,7 @@ pub const Msg = union(enum) {
     rubric_iterations_increment,
     rubric_iterations_decrement,
     save_general_settings,
+    grader_prompt_input: canvas.TextInputEvent,
 
     pub const view_unbound = .{
         "stream_line",
@@ -1174,6 +1175,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.settings.key_modal_visible = false;
             model.settings.key_input = "";
             model.settings.key_error = "";
+            model.settings.grader_prompt_loading = false;
             fx.fetch(.{
                 .key = settings_key,
                 .url = "http://127.0.0.1:8080/settings/model-catalog?user_id=native_sdk_chat&max_models_per_provider=20&max_providers=64",
@@ -1181,6 +1183,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .headers = &.{.{ .name = "Accept", .value = "application/json" }},
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.settings_loaded),
+            });
+            fx.fetch(.{
+                .key = settings_general_key,
+                .url = "http://127.0.0.1:8080/settings?user_id=native_sdk_chat",
+                .method = .GET,
+                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.settings_general_loaded),
             });
         },
         .close_settings => {
@@ -1665,6 +1675,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.grader_prompt_saved),
             });
+        },
+        .grader_prompt_input => |event| {
+            const output = model.allocator.alloc(u8, model.settings.grader_prompt.len + 256) catch return;
+            const next = (canvas.TextEditState{
+                .text = model.settings.grader_prompt,
+                .selection = .{ .anchor = model.settings.grader_prompt.len, .focus = model.settings.grader_prompt.len },
+            }).apply(event, output) catch return;
+            model.settings.grader_prompt = next.text;
         },
     }
 }
@@ -2516,6 +2534,7 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
             ui.el(.textarea, .{
                 .text = model.settings.grader_prompt,
                 .placeholder = "Enter rubric criteria...",
+                .on_input = AppUi.inputMsg(.grader_prompt_input),
                 .height = 100,
                 .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
             }, .{}),
