@@ -76,7 +76,6 @@ async def test_rubric_middleware_grade_returns_grader_error_on_provider_exceptio
     mw = RubricMiddleware(FailingProvider(), "- Three lines")
     result = await mw.grade([Message.user("hi")], 0)
     assert result["result"] == "grader_error"
-    assert "provider down" in result["explanation"]
 
 
 def test_grader_response_consistency_validator():

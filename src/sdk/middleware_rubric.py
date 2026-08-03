@@ -1,9 +1,10 @@
 """RubricMiddleware — verification loop that grades agent responses.
 
 Triggered after the main agent loop completes (when rubric is enabled).
-Runs a cut-down agent loop (separate from the main runner) to evaluate
-the agent's output against the rubric. Points back to the trigger of the
-runner — does not use a needs_rerun flag.
+Runs a proper AgentLoop (separate from the main runner) to evaluate
+the agent's output against the rubric. The grader loop has empty tools
+and only the grader system prompt — no skills middleware — so it can
+be extended with tools and skills in the future.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from typing import Any, Literal, TypedDict
 from pydantic import BaseModel, model_validator
 
 from src.app_logging import get_logger
+from src.sdk.loop import AgentLoop
 from src.sdk.messages import Message
 
 logger = get_logger()
@@ -169,9 +171,9 @@ def _revision_prompt(evaluation: dict[str, Any]) -> str:
 class RubricMiddleware:
     """Verification loop that grades agent responses after the main agent runs.
 
-    Runs a cut-down agent loop (separate from the main runner) to evaluate
-    the agent's output against the rubric. Points back to the trigger of the
-    runner — does not use a needs_rerun flag.
+    Runs a proper AgentLoop (separate from the main runner) with empty tools
+    and only the grader system prompt. No skills middleware. This structure
+    allows tools and skills to be added in the future.
 
     The caller (RunService) is responsible for:
     - Running the main agent loop
@@ -188,6 +190,18 @@ class RubricMiddleware:
         self._grader_provider = grader_provider
         self._grader_prompt = grader_prompt
         self._max_iterations = max_iterations
+        self._loop: AgentLoop | None = None
+
+    async def _ensure_loop(self) -> AgentLoop:
+        if self._loop is None:
+            self._loop = AgentLoop(
+                provider=self._grader_provider,
+                tools=[],
+                system_prompt=GRADER_SYSTEM_PROMPT,
+                middlewares=[],
+                max_iterations=1,
+            )
+        return self._loop
 
     async def grade(
         self,
@@ -210,9 +224,18 @@ class RubricMiddleware:
                 Message.system(GRADER_SYSTEM_PROMPT),
                 Message.user(payload),
             ]
-            response = await self._grader_provider.chat(grader_messages)
-            content = response.content if isinstance(response.content, str) else str(response.content)
-            graded = _parse_grader_response(content)
+            loop = await self._ensure_loop()
+            result_messages = await loop.run(grader_messages)
+            last_assistant = None
+            for msg in reversed(result_messages):
+                if msg.role == "assistant":
+                    last_assistant = msg
+                    break
+            content = last_assistant.content if last_assistant else ""
+            if isinstance(content, str):
+                graded = _parse_grader_response(content)
+            else:
+                graded = _parse_grader_response(str(content))
             return {
                 "grading_run_id": grading_run_id,
                 "iteration": iteration,
