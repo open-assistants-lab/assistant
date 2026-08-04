@@ -1008,23 +1008,38 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .history_loaded => |response| {
             if (response.outcome != .ok) {
-                // A3: surface backend connection error
                 const chat = model.activeChat();
                 chat.history_loading = false;
                 addMessage(chat, model.allocator, "system", "Unable to connect to server. Is the backend running?");
                 return;
             }
             const body = response.body;
-            if (body.len == 0) return;
-            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
+            const chat = model.findChatByHistoryKey(response.key) orelse model.activeChat();
+            if (body.len == 0) {
+                chat.history_loading = false;
+                chat.history_loaded = true;
+                return;
+            }
+            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch {
+                chat.history_loading = false;
+                chat.history_loaded = true;
+                return;
+            };
             defer parsed.deinit();
             const root = parsed.value;
-            const turns_arr = root.object.get("turns") orelse return;
+            const turns_arr = root.object.get("turns") orelse {
+                chat.history_loading = false;
+                chat.history_loaded = true;
+                return;
+            };
             const arr = switch (turns_arr) {
                 .array => |a| a,
-                else => return,
+                else => {
+                    chat.history_loading = false;
+                    chat.history_loaded = true;
+                    return;
+                },
             };
-            const chat = model.findChatByHistoryKey(response.key) orelse model.activeChat();
             chat.history_loaded = true;
             chat.history_loading = false;
             chat.msg_count = 0;
@@ -1039,7 +1054,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 for (msgs.items) |item| {
                     addHistoryMessage(chat, model.allocator, item);
                 }
-                // Extract model and rubric status from turn metadata
                 if (turn.get("metadata")) |meta| {
                     if (meta.object.get("model")) |m| {
                         chat.context_info.model = model.allocator.dupe(u8, m.string) catch "";
@@ -1056,15 +1070,18 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .chat_history_loaded => |response| {
             if (response.outcome != .ok) {
-                // A3: surface history fetch error
                 const chat = model.findChatByHistoryKey(response.key) orelse return;
                 chat.history_loading = false;
                 addMessage(chat, model.allocator, "system", "Failed to load chat history.");
                 return;
             }
             const body = response.body;
-            if (body.len == 0) return;
             const chat = model.findChatByHistoryKey(response.key) orelse return;
+            if (body.len == 0) {
+                chat.history_loading = false;
+                chat.history_loaded = true;
+                return;
+            }
             chat.history_loading = false;
             const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
             defer parsed.deinit();
@@ -2772,9 +2789,8 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     child_count += 1;
 
     // HITL bar (if pending for the active chat)
-    const active_chat = &model.chats[model.active_chat_idx];
-    if (active_chat.has_pending) {
-        const approve_text = std.fmt.allocPrint(ui.arena, "Approve: {s}?", .{active_chat.pending_tool}) catch "Approve?";
+    if (chat.has_pending) {
+        const approve_text = std.fmt.allocPrint(ui.arena, "Approve: {s}?", .{chat.pending_tool}) catch "Approve?";
         children[child_count] = ui.row(.{
             .gap = 12,
             .padding = 12,
@@ -2790,14 +2806,14 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
 
     // Composer: bordered container with textarea + model button + Send/Stop button
     const model_label = model.selectedModelLabel(ui.arena);
-    const model_button: AppUi.Node = if (model.available_model_count > 0 and !active_chat.streaming)
+    const model_button: AppUi.Node = if (model.available_model_count > 0 and !chat.streaming)
         ui.button(.{ .on_press = .cycle_model, .variant = .ghost, .style_tokens = .{ .foreground = .text_muted } }, model_label)
     else if (model.available_model_count > 0)
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, model_label)
     else
         ui.text(.{}, "");
 
-    const textarea_height: f32 = active_chat.last_textarea_height;
+    const textarea_height: f32 = chat.last_textarea_height;
 
     const composer_textarea = blk: {
         var field = ui.el(.textarea, .{
@@ -2809,15 +2825,15 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
             .height = textarea_height,
             .style_tokens = .{ .background = .surface_subtle, .border_color = .surface_subtle },
         }, .{});
-        if (active_chat.draft_selection_programmatic) {
-            field.widget.text_selection = active_chat.draft_selection;
+        if (chat.draft_selection_programmatic) {
+            field.widget.text_selection = chat.draft_selection;
         }
         field.widget.style.radius = 8;
         field.widget.style.focus_ring = canvas.Color.rgba8(0, 0, 0, 0);
         break :blk field;
     };
 
-    const send_button: AppUi.Node = if (active_chat.streaming)
+    const send_button: AppUi.Node = if (chat.streaming)
         ui.button(.{ .on_press = .cancel, .variant = .ghost }, "Stop")
     else
         ui.button(.{ .on_press = .send_message, .variant = .primary }, "Send");
@@ -2835,7 +2851,7 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     });
 
     // Context rail: model, tokens, percentage, freshness
-    const ci = &active_chat.context_info;
+    const ci = &chat.context_info;
     const context_rail = ui.row(.{
         .gap = 8,
         .padding = 0,
@@ -3048,7 +3064,7 @@ fn initFx(model: *Model, fx: *Effects) void {
     chat.fetch_key = init_fetch_key;
     const url = std.fmt.allocPrint(
         model.allocator,
-        "http://127.0.0.1:8080/conversation?user_id=native_sdk_chat&session_id={s}&limit=100",
+        "http://127.0.0.1:8080/conversation/turns?user_id=native_sdk_chat&session_id={s}&limit=50",
         .{chat.sessionId()},
     ) catch return;
     fx.fetch(.{
