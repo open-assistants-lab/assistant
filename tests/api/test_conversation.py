@@ -156,37 +156,61 @@ class TestTitleGeneration:
 
 class TestStreamEdgeCases:
     @pytest.mark.asyncio
-    async def test_stream_message_accepts_legacy_only_alias_chunks(self, monkeypatch):
+    async def test_stream_message_emits_flat_canonical_sse_contract(self, monkeypatch):
+        """POST /message/stream must emit flat canonical SSE events that the
+        native frontend can parse: {type, data:{payload}}, not double-nested."""
         from src.http.models import MessageRequest
         from src.http.routers import conversation as conversation_router
-        from src.sdk.messages import StreamChunk
+        from src.sdk.run_events import (
+            BlockDeltaData,
+            ReasoningDeltaEvent,
+            TextDeltaEvent,
+            ToolInputStartEvent,
+            ToolStartData,
+        )
 
         store = FakeConversation()
 
-        async def fake_stream(**kwargs):
-            yield StreamChunk.ai_token("Hello")
-            yield StreamChunk.reasoning("Think")
-            yield StreamChunk.tool_start("email_list", "call_1")
-            yield StreamChunk.tool_result_event("email_list", "call_1", "result")
+        common = dict(
+            event_id="e1", sequence=1, timestamp="2026-01-01T00:00:00Z",
+            session_id="default", run_id="r", attempt=1,
+        )
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
-        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
+        async def fake_execute_stream(self, **kwargs):
+            yield TextDeltaEvent(data=BlockDeltaData(block_id="b1", delta="Hello"), **common)
+            yield ReasoningDeltaEvent(data=BlockDeltaData(block_id="b2", delta="Think"), **common)
+            yield ToolInputStartEvent(
+                data=ToolStartData(block_id="b3", tool_call_id="c1", name="email_list"),
+                **common,
+            )
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda *a, **kw: store)
+        monkeypatch.setattr(conversation_router.RunService, "execute_stream", fake_execute_stream)
 
         response = await conversation_router.message_stream(
             MessageRequest(message="List emails", user_id="u")
         )
-        chunks = []
-        async for chunk in response.body_iterator:
-            chunks.append(chunk)
+        output = "".join([c async for c in response.body_iterator])
 
-        output = "".join(chunks)
-        assert '"content": "Hello"' in output
-        assert '"content": "Think"' in output
-        assert '"tool": "email_list"' in output
-        assert [(args, kwargs) for args, kwargs in store.messages if args[0] in {"assistant", "reasoning"}] == [
-            (("reasoning", "Think"), {"metadata": {}, "session_id": "default"}),
-            (("assistant", "Hello"), {"metadata": {"stream": True}, "session_id": "default"}),
-        ]
+        # Flat canonical: type + data.payload at the SAME nesting level the frontend reads.
+        assert '"type": "text_delta"' in output
+        assert '"delta": "Hello"' in output
+        assert '"type": "reasoning_delta"' in output
+        assert '"delta": "Think"' in output
+        assert '"type": "tool_input_start"' in output
+        assert '"name": "email_list"' in output
+        # The payload must NOT be double-nested under a second "data".
+        import json
+        for line in output.splitlines():
+            if line.startswith("data: "):
+                payload = json.loads(line[len("data: "):])
+                assert "type" in payload
+                assert "data" in payload
+                # Frontend reads payload["data"]["delta"] directly — verify it resolves.
+                if payload["type"] == "text_delta":
+                    assert payload["data"]["delta"] == "Hello"
+                if payload["type"] == "tool_input_start":
+                    assert payload["data"]["name"] == "email_list"
 
     @pytest.mark.asyncio
     async def test_verbose_stream_error_returns_error_without_success_fallback(self, monkeypatch):

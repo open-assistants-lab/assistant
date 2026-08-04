@@ -62,8 +62,23 @@ def _normalized_session_id(session_id: str | None) -> str:
 
 
 def sse(event_type: str, data: dict[str, Any]) -> str:
-    """Format an SSE event string."""
+    """Format an SSE event string with a canonical envelope.
+
+    `data` is placed under the "data" key. Use sse_raw() instead when `data`
+    is already a full RunEvent dump (which carries its own type+data), to avoid
+    double-nesting the payload.
+    """
     return f"data: {json.dumps({'type': event_type, 'data': data})}\n\n"
+
+
+def sse_raw(event_dump: dict[str, Any]) -> str:
+    """Format an SSE event from a raw RunEvent dump.
+
+    A RunEvent dump already carries "type" and "data" at its top level, so it
+    is serialized directly — matching the WebSocket path and the canonical
+    contract clients expect: {"type": ..., "data": {payload}}.
+    """
+    return f"data: {json.dumps(event_dump)}\n\n"
 
 # ── Canvas HTML fence block parser ──────────────────────────────────────────
 
@@ -655,43 +670,42 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
 
                     event_type = event.type
                     data = event.model_dump(mode="json")
+                    event_data = data.get("data", {})
 
                     if event_type == "text_delta":
-                        delta = data.get("data", {}).get("delta", "")
+                        delta = event_data.get("delta", "")
                         if delta:
                             ai_content_parts.append(delta)
-                            yield sse("text_delta", data)
+                            yield sse_raw(data)
 
                     elif event_type == "reasoning_delta":
-                        delta = data.get("data", {}).get("delta", "")
+                        delta = event_data.get("delta", "")
                         if delta:
                             reasoning_parts.append(delta)
-                            yield sse("reasoning_delta", data)
+                            yield sse_raw(data)
 
                     elif event_type == "tool_input_start":
-                        tool_data = data.get("data", {})
                         tool_metadata_list.append(
-                            {"tool_name": tool_data.get("name", ""), "tool_call_id": tool_data.get("tool_call_id", "")}
+                            {"tool_name": event_data.get("name", ""), "tool_call_id": event_data.get("tool_call_id", "")}
                         )
-                        yield sse("tool_input_start", data)
+                        yield sse_raw(data)
 
                     elif event_type == "tool_result":
-                        tool_data = data.get("data", {})
-                        output = tool_data.get("content", "")
+                        output = event_data.get("content", "")
                         if output:
-                            tool_results[tool_data.get("tool_call_id", "")] = str(output)[:500]
-                        yield sse("tool_result", data)
+                            tool_results[event_data.get("tool_call_id", "")] = str(output)[:500]
+                        yield sse_raw(data)
 
                     elif event_type == "interrupt":
                         _pending_interrupts[skey] = {
-                            "tool": data.get("data", {}).get("tool", ""),
-                            "call_id": data.get("data", {}).get("call_id", ""),
-                            "args": data.get("data", {}).get("args", {}),
+                            "tool": event_data.get("tool", ""),
+                            "call_id": event_data.get("call_id", ""),
+                            "args": event_data.get("args", {}),
                             "model": req.model,
                             "provider_keys": req.provider_keys,
                             "session_id": session_id,
                         }
-                        yield sse("interrupt", data)
+                        yield sse_raw(data)
                         _persist_collected_stream_state(
                             conversation,
                             session_id=session_id,
@@ -715,23 +729,30 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                         )
                         persisted = True
                         aborted = True
-                        yield sse("error", data)
+                        yield sse_raw(data)
                         break
 
                     elif event_type == "rubric_evaluation_start":
-                        yield sse("rubric_evaluation_start", data)
+                        yield sse_raw(data)
 
                     elif event_type == "rubric_evaluation_end":
-                        yield sse("rubric_evaluation_end", data)
+                        yield sse_raw(data)
 
                     elif event_type == "usage":
-                        yield sse("usage", data)
+                        yield sse_raw(data)
+
+                    elif event_type == "response_revision_start":
+                        yield sse_raw(data)
+
+                    elif event_type == "context_compressed":
+                        yield sse_raw(data)
 
                     elif event_type == "done":
-                        result = data.get("data", {}).get("result", {})
+                        result = event_data.get("result", {})
                         response = result.get("response", "")
                         if not ai_content_parts and response:
                             ai_content_parts.append(response)
+                        yield sse_raw(data)
 
                 if aborted:
                     return
@@ -928,7 +949,7 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
                     if is_compat_alias and event.content in seen_canonical_text:
                         continue
                     ai_content_parts.append(event.content)
-                    yield sse("messages", {"content": event.content})
+                    yield sse("text_delta", {"delta": event.content})
                     if not is_compat_alias:
                         seen_canonical_text.add(event.content)
 
@@ -939,11 +960,11 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
                     if not is_compat_alias:
                         seen_canonical_tool_starts.add(call_id)
                     tool_metadata_list.append(
-                        {"tool_name": event.tool, "tool_call_id": event.call_id or ""}
+                        {"tool_name": event.tool, "tool_call_id": call_id}
                     )
-                    yield sse("tool_start", {
-                        "tool": event.tool,
-                        "call_id": event.call_id or "",
+                    yield sse("tool_input_start", {
+                        "name": event.tool,
+                        "tool_call_id": call_id,
                         "args": event.args or {},
                     })
 
@@ -952,16 +973,16 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
                     if output:
                         tool_results[event.call_id or ""] = output
                         yield sse("tool_result", {
-                            "tool": event.tool,
-                            "call_id": event.call_id or "",
-                            "result": output,
+                            "name": event.tool,
+                            "tool_call_id": event.call_id or "",
+                            "content": output,
                         })
 
                 elif event.kind == "reasoning_delta" and event.content:
                     if is_compat_alias and event.content in seen_canonical_reasoning:
                         continue
                     reasoning_parts.append(event.content)
-                    yield sse("reasoning", {"content": event.content})
+                    yield sse("reasoning_delta", {"delta": event.content})
                     if not is_compat_alias:
                         seen_canonical_reasoning.add(event.content)
 
@@ -1005,13 +1026,13 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
                     )
                     persisted = True
                     aborted = True
-                    yield sse("error", {"content": event.content})
+                    yield sse("error", {"code": "error", "message": event.content})
                     break
 
                 elif event.kind == "done" and event.content:
                     if not ai_content_parts:
                         ai_content_parts.append(event.content)
-                        yield sse("messages", {"content": event.content})
+                        yield sse("done", {"result": {"response": event.content}})
 
             response = "".join(ai_content_parts) if ai_content_parts else ""
             if aborted:
