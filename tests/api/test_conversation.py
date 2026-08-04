@@ -3,6 +3,83 @@
 import pytest
 
 
+def _make_run_event_factory(chunk_gen):
+    """Build a fake `RunService.execute_stream` that replays StreamChunks as RunEvents.
+
+    The conversation router's message/stream endpoint now consumes RunEvents from
+    RunService.execute_stream (not StreamChunks from run_sdk_agent_stream). The legacy
+    tests below were written against StreamChunk generators, so this adapter bridges
+    them: it normalizes each chunk via adapt_stream_chunk and emits the matching
+    canonical RunEvent, preserving ordering and the dedup/cancel semantics the tests
+    rely on.
+    """
+    from datetime import UTC, datetime
+
+    from src.sdk.run_events import (
+        BlockDeltaData,
+        ErrorData,
+        ErrorEvent,
+        InterruptData,
+        InterruptEvent,
+        ReasoningDeltaEvent,
+        TextDeltaEvent,
+        ToolInputStartEvent,
+        ToolResultData,
+        ToolResultEvent,
+        ToolStartData,
+    )
+    from src.http.stream_adapter import adapt_stream_chunk
+
+    _common = dict(
+        event_id="e1",
+        sequence=1,
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        session_id="default",
+        run_id="r1",
+        attempt=1,
+    )
+
+    async def fake_execute_stream(self, *, session_id=None, prompt=None, model=None, provider_keys=None, **kwargs):
+        async for chunk in chunk_gen():
+            ev = adapt_stream_chunk(chunk)
+            kind = ev.kind
+            if kind == "text_delta" and ev.content:
+                yield TextDeltaEvent(data=BlockDeltaData(block_id="b", delta=ev.content), **_common)
+            elif kind == "reasoning_delta" and ev.content:
+                yield ReasoningDeltaEvent(data=BlockDeltaData(block_id="b", delta=ev.content), **_common)
+            elif kind == "tool_input_start" and ev.tool:
+                yield ToolInputStartEvent(
+                    data=ToolStartData(block_id="b", tool_call_id=ev.call_id or "c", name=ev.tool),
+                    **_common,
+                )
+            elif kind == "tool_result" and ev.tool:
+                content = ev.result_preview or ev.content or ""
+                yield ToolResultEvent(
+                    data=ToolResultData(
+                        block_id="b",
+                        tool_call_id=ev.call_id or "c",
+                        name=ev.tool,
+                        status="completed",
+                        content=content,
+                    ),
+                    **_common,
+                )
+            elif kind == "interrupt":
+                yield InterruptEvent(
+                    data=InterruptData(tool=ev.tool or "t", call_id=ev.call_id or "c", args=ev.args or {}),
+                    **_common,
+                )
+            elif kind == "error":
+                yield ErrorEvent(
+                    data=ErrorData(code="error", message=ev.content or "error", retryable=False),
+                    **_common,
+                )
+            # Other kinds (text_start, reasoning_start, done, etc.) are dropped, mirroring
+            # the router which only forwards the canonical content events these tests assert on.
+
+    return fake_execute_stream
+
+
 class FakeConversation:
     def __init__(self):
         self.messages = []
@@ -43,6 +120,11 @@ class TestToolMessagePersistence:
 
 
 class TestMessageSessionPropagation:
+    @pytest.mark.skip(
+        reason="handle_message's verbose flag no longer selects a separate stream runner; "
+        "session_id propagation to the runner is covered by "
+        "TestStreamEdgeCases.test_non_verbose_message_passes_session_id_to_runner."
+    )
     @pytest.mark.asyncio
     async def test_verbose_message_passes_session_id_to_stream_runner(self, monkeypatch):
         from src.http.models import MessageRequest
@@ -212,6 +294,12 @@ class TestStreamEdgeCases:
                 if payload["type"] == "tool_input_start":
                     assert payload["data"]["name"] == "email_list"
 
+    @pytest.mark.skip(
+        reason="handle_message no longer has a verbose/non-verbose split; run_service.execute "
+        "surfaces agent failures as exceptions (handle_message returns error=str(e)), not via a "
+        "StreamChunk.error -> result.error path. The session-id propagation contract is covered by "
+        "test_non_verbose_message_passes_session_id_to_runner."
+    )
     @pytest.mark.asyncio
     async def test_verbose_stream_error_returns_error_without_success_fallback(self, monkeypatch):
         from src.http.models import MessageRequest
@@ -250,7 +338,10 @@ class TestStreamEdgeCases:
             yield StreamChunk.interrupt("files_delete", "call-2", {"path": "x"})
 
         monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
-        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
+        monkeypatch.setattr(
+            conversation_router.RunService, "execute_stream",
+            _make_run_event_factory(fake_stream),
+        )
 
         response = await conversation_router.message_stream(MessageRequest(message="go", user_id="u"))
         async for _ in response.body_iterator:
@@ -295,7 +386,10 @@ class TestStreamEdgeCases:
             return FakeLoop()
 
         monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
-        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_initial_stream)
+        monkeypatch.setattr(
+            conversation_router.RunService, "execute_stream",
+            _make_run_event_factory(fake_initial_stream),
+        )
 
         response = await conversation_router.message_stream(
             MessageRequest(
@@ -455,7 +549,10 @@ class TestStreamEdgeCases:
             yield StreamChunk.error("boom")
 
         monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
-        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
+        monkeypatch.setattr(
+            conversation_router.RunService, "execute_stream",
+            _make_run_event_factory(fake_stream),
+        )
 
         response = await conversation_router.message_stream(MessageRequest(message="go", user_id="u"))
         async for _ in response.body_iterator:
@@ -490,7 +587,10 @@ class TestStreamEdgeCases:
             yield StreamChunk.text_delta("ignored")
 
         monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
-        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
+        monkeypatch.setattr(
+            conversation_router.RunService, "execute_stream",
+            _make_run_event_factory(fake_stream),
+        )
 
         response = await conversation_router.message_stream(MessageRequest(message="go", user_id="u"))
         async for _ in response.body_iterator:
@@ -522,7 +622,10 @@ class TestStreamEdgeCases:
             yield StreamChunk.text_delta("ignored")
 
         monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
-        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
+        monkeypatch.setattr(
+            conversation_router.RunService, "execute_stream",
+            _make_run_event_factory(fake_stream),
+        )
 
         response = await conversation_router.message_stream(MessageRequest(message="go", user_id="u"))
         iterator = response.body_iterator.__aiter__()
@@ -757,7 +860,7 @@ class TestStreamEdgeCases:
         )
         iterator = response.body_iterator.__aiter__()
         async for chunk in iterator:
-            if '"result": "noon"' in chunk:
+            if '"content": "noon"' in chunk:
                 await iterator.aclose()
                 break
 
@@ -785,7 +888,10 @@ class TestStreamEdgeCases:
             yield StreamChunk.text_delta("```html:canvas\n<div>hi</div>\n```\nDone")
 
         monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
-        monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
+        monkeypatch.setattr(
+            conversation_router.RunService, "execute_stream",
+            _make_run_event_factory(fake_stream),
+        )
 
         response = await conversation_router.message_stream(MessageRequest(message="go", user_id="u"))
         iterator = response.body_iterator.__aiter__()
@@ -823,19 +929,21 @@ class TestStreamEdgeCases:
             def get_messages_with_summary(self, *args, **kwargs):
                 return []
 
-        async def fake_run_sdk_agent(**kwargs):
-            captured.update(kwargs)
-            return []
+        async def fake_execute(self, *, session_id, prompt, model=None, provider_keys=None, **kwargs):
+            captured["session_id"] = session_id
+            # Raise so handle_message returns early without needing a full RunResult.
+            raise ValueError("captured")
 
         monkeypatch.setattr(conversation_router, "get_message_store", lambda user_id: FakeConversation())
-        monkeypatch.setattr(conversation_router, "run_sdk_agent", fake_run_sdk_agent)
+        monkeypatch.setattr(conversation_router.RunService, "execute", fake_execute)
 
-        await conversation_router.handle_message(
+        result = await conversation_router.handle_message(
             MessageRequest(message="hello", user_id="test_user", session_id="chat-1"),
             None,
         )
 
         assert captured["session_id"] == "chat-1"
+        assert result.error == "captured"
 
 
 class TestGetConversation:
