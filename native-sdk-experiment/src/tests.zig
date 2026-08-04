@@ -1249,3 +1249,261 @@ test "settings modal test-key network failure shows inline error" {
     try testing.expect(!model.settings.key_testing);
     try testing.expectEqualStrings("Failed to test key", model.settings.key_error);
 }
+
+test "delete chat before active keeps same active chat" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    model.activeChat().draft_text = "first";
+    main.update(&model, .send_message, &fx);
+    model.activeChat().streaming = false;
+    main.update(&model, .new_chat, &fx);
+    model.activeChat().draft_text = "second";
+    main.update(&model, .send_message, &fx);
+    model.activeChat().streaming = false;
+    main.update(&model, .new_chat, &fx);
+    model.activeChat().draft_text = "third";
+    main.update(&model, .send_message, &fx);
+    model.activeChat().streaming = false;
+    try testing.expectEqual(@as(usize, 3), model.chat_count);
+    try testing.expectEqual(@as(usize, 2), model.active_chat_idx);
+
+    const middle_id = model.chats[1].id;
+    main.update(&model, .{ .switch_chat = middle_id }, &fx);
+    try testing.expectEqual(@as(usize, 1), model.active_chat_idx);
+
+    main.update(&model, .{ .delete_chat = model.chats[0].id }, &fx);
+
+    try testing.expectEqual(@as(usize, 2), model.chat_count);
+    try testing.expectEqual(@as(usize, 0), model.active_chat_idx);
+    try testing.expectEqual(middle_id, model.activeChat().id);
+}
+
+test "cancel clears pending HITL state" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "test");
+    const chat = model.activeChat();
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"interrupt\",\"data\":{\"tool\":\"email_send\",\"call_id\":\"abc123\",\"args\":{}}}" } }, &fx);
+    try testing.expect(chat.has_pending);
+
+    main.update(&model, .cancel, &fx);
+
+    try testing.expect(!chat.streaming);
+    try testing.expect(!chat.has_pending);
+    try testing.expectEqualStrings("", chat.pending_tool);
+    try testing.expectEqualStrings("", chat.pending_call_id);
+}
+
+test "stream_done with unknown key does not finalize active stream" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "test");
+    const chat = model.activeChat();
+    try testing.expect(chat.streaming);
+
+    main.update(&model, .{ .stream_done = .{ .key = fk + 999, .outcome = .ok, .body = "" } }, &fx);
+
+    try testing.expect(chat.streaming);
+}
+
+test "remove key clears the targeted provider not the first keyed one" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    model.settings.providers[0] = .{
+        .id = "openai",
+        .name = "OpenAI",
+        .has_key = true,
+        .via_env = false,
+        .key_source = "user",
+        .model_count = 1,
+    };
+    model.settings.providers[0].model_indices[0] = 0;
+    model.settings.providers[1] = .{
+        .id = "anthropic",
+        .name = "Anthropic",
+        .has_key = true,
+        .via_env = false,
+        .key_source = "user",
+        .model_count = 1,
+    };
+    model.settings.providers[1].model_indices[0] = 1;
+    model.settings.provider_count = 2;
+    model.available_models[0] = .{ .id = "openai:gpt", .name = "GPT", .provider = "openai", .provider_display = "OpenAI", .key_source = "user" };
+    model.available_models[1] = .{ .id = "anthropic:claude", .name = "Claude", .provider = "anthropic", .provider_display = "Anthropic", .key_source = "user" };
+    model.available_model_count = 2;
+
+    main.update(&model, .{ .remove_key = 1 }, &fx);
+    const req = fx.pendingFetchAt(fx.pendingFetchCount() - 1).?;
+    main.update(&model, .{ .key_deleted = .{ .key = req.key, .outcome = .ok, .body = "" } }, &fx);
+
+    try testing.expect(!model.settings.providers[1].has_key);
+    try testing.expect(model.settings.providers[0].has_key);
+    try testing.expectEqual(@as(usize, 1), model.settings.providers[0].model_count);
+}
+
+test "inline add key marks provider and models usable" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    model.settings.key_modal_visible = false;
+    model.settings.providers[0] = .{
+        .id = "anthropic",
+        .name = "Anthropic",
+        .has_key = false,
+        .key_source = "none",
+        .adding_key = true,
+        .key_input = "sk-ant-test",
+        .model_count = 1,
+    };
+    model.settings.providers[0].model_indices[0] = 0;
+    model.settings.provider_count = 1;
+    model.available_models[0] = .{ .id = "anthropic:claude", .name = "Claude", .provider = "anthropic", .provider_display = "Anthropic", .key_source = "none" };
+    model.available_model_count = 1;
+
+    main.update(&model, .{ .key_saved = .{ .key = 50, .outcome = .ok, .body = "" } }, &fx);
+
+    try testing.expect(model.settings.providers[0].has_key);
+    try testing.expectEqualStrings("user", model.settings.providers[0].key_source);
+    try testing.expectEqualStrings("user", model.available_models[0].key_source);
+}
+
+test "search backspace deletes a full UTF-8 code point" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    main.update(&model, .{ .search_input = .{ .insert_text = "café" } }, &fx);
+    try testing.expectEqualStrings("café", model.search_query);
+    main.update(&model, .{ .search_input = .delete_backward }, &fx);
+    try testing.expectEqualStrings("caf", model.search_query);
+}
+
+test "addHistoryMessage at capacity does not corrupt previous message" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    const chat = model.activeChat();
+
+    var i: usize = 0;
+    while (i < main.max_messages) : (i += 1) {
+        main.addMessage(chat, arena, "user", "msg");
+    }
+    try testing.expectEqual(main.max_messages, chat.msg_count);
+    chat._messages[chat.msg_count - 1].timestamp = "SENTINEL";
+
+    const item_json = "{\"role\":\"assistant\",\"content\":\"overflow\",\"timestamp\":\"2026-01-01T12:34:56Z\"}";
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena, item_json, .{});
+    defer parsed.deinit();
+    main.addHistoryMessage(chat, arena, parsed.value);
+
+    try testing.expectEqual(main.max_messages, chat.msg_count);
+    try testing.expectEqualStrings("SENTINEL", chat._messages[chat.msg_count - 1].timestamp);
+    try testing.expectEqualStrings("msg", chat._messages[chat.msg_count - 1].content);
+}
+
+test "stream_line ignores non-string event type without crashing" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "test");
+    const chat = model.activeChat();
+    const before = chat.msg_count;
+
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":123,\"data\":{}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":null,\"data\":{}}" } }, &fx);
+
+    try testing.expect(chat.streaming);
+    try testing.expectEqual(before, chat.msg_count);
+}
+
+test "stream_line ignores non-object data without crashing" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "test");
+    const chat = model.activeChat();
+    const before = chat.msg_count;
+
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"text_delta\",\"data\":[1,2,3]}" } }, &fx);
+
+    try testing.expect(chat.streaming);
+    try testing.expectEqual(before, chat.msg_count);
+}
+
+test "stream_line usage with float token counts does not crash" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "test");
+    const chat = model.activeChat();
+
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"usage\",\"data\":{\"usage\":{\"input_tokens\":10.0,\"output_tokens\":20.5}}}" } }, &fx);
+
+    try testing.expect(chat.streaming);
+    try testing.expectEqual(@as(u32, 10), chat.context_info.input_tokens);
+    try testing.expectEqual(@as(u32, 20), chat.context_info.output_tokens);
+}
+
+test "stream_line text_delta with non-string delta is ignored" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "test");
+    const chat = model.activeChat();
+    const before = chat.msg_count;
+
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"text_delta\",\"data\":{\"delta\":42}}" } }, &fx);
+
+    try testing.expect(chat.streaming);
+    try testing.expectEqual(before, chat.msg_count);
+}

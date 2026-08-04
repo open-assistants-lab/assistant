@@ -25,6 +25,12 @@ const grader_prompt_key: u64 = 12;
 
 const max_providers = 128;
 const max_provider_models = 512;
+const max_pending_key_deletes = 16;
+
+const KeyDeletePending = struct {
+    key: u64 = 0,
+    provider_id: []const u8 = "",
+};
 
 const ProviderInfo = struct {
     id: []const u8 = "",
@@ -67,6 +73,8 @@ const SettingsState = struct {
     key_visible: bool = false,
     key_error: []const u8 = "",
     key_testing: bool = false,
+    pending_key_deletes: [max_pending_key_deletes]KeyDeletePending = [_]KeyDeletePending{.{}} ** max_pending_key_deletes,
+    pending_key_delete_count: usize = 0,
     rubric_enabled: bool = false,
     rubric_max_iterations: u32 = 3,
     grader_prompt: []const u8 = "",
@@ -102,7 +110,7 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
 }};
 const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
 
-const max_messages = 200;
+pub const max_messages = 200;
 const max_chats = 50;
 
 pub const ThemeMode = enum { dark, light };
@@ -410,6 +418,34 @@ pub const Model = struct {
 
 pub const Effects = native_sdk.UiApp(Model, Msg).Effects;
 
+fn jsonString(v: std.json.Value) ?[]const u8 {
+    return switch (v) {
+        .string => |s| s,
+        else => null,
+    };
+}
+
+fn jsonObject(v: std.json.Value) ?std.json.ObjectMap {
+    return switch (v) {
+        .object => |o| o,
+        else => null,
+    };
+}
+
+fn jsonCount(v: std.json.Value) ?u32 {
+    switch (v) {
+        .integer => |n| {
+            if (n < 0 or n > std.math.maxInt(u32)) return null;
+            return @intCast(n);
+        },
+        .float => |f| {
+            if (f < 0 or f > @as(f64, std.math.maxInt(u32))) return null;
+            return @as(u32, @intFromFloat(f));
+        },
+        else => return null,
+    }
+}
+
 fn tokensFn(model: *const Model) canvas.DesignTokens {
     return switch (model.theme_mode) {
         .dark => theme.darkTokens(),
@@ -541,7 +577,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                         model.chats[j] = model.chats[j + 1];
                     }
                     model.chat_count -= 1;
-                    // Fix active index
+                    // Fix active index: if we removed a chat before the active one,
+                    // the active chat shifted left by one slot.
+                    if (i < model.active_chat_idx) {
+                        model.active_chat_idx -= 1;
+                    }
                     if (model.active_chat_idx >= model.chat_count) {
                         model.active_chat_idx = model.chat_count - 1;
                     }
@@ -633,8 +673,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 },
                 .clear => model.search_query = "",
                 .delete_backward => {
-                    if (model.search_query.len > 0) {
-                        model.search_query = model.search_query[0 .. model.search_query.len - 1];
+                    const q = model.search_query;
+                    if (q.len > 0) {
+                        // Walk back over UTF-8 continuation bytes (10xxxxxx) to the
+                        // leading byte so we remove a whole code point, not one byte.
+                        var end = q.len - 1;
+                        while (end > 0 and (q[end] & 0xC0) == 0x80) {
+                            end -= 1;
+                        }
+                        model.search_query = q[0..end];
                     }
                 },
                 else => {},
@@ -698,6 +745,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const chat = model.activeChat();
             if (!chat.streaming) return;
             chat.streaming = false;
+            chat.has_pending = false;
+            chat.pending_tool = "";
+            chat.pending_call_id = "";
             // Remove empty typing indicator if present
             if (chat.msg_count > 0) {
                 const last = &chat._messages[chat.msg_count - 1];
@@ -778,31 +828,33 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (std.mem.eql(u8, body, "[DONE]")) return;
             const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
             defer parsed.deinit();
-            const root = parsed.value;
-            const event_type = root.object.get("type") orelse return;
-            const data = root.object.get("data") orelse return;
+            // Validate top-level shape before any field access; malformed events
+            // are dropped rather than triggering a union-tag crash.
+            const root_obj = jsonObject(parsed.value) orelse return;
+            const event_type = jsonString(root_obj.get("type") orelse return) orelse return;
+            const data = jsonObject(root_obj.get("data") orelse return) orelse return;
 
-            if (std.mem.eql(u8, event_type.string, "text_delta")) {
-                const delta = data.object.get("delta") orelse return;
+            if (std.mem.eql(u8, event_type, "text_delta")) {
+                const delta = jsonString(data.get("delta") orelse return) orelse return;
                 if (!std.mem.eql(u8, chat.open_bubble_type, "assistant")) {
-                    addMessage(chat, model.allocator, "assistant", trimLeadingMessageWhitespace(delta.string));
+                    addMessage(chat, model.allocator, "assistant", trimLeadingMessageWhitespace(delta));
                     chat.open_bubble_type = "assistant";
                 } else {
-                    appendToLastMessage(chat, model.allocator, "assistant", delta.string);
+                    appendToLastMessage(chat, model.allocator, "assistant", delta);
                 }
-            } else if (std.mem.eql(u8, event_type.string, "reasoning_delta")) {
-                const delta = data.object.get("delta") orelse return;
+            } else if (std.mem.eql(u8, event_type, "reasoning_delta")) {
+                const delta = jsonString(data.get("delta") orelse return) orelse return;
                 removeTrailingEmptyAssistant(chat);
                 if (!std.mem.eql(u8, chat.open_bubble_type, "reasoning")) {
-                    addMessage(chat, model.allocator, "reasoning", delta.string);
+                    addMessage(chat, model.allocator, "reasoning", delta);
                     chat.open_bubble_type = "reasoning";
                 } else {
-                    appendToLastMessage(chat, model.allocator, "reasoning", delta.string);
+                    appendToLastMessage(chat, model.allocator, "reasoning", delta);
                 }
-            } else if (std.mem.eql(u8, event_type.string, "tool_input_start")) {
-                const name = data.object.get("name") orelse return;
+            } else if (std.mem.eql(u8, event_type, "tool_input_start")) {
+                const name = jsonString(data.get("name") orelse return) orelse return;
                 removeTrailingEmptyAssistant(chat);
-                const args_val = data.object.get("args");
+                const args_val = data.get("args");
                 const args_str = if (args_val) |v| blk: {
                     switch (v) {
                         .object => |obj| {
@@ -813,45 +865,45 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                         else => break :blk "",
                     }
                 } else "";
-                addToolMessage(chat, model.allocator, name.string, args_str);
+                addToolMessage(chat, model.allocator, name, args_str);
                 chat.open_bubble_type = "tool";
-                chat.status_text = std.fmt.allocPrint(model.allocator, "{s}: running...", .{name.string}) catch name.string;
-            } else if (std.mem.eql(u8, event_type.string, "tool_result")) {
-                const content = data.object.get("content") orelse return;
-                const name = data.object.get("name") orelse return;
+                chat.status_text = std.fmt.allocPrint(model.allocator, "{s}: running...", .{name}) catch name;
+            } else if (std.mem.eql(u8, event_type, "tool_result")) {
+                const content = jsonString(data.get("content") orelse return) orelse return;
+                const name = jsonString(data.get("name") orelse return) orelse return;
                 if (findRunningToolBubble(chat)) |tb| {
                     tb.tool_status = model.allocator.dupe(u8, "done") catch return;
-                    tb.tool_result = model.allocator.dupe(u8, content.string) catch return;
+                    tb.tool_result = model.allocator.dupe(u8, content) catch return;
                     tb.collapsed = true;
                 }
-                chat.status_text = std.fmt.allocPrint(model.allocator, "{s}: done", .{name.string}) catch name.string;
-            } else if (std.mem.eql(u8, event_type.string, "interrupt")) {
-                const tool = data.object.get("tool") orelse return;
-                const call_id = data.object.get("call_id") orelse return;
+                chat.status_text = std.fmt.allocPrint(model.allocator, "{s}: done", .{name}) catch name;
+            } else if (std.mem.eql(u8, event_type, "interrupt")) {
+                const tool = jsonString(data.get("tool") orelse return) orelse return;
+                const call_id = jsonString(data.get("call_id") orelse return) orelse return;
                 chat.has_pending = true;
-                chat.pending_tool = model.allocator.dupe(u8, tool.string) catch return;
-                chat.pending_call_id = model.allocator.dupe(u8, call_id.string) catch return;
-            } else if (std.mem.eql(u8, event_type.string, "rubric_evaluation_start")) {
+                chat.pending_tool = model.allocator.dupe(u8, tool) catch return;
+                chat.pending_call_id = model.allocator.dupe(u8, call_id) catch return;
+            } else if (std.mem.eql(u8, event_type, "rubric_evaluation_start")) {
                 chat.status_text = "Checking rubric...";
-            } else if (std.mem.eql(u8, event_type.string, "rubric_evaluation_end")) {
-                const result = data.object.get("result") orelse {
+            } else if (std.mem.eql(u8, event_type, "rubric_evaluation_end")) {
+                const result = jsonString(data.get("result") orelse return) orelse {
                     chat.status_text = "";
                     return;
                 };
-                chat.rubric_status = model.allocator.dupe(u8, result.string) catch "";
+                chat.rubric_status = model.allocator.dupe(u8, result) catch "";
                 chat.rubric_attempts += 1;
-                if (std.mem.eql(u8, result.string, "satisfied")) {
+                if (std.mem.eql(u8, result, "satisfied")) {
                     chat.status_text = "Rubric passed";
-                } else if (std.mem.eql(u8, result.string, "needs_revision")) {
+                } else if (std.mem.eql(u8, result, "needs_revision")) {
                     chat.status_text = std.fmt.allocPrint(model.allocator, "Revising... ({d})", .{chat.rubric_attempts}) catch "Revising...";
-                } else if (std.mem.eql(u8, result.string, "grader_error")) {
+                } else if (std.mem.eql(u8, result, "grader_error")) {
                     chat.status_text = "Rubric check failed";
-                } else if (std.mem.eql(u8, result.string, "invalid_rubric")) {
+                } else if (std.mem.eql(u8, result, "invalid_rubric")) {
                     chat.status_text = "Rubric configuration invalid";
                 } else {
                     chat.status_text = "";
                 }
-            } else if (std.mem.eql(u8, event_type.string, "response_revision_start")) {
+            } else if (std.mem.eql(u8, event_type, "response_revision_start")) {
                 // Remove last assistant bubble for revision
                 if (chat.msg_count > 0) {
                     var i: usize = chat.msg_count;
@@ -866,25 +918,22 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 }
                 chat.open_bubble_type = "";
                 chat.status_text = "Revising...";
-            } else if (std.mem.eql(u8, event_type.string, "context_compressed")) {
+            } else if (std.mem.eql(u8, event_type, "context_compressed")) {
                 chat.compression_animation_ticks = 8;
-            } else if (std.mem.eql(u8, event_type.string, "usage")) {
-                const usage_data = data.object.get("usage") orelse return;
-                if (usage_data.object.get("input_tokens")) |it| {
-                    chat.context_info.input_tokens = @intCast(it.integer);
+            } else if (std.mem.eql(u8, event_type, "usage")) {
+                const usage_data = jsonObject(data.get("usage") orelse return) orelse return;
+                if (usage_data.get("input_tokens")) |it| {
+                    if (jsonCount(it)) |n| chat.context_info.input_tokens = n;
                 }
-                if (usage_data.object.get("output_tokens")) |ot| {
-                    chat.context_info.output_tokens = @intCast(ot.integer);
+                if (usage_data.get("output_tokens")) |ot| {
+                    if (jsonCount(ot)) |n| chat.context_info.output_tokens = n;
                 }
-            } else if (std.mem.eql(u8, event_type.string, "done")) {
+            } else if (std.mem.eql(u8, event_type, "done")) {
                 // Extract RunResult from done event
-                const result_data = data.object.get("result") orelse return;
-                if (result_data.object.get("verification")) |verification| {
-                    const status_val = verification.object.get("status") orelse return;
-                    const status_str = switch (status_val) {
-                        .string => |s| s,
-                        else => return,
-                    };
+                const result_data = jsonObject(data.get("result") orelse return) orelse return;
+                if (result_data.get("verification")) |verification_val| {
+                    const verification = jsonObject(verification_val) orelse return;
+                    const status_str = jsonString(verification.get("status") orelse return) orelse return;
                     if (std.mem.eql(u8, status_str, "satisfied")) {
                         chat.rubric_status = "Rubric passed";
                     } else if (std.mem.eql(u8, status_str, "max_attempts_reached")) {
@@ -897,40 +946,40 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                         chat.rubric_status = "Rubric cancelled";
                     }
                 }
-                if (result_data.object.get("model")) |model_val| {
-                    chat.context_info.model = model.allocator.dupe(u8, model_val.string) catch "";
+                if (result_data.get("model")) |model_val| {
+                    if (jsonString(model_val)) |model_str| {
+                        chat.context_info.model = model.allocator.dupe(u8, model_str) catch "";
+                    }
                 }
-            } else if (std.mem.eql(u8, event_type.string, "error")) {
-                const message = data.object.get("message") orelse {
-                    const code = data.object.get("code") orelse return;
-                    if (std.mem.eql(u8, code.string, "cancelled")) {
-                        chat.streaming = false;
-                        chat.open_bubble_type = "";
-                        chat.status_text = "";
-                        if (chat.msg_count > 0) {
-                            const last = &chat._messages[chat.msg_count - 1];
-                            if (std.mem.eql(u8, last.role, "assistant") and last.content.len == 0) {
-                                chat.msg_count -= 1;
-                                chat.messages = chat._messages[0..chat.msg_count];
-                            }
-                        }
+            } else if (std.mem.eql(u8, event_type, "error")) {
+                if (data.get("message")) |message_val| {
+                    const message = jsonString(message_val) orelse return;
+                    if (chat.open_bubble_type.len > 0 and chat.msg_count > 0) {
+                        appendToLastMessage(chat, model.allocator, chat.open_bubble_type, message);
+                    } else {
+                        addMessage(chat, model.allocator, "system", message);
                     }
                     return;
-                };
-                if (chat.open_bubble_type.len > 0 and chat.msg_count > 0) {
-                    appendToLastMessage(chat, model.allocator, chat.open_bubble_type, message.string);
-                } else {
-                    addMessage(chat, model.allocator, "system", message.string);
+                }
+                const code = jsonString(data.get("code") orelse return) orelse return;
+                if (std.mem.eql(u8, code, "cancelled")) {
+                    chat.streaming = false;
+                    chat.open_bubble_type = "";
+                    chat.status_text = "";
+                    if (chat.msg_count > 0) {
+                        const last = &chat._messages[chat.msg_count - 1];
+                        if (std.mem.eql(u8, last.role, "assistant") and last.content.len == 0) {
+                            chat.msg_count -= 1;
+                            chat.messages = chat._messages[0..chat.msg_count];
+                        }
+                    }
                 }
             }
         },
         .stream_done => |response| {
-            const chat = model.findChatByFetchKey(response.key) orelse {
-                // Fallback: finalize the active chat if it's streaming
-                const ac = model.activeChat();
-                if (ac.streaming) finalizeStream(ac);
-                return;
-            };
+            // Ignore completion events whose key matches no streaming chat.
+            // Finalizing the active chat here would kill an unrelated, newer stream.
+            const chat = model.findChatByFetchKey(response.key) orelse return;
             // A3: Surface stream errors
             if (response.outcome != .ok) {
                 const err_msg = std.fmt.allocPrint(model.allocator, "Stream error: {s}", .{@tagName(response.outcome)}) catch "Stream error";
@@ -970,11 +1019,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             chat.streaming = false;
         },
         .approve_done => |response| {
-            const chat = model.findChatByFetchKey(response.key) orelse {
-                const ac = model.activeChat();
-                if (ac.streaming) finalizeStream(ac);
-                return;
-            };
+            const chat = model.findChatByFetchKey(response.key) orelse return;
             finalizeStream(chat);
         },
         .reject_done, .cancel_done => {},
@@ -1631,10 +1676,19 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
             for (0..model.settings.provider_count) |i| {
                 if (model.settings.providers[i].adding_key and model.settings.providers[i].key_input.len > 0) {
-                    model.settings.providers[i].has_key = true;
-                    model.settings.providers[i].adding_key = false;
-                    model.settings.providers[i].key_input = "";
-                    model.settings.providers[i].key_visible = false;
+                    const prov = &model.settings.providers[i];
+                    prov.has_key = true;
+                    prov.via_env = false;
+                    prov.key_source = "user";
+                    prov.adding_key = false;
+                    prov.key_input = "";
+                    prov.key_visible = false;
+                    for (0..prov.model_count) |mi| {
+                        const model_idx = prov.model_indices[mi];
+                        if (model_idx < model.available_model_count) {
+                            model.available_models[model_idx].key_source = "user";
+                        }
+                    }
                     break;
                 }
             }
@@ -1643,12 +1697,17 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (idx >= model.settings.provider_count) return;
             const p = &model.settings.providers[idx];
             if (p.via_env) return;
+            const provider_id = p.id;
             const url = std.fmt.allocPrint(
                 model.allocator,
                 "http://127.0.0.1:8080/settings/api-keys/{s}?user_id=native_sdk_chat",
-                .{p.id},
+                .{provider_id},
             ) catch return;
             const fetch_key = model.allocFetchKey();
+            if (model.settings.pending_key_delete_count < max_pending_key_deletes) {
+                model.settings.pending_key_deletes[model.settings.pending_key_delete_count] = .{ .key = fetch_key, .provider_id = provider_id };
+                model.settings.pending_key_delete_count += 1;
+            }
             fx.fetch(.{
                 .key = fetch_key,
                 .url = url,
@@ -1660,10 +1719,36 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .key_deleted => |response| {
             if (response.outcome != .ok) return;
+            // Correlate this response with the provider whose key was deleted.
+            var provider_id: []const u8 = "";
+            var found: ?usize = null;
+            for (0..model.settings.pending_key_delete_count) |i| {
+                if (model.settings.pending_key_deletes[i].key == response.key) {
+                    provider_id = model.settings.pending_key_deletes[i].provider_id;
+                    found = i;
+                    break;
+                }
+            }
+            if (found) |fi| {
+                var k = fi;
+                while (k + 1 < model.settings.pending_key_delete_count) : (k += 1) {
+                    model.settings.pending_key_deletes[k] = model.settings.pending_key_deletes[k + 1];
+                }
+                model.settings.pending_key_delete_count -= 1;
+            } else {
+                return;
+            }
             for (0..model.settings.provider_count) |i| {
-                if (model.settings.providers[i].has_key and !model.settings.providers[i].via_env) {
-                    model.settings.providers[i].has_key = false;
-                    model.settings.providers[i].model_count = 0;
+                const prov = &model.settings.providers[i];
+                if (std.mem.eql(u8, prov.id, provider_id)) {
+                    prov.has_key = false;
+                    prov.key_source = "none";
+                    for (0..prov.model_count) |mi| {
+                        const model_idx = prov.model_indices[mi];
+                        if (model_idx < model.available_model_count) {
+                            model.available_models[model_idx].key_source = "none";
+                        }
+                    }
                     break;
                 }
             }
@@ -2326,7 +2411,7 @@ fn extractTimestamp(item: std.json.Value, allocator: std.mem.Allocator) []const 
     return "";
 }
 
-fn addHistoryMessage(chat: *Chat, allocator: std.mem.Allocator, item: std.json.Value) void {
+pub fn addHistoryMessage(chat: *Chat, allocator: std.mem.Allocator, item: std.json.Value) void {
     const role_val = item.object.get("role") orelse return;
     const content_val = item.object.get("content") orelse return;
     const role_str = switch (role_val) {
@@ -2365,12 +2450,14 @@ fn addHistoryMessage(chat: *Chat, allocator: std.mem.Allocator, item: std.json.V
         chat.messages = chat._messages[0..chat.msg_count];
     } else if (std.mem.eql(u8, role_str, "reasoning")) {
         if (content_str.len == 0) return;
+        if (chat.msg_count >= max_messages) return;
         addMessage(chat, allocator, role_str, content_str);
         chat._messages[chat.msg_count - 1].collapsed = true;
         chat._messages[chat.msg_count - 1].timestamp = extractTimestamp(item, allocator);
     } else {
         const trimmed = std.mem.trim(u8, content_str, " \n\r\t");
         if (trimmed.len == 0) return;
+        if (chat.msg_count >= max_messages) return;
         addMessage(chat, allocator, role_str, trimmed);
         chat._messages[chat.msg_count - 1].timestamp = extractTimestamp(item, allocator);
     }
