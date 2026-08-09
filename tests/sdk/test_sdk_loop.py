@@ -495,7 +495,7 @@ class TestAgentLoopStreaming:
             chunks.append(chunk)
 
         types = [c.type for c in chunks]
-        assert "ai_token" in types
+        assert "text_delta" in types
         assert "done" in types
 
     async def test_stream_with_tool_calls(self):
@@ -1729,3 +1729,87 @@ class TestContextTelemetry:
         events = [event async for event in loop.run_stream([Message.user("hi")])]
         assert snapshots == []
         assert events[-1].type == "done"
+
+
+@pytest.mark.asyncio
+async def test_run_stream_aclose_from_different_context_does_not_raise():
+    """Regression: run_stream's finally block calls _current_agent_loop.reset(token),
+    but when the async generator is torn down (aclose) from a different async
+    context (as FastAPI's StreamingResponse does on client disconnect), the
+    token was created in a different contextvars.Context and .reset() raises
+    ValueError. The teardown must not crash — this is the production SSE
+    disconnect path.
+
+    What we can and do guarantee:
+      - aclose from a different context completes without raising ValueError.
+      - the generator is fully closed afterwards.
+    What we deliberately do NOT assert:
+      - the originating context's ContextVar state after cross-context
+        teardown (Python contextvars cannot reach into a live foreign context
+        to mutate it; the originating context is being discarded by the
+        caller in the real SSE case).
+    """
+    from src.sdk.loop import get_current_agent_loop
+
+    provider = MockProvider(responses=[Message.assistant(content="hello")])
+    provider.set_stream_events(
+        [
+            [
+                StreamChunk.text_delta(content="hel"),
+                StreamChunk.text_delta(content="lo"),
+                StreamChunk.done(content="hello"),
+            ]
+        ]
+    )
+    loop = AgentLoop(provider=provider, tools=[])
+
+    # Start iterating in the current task, consume one chunk, then suspend.
+    gen = loop.run_stream([Message.user("hi")])
+
+    async def consume_one() -> StreamChunk | None:
+        async for chunk in gen:
+            return chunk
+        return None
+
+    first = await consume_one()
+    assert first is not None
+    # While streaming, the loop is registered as the current agent loop.
+    assert get_current_agent_loop() is loop
+
+    # Tear down the generator from a DIFFERENT task context, exactly as
+    # FastAPI does when a streaming client disconnects. Before the fix this
+    # raised: ValueError: <Token> was created in a different Context, which
+    # escaped the SSE handler and corrupted the response.
+    async def teardown_in_other_context() -> None:
+        await gen.aclose()
+
+    await asyncio.wait_for(
+        asyncio.get_event_loop().create_task(teardown_in_other_context()),
+        timeout=5.0,
+    )
+
+    # The generator must be fully closed (StopAsyncIteration, not more chunks).
+    drained: list[StreamChunk] = []
+    async for leftover in gen:
+        drained.append(leftover)
+    assert drained == [], "generator should yield no more chunks after cross-context aclose"
+
+
+@pytest.mark.asyncio
+async def test_run_stream_completes_normally_resets_context_var():
+    """Companion: when run_stream completes normally (full iteration), the
+    context var must be reset to None afterwards. Guards against the fix
+    accidentally leaking the loop reference.
+    """
+    from src.sdk.loop import _current_agent_loop
+
+    provider = MockProvider(responses=[Message.assistant(content="ok")])
+    provider.set_stream_events(
+        [[StreamChunk.text_delta(content="ok"), StreamChunk.done(content="ok")]]
+    )
+    loop = AgentLoop(provider=provider, tools=[])
+
+    async for _ in loop.run_stream([Message.user("Reply exactly: ok")]):
+        pass
+
+    assert _current_agent_loop.get() is None

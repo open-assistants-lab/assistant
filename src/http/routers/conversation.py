@@ -610,6 +610,7 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
             response=response,
             reasoning=reasoning_text,
             verbose_data={"canvas_blocks": canvas_blocks},
+            tool_calls=result.tool_calls if result.tool_calls else None,
             verification=verification_verdict,
             usage=usage_data,
         )

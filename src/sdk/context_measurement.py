@@ -43,20 +43,23 @@ def estimate_message_tokens(
         content = message.content if isinstance(message.content, str) else _stable_json(message.content)
         total += estimator(content)
 
-        if message.reasoning:
-            total += estimator(message.reasoning)
+        reasoning = getattr(message, "reasoning", None)
+        if reasoning:
+            total += estimator(reasoning)
 
         if message.role == "assistant":
-            for tool_call in message.tool_calls:
+            for tool_call in getattr(message, "tool_calls", None) or ():
                 total += estimator(tool_call.id)
                 total += estimator(tool_call.name)
                 total += estimator(_stable_json(tool_call.arguments))
 
         if message.role == "tool":
-            if message.tool_call_id:
-                total += estimator(message.tool_call_id)
-            if message.name:
-                total += estimator(message.name)
+            tool_call_id = getattr(message, "tool_call_id", None)
+            if tool_call_id:
+                total += estimator(tool_call_id)
+            name = getattr(message, "name", None)
+            if name:
+                total += estimator(name)
 
     return total
 

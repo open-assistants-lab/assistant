@@ -6,7 +6,7 @@ import math
 import re
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -303,6 +303,7 @@ class RunResult(ContractModel):
     last_call_context: ContextSnapshot | None = None
     next_context: ContextSnapshot | None = None
     persisted_at: datetime | None = None
+    tool_calls: list[dict[str, Any]] = Field(default_factory=list)
 
     @field_validator(
         "persisted_at", mode="before", json_schema_input_type=datetime | str | None

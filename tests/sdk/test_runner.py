@@ -914,7 +914,11 @@ async def test_create_sdk_loop_rebuilds_tool_index_when_capabilities_change(monk
             self.cleared = False
 
         def count(self):
-            return 1 if not self.cleared else 0
+            # Simulates a persisted index that already has data — the runner
+            # should NOT clear it (get_or_create_index handles clearing when
+            # source hashes change). With count() > 0 the re-indexing loop
+            # is skipped, which is the fast path after the fix.
+            return 1
 
         def clear(self):
             self.cleared = True
@@ -949,8 +953,12 @@ async def test_create_sdk_loop_rebuilds_tool_index_when_capabilities_change(monk
 
         await create_sdk_loop(user_id="test_user", workspace_id="ignored-workspace")
 
-    assert fake_index.cleared is True
-    assert "demo_lookup" in fake_index.indexed
+    # The runner must NOT clear a persisted index — that would force a ~23s
+    # chromadb re-embedding of all tools on every new session. Clearing is
+    # the responsibility of get_or_create_index when source hashes change.
+    assert fake_index.cleared is False
+    # Since the index already had data (count() > 0), no re-indexing occurs.
+    assert fake_index.indexed == []
 
 
 def test_tool_reload_filters_disabled_mcp_and_connector_tools(monkeypatch, tmp_path):

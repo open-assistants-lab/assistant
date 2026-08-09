@@ -202,34 +202,54 @@ class LangfuseTracer:
             from langfuse import propagate_attributes
 
             # Use start_as_current_observation so child observations (LLM calls,
-            # tool spans, middleware spans) are correctly nested under agent_run
-            with client.start_as_current_observation(as_type="span", name="agent_run") as trace:
-                with propagate_attributes(
-                    user_id=user_id,
-                    session_id=session_id,
-                    tags=["agent"],
-                ):
-                    try:
-                        trace.update(
-                            input=[
-                                m.model_dump() if hasattr(m, "model_dump") else str(m)
-                                for m in messages[:5]
-                            ]
-                        )
-                    except Exception:
-                        pass
-                    async for chunk in original_run_stream(messages):
-                        yield chunk
-                    if loop.state and loop.state.messages:
-                        last = loop.state.messages[-1]
-                        if last.role == "assistant":
-                            content = (
-                                last.content if isinstance(last.content, str) else str(last.content)
+            # tool spans, middleware spans) are correctly nested under agent_run.
+            #
+            # Cross-context teardown robustness: both context managers below set
+            # OpenTelemetry ContextVars internally. When this async generator is
+            # torn down via aclose() from a different task (FastAPI
+            # StreamingResponse client disconnect), GeneratorExit lands here and
+            # the `with` __exit__ calls opentelemetry.context.detach(token),
+            # which raises ValueError because the token was created in a
+            # different contextvars.Context. We wrap the whole block in a
+            # try/except that suppresses that ValueError so the SSE handler
+            # never sees it; the trace is abandoned (correct — the stream was
+            # cancelled) and the originating task's context is being discarded.
+            try:
+                with client.start_as_current_observation(as_type="span", name="agent_run") as trace:
+                    with propagate_attributes(
+                        user_id=user_id,
+                        session_id=session_id,
+                        tags=["agent"],
+                    ):
+                        try:
+                            trace.update(
+                                input=[
+                                    m.model_dump() if hasattr(m, "model_dump") else str(m)
+                                    for m in messages[:5]
+                                ]
                             )
-                            try:
-                                trace.update(output=content[:500])
-                            except Exception:
-                                pass
+                        except Exception:
+                            pass
+                        async for chunk in original_run_stream(messages):
+                            yield chunk
+                        if loop.state and loop.state.messages:
+                            last = loop.state.messages[-1]
+                            if last.role == "assistant":
+                                content = (
+                                    last.content if isinstance(last.content, str) else str(last.content)
+                                )
+                                try:
+                                    trace.update(output=content[:500])
+                                except Exception:
+                                    pass
+            except ValueError as exc:
+                # Suppress the OTel cross-context detach error on
+                # GeneratorExit/aclose. Only suppress when it's the contextvar
+                # token mismatch (the known cross-context teardown case);
+                # re-raise any other ValueError.
+                if "was created in a different Context" in str(exc):
+                    return
+                raise
 
         loop.run = traced_run
         loop.run_stream = traced_run_stream

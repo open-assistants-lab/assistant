@@ -186,10 +186,12 @@ class RubricMiddleware:
         grader_provider: Any,
         grader_prompt: str,
         max_iterations: int = 3,
+        grader_model_id: str | None = None,
     ) -> None:
         self._grader_provider = grader_provider
         self._grader_prompt = grader_prompt
         self._max_iterations = max_iterations
+        self._grader_model_id = grader_model_id
         self._loop: AgentLoop | None = None
 
     async def _ensure_loop(self) -> AgentLoop:
@@ -259,4 +261,7 @@ class RubricMiddleware:
 
     @property
     def grader_model_id(self) -> str:
-        return self._grader_provider.model_id
+        if self._grader_model_id:
+            return self._grader_model_id
+        # Fallback: some test/legacy providers carry model_id directly.
+        return getattr(self._grader_provider, "model_id", "unknown:grader")

@@ -426,8 +426,11 @@ async def create_sdk_loop(
         connectkit_bridge=connectkit_bridge,
     )
 
-    if hasattr(idx, "clear"):
-        idx.clear()
+    # NOTE: do NOT call idx.clear() here. get_or_create_index already clears
+    # when source hashes change (needs_reindex). A blanket clear here wipes the
+    # persisted index on every new session, forcing a ~23s chromadb re-embedding
+    # of all 82 tools. The idx.count() == 0 check below correctly skips
+    # re-indexing when the persisted index already has data.
 
     if idx.count() == 0:
         # Index native tools
@@ -544,29 +547,10 @@ async def create_sdk_loop(
             )
         )
 
-    # Verification (rubric) middleware
-    verification_config = settings.verification
-    if verification_config.enabled is True:
-        from src.sdk.middleware_rubric import RubricMiddleware
-
-        grader_model = verification_config.grader_model or model_id
-        grader_provider = create_model_from_config(
-            grader_model, provider_keys=provider_keys, user_id=user_id
-        )
-
-        grader_tool_defs: list[Any] = []
-        if verification_config.grader_tools:
-            native_by_name = {td.name: td for td in get_native_tools()}
-            for tool_name in verification_config.grader_tools:
-                if tool_name in native_by_name:
-                    grader_tool_defs.append(native_by_name[tool_name])
-
-        rubric_mw = RubricMiddleware(
-            grader_provider=grader_provider,
-            grader_prompt=verification_config.grader_system_prompt or "",
-            max_iterations=verification_config.max_iterations,
-        )
-        middlewares.append(rubric_mw)
+    # Verification (rubric) grading is handled by RunService, which creates its
+    # own RubricMiddleware and calls grade() after the main loop runs. RubricMiddleware
+    # is not a Middleware subclass (no name/wrap_tool_call), so it must NOT be added
+    # to the loop's middlewares list — doing so crashes every tool call.
 
     t4 = time.monotonic()
 

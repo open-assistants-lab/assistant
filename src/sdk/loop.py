@@ -22,6 +22,7 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import inspect
 import json
 import logging
@@ -74,6 +75,44 @@ ContextSink = Callable[[ContextSnapshot], Awaitable[None] | None]
 _canonical_model_adapter = TypeAdapter(CanonicalModel)
 
 _current_agent_loop: ContextVar[AgentLoop | None] = ContextVar("_current_agent_loop", default=None)
+
+
+def _bind_current_agent_loop(loop: AgentLoop | None) -> contextvars.Token[AgentLoop | None]:
+    """Set the current agent loop ContextVar and return a token for restoration.
+
+    Used by run()/run_stream()/run_single(). The token is only valid for
+    ``reset`` in the same context that called ``set``; async generators torn
+    down from a different context must use :func:`_restore_current_agent_loop`.
+    """
+    return _current_agent_loop.set(loop)
+
+
+def _restore_current_agent_loop(
+    token: contextvars.Token[AgentLoop | None] | None,
+    previous: AgentLoop | None,
+    owner_context: contextvars.Context | None = None,
+) -> None:
+    """Restore the current agent loop ContextVar after a run.
+
+    Prefers ``token.reset()`` (cheap, restores to the exact prior value) but
+    falls back when the token was created in a different ``contextvars.Context``
+    — which happens when an async generator (``run_stream``) is torn down via
+    ``aclose()`` from a different task than the one that started it (e.g.
+    FastAPI ``StreamingResponse`` client disconnect). In that cross-context
+    case ``reset`` raises ``ValueError``; we catch it and ``set(previous)``
+    in the current (teardown) context so we don't leave a stale reference
+    there either. The originating context is being discarded by the caller,
+    so not resetting it there is acceptable — the important guarantees are
+    (1) no exception escapes the teardown, and (2) normal completion fully
+    resets the var.
+    """
+    if token is None:
+        return
+    try:
+        _current_agent_loop.reset(token)
+    except ValueError:
+        # Token was created in a different context (cross-context aclose).
+        _current_agent_loop.set(previous)
 
 
 def get_current_agent_loop() -> AgentLoop | None:
@@ -450,7 +489,8 @@ class AgentLoop:
             try:
                 tc.arguments = mw.wrap_tool_call(tc.name, tc.arguments)
             except Exception:
-                logger.warning(f"wrap_tool_call error in {mw.name} for {tc.name}", exc_info=True)
+                mw_name = getattr(mw, "name", type(mw).__name__)
+                logger.warning(f"wrap_tool_call error in {mw_name} for {tc.name}", exc_info=True)
 
         if self.trace_provider:
             async with self.trace_provider.start_span(SpanType.TOOL_EXECUTION, tc.name) as span:
@@ -503,7 +543,8 @@ class AgentLoop:
                 try:
                     tc_args = mw.wrap_tool_call(tc.name, tc_args)
                 except Exception:
-                    logger.warning(f"wrap_tool_call error in {mw.name} for {tc.name}", exc_info=True)
+                    mw_name = getattr(mw, "name", type(mw).__name__)
+                    logger.warning(f"wrap_tool_call error in {mw_name} for {tc.name}", exc_info=True)
 
             tc_with_args = ToolCall(id=tc.id, name=tc.name, arguments=tc_args)
 
@@ -586,7 +627,8 @@ class AgentLoop:
             try:
                 tc.arguments = mw.wrap_tool_call(tc.name, tc.arguments)
             except Exception:
-                logger.warning(f"wrap_tool_call error in {mw.name} for {tc.name}", exc_info=True)
+                mw_name = getattr(mw, "name", type(mw).__name__)
+                logger.warning(f"wrap_tool_call error in {mw_name} for {tc.name}", exc_info=True)
 
         if self.trace_provider:
             async with self.trace_provider.start_span(
@@ -647,7 +689,8 @@ class AgentLoop:
                 try:
                     tc_args = mw.wrap_tool_call(tc.name, tc_args)
                 except Exception:
-                    logger.warning(f"wrap_tool_call error in {mw.name} for {tc.name}", exc_info=True)
+                    mw_name = getattr(mw, "name", type(mw).__name__)
+                    logger.warning(f"wrap_tool_call error in {mw_name} for {tc.name}", exc_info=True)
 
             tc_with_args = ToolCall(id=tc.id, name=tc.name, arguments=tc_args)
 
@@ -992,11 +1035,12 @@ class AgentLoop:
 
     async def run(self, messages: list[Message]) -> list[Message]:
         """Run the agent loop to completion. Returns final message list."""
-        token = _current_agent_loop.set(self)
+        previous = _current_agent_loop.get()
+        token = _bind_current_agent_loop(self)
         try:
             return await self._run_impl(messages)
         finally:
-            _current_agent_loop.reset(token)
+            _restore_current_agent_loop(token, previous)
 
     async def _run_impl(self, messages: list[Message]) -> list[Message]:
         """Internal run implementation (wrapped by run() for ContextVar lifecycle)."""
@@ -1175,7 +1219,8 @@ class AgentLoop:
         cost_tracker = CostTracker()
         all_tool_calls: list[dict[str, Any]] = []
 
-        token = _current_agent_loop.set(self)
+        previous = _current_agent_loop.get()
+        token = _bind_current_agent_loop(self)
 
         await self._run_hooks("abefore_agent", state)
 
@@ -1189,7 +1234,7 @@ class AgentLoop:
                 async for chunk in self._run_stream_inner(state, cost_tracker, all_tool_calls):
                     yield chunk
         finally:
-            _current_agent_loop.reset(token)
+            _restore_current_agent_loop(token, previous)
 
     async def _run_stream_inner(
         self,
@@ -1516,7 +1561,6 @@ class AgentLoop:
             if not in_text_block:
                 yield StreamChunk.text_start()
             yield StreamChunk.text_delta(content=chunk.content)
-            yield StreamChunk.ai_token(content=chunk.content)
             content_parts.append(chunk.content)
 
         elif canonical == "tool_input_start":
@@ -1556,8 +1600,8 @@ class AgentLoop:
         elif canonical == "reasoning_delta":
             if not in_reasoning_block:
                 yield StreamChunk.reasoning_start()
+                in_reasoning_block = True
             yield StreamChunk.reasoning_delta(content=chunk.content)
-            yield StreamChunk.reasoning(content=chunk.content)
             reasoning_parts.append(chunk.content)
 
         elif canonical == "reasoning_start":
@@ -1583,7 +1627,8 @@ class AgentLoop:
 
     async def run_single(self, messages: list[Message]) -> Message:
         """Single LLM call — no tool loop. For summarization, extraction, etc."""
-        token = _current_agent_loop.set(self)
+        previous = _current_agent_loop.get()
+        token = _bind_current_agent_loop(self)
         try:
             prepared = list(messages)
             if self.system_prompt:
@@ -1601,4 +1646,4 @@ class AgentLoop:
 
             return Message.assistant(content=content)
         finally:
-            _current_agent_loop.reset(token)
+            _restore_current_agent_loop(token, previous)

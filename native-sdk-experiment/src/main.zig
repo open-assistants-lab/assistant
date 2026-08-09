@@ -111,7 +111,7 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
 const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
 
 pub const max_messages = 200;
-const max_chats = 50;
+const max_chats = 100;
 
 pub const ThemeMode = enum { dark, light };
 
@@ -185,6 +185,12 @@ pub const Chat = struct {
     rubric_attempts: u32 = 0,
     compression_animation_ticks: u32 = 0,
     context_info: ContextInfo = .{},
+    // Cached group extents for the virtual list. Recomputed when messages change.
+    // group_extents[i] = height of group i. group_count = number of groups.
+    _group_extents: [max_messages]f32 = undefined,
+    _group_extents_count: usize = 0,
+    _group_extents_msg_count: usize = 0,  // msg_count when cache was built
+    _group_extents_scroll_gen: u64 = 0,   // scroll_gen when cache was built
 
     pub fn hasUnread(self: *const Chat) bool {
         return self.unread_count > 0;
@@ -453,6 +459,265 @@ fn tokensFn(model: *const Model) canvas.DesignTokens {
     };
 }
 
+/// Process a single SSE event body (the JSON after `data: `).
+/// Used by both stream_line (live streaming) and stream_done (buffered fallback).
+fn processSSEEvent(model: *Model, chat: *Chat, sse_body: []const u8) void {
+    const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, sse_body, .{}) catch return;
+    defer parsed.deinit();
+    const root_obj = jsonObject(parsed.value) orelse return;
+    const event_type = jsonString(root_obj.get("type") orelse return) orelse return;
+    const data = jsonObject(root_obj.get("data") orelse return) orelse return;
+
+    if (std.mem.eql(u8, event_type, "text_delta")) {
+        const delta = jsonString(data.get("delta") orelse return) orelse return;
+        if (!std.mem.eql(u8, chat.open_bubble_type, "assistant")) {
+            addMessage(chat, model.allocator, "assistant", trimLeadingMessageWhitespace(delta));
+            chat.open_bubble_type = "assistant";
+        } else {
+            appendToLastMessage(chat, model.allocator, "assistant", delta);
+        }
+    } else if (std.mem.eql(u8, event_type, "reasoning_delta")) {
+        const delta = jsonString(data.get("delta") orelse return) orelse return;
+        removeTrailingEmptyAssistant(chat);
+        if (!std.mem.eql(u8, chat.open_bubble_type, "reasoning")) {
+            addMessage(chat, model.allocator, "reasoning", delta);
+            chat.open_bubble_type = "reasoning";
+        } else {
+            appendToLastMessage(chat, model.allocator, "reasoning", delta);
+        }
+    } else if (std.mem.eql(u8, event_type, "tool_input_start")) {
+        const name = jsonString(data.get("name") orelse return) orelse return;
+        removeTrailingEmptyAssistant(chat);
+        const args_val = data.get("args");
+        const args_str = if (args_val) |v| blk: {
+            switch (v) {
+                .object => |obj| {
+                    if (obj.count() == 0) break :blk "";
+                    break :blk std.fmt.allocPrint(model.allocator, "{any}", .{v}) catch "";
+                },
+                .string => |s| break :blk s,
+                else => break :blk "",
+            }
+        } else "";
+        addToolMessage(chat, model.allocator, name, args_str);
+        chat.open_bubble_type = "tool";
+        chat.status_text = std.fmt.allocPrint(model.allocator, "{s}: running...", .{name}) catch name;
+    } else if (std.mem.eql(u8, event_type, "tool_result")) {
+        const content = jsonString(data.get("content") orelse return) orelse return;
+        const name = jsonString(data.get("name") orelse return) orelse return;
+        if (findRunningToolBubble(chat)) |tb| {
+            tb.tool_status = model.allocator.dupe(u8, "done") catch return;
+            tb.tool_result = model.allocator.dupe(u8, content) catch return;
+            tb.collapsed = true;
+        }
+        chat.status_text = std.fmt.allocPrint(model.allocator, "{s}: done", .{name}) catch name;
+    } else if (std.mem.eql(u8, event_type, "interrupt")) {
+        const tool = jsonString(data.get("tool") orelse return) orelse return;
+        const call_id = jsonString(data.get("call_id") orelse return) orelse return;
+        chat.has_pending = true;
+        chat.pending_tool = model.allocator.dupe(u8, tool) catch return;
+        chat.pending_call_id = model.allocator.dupe(u8, call_id) catch return;
+    } else if (std.mem.eql(u8, event_type, "rubric_evaluation_start")) {
+        chat.status_text = "Checking rubric...";
+        removeTrailingEmptyAssistant(chat);
+        addMessage(chat, model.allocator, "system", "🔎 Checking response against rubric...");
+    } else if (std.mem.eql(u8, event_type, "rubric_evaluation_end")) {
+        const eval_obj = jsonObject(data.get("evaluation") orelse return) orelse return;
+        const result = jsonString(eval_obj.get("result") orelse return) orelse {
+            chat.status_text = "";
+            return;
+        };
+        chat.rubric_status = model.allocator.dupe(u8, result) catch "";
+        chat.rubric_attempts += 1;
+
+        // Build a visible rubric result message
+        const explanation_val = eval_obj.get("explanation");
+        const explanation: []const u8 = if (explanation_val) |ev| switch (ev) {
+            .string => |s| s,
+            else => "",
+        } else "";
+        var passed_count: usize = 0;
+        var total_count: usize = 0;
+        if (eval_obj.get("criteria")) |crit_val| {
+            if (crit_val == .array) {
+                total_count = crit_val.array.items.len;
+                for (crit_val.array.items) |c| {
+                    if (c != .object) continue;
+                    const passed = c.object.get("passed") orelse continue;
+                    if (passed == .bool and passed.bool) passed_count += 1;
+                }
+            }
+        }
+        const verdict: []const u8 = if (std.mem.eql(u8, result, "satisfied"))
+            "✅ Rubric passed"
+        else if (std.mem.eql(u8, result, "needs_revision"))
+            "⚠️ Rubric needs revision"
+        else if (std.mem.eql(u8, result, "grader_error"))
+            "❌ Rubric check failed"
+        else if (std.mem.eql(u8, result, "invalid_rubric"))
+            "❌ Rubric configuration invalid"
+        else
+            "Rubric complete";
+
+        const rubric_msg = std.fmt.allocPrint(model.allocator, "{s} ({d}/{d} criteria passed)\n{s}", .{ verdict, passed_count, total_count, explanation }) catch verdict;
+        removeTrailingEmptyAssistant(chat);
+        addMessage(chat, model.allocator, "system", rubric_msg);
+        chat.status_text = model.allocator.dupe(u8, verdict) catch "";
+    } else if (std.mem.eql(u8, event_type, "response_revision_start")) {
+        if (chat.msg_count > 0) {
+            var i: usize = chat.msg_count;
+            while (i > 0) {
+                i -= 1;
+                if (std.mem.eql(u8, chat._messages[i].role, "assistant")) {
+                    chat.msg_count = i;
+                    chat.messages = chat._messages[0..chat.msg_count];
+                    break;
+                }
+            }
+        }
+        chat.open_bubble_type = "";
+        chat.status_text = "Revising...";
+        removeTrailingEmptyAssistant(chat);
+        const attempt = if (data.get("new_attempt")) |a| switch (a) {
+            .integer => |n| n,
+            .float => |n| @as(i64, @intFromFloat(n)),
+            else => 0,
+        } else 0;
+        const rev_msg = std.fmt.allocPrint(model.allocator, "🔄 Revising response (attempt {d})...", .{attempt}) catch "Revising...";
+        addMessage(chat, model.allocator, "system", rev_msg);
+    } else if (std.mem.eql(u8, event_type, "context_compressed")) {
+        chat.compression_animation_ticks = 8;
+        const status = jsonString(data.get("status") orelse return) orelse "succeeded";
+        if (std.mem.eql(u8, status, "succeeded")) {
+            removeTrailingEmptyAssistant(chat);
+            addMessage(chat, model.allocator, "system", "📝 Conversation summarized to fit context window.");
+        }
+    } else if (std.mem.eql(u8, event_type, "usage")) {
+        const usage_data = jsonObject(data.get("usage") orelse return) orelse return;
+        if (usage_data.get("input_tokens")) |it| {
+            if (jsonCount(it)) |n| chat.context_info.input_tokens = n;
+        }
+        if (usage_data.get("output_tokens")) |ot| {
+            if (jsonCount(ot)) |n| chat.context_info.output_tokens = n;
+        }
+    } else if (std.mem.eql(u8, event_type, "done")) {
+        const result_data = jsonObject(data.get("result") orelse return) orelse return;
+        if (result_data.get("verification")) |verification_val| {
+            const verification = jsonObject(verification_val) orelse return;
+            const status_str = jsonString(verification.get("status") orelse return) orelse return;
+            if (std.mem.eql(u8, status_str, "satisfied")) {
+                chat.rubric_status = "Rubric passed";
+            } else if (std.mem.eql(u8, status_str, "max_attempts_reached")) {
+                chat.rubric_status = "Max revisions reached";
+            } else if (std.mem.eql(u8, status_str, "grader_error")) {
+                chat.rubric_status = "Rubric check failed";
+            } else if (std.mem.eql(u8, status_str, "invalid_rubric")) {
+                chat.rubric_status = "Rubric configuration invalid";
+            } else if (std.mem.eql(u8, status_str, "cancelled")) {
+                chat.rubric_status = "Rubric cancelled";
+            }
+        }
+        if (result_data.get("model")) |model_val| {
+            if (jsonString(model_val)) |model_str| {
+                chat.context_info.model = model.allocator.dupe(u8, model_str) catch "";
+            }
+        }
+    } else if (std.mem.eql(u8, event_type, "error")) {
+        if (data.get("message")) |message_val| {
+            const message = jsonString(message_val) orelse return;
+            if (chat.open_bubble_type.len > 0 and chat.msg_count > 0) {
+                appendToLastMessage(chat, model.allocator, chat.open_bubble_type, message);
+            } else {
+                addMessage(chat, model.allocator, "system", message);
+            }
+            return;
+        }
+        const code = jsonString(data.get("code") orelse return) orelse return;
+        if (std.mem.eql(u8, code, "cancelled")) {
+            chat.streaming = false;
+            chat.open_bubble_type = "";
+            chat.status_text = "";
+            if (chat.msg_count > 0) {
+                const last = &chat._messages[chat.msg_count - 1];
+                if (std.mem.eql(u8, last.role, "assistant") and last.content.len == 0) {
+                    chat.msg_count -= 1;
+                    chat.messages = chat._messages[0..chat.msg_count];
+                }
+            }
+        }
+    }
+}
+
+/// Recalculate the textarea height from the current draft_text line count.
+/// Called on input, chat switch, and new chat so the textarea always
+/// reflects the actual content height (auto-grows with multi-line text,
+/// up to max_lines, then scrolls internally).
+fn recalcTextareaHeight(chat: *Chat) void {
+    const new_line_count = std.mem.count(u8, chat.draft_text, "\n") + 1;
+    const line_height: f32 = 20;
+    const padding: f32 = 8;
+    const max_lines = 8;
+    const natural_height = @max(36, @as(f32, @floatFromInt(new_line_count)) * line_height + padding);
+    const max_height = @as(f32, @floatFromInt(max_lines)) * line_height + padding;
+    const new_height = @min(max_height, natural_height);
+    if (new_height != chat.last_textarea_height) {
+        const growing = new_height > chat.last_textarea_height;
+        chat.last_textarea_height = new_height;
+        if (growing) {
+            chat.transcript_scroll_generation += 1;
+        }
+    }
+}
+
+/// Core send-message logic, shared by the Send button and Enter-in-textarea.
+/// Reads and clears the active chat's draft_text, fires the /message request.
+fn doSend(model: *Model, fx: *Effects) void {
+    const chat = model.activeChat();
+    const text = std.mem.trim(u8, chat.draft_text, " \n\r\t");
+    if (text.len == 0 or chat.streaming) return;
+    chat.transcript_scroll_generation += 1;
+    addMessage(chat, model.allocator, "user", text);
+    if (chat.msg_count == 1) {
+        chat.title = model.allocator.dupe(u8, text) catch "New chat";
+    }
+    chat.draft_text = "";
+    chat.draft_selection = .{};
+    chat.last_textarea_height = 36;
+    chat.streaming = true;
+    chat.fetch_key = model.allocFetchKey();
+    chat.open_bubble_type = "";
+    chat.status_text = "Thinking...";
+    addMessage(chat, model.allocator, "assistant", "");
+    chat.open_bubble_type = "assistant";
+
+    fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
+
+    const escaped = escapeJsonString(model.allocator, text) catch return;
+    const selected_model = model.selectedModel();
+    const body = std.fmt.allocPrint(
+        model.allocator,
+        "{{\"message\":\"{s}\",\"user_id\":\"native_sdk_chat\",\"session_id\":\"{s}\",\"model\":\"{s}\"}}",
+        .{ escaped, chat.sessionId(), selected_model },
+    ) catch return;
+    fx.fetch(.{
+        .key = chat.fetch_key,
+        .url = "http://127.0.0.1:8080/message/stream",
+        .method = .POST,
+        .headers = &.{.{
+            .name = "Content-Type",
+            .value = "application/json",
+        }, .{
+            .name = "Accept",
+            .value = "text/event-stream",
+        }},
+        .body = body,
+        .response = .stream,
+        .on_line = Effects.lineMsg(.stream_line),
+        .timeout_ms = 120_000,
+        .on_response = Effects.responseMsg(.stream_done),
+    });
+}
+
 pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
     switch (msg) {
         .input_changed => |event| {
@@ -470,24 +735,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             chat.draft_text = next.text;
             chat.draft_selection = next.selection;
             chat.draft_selection_programmatic = (event == .set_selection);
-            const new_line_count = std.mem.count(u8, chat.draft_text, "\n") + 1;
-            const line_height: f32 = 20;
-            const padding: f32 = 8;
-            const max_lines = 8;
-            const natural_height = @max(36, @as(f32, @floatFromInt(new_line_count)) * line_height + padding);
-            const max_height = @as(f32, @floatFromInt(max_lines)) * line_height + padding;
-            const new_height = @min(max_height, natural_height);
-            if (new_height != chat.last_textarea_height) {
-                const growing = new_height > chat.last_textarea_height;
-                chat.last_textarea_height = new_height;
-                // Only reset scroll state when viewport shrinks (textarea grows):
-                // the trailing anchor needs to re-pin to the new bottom. When the
-                // viewport grows (textarea shrinks), the bottom is already visible
-                // so the existing scroll state is correct — no reset needed.
-                if (growing) {
-                    chat.transcript_scroll_generation += 1;
-                }
-            }
+            recalcTextareaHeight(chat);
         },
         .toggle_theme => {
             model.theme_mode = switch (model.theme_mode) {
@@ -497,19 +745,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .new_chat => {
             model.settings.visible = false;
-            // Smart new chat: if there's already an empty chat with no messages
-            // AND its history has been loaded (so we know it's truly empty), switch to it
-            var i: usize = 0;
-            while (i < model.chat_count) : (i += 1) {
-                if (model.chats[i].msg_count == 0 and model.chats[i].history_loaded) {
-                    model.active_chat_idx = i;
-                    model.active_chat_id = model.chats[i].id;
-                    model.chats[i].unread_count = 0;
-                    return;
-                }
-            }
-            // No empty chat found — create a new one
             if (model.chat_count >= max_chats) return;
+            // Append the new chat, then sort by created_at descending so the
+            // newest chat naturally appears at the top.
             model.chats[model.chat_count] = .{ .id = model.next_chat_id, .history_loaded = true };
             model.chats[model.chat_count].setSessionId(model.next_chat_id);
             model.chats[model.chat_count].created_at = currentTimestampISO(model.allocator);
@@ -517,6 +755,16 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.active_chat_idx = model.chat_count;
             model.active_chat_id = model.chats[model.active_chat_idx].id;
             model.chat_count += 1;
+            // Sort by created_at descending (newest first)
+            sortChatsByCreatedAt(model);
+            // Re-find the active chat after sort
+            var idx: usize = 0;
+            while (idx < model.chat_count) : (idx += 1) {
+                if (model.chats[idx].id == model.active_chat_id) {
+                    model.active_chat_idx = idx;
+                    break;
+                }
+            }
         },
         .switch_chat => |chat_id| {
             model.settings.visible = false;
@@ -526,6 +774,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     model.active_chat_idx = i;
                     model.active_chat_id = model.chats[i].id;
                     model.chats[i].unread_count = 0;
+                    recalcTextareaHeight(&model.chats[i]);
                     // Load history for this chat if not yet loaded
                     if (!model.chats[i].history_loaded and model.chats[i].msg_count == 0) {
                         model.chats[i].history_loaded = true;
@@ -700,46 +949,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.sidebar_split = frac;
         },
         .send_message => {
-            const chat = model.activeChat();
-            const text = std.mem.trim(u8, chat.draft_text, " ");
-            if (text.len == 0 or chat.streaming) return;
-            chat.transcript_scroll_generation += 1;
-            addMessage(chat, model.allocator, "user", text);
-            if (chat.msg_count == 1) {
-                chat.title = model.allocator.dupe(u8, text) catch "New chat";
-            }
-            chat.draft_text = "";
-            chat.streaming = true;
-            chat.fetch_key = model.allocFetchKey();
-            chat.open_bubble_type = "";
-            chat.status_text = "Thinking...";
-            // Create empty assistant bubble so "typing..." shows while waiting for first token
-            addMessage(chat, model.allocator, "assistant", "");
-            chat.open_bubble_type = "assistant";
-
-            // Start pulse timer for streaming indicator
-            fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
-
-            const escaped = escapeJsonString(model.allocator, text) catch return;
-            const selected_model = model.selectedModel();
-            const body = std.fmt.allocPrint(
-                model.allocator,
-                "{{\"message\":\"{s}\",\"user_id\":\"native_sdk_chat\",\"session_id\":\"{s}\",\"model\":\"{s}\"}}",
-                .{ escaped, chat.sessionId(), selected_model },
-            ) catch return;
-            fx.fetch(.{
-                .key = chat.fetch_key,
-                .url = "http://127.0.0.1:8080/message/stream",
-                .method = .POST,
-                .headers = &.{.{
-                    .name = "Content-Type",
-                    .value = "application/json",
-                }},
-                .body = body,
-                .response = .stream,
-                .on_line = Effects.lineMsg(.stream_line),
-                .on_response = Effects.responseMsg(.stream_done),
-            });
+            doSend(model, fx);
         },
         .cancel => {
             const chat = model.activeChat();
@@ -793,8 +1003,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     .value = "application/json",
                 }},
                 .body = body,
-                .response = .stream,
-                .on_line = Effects.lineMsg(.stream_line),
+                .response = .buffered,
                 .on_response = Effects.responseMsg(.approve_done),
             });
         },
@@ -824,163 +1033,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const chat = model.findChatByFetchKey(line.key) orelse return;
             const prefix = "data: ";
             if (!std.mem.startsWith(u8, line.line, prefix)) return;
-            const body = line.line[prefix.len..];
-            if (std.mem.eql(u8, body, "[DONE]")) return;
-            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
-            defer parsed.deinit();
-            // Validate top-level shape before any field access; malformed events
-            // are dropped rather than triggering a union-tag crash.
-            const root_obj = jsonObject(parsed.value) orelse return;
-            const event_type = jsonString(root_obj.get("type") orelse return) orelse return;
-            const data = jsonObject(root_obj.get("data") orelse return) orelse return;
-
-            if (std.mem.eql(u8, event_type, "text_delta")) {
-                const delta = jsonString(data.get("delta") orelse return) orelse return;
-                if (!std.mem.eql(u8, chat.open_bubble_type, "assistant")) {
-                    addMessage(chat, model.allocator, "assistant", trimLeadingMessageWhitespace(delta));
-                    chat.open_bubble_type = "assistant";
-                } else {
-                    appendToLastMessage(chat, model.allocator, "assistant", delta);
-                }
-            } else if (std.mem.eql(u8, event_type, "reasoning_delta")) {
-                const delta = jsonString(data.get("delta") orelse return) orelse return;
-                removeTrailingEmptyAssistant(chat);
-                if (!std.mem.eql(u8, chat.open_bubble_type, "reasoning")) {
-                    addMessage(chat, model.allocator, "reasoning", delta);
-                    chat.open_bubble_type = "reasoning";
-                } else {
-                    appendToLastMessage(chat, model.allocator, "reasoning", delta);
-                }
-            } else if (std.mem.eql(u8, event_type, "tool_input_start")) {
-                const name = jsonString(data.get("name") orelse return) orelse return;
-                removeTrailingEmptyAssistant(chat);
-                const args_val = data.get("args");
-                const args_str = if (args_val) |v| blk: {
-                    switch (v) {
-                        .object => |obj| {
-                            if (obj.count() == 0) break :blk "";
-                            break :blk std.fmt.allocPrint(model.allocator, "{any}", .{v}) catch "";
-                        },
-                        .string => |s| break :blk s,
-                        else => break :blk "",
-                    }
-                } else "";
-                addToolMessage(chat, model.allocator, name, args_str);
-                chat.open_bubble_type = "tool";
-                chat.status_text = std.fmt.allocPrint(model.allocator, "{s}: running...", .{name}) catch name;
-            } else if (std.mem.eql(u8, event_type, "tool_result")) {
-                const content = jsonString(data.get("content") orelse return) orelse return;
-                const name = jsonString(data.get("name") orelse return) orelse return;
-                if (findRunningToolBubble(chat)) |tb| {
-                    tb.tool_status = model.allocator.dupe(u8, "done") catch return;
-                    tb.tool_result = model.allocator.dupe(u8, content) catch return;
-                    tb.collapsed = true;
-                }
-                chat.status_text = std.fmt.allocPrint(model.allocator, "{s}: done", .{name}) catch name;
-            } else if (std.mem.eql(u8, event_type, "interrupt")) {
-                const tool = jsonString(data.get("tool") orelse return) orelse return;
-                const call_id = jsonString(data.get("call_id") orelse return) orelse return;
-                chat.has_pending = true;
-                chat.pending_tool = model.allocator.dupe(u8, tool) catch return;
-                chat.pending_call_id = model.allocator.dupe(u8, call_id) catch return;
-            } else if (std.mem.eql(u8, event_type, "rubric_evaluation_start")) {
-                chat.status_text = "Checking rubric...";
-            } else if (std.mem.eql(u8, event_type, "rubric_evaluation_end")) {
-                const result = jsonString(data.get("result") orelse return) orelse {
-                    chat.status_text = "";
-                    return;
-                };
-                chat.rubric_status = model.allocator.dupe(u8, result) catch "";
-                chat.rubric_attempts += 1;
-                if (std.mem.eql(u8, result, "satisfied")) {
-                    chat.status_text = "Rubric passed";
-                } else if (std.mem.eql(u8, result, "needs_revision")) {
-                    chat.status_text = std.fmt.allocPrint(model.allocator, "Revising... ({d})", .{chat.rubric_attempts}) catch "Revising...";
-                } else if (std.mem.eql(u8, result, "grader_error")) {
-                    chat.status_text = "Rubric check failed";
-                } else if (std.mem.eql(u8, result, "invalid_rubric")) {
-                    chat.status_text = "Rubric configuration invalid";
-                } else {
-                    chat.status_text = "";
-                }
-            } else if (std.mem.eql(u8, event_type, "response_revision_start")) {
-                // Remove last assistant bubble for revision
-                if (chat.msg_count > 0) {
-                    var i: usize = chat.msg_count;
-                    while (i > 0) {
-                        i -= 1;
-                        if (std.mem.eql(u8, chat._messages[i].role, "assistant")) {
-                            chat.msg_count = i;
-                            chat.messages = chat._messages[0..chat.msg_count];
-                            break;
-                        }
-                    }
-                }
-                chat.open_bubble_type = "";
-                chat.status_text = "Revising...";
-            } else if (std.mem.eql(u8, event_type, "context_compressed")) {
-                chat.compression_animation_ticks = 8;
-            } else if (std.mem.eql(u8, event_type, "usage")) {
-                const usage_data = jsonObject(data.get("usage") orelse return) orelse return;
-                if (usage_data.get("input_tokens")) |it| {
-                    if (jsonCount(it)) |n| chat.context_info.input_tokens = n;
-                }
-                if (usage_data.get("output_tokens")) |ot| {
-                    if (jsonCount(ot)) |n| chat.context_info.output_tokens = n;
-                }
-            } else if (std.mem.eql(u8, event_type, "done")) {
-                // Extract RunResult from done event
-                const result_data = jsonObject(data.get("result") orelse return) orelse return;
-                if (result_data.get("verification")) |verification_val| {
-                    const verification = jsonObject(verification_val) orelse return;
-                    const status_str = jsonString(verification.get("status") orelse return) orelse return;
-                    if (std.mem.eql(u8, status_str, "satisfied")) {
-                        chat.rubric_status = "Rubric passed";
-                    } else if (std.mem.eql(u8, status_str, "max_attempts_reached")) {
-                        chat.rubric_status = "Max revisions reached";
-                    } else if (std.mem.eql(u8, status_str, "grader_error")) {
-                        chat.rubric_status = "Rubric check failed";
-                    } else if (std.mem.eql(u8, status_str, "invalid_rubric")) {
-                        chat.rubric_status = "Rubric configuration invalid";
-                    } else if (std.mem.eql(u8, status_str, "cancelled")) {
-                        chat.rubric_status = "Rubric cancelled";
-                    }
-                }
-                if (result_data.get("model")) |model_val| {
-                    if (jsonString(model_val)) |model_str| {
-                        chat.context_info.model = model.allocator.dupe(u8, model_str) catch "";
-                    }
-                }
-            } else if (std.mem.eql(u8, event_type, "error")) {
-                if (data.get("message")) |message_val| {
-                    const message = jsonString(message_val) orelse return;
-                    if (chat.open_bubble_type.len > 0 and chat.msg_count > 0) {
-                        appendToLastMessage(chat, model.allocator, chat.open_bubble_type, message);
-                    } else {
-                        addMessage(chat, model.allocator, "system", message);
-                    }
-                    return;
-                }
-                const code = jsonString(data.get("code") orelse return) orelse return;
-                if (std.mem.eql(u8, code, "cancelled")) {
-                    chat.streaming = false;
-                    chat.open_bubble_type = "";
-                    chat.status_text = "";
-                    if (chat.msg_count > 0) {
-                        const last = &chat._messages[chat.msg_count - 1];
-                        if (std.mem.eql(u8, last.role, "assistant") and last.content.len == 0) {
-                            chat.msg_count -= 1;
-                            chat.messages = chat._messages[0..chat.msg_count];
-                        }
-                    }
-                }
-            }
+            const sse_body = line.line[prefix.len..];
+            if (std.mem.eql(u8, sse_body, "[DONE]")) return;
+            processSSEEvent(model, chat, sse_body);
         },
         .stream_done => |response| {
-            // Ignore completion events whose key matches no streaming chat.
-            // Finalizing the active chat here would kill an unrelated, newer stream.
+            // Terminal event for the streaming fetch. The response content was
+            // already rendered incrementally via stream_line/processSSEEvent.
+            // Here we just finalize the stream state and generate a title.
             const chat = model.findChatByFetchKey(response.key) orelse return;
-            // A3: Surface stream errors
             if (response.outcome != .ok) {
                 const err_msg = std.fmt.allocPrint(model.allocator, "Stream error: {s}", .{@tagName(response.outcome)}) catch "Stream error";
                 addMessage(chat, model.allocator, "system", err_msg);
@@ -988,7 +1049,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 return;
             }
             finalizeStream(chat);
-            queueHistoryFetch(model, chat, fx);
             // Mark this chat as unread if it's not the active one
             if (&model.chats[model.active_chat_idx] != chat) {
                 chat.unread_count += 1;
@@ -1224,16 +1284,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             // The initial chat (index 0) is included in the sort. The active chat
             // index is adjusted to follow the moved chat.
             const old_active_id = model.chats[model.active_chat_idx].id;
-            // Simple insertion sort (avoids std.mem.sort SIMD issues with large structs)
-            var sort_i: usize = 1;
-            while (sort_i < model.chat_count) : (sort_i += 1) {
-                var j = sort_i;
-                while (j > 0 and chatCreatedAtCmp(model.chats[j], model.chats[j - 1])) : (j -= 1) {
-                    const tmp = model.chats[j];
-                    model.chats[j] = model.chats[j - 1];
-                    model.chats[j - 1] = tmp;
-                }
-            }
+            sortChatsByCreatedAt(model);
             // Re-find the active chat by its id
             var new_idx: usize = 0;
             while (new_idx < model.chat_count) : (new_idx += 1) {
@@ -2141,27 +2192,22 @@ pub fn buildView(ui: *AppUi, model: *const Model) AppUi.Node {
 }
 
 fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
-    // Top section: New chat button + search
+    // Top section: search + New chat button (search above new chat)
     var top_nodes: [2]AppUi.Node = undefined;
-    top_nodes[0] = ui.row(.{
-        .on_press = .new_chat,
-        .gap = 8,
-        .padding = 12,
-        .cross = .center,
-        .grow = 1,
-        .style_tokens = .{ .background = .surface_pressed, .radius = .md },
-        .semantics = .{ .role = .button, .label = "New chat" },
-    }, .{
-        ui.icon(.{ .style_tokens = .{ .foreground = .text } }, "plus"),
-        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text } }, "New chat"),
-    });
-    top_nodes[1] = ui.textField(.{
+    top_nodes[0] = ui.textField(.{
         .text = model.search_query,
         .placeholder = "Search chats...",
         .on_input = AppUi.inputMsg(.search_input),
         .semantics = .{ .label = "Search chats" },
         .style_tokens = .{ .background = .surface_subtle, .radius = .md },
     });
+    top_nodes[1] = ui.button(.{
+        .on_press = .new_chat,
+        .variant = .ghost,
+        .grow = 1,
+        .style_tokens = .{ .background = .surface_pressed, .radius = .md },
+        .semantics = .{ .label = "New chat" },
+    }, "New chat");
 
     // Chat list
     const chats = model.filteredChats();
@@ -2357,22 +2403,50 @@ fn chatCreatedAtCmp(a: Chat, b: Chat) bool {
     return std.mem.order(u8, a.created_at, b.created_at) == .gt;
 }
 
+/// Sort the chats array by created_at descending (newest first).
+fn sortChatsByCreatedAt(model: *Model) void {
+    var sort_i: usize = 1;
+    while (sort_i < model.chat_count) : (sort_i += 1) {
+        var j = sort_i;
+        while (j > 0 and chatCreatedAtCmp(model.chats[j], model.chats[j - 1])) : (j -= 1) {
+            const tmp = model.chats[j];
+            model.chats[j] = model.chats[j - 1];
+            model.chats[j - 1] = tmp;
+        }
+    }
+}
+
 fn groupExtentEstimate(context: ?*const anyopaque, index: u64) f32 {
     const chat: *const Chat = @ptrCast(@alignCast(@constCast(context)));
+    // Recompute cache if messages changed (different msg_count or scroll_gen).
+    if (chat._group_extents_msg_count != chat.msg_count or
+        chat._group_extents_scroll_gen != chat.transcript_scroll_generation)
+    {
+        computeGroupExtents(@constCast(chat));
+    }
+    if (index < chat._group_extents_count) {
+        return chat._group_extents[index];
+    }
+    return 80;
+}
+
+/// Precompute the height of every message group. Called once per render
+/// when the cache is invalid (messages changed). This makes the virtual
+/// list's extent_estimate callback O(1) per item instead of O(n) per item,
+/// eliminating the O(n²) scroll lag.
+fn computeGroupExtents(chat: *Chat) void {
     const count = chat.msg_count;
     const line_height: f32 = 17.5;
     const timestamp_height: f32 = 16.25;
     const bubble_padding: f32 = 16;
     const group_gap: f32 = 8;
-    var group_idx: u64 = 0;
+    var group_idx: usize = 0;
     var i: usize = 0;
     while (i < count) {
         const msg = &chat._messages[i];
         if (msg.isUser() or std.mem.eql(u8, msg.role, "system")) {
-            if (group_idx == index) {
-                const lines = estimatedWrappedLines(msg.content);
-                return bubble_padding + lines * line_height + timestamp_height + group_gap;
-            }
+            const lines = estimatedWrappedLines(msg.content);
+            chat._group_extents[group_idx] = bubble_padding + lines * line_height + timestamp_height + group_gap;
             group_idx += 1;
             i += 1;
         } else {
@@ -2391,11 +2465,13 @@ fn groupExtentEstimate(context: ?*const anyopaque, index: u64) f32 {
                     group_height += bubble_padding + lines * line_height + timestamp_height + group_gap;
                 }
             }
-            if (group_idx == index) return group_height;
+            chat._group_extents[group_idx] = group_height;
             group_idx += 1;
         }
     }
-    return 80;
+    chat._group_extents_count = group_idx;
+    chat._group_extents_msg_count = chat.msg_count;
+    chat._group_extents_scroll_gen = chat.transcript_scroll_generation;
 }
 
 fn extractTimestamp(item: std.json.Value, allocator: std.mem.Allocator) []const u8 {
@@ -2766,6 +2842,11 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     const chat = &model.chats[model.active_chat_idx];
     const count = chat.msg_count;
 
+    // Invalidate the group extents cache if messages or scroll generation changed.
+    // The virtual list calls groupExtentEstimate for every visible item on each
+    // scroll frame. Without caching, that's O(n) per item × O(n) items = O(n²).
+    // With caching, it's O(n) once + O(1) per item = O(n) total.
+
     var children: [4]AppUi.Node = undefined;
     var child_count: usize = 0;
 
@@ -2905,7 +2986,7 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     const composer_textarea = blk: {
         var field = ui.el(.textarea, .{
             .text = model.inputText(),
-            .placeholder = "Type a message... (Enter to send, Shift+Enter for newline)",
+            .placeholder = "Type a message... (Cmd+Enter to send)",
             .on_input = AppUi.inputMsg(.input_changed),
             .on_submit = .send_message,
             .semantics = .{ .label = "Message" },
@@ -2925,56 +3006,45 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     else
         ui.button(.{ .on_press = .send_message, .variant = .primary }, "Send");
 
-    const hosted_button: AppUi.Node = if (model.selectedModelIsHosted())
-        ui.button(.{ .on_press = .cycle_model, .variant = .secondary, .style_tokens = .{ .foreground = .text_muted } }, "Hosted — tap to change")
-    else
-        ui.text(.{}, "");
+    // Textarea in its own card — no padding, no gap, edge-to-edge.
+    // The bottom row (model + status + Send) is a SEPARATE row below the card
+    // so it stays pinned regardless of textarea height.
 
-    const composer_bottom_row = ui.row(.{ .gap = 8, .cross = .center, .grow = 0 }, .{
-        model_button,
-        hosted_button,
-        ui.spacer(1),
-        send_button,
-    });
-
-    // Context rail: model, tokens, percentage, freshness
     const ci = &chat.context_info;
-    const context_rail = ui.row(.{
-        .gap = 8,
-        .padding = 0,
-        .cross = .center,
-        .style_tokens = .{ .foreground = .text_muted },
-    }, .{
-        ui.text(.{ .size = .sm }, ci.model),
-        if (ci.model.len > 0) ui.text(.{ .size = .sm }, "•") else ui.text(.{}, ""),
-        ui.text(.{ .size = .sm }, std.fmt.allocPrint(ui.arena, "{d}K in / {d}K out", .{ ci.input_tokens / 1000, ci.output_tokens / 1000 }) catch ""),
-        ui.text(.{ .size = .sm }, "•"),
-        if (ci.context_window > 0) blk: {
-            const pct = @as(u32, @intFromFloat(ci.context_percentage));
-            break :blk ui.text(.{ .size = .sm }, std.fmt.allocPrint(ui.arena, "{d}%", .{pct}) catch "");
-        } else ui.text(.{ .size = .sm }, "—"),
-        ui.text(.{ .size = .sm }, "•"),
-        ui.text(.{ .size = .sm, .style_tokens = .{
-            .foreground = if (std.mem.eql(u8, ci.freshness, "live")) .success else .text_muted,
-        } }, ci.freshness),
-    });
+    const tokens_text = std.fmt.allocPrint(ui.arena, "{d} in / {d} out", .{ ci.input_tokens, ci.output_tokens }) catch "";
+    const freshness_style: canvas.ColorTokenName = if (std.mem.eql(u8, ci.freshness, "live")) .success else .text_muted;
 
-    children[child_count] = ui.el(.card, .{
-        .padding = 12,
+    children[child_count] = ui.column(.{
+        .grow = 0,
+        .padding = 0,
+        .gap = 0,
         .style_tokens = .{ .background = .surface_subtle, .radius = .md },
     }, .{
-        ui.column(.{ .gap = 6 }, .{
-            composer_textarea,
-            context_rail,
-            composer_bottom_row,
-        }),
+        composer_textarea,
+    });
+    child_count += 1;
+
+    // Bottom row: separate, static, sits below the textarea card.
+    children[child_count] = ui.row(.{
+        .gap = 6,
+        .cross = .center,
+        .grow = 0,
+        .padding = 12,
+    }, .{
+        model_button,
+        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "•"),
+        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, tokens_text),
+        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "•"),
+        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = freshness_style } }, ci.freshness),
+        ui.spacer(1),
+        send_button,
     });
     child_count += 1;
 
     const children_slice: []const AppUi.Node = children[0..child_count];
     return ui.column(.{
         .style_tokens = .{ .background = .surface },
-        .gap = 8,
+        .gap = 2,
         .min_width = 320,
         .padding = 12,
     }, children_slice);
@@ -2999,7 +3069,7 @@ fn buildAssistantGroup(ui: *AppUi, chat: *const Chat, start: usize, end: usize) 
     for (0..len) |j| {
         child_nodes[j] = buildChildBubble(ui, &chat._messages[start + j], chat.status_text);
     }
-    return ui.column(.{ .gap = 6 }, .{
+    return ui.column(.{ .gap = 6, .padding = 12 }, .{
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .accent } }, "Assistant"),
         ui.column(.{ .gap = 8 }, child_nodes),
     });
@@ -3008,20 +3078,27 @@ fn buildAssistantGroup(ui: *AppUi, chat: *const Chat, start: usize, end: usize) 
 fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage, status_text: []const u8) AppUi.Node {
     if (msg.isReasoning()) {
         if (msg.content.len == 0) return ui.text(.{}, "");
+        const expand_label: []const u8 = if (msg.collapsed) "Expand" else "Collapse";
         const display_text: []const u8 = if (msg.collapsed) blk: {
             const newline = std.mem.indexOf(u8, msg.content, "\n");
             break :blk if (newline) |n| msg.content[0..n] else msg.content;
         } else msg.content;
-        const expand_label: []const u8 = if (msg.collapsed) "Expand" else "Collapse";
+        const toggle_label = std.fmt.allocPrint(ui.arena, "Thinking  {s}", .{expand_label}) catch expand_label;
         return ui.el(.bubble, .{
             .padding = 8,
             .style_tokens = .{ .background = .surface_subtle, .border_color = .border, .radius = .md },
         }, .{
-            ui.row(.{ .gap = 8, .cross = .center, .on_press = .{ .toggle_bubble = msg.id } }, .{
-                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .accent } }, "Thinking"),
-                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, expand_label),
+            ui.column(.{ .gap = 6 }, .{
+                ui.button(.{
+                    .on_press = .{ .toggle_bubble = msg.id },
+                    .variant = .ghost,
+                    .grow = 0,
+                    .style_tokens = .{ .foreground = .accent },
+                    .size = .sm,
+                    .semantics = .{ .label = expand_label },
+                }, toggle_label),
+                ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, display_text),
             }),
-            ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, display_text),
         });
     } else if (msg.isTool()) {
         const icon = toolIconName(msg.tool_name);
@@ -3044,16 +3121,20 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage, status_text: []const u8
                 const newline = std.mem.indexOf(u8, msg.tool_result, "\n");
                 break :blk if (newline) |n| msg.tool_result[0..n] else msg.tool_result;
             } else msg.tool_result;
+            const tool_label = std.fmt.allocPrint(ui.arena, "{s}  {s}", .{ msg.tool_name, msg.tool_status }) catch msg.tool_name;
             return ui.el(.bubble, .{
                 .padding = 8,
                 .style_tokens = .{ .background = .surface_subtle, .border_color = .border, .radius = .md },
             }, .{
                 ui.column(.{ .gap = 4 }, .{
-                    ui.row(.{ .gap = 8, .cross = .center, .on_press = .{ .toggle_bubble = msg.id } }, .{
-                        ui.iconGlyph(.{ .style_tokens = .{ .foreground = .accent } }, icon),
-                        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .accent } }, msg.tool_name),
-                        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, msg.tool_status),
-                    }),
+                    ui.button(.{
+                        .on_press = .{ .toggle_bubble = msg.id },
+                        .variant = .ghost,
+                        .grow = 0,
+                        .style_tokens = .{ .foreground = .accent },
+                        .size = .sm,
+                        .semantics = .{ .label = msg.tool_status },
+                    }, tool_label),
                     ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, display_result),
                 }),
             });
@@ -3090,6 +3171,7 @@ fn buildMessageBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
         return ui.row(.{
             .main = .end,
             .cross = .start,
+            .padding = 12,
         }, .{
             ui.el(.bubble, .{
                 .padding = 8,
@@ -3102,11 +3184,14 @@ fn buildMessageBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
             }),
         });
     } else if (std.mem.eql(u8, msg.role, "system")) {
-        // System/error: muted, no card, no role label
-        return ui.text(.{
-            .size = .sm,
-            .style_tokens = .{ .foreground = .text_muted },
-        }, msg.content);
+        // System/error: muted, no card, no role label, padded to align with messages
+        return ui.row(.{ .padding = 12 }, .{
+            ui.text(.{
+                .size = .sm,
+                .style_tokens = .{ .foreground = .text_muted },
+                .wrap = true,
+            }, msg.content),
+        });
     } else {
         // Fallback for any standalone assistant/tool/reasoning (shouldn't normally happen)
         return buildChildBubble(ui, msg, "");

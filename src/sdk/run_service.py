@@ -70,6 +70,54 @@ from src.storage.messages import MessageStore
 logger = get_logger()
 
 
+def _storage_messages_to_sdk(history: list[Any]) -> list[Message]:
+    """Convert storage-layer Message dataclasses to SDK Message objects.
+
+    The storage layer (src.storage.messages.Message) is a plain dataclass with
+    a different field set than the SDK Message (notably no `reasoning`,
+    `tool_calls`, `tool_call_id`, `name`). The context measurer, providers,
+    and middlewares all expect SDK Message objects, so history loaded from the
+    message store must be normalized before entering the agent loop.
+
+    Storage messages with role='reasoning' (persisted by the streaming SSE
+    handler's persist_reasoning_message) are converted to SDK assistant
+    messages with the reasoning field set, matching the runner's history
+    loader at runner.py:826.
+    """
+    converted: list[Message] = []
+    for row in history:
+        # Already an SDK Message (e.g. a freshly constructed one) — keep as is.
+        if isinstance(row, Message):
+            converted.append(row)
+            continue
+        role = row.role
+        if role == "reasoning":
+            # Storage reasoning messages → SDK assistant with reasoning field.
+            converted.append(
+                Message(
+                    role="assistant",
+                    content="",
+                    reasoning=row.content,
+                    storage_id=getattr(row, "id", None),
+                    storage_ts=str(getattr(row, "ts", None)) if getattr(row, "ts", None) is not None else None,
+                    storage_session_id=getattr(row, "session_id", None),
+                    source=getattr(row, "source", None),
+                )
+            )
+        else:
+            converted.append(
+                Message(
+                    role=role,
+                    content=row.content,
+                    storage_id=getattr(row, "id", None),
+                    storage_ts=str(getattr(row, "ts", None)) if getattr(row, "ts", None) is not None else None,
+                    storage_session_id=getattr(row, "session_id", None),
+                    source=getattr(row, "source", None),
+                )
+            )
+    return converted
+
+
 def _revision_prompt(evaluation: dict[str, Any]) -> str:
     from src.sdk.middleware_rubric import _revision_prompt as _rp
     return _rp(evaluation)
@@ -91,15 +139,15 @@ def _stream_chunk_to_event(
     if ct == "text_start":
         return emit(TextStartEvent, BlockData(block_id=chunk.call_id or str(uuid.uuid4())).model_dump(), attempt)
     elif ct == "text_delta":
-        return emit(TextDeltaEvent, BlockDeltaData(block_id="", delta=chunk.content).model_dump(), attempt)
+        return emit(TextDeltaEvent, BlockDeltaData(block_id="text", delta=chunk.content).model_dump(), attempt)
     elif ct == "text_end":
-        return emit(TextEndEvent, BlockData(block_id="").model_dump(), attempt)
+        return emit(TextEndEvent, BlockData(block_id="text").model_dump(), attempt)
     elif ct == "reasoning_start":
         return emit(ReasoningStartEvent, BlockData(block_id=chunk.call_id or str(uuid.uuid4())).model_dump(), attempt)
     elif ct == "reasoning_delta":
-        return emit(ReasoningDeltaEvent, BlockDeltaData(block_id="", delta=chunk.content).model_dump(), attempt)
+        return emit(ReasoningDeltaEvent, BlockDeltaData(block_id="reasoning", delta=chunk.content).model_dump(), attempt)
     elif ct == "reasoning_end":
-        return emit(ReasoningEndEvent, BlockData(block_id="").model_dump(), attempt)
+        return emit(ReasoningEndEvent, BlockData(block_id="reasoning").model_dump(), attempt)
     elif ct == "tool_input_start":
         return emit(ToolInputStartEvent, ToolStartData(
             block_id=chunk.call_id or str(uuid.uuid4()),
@@ -111,7 +159,7 @@ def _stream_chunk_to_event(
         if call_id:
             accumulated_args[call_id] = accumulated_args.get(call_id, "") + (chunk.content or "")
         return emit(ToolInputDeltaEvent, ToolDeltaData(
-            block_id="", tool_call_id=call_id, delta=chunk.content,
+            block_id="tool", tool_call_id=call_id, delta=chunk.content,
         ).model_dump(), attempt)
     elif ct == "tool_input_end":
         call_id = chunk.call_id or ""
@@ -122,7 +170,7 @@ def _stream_chunk_to_event(
         except json.JSONDecodeError:
             args = {}
         return emit(ToolInputEndEvent, ToolEndData(
-            block_id="", tool_call_id=call_id, arguments=args,
+            block_id="tool", tool_call_id=call_id, arguments=args,
         ).model_dump(), attempt)
     elif ct == "tool_result":
         return emit(ToolResultEvent, ToolResultData(
@@ -151,7 +199,11 @@ def _stream_chunk_to_event(
                 "cache_creation_tokens": chunk.usage.cache_creation_tokens or 0,
             },
         ).model_dump(), attempt)
-    return emit(TextDeltaEvent, BlockDeltaData(block_id="", delta=chunk.content).model_dump(), attempt)
+    elif ct == "done":
+        return None
+    elif ct == "error":
+        return None
+    return emit(TextDeltaEvent, BlockDeltaData(block_id="text", delta=chunk.content).model_dump(), attempt)
 
 
 class RunService:
@@ -217,7 +269,7 @@ class RunService:
         register_user_loop(self._user_id, loop, session_id=session_id)
         try:
             history = self._message_store.get_messages_with_summary(session_id, limit=50)
-            messages = list(history) + [Message.user(prompt)]
+            messages = _storage_messages_to_sdk(list(history)) + [Message.user(prompt)]
 
             result = await self._run_bounded_orchestration(loop, messages, run_id, session_id, lock)
 
@@ -239,6 +291,7 @@ class RunService:
                 response=result.response,
                 usage=result.usage,
                 verification=result.verification,
+                tool_calls=result.tool_calls,
                 persisted_at=datetime.now(UTC),
             )
         finally:
@@ -283,7 +336,7 @@ class RunService:
         register_user_loop(self._user_id, loop, session_id=session_id)
         try:
             history = self._message_store.get_messages_with_summary(session_id, limit=50)
-            messages = list(history) + [Message.user(prompt)]
+            messages = _storage_messages_to_sdk(list(history)) + [Message.user(prompt)]
 
             rubric_mw = self._load_rubric_middleware(loop)
             rubric_enabled = rubric_mw is not None
@@ -321,7 +374,9 @@ class RunService:
                         elif chunk.type == "error":
                             run_status = RunStatus.FAILED
                             break
-                        yield _stream_chunk_to_event(chunk, _emit, attempt, loop.model_id, accumulated_args)
+                        ev = _stream_chunk_to_event(chunk, _emit, attempt, loop.model_id, accumulated_args)
+                        if ev is not None:
+                            yield ev
                 except Exception as exc:
                     logger.error("run_service.agent_error", {"error": str(exc)}, user_id=self._user_id)
                     run_status = RunStatus.FAILED
@@ -394,7 +449,7 @@ class RunService:
                 ).model_dump(), attempt + 1)
 
                 feedback = _revision_prompt(evaluation_result)
-                messages = list(messages) + [Message.user(content=feedback, source="rubric_middleware")]
+                messages = list(messages) + [Message.user(content=feedback)]
 
             if rubric_status == TerminalRubricStatus.NOT_RUN and rubric_availability == RubricAvailability.ON:
                 rubric_status = TerminalRubricStatus.SATISFIED
@@ -468,6 +523,7 @@ class RunService:
         rubric_availability = RubricAvailability.OFF
         agent_usage = UsageAggregate()
         grader_usage = UsageAggregate()
+        result_tool_calls: list[dict[str, Any]] = []
 
         for attempt in range(1, max_attempts + 1):
             if lock.cancelled:
@@ -492,6 +548,30 @@ class RunService:
 
             final_response = last_assistant.content if isinstance(last_assistant.content, str) else str(last_assistant.content)
             final_attempt = attempt
+
+            # Extract tool call info from result messages for the non-streaming response.
+            # The loop's result_messages contain assistant tool_call requests (role=assistant
+            # with tool_calls) and tool results (role=tool with content + name).
+            if attempt == 1:
+                tool_call_records: list[dict[str, Any]] = []
+                for msg in result_messages:
+                    if msg.role == "assistant" and msg.tool_calls:
+                        for tc in msg.tool_calls:
+                            tool_call_records.append({
+                                "name": tc.name,
+                                "arguments": tc.arguments,
+                                "id": tc.id,
+                                "status": "called",
+                            })
+                    elif msg.role == "tool" and msg.tool_call_id:
+                        # Find the matching tool call and update with result
+                        for record in tool_call_records:
+                            if record.get("id") == msg.tool_call_id:
+                                record["status"] = "done"
+                                record["result"] = msg.content[:500] if isinstance(msg.content, str) else str(msg.content)[:500]
+                                break
+                if tool_call_records:
+                    result_tool_calls = tool_call_records
 
             if last_assistant.usage:
                 agent_usage = UsageAggregate(
@@ -571,6 +651,7 @@ class RunService:
                 max_attempts=max_attempts,
                 evaluations=tuple(evaluations),
             ),
+            tool_calls=result_tool_calls,
         )
 
     def _load_rubric_middleware(self, loop: AgentLoop) -> RubricMiddleware | None:
@@ -591,7 +672,12 @@ class RunService:
             try:
                 from src.config.user_settings_store import UserSettingsStore
                 store = UserSettingsStore(self._user_id)
-                grader_prompt = store.load_grader_prompt()
+                loaded = store.load_grader_prompt()
+                # load_grader_prompt() returns a GraderPromptResponse pydantic model
+                # (with a .content: str field), not a plain str. Extract the text so
+                # _build_grader_payload's rubric.strip() doesn't crash with
+                # "'GraderPromptResponse' object has no attribute 'strip'".
+                grader_prompt = getattr(loaded, "content", loaded) if loaded else None
             except Exception:
                 grader_prompt = vc.default_rubric or None
 

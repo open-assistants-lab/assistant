@@ -131,3 +131,28 @@ def test_rubric_middleware_max_iterations():
 def test_rubric_middleware_default_max_iterations():
     mw = RubricMiddleware(FakeGraderProvider("{}"), "- Three lines")
     assert mw.max_iterations == 3
+
+
+def test_rubric_middleware_grader_model_id_from_explicit_arg() -> None:
+    """Regression: real LLMProvider subclasses (OllamaCloud, OpenAIProvider, ...)
+    do NOT carry a `model_id` attribute — only AgentLoop does. The middleware
+    must not read provider.model_id; it must use the explicit grader_model_id
+    passed at construction.
+    """
+    provider = FakeGraderProvider("{}")
+    # Simulate a real provider: delete the test-only model_id attribute.
+    del provider.model_id
+    mw = RubricMiddleware(provider, "- Three lines", grader_model_id="ollama:minimax-m2.5")
+    assert mw.grader_model_id == "ollama:minimax-m2.5"
+
+
+def test_rubric_middleware_grader_model_id_without_model_id_attr_or_arg() -> None:
+    """A provider with no model_id attribute and no explicit grader_model_id
+    must not raise AttributeError — it should fall back to a sentinel string
+    so usage aggregation still works.
+    """
+    provider = FakeGraderProvider("{}")
+    del provider.model_id
+    mw = RubricMiddleware(provider, "- Three lines")
+    assert isinstance(mw.grader_model_id, str)
+    assert mw.grader_model_id  # non-empty

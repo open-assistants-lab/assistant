@@ -256,3 +256,36 @@ def test_public_callable_contracts_accept_injected_functions() -> None:
     assert estimate_text_tokens("one two") >= 0
     assert estimate_message_tokens([Message.user("one two")], estimator) == 7
     assert resolve_context_window("provider:model", lister) == 123
+
+
+def test_estimate_message_tokens_tolerates_objects_without_reasoning() -> None:
+    """Regression: storage-layer Message dataclasses (src.storage.messages.Message)
+    lack the SDK Message's `reasoning` attribute. estimate_message_tokens must
+    not crash when mixed/historic message objects are passed in — it should
+    treat a missing `reasoning` as None.
+    """
+    from dataclasses import dataclass
+    from datetime import datetime, UTC
+
+    @dataclass
+    class StorageMessage:
+        id: str
+        ts: datetime
+        role: str
+        content: str
+        metadata: dict | None = None
+        session_id: str = ""
+        source: str | None = None
+
+    historic = StorageMessage(
+        id="m1", ts=datetime.now(UTC), role="user", content="hello"
+    )
+    sdk_msg = Message.assistant(content="hi there", reasoning="thinking")
+
+    # Mixing storage + SDK messages must not raise AttributeError.
+    total = estimate_message_tokens([historic, sdk_msg], _length)
+    assert total > 0
+    # The SDK message's reasoning contributes tokens; the storage one is treated as no reasoning.
+    only_sdk = estimate_message_tokens([sdk_msg], _length)
+    only_storage = estimate_message_tokens([historic], _length)
+    assert total == only_sdk + only_storage
