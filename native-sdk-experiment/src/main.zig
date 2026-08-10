@@ -1997,7 +1997,7 @@ fn currentTimestampISO(allocator: std.mem.Allocator) []const u8 {
             const civil = civilFromDays(days_since_epoch);
             return std.fmt.allocPrint(
                 allocator,
-                "{d}-{d}-{d}T{d}:{d}:{d}Z",
+                "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.000000+00:00",
                 .{ civil.year, civil.month, civil.day, hour, min, sec },
             ) catch "";
         },
@@ -3069,7 +3069,7 @@ fn buildAssistantGroup(ui: *AppUi, chat: *const Chat, start: usize, end: usize) 
     for (0..len) |j| {
         child_nodes[j] = buildChildBubble(ui, &chat._messages[start + j], chat.status_text);
     }
-    return ui.column(.{ .gap = 6, .padding = 12 }, .{
+    return ui.column(.{ .gap = 6, .cross = .start }, .{
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .accent } }, "Assistant"),
         ui.column(.{ .gap = 8 }, child_nodes),
     });
@@ -3084,37 +3084,34 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage, status_text: []const u8
             break :blk if (newline) |n| msg.content[0..n] else msg.content;
         } else msg.content;
         const toggle_label = std.fmt.allocPrint(ui.arena, "Thinking  {s}", .{expand_label}) catch expand_label;
-        return ui.el(.bubble, .{
-            .padding = 8,
-            .style_tokens = .{ .background = .surface_subtle, .border_color = .border, .radius = .md },
+        return ui.column(.{
+            .gap = 6,
+            .cross = .start,
+            .style_tokens = .{ .border_color = .border },
         }, .{
-            ui.column(.{ .gap = 6 }, .{
-                ui.button(.{
+                ui.el(.text, .{
                     .on_press = .{ .toggle_bubble = msg.id },
-                    .variant = .ghost,
-                    .grow = 0,
-                    .style_tokens = .{ .foreground = .accent },
+                    .text = toggle_label,
                     .size = .sm,
-                    .semantics = .{ .label = expand_label },
-                }, toggle_label),
-                ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, display_text),
-            }),
+                    .style_tokens = .{ .foreground = .accent },
+                    .semantics = .{ .role = .button, .label = expand_label },
+                }, .{}),
+                ui.text(.{ .wrap = true, .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, display_text),
         });
     } else if (msg.isTool()) {
         const icon = toolIconName(msg.tool_name);
         if (std.mem.eql(u8, msg.tool_status, "running")) {
-            return ui.el(.bubble, .{
-                .padding = 8,
-                .style_tokens = .{ .background = .surface_subtle, .border_color = .border, .radius = .md },
+            return ui.column(.{
+                .gap = 4,
+                .cross = .start,
+                .style_tokens = .{ .border_color = .border },
             }, .{
-                ui.column(.{ .gap = 4 }, .{
                     ui.row(.{ .gap = 8, .cross = .center }, .{
                         ui.iconGlyph(.{ .style_tokens = .{ .foreground = .accent } }, icon),
                         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .accent } }, msg.tool_name),
                         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "running..."),
                     }),
                     ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, msg.content),
-                }),
             });
         } else {
             const display_result: []const u8 = if (msg.collapsed) blk: {
@@ -3122,21 +3119,19 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage, status_text: []const u8
                 break :blk if (newline) |n| msg.tool_result[0..n] else msg.tool_result;
             } else msg.tool_result;
             const tool_label = std.fmt.allocPrint(ui.arena, "{s}  {s}", .{ msg.tool_name, msg.tool_status }) catch msg.tool_name;
-            return ui.el(.bubble, .{
-                .padding = 8,
-                .style_tokens = .{ .background = .surface_subtle, .border_color = .border, .radius = .md },
+            return ui.column(.{
+                .gap = 4,
+                .cross = .start,
+                .style_tokens = .{ .border_color = .border },
             }, .{
-                ui.column(.{ .gap = 4 }, .{
-                    ui.button(.{
+                    ui.el(.text, .{
                         .on_press = .{ .toggle_bubble = msg.id },
-                        .variant = .ghost,
-                        .grow = 0,
-                        .style_tokens = .{ .foreground = .accent },
+                        .text = tool_label,
                         .size = .sm,
-                        .semantics = .{ .label = msg.tool_status },
-                    }, tool_label),
+                        .style_tokens = .{ .foreground = .accent },
+                        .semantics = .{ .role = .button, .label = msg.tool_status },
+                    }, .{}),
                     ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, display_result),
-                }),
             });
         }
     } else {
@@ -3145,17 +3140,15 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage, status_text: []const u8
             const typing_text: []const u8 = if (status_text.len > 0) status_text else "typing...";
             return ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, typing_text);
         } else {
-            return ui.el(.bubble, .{
-                .padding = 8,
-                .style_tokens = .{ .background = .surface_subtle, .border_color = .border, .radius = .md },
+            return ui.column(.{
+                .gap = 0,
+                .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
             }, .{
-                ui.column(.{ .gap = 0 }, .{
                     ui.text(.{ .wrap = true }, msg.content),
                     if (msg.timestamp.len > 0)
                         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, msg.timestamp)
                     else
                         ui.text(.{}, ""),
-                }),
             });
         }
     }
@@ -3171,21 +3164,18 @@ fn buildMessageBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
         return ui.row(.{
             .main = .end,
             .cross = .start,
-            .padding = 12,
         }, .{
-            ui.el(.bubble, .{
-                .padding = 8,
-                .style_tokens = .{ .background = .surface_subtle, .border_color = .border, .radius = .md },
+            ui.column(.{
+                .gap = 0,
+                .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
             }, .{
-                ui.column(.{ .gap = 0 }, .{
                     ui.text(.{ .wrap = true }, msg.content),
                     ts_node,
-                }),
             }),
         });
     } else if (std.mem.eql(u8, msg.role, "system")) {
         // System/error: muted, no card, no role label, padded to align with messages
-        return ui.row(.{ .padding = 12 }, .{
+        return ui.row(.{}, .{
             ui.text(.{
                 .size = .sm,
                 .style_tokens = .{ .foreground = .text_muted },
