@@ -15,6 +15,7 @@ def _make_run_event_factory(chunk_gen):
     """
     from datetime import UTC, datetime
 
+    from src.http.stream_adapter import adapt_stream_chunk
     from src.sdk.run_events import (
         BlockDeltaData,
         ErrorData,
@@ -28,7 +29,6 @@ def _make_run_event_factory(chunk_gen):
         ToolResultEvent,
         ToolStartData,
     )
-    from src.http.stream_adapter import adapt_stream_chunk
 
     _common = dict(
         event_id="e1",
