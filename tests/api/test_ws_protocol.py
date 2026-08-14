@@ -26,6 +26,7 @@ from src.http.ws_protocol import (
     parse_client_message,
     parse_server_message,
 )
+from tests.api.conftest import make_run_event_factory
 
 
 class TestClientMessages:
@@ -333,15 +334,17 @@ class TestWebSocketPersistence:
             yield StreamChunk.tool_result_event("email_list", "call-1", "result")
             yield StreamChunk.done()
 
-        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+        monkeypatch.setattr(ws_router.RunService, "execute_stream", make_run_event_factory(fake_run_sdk_agent_stream))
         conversation = FakeConversation()
         websocket = FakeWebSocket()
 
         await ws_router._run_agent_stream(websocket, "test_user", [], conversation, session_id="chat-1")
 
-        assert any(m.get("type") == "ai_token" and m.get("content") == "Hello" for m in websocket.sent)
-        assert any(m.get("type") == "reasoning" and m.get("content") == "Think" for m in websocket.sent)
-        assert any(m.get("type") == "tool_start" and m.get("tool") == "email_list" for m in websocket.sent)
+        # The WS endpoint now forwards canonical RunEvent envelopes (dc5eed0 removed
+        # the legacy ai_token/reasoning/tool_start wire names).
+        assert any(m.get("type") == "text_delta" and m.get("data", {}).get("delta") == "Hello" for m in websocket.sent)
+        assert any(m.get("type") == "reasoning_delta" and m.get("data", {}).get("delta") == "Think" for m in websocket.sent)
+        assert any(m.get("type") == "tool_input_start" and m.get("data", {}).get("name") == "email_list" for m in websocket.sent)
         assert [(args, kwargs) for args, kwargs in conversation.calls if args[0] in {"assistant", "reasoning"}] == [
             (("reasoning", "Think"), {"metadata": {}, "session_id": "chat-1"}),
             (("assistant", "Hello"), {"metadata": {"stream": True}, "session_id": "chat-1"}),
@@ -370,7 +373,7 @@ class TestWebSocketPersistence:
             yield StreamChunk.reasoning_delta("thinking")
             raise asyncio.CancelledError
 
-        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+        monkeypatch.setattr(ws_router.RunService, "execute_stream", make_run_event_factory(fake_run_sdk_agent_stream))
         conversation = FakeConversation()
 
         with pytest.raises(asyncio.CancelledError):
@@ -418,7 +421,7 @@ class TestWebSocketPersistence:
             async def send_json(self, payload):
                 pass
 
-        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+        monkeypatch.setattr(ws_router.RunService, "execute_stream", make_run_event_factory(fake_run_sdk_agent_stream))
 
         await ws_router._run_agent_stream(
             FakeWebSocket(),
@@ -431,6 +434,12 @@ class TestWebSocketPersistence:
 
         assert captured["session_id"] == "chat-1"
 
+    @pytest.mark.skip(
+        reason="cancel_event is no longer passed down to the stream function: the WS router "
+        "checks it in its own loop (RunService owns cancellation via SessionLock). The "
+        "router-level cancel contract is covered by "
+        "test_run_agent_stream_persists_partial_state_on_cancel_event."
+    )
     @pytest.mark.asyncio
     async def test_run_agent_stream_passes_cancel_event_to_sdk_stream(self, monkeypatch):
         import asyncio
@@ -447,7 +456,7 @@ class TestWebSocketPersistence:
                 pass
 
         cancel_event = asyncio.Event()
-        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+        monkeypatch.setattr(ws_router.RunService, "execute_stream", make_run_event_factory(fake_run_sdk_agent_stream))
 
         await ws_router._run_agent_stream(
             FakeWebSocket(),
@@ -485,7 +494,7 @@ class TestWebSocketPersistence:
             yield StreamChunk.tool_result_event("email_list", "call-1", "canonical")
             yield StreamChunk.done()
 
-        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+        monkeypatch.setattr(ws_router.RunService, "execute_stream", make_run_event_factory(fake_run_sdk_agent_stream))
 
         conversation = FakeConversation()
         websocket = FakeWebSocket()
@@ -532,7 +541,7 @@ class TestWebSocketPersistence:
             yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
             yield StreamChunk.interrupt("files_delete", "call-2", {"path": "x"})
 
-        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+        monkeypatch.setattr(ws_router.RunService, "execute_stream", make_run_event_factory(fake_run_sdk_agent_stream))
 
         conversation = FakeConversation()
         pending = [None]
@@ -582,7 +591,7 @@ class TestWebSocketPersistence:
         async def fake_run_sdk_agent_stream(**kwargs):
             yield StreamChunk.done("final answer")
 
-        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+        monkeypatch.setattr(ws_router.RunService, "execute_stream", make_run_event_factory(fake_run_sdk_agent_stream))
 
         conversation = FakeConversation()
         websocket = FakeWebSocket()
@@ -614,7 +623,7 @@ class TestWebSocketPersistence:
             yield StreamChunk.tool_result_event("time_get", "call-1", "")
             yield StreamChunk.done()
 
-        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+        monkeypatch.setattr(ws_router.RunService, "execute_stream", make_run_event_factory(fake_run_sdk_agent_stream))
 
         conversation = FakeConversation()
         await ws_router._run_agent_stream(FakeWebSocket(), "test_user", [], conversation, session_id="chat-1")
@@ -642,7 +651,7 @@ class TestWebSocketPersistence:
             yield StreamChunk.reasoning_delta("thinking")
             raise RuntimeError("stream lost")
 
-        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+        monkeypatch.setattr(ws_router.RunService, "execute_stream", make_run_event_factory(fake_run_sdk_agent_stream))
 
         conversation = FakeConversation()
         await ws_router._run_agent_stream(FakeWebSocket(), "test_user", [], conversation, session_id="chat-1")
@@ -871,7 +880,7 @@ class TestWebSocketPersistence:
             kwargs["cancel_event"].set()
             yield StreamChunk.done("normal done")
 
-        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+        monkeypatch.setattr(ws_router.RunService, "execute_stream", make_run_event_factory(fake_run_sdk_agent_stream))
         websocket = FakeWebSocket()
         conversation = FakeConversation()
         await ws_router._run_agent_stream(
@@ -912,7 +921,7 @@ class TestWebSocketPersistence:
         async def fake_run_sdk_agent_stream(**kwargs):
             yield StreamChunk.interrupt("files_delete", "call-1", {"path": "x"})
 
-        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+        monkeypatch.setattr(ws_router.RunService, "execute_stream", make_run_event_factory(fake_run_sdk_agent_stream))
 
         await ws_router._run_agent_stream(
             FakeWebSocket(),
@@ -1158,7 +1167,7 @@ class TestWebSocketPersistence:
             kwargs["cancel_event"].set()
             yield StreamChunk.done("normal done")
 
-        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+        monkeypatch.setattr(ws_router.RunService, "execute_stream", make_run_event_factory(fake_run_sdk_agent_stream))
         conversation = FakeConversation()
         await ws_router._run_agent_stream(
             FakeWebSocket(),
@@ -1205,7 +1214,7 @@ class TestWebSocketPersistence:
             yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
             yield StreamChunk.done()
 
-        monkeypatch.setattr(ws_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
+        monkeypatch.setattr(ws_router.RunService, "execute_stream", make_run_event_factory(fake_run_sdk_agent_stream))
         conversation = FakeConversation()
 
         await ws_router._run_agent_stream(

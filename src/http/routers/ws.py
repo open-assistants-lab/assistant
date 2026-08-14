@@ -230,9 +230,30 @@ async def _run_agent_stream(
 
             elif event_type == "done":
                 result = event_data.get("result", {})
+                if result.get("status") == "failed":
+                    # A failed run must not be persisted as a success; keep
+                    # whatever partial state streamed before the failure.
+                    _persist_collected_stream_state(
+                        conversation,
+                        session_id=session_id,
+                        ai_content_parts=ai_content_parts,
+                        reasoning_parts=reasoning_parts,
+                        tool_metadata_list=tool_metadata_list,
+                        tool_results=tool_results,
+                    )
+                    persisted = True
+                    await websocket.send_json(
+                        ErrorMessage(message="Agent run failed", code="AGENT_ERROR").model_dump()
+                        | {"workspace_id": workspace_id}
+                    )
+                    break
                 response = result.get("response", "")
                 if not ai_content_parts and response:
                     ai_content_parts.append(response)
+                # The streamed deltas are the source of truth for what was
+                # rendered; fall back to the done result only when nothing
+                # streamed (mirrors the conversation router's post-loop join).
+                response = "".join(ai_content_parts) if ai_content_parts else response
 
                 canvas_blocks = _extract_surfaces(response)
                 for surface in canvas_blocks:

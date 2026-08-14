@@ -1123,12 +1123,22 @@ class TestEditorIntegration:
         """REST /message verbose_data includes editor surfaces when agent emits html:editor fence."""
         editor_text = '```html:editor\nfilePath: /test/file.md\n---\n\n# Hello World\n```'
 
-        async def fake_run(*args, **kwargs):
-            from src.sdk.messages import Message
-            return [Message.assistant(editor_text + "Done.")]
+        from src.sdk.run_models import RunResult, RunStatus, RunUsage, VerificationOutcome
+
+        async def fake_execute(self, *, session_id, prompt, model=None, provider_keys=None, **kwargs):
+            return RunResult(
+                run_id="r1",
+                session_id=session_id,
+                status=RunStatus.COMPLETED,
+                attempt=1,
+                model="x:y",
+                response=editor_text + "Done.",
+                usage=RunUsage(),
+                verification=VerificationOutcome(),
+            )
 
         import src.http.routers.conversation as conv_mod
-        monkeypatch.setattr(conv_mod, "run_sdk_agent", fake_run)
+        monkeypatch.setattr(conv_mod.RunService, "execute", fake_execute)
 
         r = client.post("/message", json={
             "message": "edit my file",
@@ -1151,12 +1161,21 @@ class TestEditorIntegration:
             'Done.'
         )
 
-        async def fake_run(*args, **kwargs):
-            from src.sdk.messages import Message
-            return [Message.assistant(text)]
+        async def fake_execute(self, *, session_id, prompt, model=None, provider_keys=None, **kwargs):
+            from src.sdk.run_models import RunResult, RunStatus, RunUsage, VerificationOutcome
+            return RunResult(
+                run_id="r1",
+                session_id=session_id,
+                status=RunStatus.COMPLETED,
+                attempt=1,
+                model="x:y",
+                response=text,
+                usage=RunUsage(),
+                verification=VerificationOutcome(),
+            )
 
         import src.http.routers.conversation as conv_mod
-        monkeypatch.setattr(conv_mod, "run_sdk_agent", fake_run)
+        monkeypatch.setattr(conv_mod.RunService, "execute", fake_execute)
 
         r = client.post("/message", json={
             "message": "create dashboard and editor",

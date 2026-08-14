@@ -104,6 +104,21 @@ def _storage_messages_to_sdk(history: list[Any]) -> list[Message]:
                     source=getattr(row, "source", None),
                 )
             )
+        elif role == "summary":
+            # Storage summary messages → SDK user message with the same
+            # [SUMMARY OF PREVIOUS CONVERSATION] framing the runner's history
+            # loader uses (runner.py:730). Without this branch the SDK Message
+            # role validation rejects role="summary" outright.
+            converted.append(
+                Message(
+                    role="user",
+                    content=f"[SUMMARY OF PREVIOUS CONVERSATION]\n{row.content}",
+                    source=getattr(row, "source", None) or "summarization_middleware",
+                    storage_id=getattr(row, "id", None),
+                    storage_ts=str(getattr(row, "ts", None)) if getattr(row, "ts", None) is not None else None,
+                    storage_session_id=getattr(row, "session_id", None),
+                )
+            )
         else:
             converted.append(
                 Message(

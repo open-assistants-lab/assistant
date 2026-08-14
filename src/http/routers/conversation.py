@@ -646,6 +646,7 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
             tool_results: dict[str, str] = {}
             response = ""
             aborted = False
+            run_failed = False
             persisted = False
 
             try:
@@ -750,12 +751,26 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
 
                     elif event_type == "done":
                         result = event_data.get("result", {})
+                        run_failed = result.get("status") == "failed"
                         response = result.get("response", "")
                         if not ai_content_parts and response:
                             ai_content_parts.append(response)
                         yield sse_raw(data)
 
                 if aborted:
+                    return
+
+                if run_failed:
+                    # A failed run must not persist the success fallback; keep
+                    # whatever partial state streamed before the failure.
+                    _persist_collected_stream_state(
+                        conversation,
+                        session_id=session_id,
+                        ai_content_parts=ai_content_parts,
+                        reasoning_parts=reasoning_parts,
+                        tool_metadata_list=tool_metadata_list,
+                        tool_results=tool_results,
+                    )
                     return
 
                 response = "".join(ai_content_parts) if ai_content_parts else ""
