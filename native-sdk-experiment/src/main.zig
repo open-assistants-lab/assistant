@@ -78,6 +78,7 @@ const SettingsState = struct {
     rubric_enabled: bool = false,
     rubric_max_iterations: u32 = 3,
     grader_prompt: []const u8 = "",
+    grader_prompt_revision: u32 = 0,
     grader_prompt_loading: bool = false,
     saving_general: bool = false,
     reduced_motion: bool = false,
@@ -489,19 +490,19 @@ fn processSSEEvent(model: *Model, chat: *Chat, sse_body: []const u8) void {
         const name = jsonString(data.get("name") orelse return) orelse return;
         removeTrailingEmptyAssistant(chat);
         const args_val = data.get("args");
-        const args_str = if (args_val) |v| blk: {
-            switch (v) {
-                .object => |obj| {
-                    if (obj.count() == 0) break :blk "";
-                    break :blk std.fmt.allocPrint(model.allocator, "{any}", .{v}) catch "";
-                },
-                .string => |s| break :blk s,
-                else => break :blk "",
-            }
-        } else "";
+        const args_str = if (args_val) |v| toolArgsString(model, v) else "";
         addToolMessage(chat, model.allocator, name, args_str);
         chat.open_bubble_type = "tool";
         chat.status_text = std.fmt.allocPrint(model.allocator, "{s}: running...", .{name}) catch name;
+    } else if (std.mem.eql(u8, event_type, "tool_input_end")) {
+        // Main stream path: arguments arrive on tool_input_end (RunEvent
+        // ToolEndData.arguments), not on tool_input_start.
+        if (findRunningToolBubble(chat)) |tb| {
+            const args_val = data.get("arguments");
+            const args_str = if (args_val) |v| toolArgsString(model, v) else "";
+            const summary = std.fmt.allocPrint(model.allocator, "{s}({s})", .{ tb.tool_name, args_str }) catch return;
+            tb.content = summary;
+        }
     } else if (std.mem.eql(u8, event_type, "tool_result")) {
         const content = jsonString(data.get("content") orelse return) orelse return;
         const name = jsonString(data.get("name") orelse return) orelse return;
@@ -1003,7 +1004,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     .value = "application/json",
                 }},
                 .body = body,
-                .response = .buffered,
+                .response = .stream,
+                .on_line = Effects.lineMsg(.stream_line),
                 .on_response = Effects.responseMsg(.approve_done),
             });
         },
@@ -1339,7 +1341,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.settings.grader_prompt_loading = true;
                 fx.fetch(.{
                     .key = grader_prompt_key,
-                    .url = "http://127.0.0.1:8080/settings/grader-prompt?user_id=native_sdk_chat",
+                    .url = "http://127.0.0.1:8080/user/grader-prompt?user_id=native_sdk_chat",
                     .method = .GET,
                     .headers = &.{.{ .name = "Accept", .value = "application/json" }},
                     .response = .buffered,
@@ -1446,9 +1448,21 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
             defer parsed.deinit();
             const root = parsed.value;
-            if (root.object.get("verification")) |v| {
-                if (v.object.get("enabled")) |e| model.settings.rubric_enabled = e.bool;
-                if (v.object.get("max_iterations")) |mi| model.settings.rubric_max_iterations = @intCast(mi.integer);
+            // Canonical settings response nests verification under saved/effective
+            // and names the field max_attempts (not max_iterations).
+            if (root.object.get("saved")) |saved| {
+                if (saved.object.get("verification")) |v| {
+                    if (v.object.get("enabled")) |e| {
+                        if (e == .bool) model.settings.rubric_enabled = e.bool;
+                    }
+                }
+            }
+            if (root.object.get("effective")) |effective| {
+                if (effective.object.get("verification")) |v| {
+                    if (v.object.get("max_attempts")) |ma| {
+                        if (ma == .integer) model.settings.rubric_max_iterations = @intCast(ma.integer);
+                    }
+                }
             }
         },
         .grader_prompt_loaded => |response| {
@@ -1461,6 +1475,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const root = parsed.value;
             if (root.object.get("content")) |c| {
                 model.settings.grader_prompt = model.allocator.dupe(u8, c.string) catch "";
+            }
+            // The save must send the current revision back (strictly enforced).
+            if (root.object.get("revision")) |r| {
+                if (r == .integer and r.integer >= 0) {
+                    model.settings.grader_prompt_revision = @intCast(r.integer);
+                }
             }
         },
         .settings_general_saved => |response| {
@@ -1829,18 +1849,18 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const escaped_prompt = escapeJsonString(model.allocator, model.settings.grader_prompt) catch return;
             const settings_body = std.fmt.allocPrint(
                 model.allocator,
-                "{{\"verification\":{{\"enabled\":{s},\"max_iterations\":{d}}}}}",
+                "{{\"verification\":{{\"enabled\":{s},\"max_attempts\":{d}}}}}",
                 .{ if (model.settings.rubric_enabled) "true" else "false", model.settings.rubric_max_iterations },
             ) catch return;
             const prompt_body = std.fmt.allocPrint(
                 model.allocator,
-                "{{\"content\":\"{s}\"}}",
-                .{escaped_prompt},
+                "{{\"content\":\"{s}\",\"expected_revision\":{d}}}",
+                .{ escaped_prompt, model.settings.grader_prompt_revision },
             ) catch return;
             fx.fetch(.{
                 .key = settings_general_key,
                 .url = "http://127.0.0.1:8080/settings?user_id=native_sdk_chat",
-                .method = .PUT,
+                .method = .PATCH,
                 .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
                 .body = settings_body,
                 .response = .buffered,
@@ -1848,7 +1868,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             });
             fx.fetch(.{
                 .key = grader_prompt_key,
-                .url = "http://127.0.0.1:8080/settings/grader-prompt?user_id=native_sdk_chat",
+                .url = "http://127.0.0.1:8080/user/grader-prompt?user_id=native_sdk_chat",
                 .method = .PUT,
                 .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
                 .body = prompt_body,
@@ -2065,6 +2085,20 @@ fn addToolMessage(chat: *Chat, allocator: std.mem.Allocator, tool_name: []const 
     chat.next_id += 1;
     chat.msg_count += 1;
     chat.messages = chat._messages[0..chat.msg_count];
+}
+
+/// Serialize tool-call arguments for display in the tool bubble title.
+/// Empty objects render as "" (matching the pre-existing behavior); non-empty
+/// values render as compact JSON.
+fn toolArgsString(model: *Model, v: std.json.Value) []const u8 {
+    return switch (v) {
+        .object => |obj| {
+            if (obj.count() == 0) return "";
+            return std.json.Stringify.valueAlloc(model.allocator, v, .{}) catch "";
+        },
+        .string => |s| s,
+        else => "",
+    };
 }
 
 fn findRunningToolBubble(chat: *Chat) ?*ChatMessage {

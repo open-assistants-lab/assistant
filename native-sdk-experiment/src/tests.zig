@@ -398,6 +398,28 @@ test "tool_result updates tool bubble in place" {
     try testing.expectEqualStrings("Current time: 12:00 UTC", chat._messages[1].tool_result);
 }
 
+test "tool_input_end fills tool bubble arguments" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "test");
+    const chat = model.activeChat();
+
+    // Main stream path: tool_input_start carries no args (RunEvent ToolStartData),
+    // the arguments arrive on tool_input_end.
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_input_start\",\"data\":{\"name\":\"time_get\",\"tool_call_id\":\"call_1\"}}" } }, &fx);
+    try testing.expectEqual(@as(usize, 2), chat.msg_count);
+
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"tool_input_end\",\"data\":{\"tool_call_id\":\"call_1\",\"arguments\":{\"tz\":\"UTC\"}}}" } }, &fx);
+    try testing.expectEqual(@as(usize, 2), chat.msg_count); // no new bubble
+    try testing.expect(std.mem.indexOf(u8, chat._messages[1].content, "UTC") != null);
+    try testing.expect(std.mem.indexOf(u8, chat._messages[1].content, "time_get") != null);
+}
+
 test "assistant response after tool trims leading stream whitespace" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -730,6 +752,73 @@ test "approve clears pending" {
     try testing.expect(std.mem.indexOf(u8, request.body, "abc123") != null);
 }
 
+test "approve streams the resumed run" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "test");
+    const chat = model.activeChat();
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"interrupt\",\"data\":{\"tool\":\"email_send\",\"call_id\":\"abc123\",\"args\":{}}}" } }, &fx);
+    try testing.expect(chat.has_pending);
+
+    main.update(&model, .approve, &fx);
+    // The approve endpoint returns an SSE stream; the fetch must be in stream
+    // mode so the resumed run's events render via stream_line.
+    const request = fx.pendingFetchAt(1).?;
+    try testing.expect(request.response == .stream);
+
+    // The resumed run's text must render through stream_line.
+    const fk2 = chat.fetch_key;
+    main.update(&model, .{ .stream_line = .{ .key = fk2, .line = "data: {\"type\":\"text_delta\",\"data\":{\"delta\":\"Resumed answer\"}}" } }, &fx);
+    try testing.expectEqualStrings("Resumed answer", chat._messages[chat.msg_count - 1].content);
+}
+
+test "approve resumes the run through the real effect pipeline" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "test");
+    const chat = model.activeChat();
+
+    // 1. The backend streams an interrupt (HITL) — fed through the fake
+    //    executor exactly as the runtime delivers SSE lines.
+    try fx.feedLine(fk, "data: {\"type\":\"interrupt\",\"data\":{\"tool\":\"email_send\",\"call_id\":\"abc123\",\"args\":{}}}");
+    while (fx.takeMsg()) |msg| main.update(&model, msg, &fx);
+    try testing.expect(chat.has_pending);
+    try testing.expectEqualStrings("email_send", chat.pending_tool);
+
+    // 2. The first stream ends (the backend closed it after the interrupt).
+    try fx.feedResponse(fk, 200, "");
+    while (fx.takeMsg()) |msg| main.update(&model, msg, &fx);
+    try testing.expect(!chat.streaming);
+
+    // 3. User approves — the approve fetch must be a stream: feedLine below
+    //    would fail with EffectNotFound on a buffered fetch.
+    main.update(&model, .approve, &fx);
+    try testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
+    const request = fx.pendingFetchAt(0).?;
+    try testing.expect(request.response == .stream);
+    const fk2 = chat.fetch_key;
+
+    // 4. The resumed run streams text — rendered through the pipeline.
+    try fx.feedLine(fk2, "data: {\"type\":\"text_delta\",\"data\":{\"delta\":\"Resumed answer\"}}");
+    while (fx.takeMsg()) |msg| main.update(&model, msg, &fx);
+    try testing.expectEqualStrings("Resumed answer", chat._messages[chat.msg_count - 1].content);
+
+    // 5. The resumed stream ends — approve_done finalizes the stream.
+    try fx.feedResponse(fk2, 200, "");
+    while (fx.takeMsg()) |msg| main.update(&model, msg, &fx);
+    try testing.expect(!chat.streaming);
+}
+
 test "reject clears pending" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -1043,6 +1132,88 @@ test "settings request bodies escape JSON strings" {
     const parsed_select = try std.json.parseFromSlice(std.json.Value, arena, select_request.body, .{});
     defer parsed_select.deinit();
     try testing.expectEqualStrings("openai:gpt-quote\\\"slash", parsed_select.value.object.get("default_model").?.string);
+}
+
+test "settings general response loads rubric state from canonical shape" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    // Canonical GET /settings response: verification lives under saved/effective
+    // and the field is max_attempts (not max_iterations).
+    const body =
+        \\{"saved":{"default_model":null,"verification":{"enabled":true,"grader_model":null,"max_attempts":2}},"effective":{"default_model":"agnes:agnes-2.0-flash","verification":{"state":"on","grader_model":"ollama-cloud:deepseek-v4-flash","max_attempts":2,"grader_prompt_hash":"sha256:abc"}},"provider_status":{}}
+    ;
+    main.update(&model, .{ .settings_general_loaded = .{ .key = 0, .outcome = .ok, .body = body } }, &fx);
+    try testing.expect(model.settings.rubric_enabled);
+    try testing.expectEqual(@as(u32, 2), model.settings.rubric_max_iterations);
+}
+
+test "save general settings PATCHes verification with max_attempts" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    model.settings.rubric_enabled = true;
+    model.settings.rubric_max_iterations = 2;
+    main.update(&model, .save_general_settings, &fx);
+
+    // Settings save must PATCH (backend has no PUT) with max_attempts.
+    const settings_request = fx.pendingFetchAt(0).?;
+    try testing.expect(settings_request.method == .PATCH);
+    try testing.expect(std.mem.indexOf(u8, settings_request.body, "max_attempts") != null);
+    try testing.expect(std.mem.indexOf(u8, settings_request.body, "max_iterations") == null);
+    try testing.expect(std.mem.indexOf(u8, settings_request.body, "\"enabled\":true") != null);
+
+    // Grader prompt save must hit /user/grader-prompt and send expected_revision.
+    const prompt_request = fx.pendingFetchAt(1).?;
+    try testing.expect(std.mem.indexOf(u8, prompt_request.url, "/user/grader-prompt") != null);
+    try testing.expect(prompt_request.method == .PUT);
+    try testing.expect(std.mem.indexOf(u8, prompt_request.body, "expected_revision") != null);
+}
+
+test "grader prompt fetches use /user/grader-prompt and track revision" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    main.update(&model, .settings_general, &fx);
+    const prompt_request = fx.pendingFetchAt(0).?;
+    try testing.expect(std.mem.indexOf(u8, prompt_request.url, "/user/grader-prompt") != null);
+}
+
+test "grader prompt save sends the tracked revision" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    // The GET response carries a revision; the save must send it back.
+    const body =
+        \\{"content":"# Rubric","source":"customized","content_hash":"sha256:abc","revision":2}
+    ;
+    main.update(&model, .{ .grader_prompt_loaded = .{ .key = 0, .outcome = .ok, .body = body } }, &fx);
+    try testing.expectEqualStrings("# Rubric", model.settings.grader_prompt);
+
+    main.update(&model, .save_general_settings, &fx);
+    // 0 = settings PATCH, 1 = grader-prompt PUT.
+    const save_request = fx.pendingFetchAt(1).?;
+    try testing.expect(std.mem.indexOf(u8, save_request.body, "\"expected_revision\":2") != null);
 }
 
 test "settings catalog renders locked model rows instead of add key cards" {
