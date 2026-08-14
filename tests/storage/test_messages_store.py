@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-UTC = timezone.utc
+UTC = UTC
 from unittest import mock
 
 import pytest

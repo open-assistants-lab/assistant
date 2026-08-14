@@ -265,7 +265,7 @@ def test_estimate_message_tokens_tolerates_objects_without_reasoning() -> None:
     treat a missing `reasoning` as None.
     """
     from dataclasses import dataclass
-    from datetime import datetime, UTC
+    from datetime import UTC, datetime
 
     @dataclass
     class StorageMessage:

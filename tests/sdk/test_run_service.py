@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import pytest
 
-from src.sdk.loop import AgentLoop
 from src.sdk.messages import Message, StreamChunk
 from src.sdk.run_service import RunService
 from src.sdk.session_worker import SessionBusyError, SessionWorkerRegistry
-from tests.fixtures.run_orchestration import ScriptedProvider
 
 
 class InMemoryMessageStore:
