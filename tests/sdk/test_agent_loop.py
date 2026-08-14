@@ -32,9 +32,12 @@ class TestAgentLoopBasic:
 
         from src.sdk.loop import AgentLoop
 
-        provider = MagicMock()
+        # Real providers expose string model + provider_id attributes; the
+        # loop infers its canonical model_id from them.
+        provider = MagicMock(model="gpt-4o", provider_id="openai")
         loop = AgentLoop(provider=provider, tools=[], system_prompt="test")
         assert loop is not None
+        assert loop.model_id == "openai:gpt-4o"
 
 
 class TestAgentLoopWSProtocol:
