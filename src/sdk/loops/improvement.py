@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from typing import Any
+from typing import Any, cast
 
 from src.app_logging import get_logger
 from src.sdk.loops.storage import (
@@ -50,7 +50,7 @@ class AnalysisJob:
         analysis_provider: Any,
         mode: str = "human_review",
         auto_apply_risk_threshold: str = "low",
-        eval_suite: list[dict] | None = None,
+        eval_suite: list[dict[str, Any]] | None = None,
     ) -> None:
         self._provider = analysis_provider
         self._mode = mode
@@ -125,12 +125,12 @@ class AnalysisJob:
             lines.append("")
         return "\n".join(lines)
 
-    def _parse_suggestions(self, content: str) -> list[dict]:
+    def _parse_suggestions(self, content: str) -> list[dict[str, Any]]:
         content = content.strip()
         if content.startswith("```"):
             lines = content.split("\n")
             content = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
-        return json.loads(content)
+        return cast(list[dict[str, Any]], json.loads(content))
 
     def _risk_at_or_below(self, risk: str, threshold: str) -> bool:
         order = {"low": 0, "medium": 1, "high": 2}

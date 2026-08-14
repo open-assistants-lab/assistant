@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -65,6 +65,7 @@ from src.sdk.run_models import (
 )
 from src.sdk.runner import get_sdk_loop, register_user_loop, unregister_user_loop
 from src.sdk.session_worker import SessionBusyError, SessionLock, SessionWorkerRegistry
+from src.storage.messages import Message as StorageMessage
 from src.storage.messages import MessageStore
 
 logger = get_logger()
@@ -133,6 +134,18 @@ def _storage_messages_to_sdk(history: list[Any]) -> list[Message]:
     return converted
 
 
+def _sdk_message_to_storage(msg: Message, session_id: str) -> StorageMessage:
+    """Convert an SDK Message to the storage-layer Message persist_run expects."""
+    return StorageMessage(
+        id="",
+        ts=datetime.now(UTC),
+        role=msg.role,
+        content=str(msg.content or ""),
+        metadata={"stream": True},
+        session_id=session_id,
+    )
+
+
 def _revision_prompt(evaluation: dict[str, Any]) -> str:
     from src.sdk.middleware_rubric import _revision_prompt as _rp
     return _rp(evaluation)
@@ -140,16 +153,19 @@ def _revision_prompt(evaluation: dict[str, Any]) -> str:
 
 def _stream_chunk_to_event(
     chunk: StreamChunk,
-    emit: Any,
+    emit: Callable[[type[RunEvent], dict[str, Any], int], RunEvent],
     attempt: int,
     model_id: str = "",
     accumulated_args: dict[str, str] | None = None,
-) -> RunEvent:
+) -> RunEvent | None:
     """Convert a StreamChunk to the corresponding RunEvent.
 
     accumulated_args is a mutable dict keyed by call_id for tracking
-    tool_input_delta arguments across chunks.
+    tool_input_delta arguments across chunks. Returns None for terminal
+    chunks (done/error) that have no RunEvent projection.
     """
+    if accumulated_args is None:
+        accumulated_args = {}
     ct = chunk.canonical_type
     if ct == "text_start":
         return emit(TextStartEvent, BlockData(block_id=chunk.call_id or str(uuid.uuid4())).model_dump(), attempt)
@@ -240,11 +256,12 @@ class RunService:
         prompt: str,
         model: str | None = None,
         provider_keys: dict[str, str] | None = None,
+        rubric: str | None = None,
     ) -> RunResult:
         """Non-streaming execution. Returns immutable RunResult."""
         lock = await self._registry.acquire(session_id)
         try:
-            return await self._run(session_id, prompt, model, provider_keys, lock)
+            return await self._run(session_id, prompt, model, provider_keys, lock, rubric)
         except SessionBusyError:
             raise
         finally:
@@ -256,11 +273,12 @@ class RunService:
         prompt: str,
         model: str | None = None,
         provider_keys: dict[str, str] | None = None,
+        rubric: str | None = None,
     ) -> AsyncIterator[RunEvent]:
         """Streaming execution. Yields RunEvent envelopes."""
         lock = await self._registry.acquire(session_id)
         try:
-            async for event in self._run_stream(session_id, prompt, model, provider_keys, lock):
+            async for event in self._run_stream(session_id, prompt, model, provider_keys, lock, rubric):
                 yield event
         finally:
             await self._registry.release(session_id)
@@ -272,6 +290,7 @@ class RunService:
         model: str | None,
         provider_keys: dict[str, str] | None,
         lock: SessionLock,
+        rubric: str | None = None,
     ) -> RunResult:
         run_id = str(uuid.uuid4())
         user_msg_id = self._message_store.add_message(
@@ -286,13 +305,13 @@ class RunService:
             history = self._message_store.get_messages_with_summary(session_id, limit=50)
             messages = _storage_messages_to_sdk(list(history)) + [Message.user(prompt)]
 
-            result = await self._run_bounded_orchestration(loop, messages, run_id, session_id, lock)
+            result = await self._run_bounded_orchestration(loop, messages, run_id, session_id, lock, rubric)
 
             _ = self._message_store.persist_run(
                 run_id=run_id,
                 session_id=session_id,
                 user_message_id=user_msg_id,
-                final_answer=Message.assistant(content=result.response),
+                final_answer=_sdk_message_to_storage(Message.assistant(content=result.response), session_id),
                 audit_records=[],
                 metadata={"model": result.model},
             )
@@ -319,6 +338,7 @@ class RunService:
         model: str | None,
         provider_keys: dict[str, str] | None,
         lock: SessionLock,
+        rubric: str | None = None,
     ) -> AsyncIterator[RunEvent]:
         run_id = str(uuid.uuid4())
         sequence = 0
@@ -353,7 +373,7 @@ class RunService:
             history = self._message_store.get_messages_with_summary(session_id, limit=50)
             messages = _storage_messages_to_sdk(list(history)) + [Message.user(prompt)]
 
-            rubric_mw = self._load_rubric_middleware(loop)
+            rubric_mw = self._load_rubric_middleware(loop, rubric)
             rubric_enabled = rubric_mw is not None
             max_attempts = rubric_mw.max_iterations if rubric_mw else 1
 
@@ -403,6 +423,7 @@ class RunService:
                 if not rubric_enabled:
                     break
 
+                assert rubric_mw is not None
                 rubric_availability = RubricAvailability.ON
                 if lock.cancelled:
                     rubric_status = TerminalRubricStatus.CANCELLED
@@ -473,7 +494,7 @@ class RunService:
                 run_id=run_id,
                 session_id=session_id,
                 user_message_id=user_msg_id,
-                final_answer=Message.assistant(content=final_response),
+                final_answer=_sdk_message_to_storage(Message.assistant(content=final_response), session_id),
                 audit_records=[],
                 metadata={"model": loop.model_id},
             )
@@ -525,8 +546,9 @@ class RunService:
         run_id: str,
         session_id: str,
         lock: SessionLock,
+        rubric: str | None = None,
     ) -> RunResult:
-        rubric_mw = self._load_rubric_middleware(loop)
+        rubric_mw = self._load_rubric_middleware(loop, rubric)
         rubric_enabled = rubric_mw is not None
         max_attempts = rubric_mw.max_iterations if rubric_mw else 1
 
@@ -601,6 +623,7 @@ class RunService:
             if not rubric_enabled:
                 break
 
+            assert rubric_mw is not None
             rubric_availability = RubricAvailability.ON
             if lock.cancelled:
                 rubric_status = TerminalRubricStatus.CANCELLED
@@ -646,7 +669,7 @@ class RunService:
                 break
 
             feedback = _revision_prompt(evaluation_result)
-            messages = list(messages) + [Message.user(content=feedback, source="rubric_middleware")]
+            messages = list(messages) + [Message.user(content=feedback)]
 
         if rubric_status == TerminalRubricStatus.NOT_RUN and rubric_availability == RubricAvailability.ON:
             rubric_status = TerminalRubricStatus.SATISFIED
@@ -669,8 +692,12 @@ class RunService:
             tool_calls=result_tool_calls,
         )
 
-    def _load_rubric_middleware(self, loop: AgentLoop) -> RubricMiddleware | None:
-        """Load rubric configuration and create RubricMiddleware if enabled."""
+    def _load_rubric_middleware(self, loop: AgentLoop, rubric: str | None = None) -> RubricMiddleware | None:
+        """Load rubric configuration and create RubricMiddleware if enabled.
+
+        A request-level rubric (MessageRequest.verification.rubric) overrides the
+        stored/settings grader prompt.
+        """
         try:
             from src.config import get_settings
             from src.sdk.providers.factory import create_model_from_config
@@ -683,18 +710,20 @@ class RunService:
             grader_model = vc.grader_model or loop.model_id
             grader_provider = create_model_from_config(grader_model, user_id=self._user_id)
 
-            grader_prompt: str | None = None
-            try:
-                from src.config.user_settings_store import UserSettingsStore
-                store = UserSettingsStore(self._user_id)
-                loaded = store.load_grader_prompt()
-                # load_grader_prompt() returns a GraderPromptResponse pydantic model
-                # (with a .content: str field), not a plain str. Extract the text so
-                # _build_grader_payload's rubric.strip() doesn't crash with
-                # "'GraderPromptResponse' object has no attribute 'strip'".
-                grader_prompt = getattr(loaded, "content", loaded) if loaded else None
-            except Exception:
-                grader_prompt = vc.default_rubric or None
+            grader_prompt: str | None = rubric
+            if grader_prompt is None:
+                try:
+                    from src.config.user_settings_store import UserSettingsStore
+
+                    store = UserSettingsStore(self._user_id)
+                    loaded = store.load_grader_prompt()
+                    # load_grader_prompt() returns a GraderPromptResponse pydantic model
+                    # (with a .content: str field), not a plain str. Extract the text so
+                    # _build_grader_payload's rubric.strip() doesn't crash with
+                    # "'GraderPromptResponse' object has no attribute 'strip'".
+                    grader_prompt = getattr(loaded, "content", None) if loaded else None
+                except Exception:
+                    grader_prompt = vc.default_rubric or None
 
             if not grader_prompt:
                 logger.warning("rubric.no_prompt", {}, user_id=self._user_id)
@@ -708,8 +737,3 @@ class RunService:
         except Exception as exc:
             logger.warning("rubric.load_failed", {"error": str(exc)}, user_id=self._user_id)
             return None
-
-
-def _revision_prompt(evaluation: dict[str, Any]) -> str:
-    from src.sdk.middleware_rubric import _revision_prompt as _rp
-    return _rp(evaluation)

@@ -31,7 +31,6 @@ from src.http.routers.conversation import (
     _persist_collected_stream_state,
     _strip_canvas_fences,
 )
-from src.http.stream_adapter import adapt_stream_chunk
 from src.http.ws_protocol import (
     ApproveMessage,
     AuthMessage,
@@ -47,12 +46,11 @@ from src.http.ws_protocol import (
     parse_client_message,
 )
 from src.sdk.messages import Message, ToolCall
+from src.sdk.run_service import RunService
 from src.sdk.runner import (
     _messages_from_conversation,
     get_sdk_loop,
-    run_sdk_agent_stream,
 )
-from src.sdk.run_service import RunService
 from src.sdk.session_worker import SessionBusyError, SessionWorkerRegistry
 from src.storage.messages import get_message_store
 
@@ -120,7 +118,7 @@ async def _run_agent_stream(
     try:
         async for event in run_service.execute_stream(
             session_id=session_id,
-            prompt=sdk_messages[-1].content if sdk_messages else "",
+            prompt=str(sdk_messages[-1].content) if sdk_messages else "",
             model=model,
             provider_keys=provider_keys,
         ):

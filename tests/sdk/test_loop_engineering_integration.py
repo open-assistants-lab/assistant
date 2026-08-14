@@ -40,24 +40,33 @@ async def test_ws_passes_rubric_to_runner(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_sse_stream_resolves_rubric_from_request(monkeypatch):
-    """When request includes verification.rubric, SSE stream passes it to runner."""
+    """When request includes verification.rubric, SSE stream passes it to RunService."""
     from fastapi.testclient import TestClient
 
     from src.http.main import app
+    from src.sdk.messages import StreamChunk
 
     captured_rubric = {}
 
-    async def fake_stream(**kwargs):
-        captured_rubric["rubric"] = kwargs.get("rubric")
-        yield StreamChunk(type="text_delta", content="hi")
-        yield StreamChunk(type="done", content="hi")
+    class DummyLoop:
+        model_id = "x:y"
 
-    monkeypatch.setattr("src.http.routers.conversation.run_sdk_agent_stream", fake_stream)
+        async def run_stream(self, messages):
+            yield StreamChunk(type="done", content="hi")
+
+    async def fake_get_sdk_loop(*args, **kwargs):
+        return DummyLoop()
+
+    def fake_load_rubric(self, loop, rubric=None):
+        captured_rubric["rubric"] = rubric
+        return None
+
+    monkeypatch.setattr("src.sdk.run_service.get_sdk_loop", fake_get_sdk_loop)
+    monkeypatch.setattr("src.http.routers.conversation.RunService._load_rubric_middleware", fake_load_rubric)
     monkeypatch.setattr("src.http.routers.conversation.get_message_store", MagicMock(return_value=MagicMock(
         add_message=MagicMock(),
-        get_messages_by_session_id=MagicMock(return_value=[]),
+        get_messages_with_summary=MagicMock(return_value=[]),
     )))
-    monkeypatch.setattr("src.http.routers.conversation._messages_from_conversation", MagicMock(return_value=[]))
 
     client = TestClient(app)
     response = client.post(
@@ -72,34 +81,33 @@ def test_sse_stream_resolves_rubric_from_request(monkeypatch):
 
 
 def test_sse_stream_resolves_rubric_from_settings(monkeypatch):
-    """When verification is enabled globally, SSE stream uses default_rubric."""
+    """When verification is enabled globally, RunService uses default_rubric."""
     import src.config.settings as _cfg
     _cfg._config = None
 
     monkeypatch.setenv("VERIFICATION_ENABLED", "true")
     monkeypatch.setenv("VERIFICATION_DEFAULT_RUBRIC", "- Non-empty")
+    monkeypatch.setattr(
+        "src.config.user_settings_store.UserSettingsStore.load_grader_prompt",
+        lambda self: GraderPromptResponse(
+            content="- Non-empty",
+            source="seeded",
+            content_hash="sha256:" + "0" * 64,
+            revision=0,
+        ),
+    )
+    monkeypatch.setattr(
+        "src.sdk.providers.factory.create_model_from_config",
+        lambda *a, **k: MagicMock(),
+    )
 
-    from fastapi.testclient import TestClient
+    from src.config.user_settings import GraderPromptResponse
+    from src.sdk.run_service import RunService
 
-    from src.http.main import app
-
-    captured_rubric = {}
-
-    async def fake_stream(**kwargs):
-        captured_rubric["rubric"] = kwargs.get("rubric")
-        yield StreamChunk(type="done", content="hi")
-
-    monkeypatch.setattr("src.http.routers.conversation.run_sdk_agent_stream", fake_stream)
-    monkeypatch.setattr("src.http.routers.conversation.get_message_store", MagicMock(return_value=MagicMock(
-        add_message=MagicMock(),
-        get_messages_by_session_id=MagicMock(return_value=[]),
-    )))
-    monkeypatch.setattr("src.http.routers.conversation._messages_from_conversation", MagicMock(return_value=[]))
-
-    client = TestClient(app)
-    response = client.post("/message/stream", json={"message": "hi"})
-    assert response.status_code == 200
-    assert captured_rubric["rubric"] == "- Non-empty"
+    loop = MagicMock(model_id="x:y")
+    mw = RunService("u", MagicMock(), MagicMock())._load_rubric_middleware(loop)
+    assert mw is not None
+    assert mw._grader_prompt == "- Non-empty"
 
     _cfg._config = None
 
@@ -113,26 +121,52 @@ def test_rest_message_returns_verification_verdict(monkeypatch):
     from fastapi.testclient import TestClient
 
     from src.http.main import app
+    from src.sdk.run_models import (
+        RubricAvailability,
+        RubricEvaluation,
+        RubricEvaluationResult,
+        RunResult,
+        RunStatus,
+        RunUsage,
+        TerminalRubricStatus,
+        VerificationOutcome,
+    )
 
-    async def fake_run_sdk_agent(**kwargs):
-        return [Message.assistant(content="done")]
+    async def fake_execute(
+        self, *, session_id, prompt, model=None, provider_keys=None, rubric=None, **kwargs
+    ):
+        return RunResult(
+            run_id="r1",
+            session_id=session_id,
+            status=RunStatus.COMPLETED,
+            attempt=1,
+            model="x:y",
+            response="done",
+            usage=RunUsage(),
+            verification=VerificationOutcome(
+                availability=RubricAvailability.ON,
+                status=TerminalRubricStatus.SATISFIED,
+                attempts=1,
+                max_attempts=2,
+                evaluations=[
+                    RubricEvaluation(
+                        grading_run_id="g1",
+                        attempt=1,
+                        result=RubricEvaluationResult.SATISFIED,
+                        explanation="ok",
+                        criteria=[],
+                        passed_count=0,
+                        total_count=0,
+                    )
+                ],
+            ),
+        )
 
-    monkeypatch.setattr("src.http.routers.conversation.run_sdk_agent", fake_run_sdk_agent)
+    monkeypatch.setattr("src.http.routers.conversation.RunService.execute", fake_execute)
     monkeypatch.setattr("src.http.routers.conversation.get_message_store", MagicMock(return_value=MagicMock(
         add_message=MagicMock(),
         get_messages_by_session_id=MagicMock(return_value=[]),
     )))
-    monkeypatch.setattr("src.http.routers.conversation._messages_from_conversation", MagicMock(return_value=[]))
-
-    # Mock the cached loop to have a verification verdict
-    fake_loop = MagicMock()
-    fake_loop._verification_verdict = {
-        "status": "satisfied",
-        "iterations": 1,
-        "evaluations": [{"iteration": 0, "result": "satisfied"}],
-    }
-    monkeypatch.setattr("src.sdk.runner._loop_cache", {"test_key": fake_loop})
-    monkeypatch.setattr("src.sdk.runner._loop_cache_key", lambda *a, **k: "test_key")
 
     client = TestClient(app)
     response = client.post("/message", json={

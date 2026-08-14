@@ -11,7 +11,9 @@
     "agent": {
       "available": true,
       "calls": 1,
-      "models": ["anthropic:claude-sonnet-4"],
+      "models": [
+        "anthropic:claude-sonnet-4"
+      ],
       "input_tokens": 120,
       "output_tokens": 24,
       "reasoning_tokens": 18,
@@ -21,7 +23,9 @@
     "grader": {
       "available": true,
       "calls": 1,
-      "models": ["anthropic:claude-sonnet-4"],
+      "models": [
+        "anthropic:claude-sonnet-4"
+      ],
       "input_tokens": 80,
       "output_tokens": 12,
       "reasoning_tokens": 0,
@@ -85,5 +89,6 @@
     "freshness": "live",
     "estimated": true
   },
-  "persisted_at": "2026-08-02T12:00:16Z"
+  "persisted_at": "2026-08-02T12:00:16Z",
+  "tool_calls": []
 }

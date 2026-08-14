@@ -50,8 +50,8 @@ class Logger:
             self.json_dir.mkdir(parents=True, exist_ok=True)
 
         # Langfuse
-        self.langfuse = None
-        self.langfuse_handler = None
+        self.langfuse: Any = None
+        self.langfuse_handler: Any = None
         self._init_langfuse()
 
     def _init_langfuse(self) -> None:

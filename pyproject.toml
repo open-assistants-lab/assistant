@@ -111,4 +111,5 @@ norecursedirs = ["tests/hybriddb/benchmarks"]
 python_version = "3.11"
 strict = true
 ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
 exclude = ["src/skills_seed/"]

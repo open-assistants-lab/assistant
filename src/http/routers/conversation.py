@@ -19,7 +19,7 @@ from pydantic import BaseModel
 import src.config.user_settings_store as _user_settings_store
 import src.sdk.context_measurement as _context_measurement
 import src.sdk.run_models as _run_models
-from src.app_logging import get_logger, timer
+from src.app_logging import get_logger
 from src.config import get_settings
 from src.http.auth import require_auth
 from src.http.conversation_persistence import (
@@ -30,14 +30,13 @@ from src.http.conversation_persistence import (
 from src.http.models import MessageRequest, MessageResponse, VerificationVerdict
 from src.http.stream_adapter import adapt_stream_chunk
 from src.sdk.messages import Message, ToolCall
+from src.sdk.run_service import RunService
 from src.sdk.runner import (
     _messages_from_conversation,
     get_sdk_loop,
     reset_sdk_loop,
-    run_sdk_agent,
     run_sdk_agent_stream,
 )
-from src.sdk.run_service import RunService
 from src.sdk.session_worker import SessionBusyError, SessionWorkerRegistry
 from src.storage.messages import get_message_store
 
@@ -570,6 +569,7 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
                 prompt=req.message,
                 model=req.model,
                 provider_keys=req.provider_keys,
+                rubric=req.verification.rubric if req.verification else None,
             )
         except SessionBusyError:
             return MessageResponse(response="", error="Session already has an active run")
@@ -655,6 +655,7 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                     prompt=req.message,
                     model=req.model,
                     provider_keys=req.provider_keys,
+                    rubric=req.verification.rubric if req.verification else None,
                 ):
                     if _cancel_flags.get(skey, False) or cancel_event.is_set():
                         _persist_collected_stream_state(

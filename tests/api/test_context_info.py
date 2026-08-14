@@ -281,8 +281,8 @@ def test_context_info_does_not_run_agent_compression_or_public_events(
 ) -> None:
     _configure(monkeypatch)
     monkeypatch.setattr(
-        conversation_router,
-        "run_sdk_agent",
+        conversation_router.RunService,
+        "execute",
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("agent run called")),
     )
     monkeypatch.setattr(

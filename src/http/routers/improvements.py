@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
@@ -36,7 +38,7 @@ class OutcomeResponse(BaseModel):
 async def list_improvements(
     user_id: str = Query("default_user"),
     status: str | None = Query(None),
-) -> dict:
+) -> dict[str, Any]:
     db = LoopEngineeringDB(get_loop_engineering_db_path(user_id))
     await db.init()
     suggestions = await db.list_suggestions(status=status)
@@ -47,7 +49,7 @@ async def list_improvements(
 async def approve_suggestion(
     suggestion_id: str,
     user_id: str = Query("default_user"),
-) -> dict:
+) -> dict[str, Any]:
     db = LoopEngineeringDB(get_loop_engineering_db_path(user_id))
     await db.init()
     import time
@@ -60,7 +62,7 @@ async def approve_suggestion(
 async def reject_suggestion(
     suggestion_id: str,
     user_id: str = Query("default_user"),
-) -> dict:
+) -> dict[str, Any]:
     db = LoopEngineeringDB(get_loop_engineering_db_path(user_id))
     await db.init()
     success = await db.update_suggestion_status(suggestion_id, "rejected")
@@ -70,7 +72,7 @@ async def reject_suggestion(
 @router.post("/improvements/analyze")
 async def analyze_outcomes(
     user_id: str = Query("default_user"),
-) -> dict:
+) -> dict[str, Any]:
     """Trigger analysis job manually to propose improvements."""
     from src.config import get_settings
     from src.sdk.loops.improvement import AnalysisJob
@@ -97,7 +99,7 @@ async def analyze_outcomes(
 async def list_run_outcomes(
     user_id: str = Query("default_user"),
     limit: int = Query(50),
-) -> dict:
+) -> dict[str, Any]:
     db = LoopEngineeringDB(get_loop_engineering_db_path(user_id))
     await db.init()
     outcomes = await db.list_run_outcomes(user_id, limit=limit)

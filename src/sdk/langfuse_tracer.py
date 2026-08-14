@@ -12,6 +12,7 @@ When disabled, all methods are no-ops with zero overhead.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any
 
 from src.app_logging import get_logger
@@ -71,7 +72,7 @@ class LangfuseTracer:
         provider._original_chat = original_chat
         provider._original_chat_stream = original_chat_stream
 
-        async def traced_chat(messages, tools=None, model=None, provider_options=None, **kwargs):
+        async def traced_chat(messages: list[Any], tools: Any = None, model: str | None = None, provider_options: Any = None, **kwargs: Any) -> Any:
             client = cls._get_client()
             if client is None:
                 return await original_chat(
@@ -108,7 +109,7 @@ class LangfuseTracer:
                     pass
                 return response
 
-        def traced_chat_stream(messages, tools=None, model=None, provider_options=None, **kwargs):
+        def traced_chat_stream(messages: list[Any], tools: Any = None, model: str | None = None, provider_options: Any = None, **kwargs: Any) -> Any:
             client = cls._get_client()
             if client is None:
                 return original_chat_stream(
@@ -124,7 +125,7 @@ class LangfuseTracer:
             except Exception:
                 pass
 
-            async def wrapping_generator():
+            async def wrapping_generator() -> AsyncIterator[Any]:
                 accumulated_usage = {"input": 0, "output": 0, "reasoning": 0}
                 try:
                     async for chunk in original_chat_stream(
@@ -157,7 +158,7 @@ class LangfuseTracer:
         original_run = loop.run
         original_run_stream = loop.run_stream
 
-        async def traced_run(messages):
+        async def traced_run(messages: list[Any]) -> Any:
             client = cls._get_client()
             if client is None:
                 return await original_run(messages)
@@ -192,7 +193,7 @@ class LangfuseTracer:
                                 pass
                     return result
 
-        async def traced_run_stream(messages):
+        async def traced_run_stream(messages: list[Any]) -> AsyncIterator[Any]:
             client = cls._get_client()
             if client is None:
                 async for chunk in original_run_stream(messages):
@@ -271,7 +272,7 @@ class LangfuseTracer:
         if hasattr(loop, "_execute_single_tool"):
             original = loop._execute_single_tool
 
-            async def traced(tc, state):
+            async def traced(tc: Any, state: Any) -> Any:
                 with client.start_as_current_observation(as_type="span", name=f"tool:{tc.name}") as span:
                     try:
                         span.update(input=tc.arguments)
@@ -300,7 +301,7 @@ class LangfuseTracer:
         if hasattr(loop, "_execute_single_tool_streaming"):
             original_stream = loop._execute_single_tool_streaming
 
-            async def traced_stream(tc, state):
+            async def traced_stream(tc: Any, state: Any) -> AsyncIterator[Any]:
                 with client.start_as_current_observation(as_type="span", name=f"tool:{tc.name}") as span:
                     try:
                         span.update(input=tc.arguments)
@@ -314,7 +315,7 @@ class LangfuseTracer:
         if hasattr(loop, "_execute_tool_batch"):
             original_batch = loop._execute_tool_batch
 
-            async def traced_batch(tool_calls, state):
+            async def traced_batch(tool_calls: Any, state: Any) -> Any:
                 with client.start_as_current_observation(as_type="span", name="tool:batch") as span:
                     try:
                         span.update(
@@ -339,7 +340,7 @@ class LangfuseTracer:
         if hasattr(loop, "_execute_tool_batch_streaming"):
             original_batch_stream = loop._execute_tool_batch_streaming
 
-            async def traced_batch_stream(tool_calls, state):
+            async def traced_batch_stream(tool_calls: Any, state: Any) -> AsyncIterator[Any]:
                 with client.start_as_current_observation(as_type="span", name="tool:batch") as span:
                     try:
                         span.update(
@@ -391,7 +392,7 @@ class LangfuseTracer:
                             span.update(metadata={"error": str(e)})
                         except Exception:
                             pass
-                        logger.warning(f"{hook_name} error in {mw.name}", exc_info=True)
+                        logger.warning("langfuse.hook_error", {"hook": hook_name, "middleware": mw.name, "error": str(e)})
 
         loop._run_hooks = traced_run_hooks
 

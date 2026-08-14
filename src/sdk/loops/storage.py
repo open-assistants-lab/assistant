@@ -23,13 +23,13 @@ class RunOutcome:
     response: str
     verification_status: str | None = None
     verification_iterations: int = 0
-    verification_evaluations: list[dict] = field(default_factory=list)
+    verification_evaluations: list[dict[str, Any]] = field(default_factory=list)
     cost_usd: float = 0.0
     input_tokens: int = 0
     output_tokens: int = 0
     model: str = ""
     timestamp: str = ""
-    traces: dict | None = None
+    traces: dict[str, Any] | None = None
 
 
 @dataclass
@@ -43,7 +43,7 @@ class ImprovementSuggestion:
     rationale: str
     risk_level: str
     status: str = "proposed"
-    eval_result: dict | None = None
+    eval_result: dict[str, Any] | None = None
     created_at: str = ""
     applied_at: str | None = None
 

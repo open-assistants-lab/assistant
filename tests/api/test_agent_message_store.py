@@ -73,7 +73,7 @@ async def test_rest_runner_uses_only_session_scoped_summary_history(monkeypatch)
     async def fake_get_sdk_loop(*args, **kwargs):
         return DummyLoop()
 
-    async def fake_orchestrate(self, loop, messages, run_id, session_id, lock):
+    async def fake_orchestrate(self, loop, messages, run_id, session_id, lock, rubric=None):
         captured["messages"] = messages
         return RunResult(
             run_id=run_id,
@@ -119,7 +119,7 @@ async def test_sse_runner_uses_only_session_scoped_summary_history(monkeypatch) 
         return DummyLoop()
 
     monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
-    monkeypatch.setattr(conversation_router.RunService, "_load_rubric_middleware", lambda self, loop: None)
+    monkeypatch.setattr(conversation_router.RunService, "_load_rubric_middleware", lambda self, loop, rubric=None: None)
     monkeypatch.setattr("src.sdk.run_service.get_sdk_loop", fake_get_sdk_loop)
 
     response = await conversation_router.message_stream(
@@ -224,7 +224,7 @@ async def test_verbose_message_reports_tool_call_when_start_name_arrives_late(mo
     async def fake_get_sdk_loop(*args, **kwargs):
         return DummyLoop()
 
-    async def fake_orchestrate(self, loop, messages, run_id, session_id, lock):
+    async def fake_orchestrate(self, loop, messages, run_id, session_id, lock, rubric=None):
         return RunResult(
             run_id=run_id,
             session_id=session_id,

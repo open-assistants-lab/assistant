@@ -102,7 +102,7 @@ def _build_grader_transcript(messages: list[Message]) -> str:
 
     chunks: list[str] = []
     for msg in selected:
-        role = msg.role
+        role: str = msg.role
         if role == "tool":
             role = f"tool:{msg.name or 'tool'}"
         text = msg.content if isinstance(msg.content, str) else str(msg.content)

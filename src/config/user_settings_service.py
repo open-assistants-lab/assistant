@@ -79,7 +79,7 @@ def resolve_provider_statuses(
             name=raw_name,
             has_key=key_source != "none",
             key_configured_via_env=key_source == "env",
-            key_source=key_source,  # type: ignore[arg-type]
+            key_source=key_source,
         )
     return MappingProxyType(statuses)
 
