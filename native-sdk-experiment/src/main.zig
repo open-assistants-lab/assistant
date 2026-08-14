@@ -111,7 +111,10 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
 }};
 const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
 
-pub const max_messages = 200;
+/// Initial per-chat message capacity. The buffer grows on demand via
+/// `ensureMessageCapacity`, so long transcripts (stress tests, deep history)
+/// are not truncated at this number.
+pub const default_message_capacity = 200;
 const max_chats = 100;
 
 pub const ThemeMode = enum { dark, light };
@@ -162,7 +165,8 @@ pub const Chat = struct {
     session_id_len: usize = 0,
     title: []const u8 = "New chat",
     draft_text: []const u8 = "",
-    _messages: [max_messages]ChatMessage = undefined,
+    _messages: []ChatMessage = &.{},
+    _message_capacity: usize = 0,
     messages: []ChatMessage = &.{},
     msg_count: usize = 0,
     next_id: u64 = 1,
@@ -188,7 +192,7 @@ pub const Chat = struct {
     context_info: ContextInfo = .{},
     // Cached group extents for the virtual list. Recomputed when messages change.
     // group_extents[i] = height of group i. group_count = number of groups.
-    _group_extents: [max_messages]f32 = undefined,
+    _group_extents: []f32 = &.{},
     _group_extents_count: usize = 0,
     _group_extents_msg_count: usize = 0,  // msg_count when cache was built
     _group_extents_scroll_gen: u64 = 0,   // scroll_gen when cache was built
@@ -304,6 +308,8 @@ pub const Msg = union(enum) {
 
 pub const Model = struct {
     theme_mode: ThemeMode = .dark,
+    /// Stress-test mode: seeded synthetic transcript, no backend fetches.
+    stress_mode: bool = false,
     chats: [max_chats]Chat = undefined,
     chat_count: usize = 0,
     active_chat_idx: usize = 0,
@@ -311,6 +317,12 @@ pub const Model = struct {
     next_chat_id: u64 = 1,
     next_fetch_key: u64 = first_stream_key,
     pulse_phase: f32 = 0,
+    // Entrance animation progress (0..1, 1 = settled). Advanced by the tick
+    // timer; the view maps each to opacity/transform. Reset to 0 when the
+    // surface (re)appears so it fades in instead of teleporting.
+    settings_entrance: f32 = 1,
+    hitl_entrance: f32 = 1,
+    empty_entrance: f32 = 1,
     search_query: []const u8 = "",
     sidebar_split: f32 = 0.2,
     available_models: [max_models]ModelOption = undefined,
@@ -462,7 +474,7 @@ fn tokensFn(model: *const Model) canvas.DesignTokens {
 
 /// Process a single SSE event body (the JSON after `data: `).
 /// Used by both stream_line (live streaming) and stream_done (buffered fallback).
-fn processSSEEvent(model: *Model, chat: *Chat, sse_body: []const u8) void {
+fn processSSEEvent(model: *Model, chat: *Chat, sse_body: []const u8, fx: *Effects) void {
     const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, sse_body, .{}) catch return;
     defer parsed.deinit();
     const root_obj = jsonObject(parsed.value) orelse return;
@@ -518,6 +530,12 @@ fn processSSEEvent(model: *Model, chat: *Chat, sse_body: []const u8) void {
         chat.has_pending = true;
         chat.pending_tool = model.allocator.dupe(u8, tool) catch return;
         chat.pending_call_id = model.allocator.dupe(u8, call_id) catch return;
+        if (model.settings.reduced_motion) {
+            model.hitl_entrance = 1;
+        } else {
+            model.hitl_entrance = 0;
+            fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
+        }
     } else if (std.mem.eql(u8, event_type, "rubric_evaluation_start")) {
         chat.status_text = "Checking rubric...";
         removeTrailingEmptyAssistant(chat);
@@ -657,7 +675,9 @@ fn recalcTextareaHeight(chat: *Chat) void {
     const new_line_count = std.mem.count(u8, chat.draft_text, "\n") + 1;
     const line_height: f32 = 20;
     const padding: f32 = 8;
-    const max_lines = 8;
+    // Cap at 10 lines (Codex convention): beyond this the field stops
+    // growing and scrolls internally instead of pushing the composer taller.
+    const max_lines = 10;
     const natural_height = @max(36, @as(f32, @floatFromInt(new_line_count)) * line_height + padding);
     const max_height = @as(f32, @floatFromInt(max_lines)) * line_height + padding;
     const new_height = @min(max_height, natural_height);
@@ -723,6 +743,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
     switch (msg) {
         .input_changed => |event| {
             const chat = model.activeChat();
+            // Enter-to-send: the SDK's textarea inserts "\n" on plain Enter
+            // (on_submit only fires on Cmd+Enter). Intercept a bare newline
+            // insert and send the message instead of adding a line break.
+            if (event == .insert_text and std.mem.eql(u8, event.insert_text, "\n")) {
+                doSend(model, fx);
+                return;
+            }
             const extra = switch (event) {
                 .insert_text => |text| text.len,
                 .set_composition => |composition| composition.text.len,
@@ -766,6 +793,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     break;
                 }
             }
+            // Entrance animation for the empty state (fade + translateY).
+            // Reduced motion jumps straight to settled.
+            if (model.settings.reduced_motion) {
+                model.empty_entrance = 1;
+            } else {
+                model.empty_entrance = 0;
+                fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
+            }
         },
         .switch_chat => |chat_id| {
             model.settings.visible = false;
@@ -776,6 +811,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     model.active_chat_id = model.chats[i].id;
                     model.chats[i].unread_count = 0;
                     recalcTextareaHeight(&model.chats[i]);
+                    // Empty state entrance when switching to an empty chat
+                    if (model.chats[i].msg_count == 0 and !model.chats[i].history_loading) {
+                        if (model.settings.reduced_motion) {
+                            model.empty_entrance = 1;
+                        } else {
+                            model.empty_entrance = 0;
+                            fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
+                        }
+                    }
                     // Load history for this chat if not yet loaded
                     if (!model.chats[i].history_loaded and model.chats[i].msg_count == 0) {
                         model.chats[i].history_loaded = true;
@@ -1037,7 +1081,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (!std.mem.startsWith(u8, line.line, prefix)) return;
             const sse_body = line.line[prefix.len..];
             if (std.mem.eql(u8, sse_body, "[DONE]")) return;
-            processSSEEvent(model, chat, sse_body);
+            processSSEEvent(model, chat, sse_body, fx);
         },
         .stream_done => |response| {
             // Terminal event for the streaming fetch. The response content was
@@ -1051,6 +1095,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 return;
             }
             finalizeStream(chat);
+            // Reconcile the transcript with server truth (the streamed content
+            // may have been persisted with edits, e.g. canvas fences stripped).
+            queueHistoryFetch(model, chat, fx);
             // Mark this chat as unread if it's not the active one
             if (&model.chats[model.active_chat_idx] != chat) {
                 chat.unread_count += 1;
@@ -1102,6 +1149,26 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.pulse_phase += 0.15;
                 if (model.pulse_phase > std.math.tau) model.pulse_phase -= std.math.tau;
             }
+            // Advance entrance animations (fade-in of surfaces). Each
+            // progresses toward 1 (settled) in 2 ticks (~120ms) — the
+            // settings panel is the heaviest view, so keep rebuilds minimal.
+            // Reduced motion jumps straight to 1.
+            var any_entrance = false;
+            if (!model.settings.reduced_motion) {
+                const entrance_step: f32 = 0.5; // 2 ticks * 60ms ≈ 120ms
+                if (model.settings_entrance < 1) {
+                    model.settings_entrance = @min(1, model.settings_entrance + entrance_step);
+                    any_entrance = true;
+                }
+                if (model.hitl_entrance < 1) {
+                    model.hitl_entrance = @min(1, model.hitl_entrance + entrance_step);
+                    any_entrance = true;
+                }
+                if (model.empty_entrance < 1) {
+                    model.empty_entrance = @min(1, model.empty_entrance + entrance_step);
+                    any_entrance = true;
+                }
+            }
             // Decrement compression animation ticks for all chats
             for (0..model.chat_count) |i| {
                 if (model.chats[i].compression_animation_ticks > 0) {
@@ -1109,7 +1176,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 }
             }
             // Reschedule timer if any chat is still streaming or has animation
-            if (model.anyStreaming() or model.anyCompressionAnimation()) {
+            if (model.anyStreaming() or model.anyCompressionAnimation() or any_entrance) {
                 fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
             }
         },
@@ -1312,6 +1379,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.settings.key_input = "";
             model.settings.key_error = "";
             model.settings.grader_prompt_loading = false;
+            // Entrance animation: fade + scale in from 0.97. Reduced motion
+            // jumps straight to settled (no animation).
+            if (model.settings.reduced_motion) {
+                model.settings_entrance = 1;
+            } else {
+                model.settings_entrance = 0;
+                fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
+            }
             fx.fetch(.{
                 .key = settings_key,
                 .url = "http://127.0.0.1:8080/settings/model-catalog?user_id=native_sdk_chat&max_models_per_provider=20&max_providers=64",
@@ -1946,6 +2021,14 @@ fn sortSettingsProviders(settings: *SettingsState) void {
     }
 }
 
+/// Smoothstep ease (standard ease-out) for entrance animations. Maps a raw
+/// 0..1 progress to an eased 0..1: starts fast, settles gently — the
+/// entrance curve. Matches the SDK's `.standard` easing (3t²-2t³).
+fn smoothstep(t: f32) f32 {
+    const x = std.math.clamp(t, 0, 1);
+    return x * x * (3 - 2 * x);
+}
+
 fn escapeJsonString(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
     var extra: usize = 0;
     for (s) |c| {
@@ -2059,8 +2142,25 @@ fn trimLeadingMessageWhitespace(content: []const u8) []const u8 {
     return content[start..];
 }
 
+/// Grows the message buffer (and the parallel group-extent cache) to at
+/// least `capacity` items. The arena owns the memory, so old buffers are
+/// never freed — growth is monotonic and cheap. Existing messages are
+/// preserved.
+pub fn ensureMessageCapacity(chat: *Chat, allocator: std.mem.Allocator, capacity: usize) void {
+    if (capacity <= chat._message_capacity) return;
+    const new_capacity = @max(capacity, chat._message_capacity * 2, default_message_capacity);
+    const new_messages = allocator.alloc(ChatMessage, new_capacity) catch return;
+    const new_extents = allocator.alloc(f32, new_capacity) catch return;
+    if (chat.msg_count > 0) {
+        @memcpy(new_messages[0..chat.msg_count], chat._messages[0..chat.msg_count]);
+    }
+    chat._messages = new_messages;
+    chat._group_extents = new_extents;
+    chat._message_capacity = new_capacity;
+}
+
 pub fn addMessage(chat: *Chat, allocator: std.mem.Allocator, role: []const u8, content: []const u8) void {
-    if (chat.msg_count >= max_messages) return;
+    ensureMessageCapacity(chat, allocator, chat.msg_count + 1);
     chat._messages[chat.msg_count] = .{
         .id = chat.next_id,
         .role = allocator.dupe(u8, role) catch return,
@@ -2073,7 +2173,7 @@ pub fn addMessage(chat: *Chat, allocator: std.mem.Allocator, role: []const u8, c
 }
 
 fn addToolMessage(chat: *Chat, allocator: std.mem.Allocator, tool_name: []const u8, args: []const u8) void {
-    if (chat.msg_count >= max_messages) return;
+    ensureMessageCapacity(chat, allocator, chat.msg_count + 1);
     const status_summary = std.fmt.allocPrint(allocator, "{s}({s})", .{ tool_name, args }) catch tool_name;
     chat._messages[chat.msg_count] = .{
         .id = chat.next_id,
@@ -2450,7 +2550,7 @@ fn sortChatsByCreatedAt(model: *Model) void {
     }
 }
 
-fn groupExtentEstimate(context: ?*const anyopaque, index: u64) f32 {
+pub fn groupExtentEstimate(context: ?*const anyopaque, index: u64) f32 {
     const chat: *const Chat = @ptrCast(@alignCast(@constCast(context)));
     // Recompute cache if messages changed (different msg_count or scroll_gen).
     if (chat._group_extents_msg_count != chat.msg_count or
@@ -2468,7 +2568,7 @@ fn groupExtentEstimate(context: ?*const anyopaque, index: u64) f32 {
 /// when the cache is invalid (messages changed). This makes the virtual
 /// list's extent_estimate callback O(1) per item instead of O(n) per item,
 /// eliminating the O(n²) scroll lag.
-fn computeGroupExtents(chat: *Chat) void {
+pub fn computeGroupExtents(chat: *Chat) void {
     const count = chat.msg_count;
     const line_height: f32 = 17.5;
     const timestamp_height: f32 = 16.25;
@@ -2508,6 +2608,47 @@ fn computeGroupExtents(chat: *Chat) void {
     chat._group_extents_scroll_gen = chat.transcript_scroll_generation;
 }
 
+/// Seeds a deterministic synthetic transcript for the virtual-list stress
+/// test. Roles and content lengths vary (user/assistant/tool/reasoning,
+/// 10..600 chars, occasional newlines) to exercise variable-extent
+/// estimation; the sequence is reproducible across runs.
+pub fn seedStressTranscript(chat: *Chat, allocator: std.mem.Allocator, count: usize) void {
+    ensureMessageCapacity(chat, allocator, count);
+    var seed: u64 = 0x9E3779B97F4A7C15;
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        seed = seed *% 6364136223846793005 +% 1442695040888963407;
+        const r = (seed >> 33) & 0xFFFF;
+        const role: []const u8 = if (i % 2 == 0)
+            "user"
+        else if (i % 13 == 0)
+            "tool"
+        else if (i % 17 == 0)
+            "reasoning"
+        else
+            "assistant";
+        const len: usize = 10 + (r % 590); // 10..600 chars
+        const content = allocator.alloc(u8, len) catch return;
+        var j: usize = 0;
+        while (j < len) : (j += 1) {
+            const c = (seed >> 32) & 0xFF;
+            seed = seed *% 6364136223846793005 +% 1442695040888963407;
+            content[j] = if (j % 97 == 0) '\n' else 'a' + @as(u8, @intCast(c % 26));
+        }
+        chat._messages[chat.msg_count] = .{
+            .id = chat.next_id,
+            .role = role,
+            .content = content,
+            .tool_name = if (std.mem.eql(u8, role, "tool")) "stress_tool" else "",
+            .tool_status = if (std.mem.eql(u8, role, "tool")) "done" else "",
+            .timestamp = "",
+        };
+        chat.next_id += 1;
+        chat.msg_count += 1;
+    }
+    chat.messages = chat._messages[0..chat.msg_count];
+}
+
 fn extractTimestamp(item: std.json.Value, allocator: std.mem.Allocator) []const u8 {
     const ts_val = item.object.get("timestamp") orelse return "";
     const ts_str = switch (ts_val) {
@@ -2533,7 +2674,7 @@ pub fn addHistoryMessage(chat: *Chat, allocator: std.mem.Allocator, item: std.js
         else => return,
     };
     if (std.mem.eql(u8, role_str, "tool")) {
-        if (chat.msg_count >= max_messages) return;
+        ensureMessageCapacity(chat, allocator, chat.msg_count + 1);
         const metadata = item.object.get("metadata");
         const tool_name = if (metadata) |m| blk: {
             const name_val = m.object.get("tool_name") orelse m.object.get("name");
@@ -2560,14 +2701,12 @@ pub fn addHistoryMessage(chat: *Chat, allocator: std.mem.Allocator, item: std.js
         chat.messages = chat._messages[0..chat.msg_count];
     } else if (std.mem.eql(u8, role_str, "reasoning")) {
         if (content_str.len == 0) return;
-        if (chat.msg_count >= max_messages) return;
         addMessage(chat, allocator, role_str, content_str);
         chat._messages[chat.msg_count - 1].collapsed = true;
         chat._messages[chat.msg_count - 1].timestamp = extractTimestamp(item, allocator);
     } else {
         const trimmed = std.mem.trim(u8, content_str, " \n\r\t");
         if (trimmed.len == 0) return;
-        if (chat.msg_count >= max_messages) return;
         addMessage(chat, allocator, role_str, trimmed);
         chat._messages[chat.msg_count - 1].timestamp = extractTimestamp(item, allocator);
     }
@@ -2863,9 +3002,16 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     child_count += 1;
 
     const children_slice: []const AppUi.Node = children[0..child_count];
+    // Entrance animation: fade-in only. The settings panel is the heaviest
+    // view (header + search + full model catalog); a scale transform forces
+    // re-rasterization of the whole panel each frame, which reads as lag.
+    // Opacity alone is GPU-cheap and still prevents the teleport.
+    const settings_eased = smoothstep(model.settings_entrance);
+
     return ui.scroll(.{
         .grow = 1,
         .padding = 12,
+        .opacity = settings_eased,
         .style_tokens = .{ .background = .surface },
     }, .{
         ui.column(.{ .gap = 12 }, children_slice),
@@ -2899,6 +3045,30 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                 ui.text(.{ .size = .heading, .style_tokens = .{ .foreground = .text_muted } }, "Loading..."),
             });
         } else {
+            // Empty state: heading, subtitle, and suggestions stagger in
+            // (fade + 8px rise, ~90ms between nodes, ~270ms total). This is
+            // the first-time tier — delight is allowed. Reduced motion:
+            // fade only, no rise.
+            const e0 = smoothstep(model.empty_entrance);
+            const e1 = smoothstep(model.empty_entrance - 0.15);
+            const e2 = smoothstep(model.empty_entrance - 0.3);
+            const rise: f32 = if (model.settings.reduced_motion) 0.0 else 8.0;
+            const fade_node = struct {
+                fn build(_: *AppUi, progress: f32, dy: f32, node_in: AppUi.Node) AppUi.Node {
+                    if (progress >= 1) return node_in;
+                    var node = node_in;
+                    node.widget.opacity = std.math.clamp(progress, 0, 1);
+                    node.widget.transform = canvas.Affine.translate(0, dy * (1 - std.math.clamp(progress, 0, 1)));
+                    return node;
+                }
+            }.build;
+            const heading = ui.text(.{ .size = .heading }, "How can I help?");
+            const subtitle = ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Ask me anything, or try one of these:");
+            const suggestions = ui.row(.{ .gap = 8 }, .{
+                ui.button(.{ .on_press = .suggestion_inbox, .variant = .ghost }, "Triage my inbox"),
+                ui.button(.{ .on_press = .suggestion_summary, .variant = .ghost }, "Draft a weekly summary"),
+                ui.button(.{ .on_press = .suggestion_contacts, .variant = .ghost }, "Find contacts in marketing"),
+            });
             children[child_count] = ui.column(.{
                 .grow = 1,
                 .padding = 32,
@@ -2907,13 +3077,9 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                 .main = .center,
                 .style_tokens = .{ .background = .surface },
             }, .{
-                ui.text(.{ .size = .heading }, "How can I help?"),
-                ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Ask me anything, or try one of these:"),
-                ui.row(.{ .gap = 8 }, .{
-                    ui.button(.{ .on_press = .suggestion_inbox, .variant = .ghost }, "Triage my inbox"),
-                    ui.button(.{ .on_press = .suggestion_summary, .variant = .ghost }, "Draft a weekly summary"),
-                    ui.button(.{ .on_press = .suggestion_contacts, .variant = .ghost }, "Find contacts in marketing"),
-                }),
+                fade_node(ui, e0, rise, heading),
+                fade_node(ui, e1, rise, subtitle),
+                fade_node(ui, e2, rise, suggestions),
             });
         }
     } else {
@@ -2990,13 +3156,19 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     }
     child_count += 1;
 
-    // HITL bar (if pending for the active chat)
+    // HITL bar (if pending for the active chat) — fades in with a small
+    // upward slide so "a decision is waiting" reads as a surface appearing,
+    // not teleporting. Reduced motion: fade only.
     if (chat.has_pending) {
         const approve_text = std.fmt.allocPrint(ui.arena, "Approve: {s}?", .{chat.pending_tool}) catch "Approve?";
+        const hitl_eased = smoothstep(model.hitl_entrance);
+        const hitl_dy = if (model.settings.reduced_motion) 0.0 else 8.0 * (1 - hitl_eased);
         children[child_count] = ui.row(.{
             .gap = 12,
             .padding = 12,
             .cross = .center,
+            .opacity = hitl_eased,
+            .transform = canvas.Affine.translate(0, hitl_dy),
             .style_tokens = .{ .background = .surface, .radius = .md },
         }, .{
             ui.text(.{ .grow = 1 }, approve_text),
@@ -3020,7 +3192,7 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     const composer_textarea = blk: {
         var field = ui.el(.textarea, .{
             .text = model.inputText(),
-            .placeholder = "Type a message... (Cmd+Enter to send)",
+            .placeholder = "Type a message... (Enter to send)",
             .on_input = AppUi.inputMsg(.input_changed),
             .on_submit = .send_message,
             .semantics = .{ .label = "Message" },
@@ -3234,6 +3406,9 @@ pub fn initialModel() Model {
 }
 
 fn initFx(model: *Model, fx: *Effects) void {
+    // Stress-test mode: the transcript is seeded locally; skip all fetches
+    // so the test is deterministic and does not need the backend.
+    if (model.stress_mode) return;
     // Fetch all sessions to restore the sidebar
     fx.fetch(.{
         .key = sessions_key,
@@ -3290,6 +3465,15 @@ pub fn main(init: std.process.Init) !void {
     });
     app_state.model = initialModel();
     app_state.model.allocator = allocator;
+
+    // Stress-test mode: seed a synthetic transcript of N messages so the
+    // virtual list can be exercised at scale without a backend.
+    if (init.environ_map.get("NATIVE_SDK_STRESS_MESSAGES")) |count_str| {
+        if (std.fmt.parseInt(usize, count_str, 10)) |count| {
+            app_state.model.stress_mode = true;
+            seedStressTranscript(app_state.model.activeChat(), allocator, count);
+        } else |_| {}
+    }
 
     try runner.runWithOptions(app_state.app(), .{
         .app_name = "assistant",

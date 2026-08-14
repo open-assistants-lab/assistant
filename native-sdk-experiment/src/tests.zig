@@ -45,6 +45,12 @@ fn countKind(widget: canvas.Widget, kind: canvas.WidgetKind) usize {
     return count;
 }
 
+fn countAllWidgets(widget: canvas.Widget) usize {
+    var count: usize = 1;
+    for (widget.children) |child| count += countAllWidgets(child);
+    return count;
+}
+
 fn findTextContaining(widget: canvas.Widget, fragment: []const u8) ?canvas.Widget {
     if (widget.kind == .text and std.mem.indexOf(u8, widget.text, fragment) != null) return widget;
     for (widget.children) |child| {
@@ -97,7 +103,7 @@ fn sendAndStartStream(model: *Model, fx: *Effects, text: []const u8) u64 {
     return model.activeChat().fetch_key;
 }
 
-test "shift+enter inserts newline without clearing draft" {
+test "enter sends the message and clears the draft" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -108,9 +114,9 @@ test "shift+enter inserts newline without clearing draft" {
 
     main.update(&model, .{ .input_changed = .{ .insert_text = "hello world" } }, &fx);
     main.update(&model, .{ .input_changed = .{ .insert_text = "\n" } }, &fx);
-
-    try testing.expectEqualStrings("hello world\n", model.activeChat().draft_text);
-    try testing.expect(!model.activeChat().streaming);
+    // Enter-to-send: a bare newline insert sends the message and clears the draft.
+    try testing.expectEqualStrings("", model.activeChat().draft_text);
+    try testing.expect(model.activeChat().streaming);
 }
 
 test "send message adds user message and starts streaming" {
@@ -189,11 +195,11 @@ test "hosted model shows change button" {
     } }, &fx);
 
     const tree = try buildTree(arena, &model);
-    const btn = findButtonContaining(tree.root, "Hosted") orelse return error.WidgetNotFound;
+    const btn = findButtonContaining(tree.root, "Agnes · Agnes 2.0 Flash") orelse return error.WidgetNotFound;
     const send_btn = findButtonContaining(tree.root, "Send") orelse return error.WidgetNotFound;
-    // Hosted button and Send button are in the same row (same y)
+    // Model button and Send button are in the same row (same y)
     try testing.expectApproxEqAbs(btn.frame.y, send_btn.frame.y, 1.0);
-    // Hosted button fits its content (not full width)
+    // Model button fits its content (not full width)
     try testing.expect(btn.frame.width < send_btn.frame.width or btn.frame.width < 200);
 }
 
@@ -649,10 +655,12 @@ test "title_generated updates chat title" {
     main.update(&model, .{ .stream_done = .{ .key = fk } }, &fx);
     // Note: title fetch is queued but we don't need to clear it
 
-    // Simulate title generation response
-    const title_response_body =
-        \\{"title":"Shanghai Weather Forecast","session_id":"chat-1"}
-    ;
+    // Simulate title generation response for the active chat's session
+    const title_response_body = std.fmt.allocPrint(
+        arena,
+        "{{\"title\":\"Shanghai Weather Forecast\",\"session_id\":\"{s}\"}}",
+        .{chat.sessionId()},
+    ) catch return;
     main.update(&model, .{ .title_generated = .{
         .key = 8,
         .outcome = .ok,
@@ -801,10 +809,11 @@ test "approve resumes the run through the real effect pipeline" {
     try testing.expect(!chat.streaming);
 
     // 3. User approves — the approve fetch must be a stream: feedLine below
-    //    would fail with EffectNotFound on a buffered fetch.
+    //    would fail with EffectNotFound on a buffered fetch. (Fetch 0 is the
+    //    history reconciliation queued by stream_done.)
     main.update(&model, .approve, &fx);
-    try testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
-    const request = fx.pendingFetchAt(0).?;
+    try testing.expectEqual(@as(usize, 2), fx.pendingFetchCount());
+    const request = fx.pendingFetchAt(1).?;
     try testing.expect(request.response == .stream);
     const fk2 = chat.fetch_key;
 
@@ -902,15 +911,12 @@ test "chat list: new chat creates empty chat and sets active" {
     model.allocator = arena;
     var fx = noopFx(arena);
     try testing.expectEqual(@as(usize, 1), model.chat_count);
-    main.update(&model, .new_chat, &fx);
-    try testing.expectEqual(@as(usize, 1), model.chat_count);
-    model.activeChat().draft_text = "test";
-    main.update(&model, .send_message, &fx);
-    model.activeChat().streaming = false;
+    const first_id = model.chats[0].id;
     main.update(&model, .new_chat, &fx);
     try testing.expectEqual(@as(usize, 2), model.chat_count);
-    try testing.expectEqual(@as(usize, 1), model.active_chat_idx);
-    try testing.expectEqual(@as(usize, 0), model.chats[1].msg_count);
+    // The new chat becomes active and is empty.
+    try testing.expect(model.activeChat().id != first_id);
+    try testing.expectEqual(@as(usize, 0), model.activeChat().msg_count);
 }
 
 test "chat list: switch chat sets active index" {
@@ -921,6 +927,7 @@ test "chat list: switch chat sets active index" {
     var model = main.initialModel();
     model.allocator = arena;
     var fx = noopFx(arena);
+    const first_chat_id = model.chats[0].id;
     model.activeChat().draft_text = "first";
     main.update(&model, .send_message, &fx);
     model.activeChat().streaming = false;
@@ -929,10 +936,10 @@ test "chat list: switch chat sets active index" {
     main.update(&model, .send_message, &fx);
     model.activeChat().streaming = false;
     main.update(&model, .new_chat, &fx);
-    try testing.expectEqual(@as(usize, 2), model.active_chat_idx);
-    const first_chat_id = model.chats[0].id;
+    // The newest chat is active (wherever it sorted to).
+    try testing.expect(model.activeChat().id != first_chat_id);
     main.update(&model, .{ .switch_chat = first_chat_id }, &fx);
-    try testing.expectEqual(@as(usize, 0), model.active_chat_idx);
+    try testing.expectEqual(first_chat_id, model.activeChat().id);
 }
 
 test "search: query accumulates text" {
@@ -999,7 +1006,7 @@ test "unread badge: switch chat resets unread count" {
     try testing.expectEqual(@as(usize, 0), model.active_chat_idx);
 }
 
-test "smart new chat: stays on empty chat with draft" {
+test "new chat keeps draft on the previous chat" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -1012,7 +1019,10 @@ test "smart new chat: stays on empty chat with draft" {
     try testing.expectEqual(@as(usize, 1), model.chat_count);
 
     main.update(&model, .new_chat, &fx);
-    try testing.expectEqual(@as(usize, 1), model.chat_count);
+    try testing.expectEqual(@as(usize, 2), model.chat_count);
+    // The new chat is empty; the draft stays on the previous chat.
+    try testing.expectEqualStrings("", model.inputText());
+    main.update(&model, .{ .switch_chat = model.chats[1].id }, &fx);
     try testing.expectEqualStrings("hello", model.inputText());
 }
 
@@ -1028,15 +1038,16 @@ test "draft preservation: switching chats preserves per-chat draft" {
     main.update(&model, .{ .input_changed = .{ .insert_text = "first" } }, &fx);
     main.update(&model, .send_message, &fx);
     model.activeChat().streaming = false;
+    const first_chat_id = model.chats[0].id;
 
     main.update(&model, .new_chat, &fx);
     main.update(&model, .{ .input_changed = .{ .insert_text = "draft2" } }, &fx);
     try testing.expectEqualStrings("draft2", model.inputText());
 
-    main.update(&model, .{ .switch_chat = model.chats[0].id }, &fx);
+    main.update(&model, .{ .switch_chat = first_chat_id }, &fx);
     try testing.expectEqualStrings("", model.inputText());
 
-    main.update(&model, .{ .switch_chat = model.chats[1].id }, &fx);
+    main.update(&model, .{ .switch_chat = model.chats[0].id }, &fx);
     try testing.expectEqualStrings("draft2", model.inputText());
 }
 
@@ -1442,16 +1453,16 @@ test "delete chat before active keeps same active chat" {
     main.update(&model, .send_message, &fx);
     model.activeChat().streaming = false;
     try testing.expectEqual(@as(usize, 3), model.chat_count);
-    try testing.expectEqual(@as(usize, 2), model.active_chat_idx);
 
     const middle_id = model.chats[1].id;
     main.update(&model, .{ .switch_chat = middle_id }, &fx);
-    try testing.expectEqual(@as(usize, 1), model.active_chat_idx);
+    try testing.expectEqual(middle_id, model.activeChat().id);
 
-    main.update(&model, .{ .delete_chat = model.chats[0].id }, &fx);
+    const top_id = model.chats[0].id;
+    main.update(&model, .{ .delete_chat = top_id }, &fx);
 
     try testing.expectEqual(@as(usize, 2), model.chat_count);
-    try testing.expectEqual(@as(usize, 0), model.active_chat_idx);
+    // Deleting a chat before the active one keeps the active chat selected.
     try testing.expectEqual(middle_id, model.activeChat().id);
 }
 
@@ -1580,7 +1591,7 @@ test "search backspace deletes a full UTF-8 code point" {
     try testing.expectEqualStrings("caf", model.search_query);
 }
 
-test "addHistoryMessage at capacity does not corrupt previous message" {
+test "addHistoryMessage beyond default capacity grows the buffer without corrupting previous messages" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -1590,10 +1601,10 @@ test "addHistoryMessage at capacity does not corrupt previous message" {
     const chat = model.activeChat();
 
     var i: usize = 0;
-    while (i < main.max_messages) : (i += 1) {
+    while (i < main.default_message_capacity) : (i += 1) {
         main.addMessage(chat, arena, "user", "msg");
     }
-    try testing.expectEqual(main.max_messages, chat.msg_count);
+    try testing.expectEqual(main.default_message_capacity, chat.msg_count);
     chat._messages[chat.msg_count - 1].timestamp = "SENTINEL";
 
     const item_json = "{\"role\":\"assistant\",\"content\":\"overflow\",\"timestamp\":\"2026-01-01T12:34:56Z\"}";
@@ -1601,9 +1612,87 @@ test "addHistoryMessage at capacity does not corrupt previous message" {
     defer parsed.deinit();
     main.addHistoryMessage(chat, arena, parsed.value);
 
-    try testing.expectEqual(main.max_messages, chat.msg_count);
-    try testing.expectEqualStrings("SENTINEL", chat._messages[chat.msg_count - 1].timestamp);
-    try testing.expectEqualStrings("msg", chat._messages[chat.msg_count - 1].content);
+    // The buffer grows on demand instead of dropping the overflow message.
+    try testing.expectEqual(main.default_message_capacity + 1, chat.msg_count);
+    try testing.expectEqualStrings("overflow", chat._messages[chat.msg_count - 1].content);
+    try testing.expectEqualStrings("SENTINEL", chat._messages[chat.msg_count - 2].timestamp);
+    try testing.expectEqualStrings("msg", chat._messages[chat.msg_count - 2].content);
+}
+
+test "virtual list mounts a viewport-sized window at 10k messages" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    const chat = model.activeChat();
+    main.seedStressTranscript(chat, arena, 10_000);
+    try testing.expectEqual(@as(usize, 10_000), chat.msg_count);
+
+    const tree = try buildTree(arena, &model);
+    const list = findChatTranscriptList(tree.root) orelse return error.VirtualListNotFound;
+    // The windowed list mounts only the visible window + overscan, never the
+    // full 10k-item transcript.
+    try testing.expect(list.children.len <= 64);
+    // The whole tree stays far under the 1024-node per-view budget.
+    const total = countAllWidgets(tree.root);
+    try testing.expect(total < 1024);
+}
+
+test "extent cache is correct and O(1) at 10k messages" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    const chat = model.activeChat();
+    main.seedStressTranscript(chat, arena, 10_000);
+
+    // First estimate call recomputes the cache; every group extent is positive.
+    const first = main.groupExtentEstimate(chat, 0);
+    try testing.expect(first > 0);
+    try testing.expect(chat._group_extents_count > 0);
+    try testing.expect(chat._group_extents_count <= chat.msg_count);
+    var i: usize = 0;
+    while (i < chat._group_extents_count) : (i += 1) {
+        try testing.expect(chat._group_extents[i] > 0);
+    }
+
+    // Cache is stable across calls (no recompute churn).
+    const cached_count = chat._group_extents_count;
+    _ = main.groupExtentEstimate(chat, 0);
+    try testing.expectEqual(cached_count, chat._group_extents_count);
+
+    // Cache invalidates when messages change.
+    main.addMessage(chat, arena, "user", "new message");
+    _ = main.groupExtentEstimate(chat, 0);
+    try testing.expect(chat._group_extents_count > cached_count);
+}
+
+test "seedStressTranscript is deterministic" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    const chat = model.activeChat();
+    main.seedStressTranscript(chat, arena, 1_000);
+
+    var model2 = main.initialModel();
+    model2.allocator = arena;
+    const chat2 = model2.activeChat();
+    main.seedStressTranscript(chat2, arena, 1_000);
+
+    try testing.expectEqual(chat.msg_count, chat2.msg_count);
+    var i: usize = 0;
+    while (i < chat.msg_count) : (i += 1) {
+        try testing.expectEqualStrings(chat._messages[i].role, chat2._messages[i].role);
+        try testing.expectEqual(chat._messages[i].content.len, chat2._messages[i].content.len);
+        try testing.expectEqualSlices(u8, chat._messages[i].content, chat2._messages[i].content);
+    }
 }
 
 test "stream_line ignores non-string event type without crashing" {
