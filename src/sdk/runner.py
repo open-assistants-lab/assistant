@@ -564,6 +564,16 @@ async def create_sdk_loop(
         model_id=model_id,
     )
 
+    # The flow identity (used by compression contexts and middleware reruns)
+    # must carry the session this loop was created for; the legacy
+    # run_sdk_agent/run_sdk_agent_stream set these after get_sdk_loop, but the
+    # RunService path never did — leaving _flow_session_id at its "default"
+    # fallback and failing summarization persistence with session_mismatch.
+    loop._flow_user_id = user_id  # type: ignore[attr-defined]
+    loop._flow_session_id = runtime_session_id  # type: ignore[attr-defined]
+    loop._flow_model = model_id  # type: ignore[attr-defined]
+    loop._flow_attempt = 1  # type: ignore[attr-defined]
+
     loop._tool_index = idx
     total_in_index = idx.count()
     if total_in_index > 0:

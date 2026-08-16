@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from src.app_logging import get_logger
+from src.sdk.langfuse_tracer import LangfuseTracer
 from src.sdk.loop import AgentLoop
 from src.sdk.messages import Message, StreamChunk
 from src.sdk.middleware_rubric import RubricMiddleware
@@ -146,6 +147,17 @@ def _sdk_message_to_storage(msg: Message, session_id: str) -> StorageMessage:
     )
 
 
+def _to_evaluation_result(raw: str) -> RubricEvaluationResult:
+    """Map the grader's raw result string to RubricEvaluationResult.
+
+    The grader returns "failed" for a malformed/contradictory rubric; that
+    maps to INVALID_RUBRIC (the terminal status for ungradable rubrics).
+    """
+    if raw == "failed":
+        return RubricEvaluationResult.INVALID_RUBRIC
+    return RubricEvaluationResult(raw)
+
+
 def _revision_prompt(evaluation: dict[str, Any]) -> str:
     from src.sdk.middleware_rubric import _revision_prompt as _rp
     return _rp(evaluation)
@@ -261,7 +273,10 @@ class RunService:
         """Non-streaming execution. Returns immutable RunResult."""
         lock = await self._registry.acquire(session_id)
         try:
-            return await self._run(session_id, prompt, model, provider_keys, lock, rubric)
+            # Run-level trace root: the loop's agent_run span and the rubric
+            # grader both nest under it (no-op when Langfuse is disabled).
+            with LangfuseTracer.trace_run(self._user_id, session_id):
+                return await self._run(session_id, prompt, model, provider_keys, lock, rubric)
         except SessionBusyError:
             raise
         finally:
@@ -278,8 +293,10 @@ class RunService:
         """Streaming execution. Yields RunEvent envelopes."""
         lock = await self._registry.acquire(session_id)
         try:
-            async for event in self._run_stream(session_id, prompt, model, provider_keys, lock, rubric):
-                yield event
+            # Run-level trace root covering the whole stream (agent + grader).
+            with LangfuseTracer.trace_run(self._user_id, session_id):
+                async for event in self._run_stream(session_id, prompt, model, provider_keys, lock, rubric):
+                    yield event
         finally:
             await self._registry.release(session_id)
 
@@ -443,7 +460,7 @@ class RunService:
                 evaluation = RubricEvaluation(
                     grading_run_id=evaluation_result["grading_run_id"],
                     attempt=attempt,
-                    result=RubricEvaluationResult(evaluation_result["result"]),
+                    result=_to_evaluation_result(evaluation_result["result"]),
                     explanation=evaluation_result["explanation"],
                     criteria=tuple(
                         CriterionEvaluation(
@@ -489,7 +506,18 @@ class RunService:
                 messages = list(messages) + [Message.user(content=feedback)]
 
             if rubric_status == TerminalRubricStatus.NOT_RUN and rubric_availability == RubricAvailability.ON:
-                rubric_status = TerminalRubricStatus.SATISFIED
+                # The verification loop ended without a terminal verdict. Only
+                # claim satisfaction when the agent run itself completed; a
+                # failed run (e.g. the agent died on a later revision attempt
+                # after earlier evaluations) must not report satisfied — the
+                # outcome validator rejects a satisfied status whose latest
+                # evaluation was needs_revision, and CANCELLED is the only
+                # terminal status that tolerates the leftover evaluations.
+                rubric_status = (
+                    TerminalRubricStatus.SATISFIED
+                    if run_status is RunStatus.COMPLETED
+                    else TerminalRubricStatus.CANCELLED
+                )
 
             persisted_id = self._message_store.persist_run(
                 run_id=run_id,
@@ -518,7 +546,10 @@ class RunService:
                 ),
                 persisted_at=datetime.now(UTC),
             )
-            yield _emit(DoneEvent, DoneData(result=run_result).model_dump())
+            # The envelope attempt must match the result's final attempt (the
+            # rubric loop can revise past attempt 1); DoneEvent validation
+            # rejects a mismatch.
+            yield _emit(DoneEvent, DoneData(result=run_result).model_dump(), final_attempt)
         except SessionBusyError:
             yield _emit(ErrorEvent, ErrorData(
                 code="session_busy",
@@ -639,7 +670,7 @@ class RunService:
             evaluation = RubricEvaluation(
                 grading_run_id=evaluation_result["grading_run_id"],
                 attempt=attempt,
-                result=RubricEvaluationResult(evaluation_result["result"]),
+                result=_to_evaluation_result(evaluation_result["result"]),
                 explanation=evaluation_result["explanation"],
                 criteria=tuple(
                     CriterionEvaluation(
@@ -674,7 +705,13 @@ class RunService:
             messages = list(messages) + [Message.user(content=feedback)]
 
         if rubric_status == TerminalRubricStatus.NOT_RUN and rubric_availability == RubricAvailability.ON:
-            rubric_status = TerminalRubricStatus.SATISFIED
+            # Only claim satisfaction when the agent run completed (see the
+            # matching fallback in _run_stream).
+            rubric_status = (
+                TerminalRubricStatus.SATISFIED
+                if run_status is RunStatus.COMPLETED
+                else TerminalRubricStatus.CANCELLED
+            )
 
         return RunResult(
             run_id=run_id,
@@ -710,6 +747,9 @@ class RunService:
                 return None
 
             grader_model = vc.grader_model or loop.model_id
+            # create_model_from_config already wraps the provider with
+            # LangfuseTracer.wrap_provider when enabled — do NOT wrap again
+            # here or the grader's LLM calls get double-traced.
             grader_provider = create_model_from_config(grader_model, user_id=self._user_id)
 
             grader_prompt: str | None = rubric
