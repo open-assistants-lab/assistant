@@ -399,7 +399,7 @@ async def test_run_service_session_busy(monkeypatch):
     store = InMemoryMessageStore()
     service = RunService("test-user", registry, store)
 
-    lock = await registry.acquire("chat-1")
+    _lock = await registry.acquire("chat-1")
     try:
         with pytest.raises(SessionBusyError):
             await service.execute(session_id="chat-1", prompt="Hello")
