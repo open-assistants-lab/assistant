@@ -12,12 +12,29 @@ When disabled, all methods are no-ops with zero overhead.
 
 from __future__ import annotations
 
+import logging as stdlib_logging
 from collections.abc import AsyncIterator
 from typing import Any
 
 from src.app_logging import get_logger
 
 logger = get_logger()
+
+
+class _OtelDetachFilter(stdlib_logging.Filter):
+    """Drop OTel's 'Failed to detach context' log noise.
+
+    When a traced async generator is closed early (client disconnect, or the
+    run loop breaking on an error chunk), GeneratorExit unwinds the OTel
+    context managers and opentelemetry.context.detach() fails to reset a
+    contextvar token that was created in a different asyncio context. OTel
+    catches the ValueError itself and logs this traceback at ERROR level —
+    the teardown is expected and the exception is already handled, so the
+    log line is pure noise.
+    """
+
+    def filter(self, record: stdlib_logging.LogRecord) -> bool:
+        return "Failed to detach context" not in record.getMessage()
 
 
 class LangfuseTracer:
@@ -35,6 +52,11 @@ class LangfuseTracer:
                 public_key=public_key,
                 secret_key=secret_key,
                 base_url=host,
+            )
+            # OTel's detach() swallows the cross-context ValueError itself and
+            # logs a full traceback; silence that expected teardown noise.
+            stdlib_logging.getLogger("opentelemetry.context").addFilter(
+                _OtelDetachFilter()
             )
             logger.info("langfuse.initialized", {"host": host})
         except Exception as e:

@@ -66,6 +66,7 @@ def test_sse_stream_resolves_rubric_from_request(monkeypatch):
     monkeypatch.setattr("src.http.routers.conversation.get_message_store", MagicMock(return_value=MagicMock(
         add_message=MagicMock(),
         get_messages_with_summary=MagicMock(return_value=[]),
+        persist_run=MagicMock(return_value="msg-1"),
     )))
 
     client = TestClient(app)
