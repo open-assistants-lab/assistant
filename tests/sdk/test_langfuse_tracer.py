@@ -66,3 +66,42 @@ def test_factory_wraps_provider_when_enabled(monkeypatch):
 
     LangfuseTracer._client = None
     _cfg._config = None
+
+
+def test_otel_detach_filter_drops_cross_context_noise() -> None:
+    """The OTel detach filter must drop the 'Failed to detach context'
+    traceback (expected async-generator teardown noise, swallowed by OTel
+    itself) while keeping every other log record."""
+    import logging
+
+    from src.sdk.langfuse_tracer import _OtelDetachFilter
+
+    filt = _OtelDetachFilter()
+    noisy = logging.LogRecord(
+        "opentelemetry.context", logging.ERROR, "ctx.py", 155,
+        "Failed to detach context", None, None,
+    )
+    normal = logging.LogRecord(
+        "opentelemetry.context", logging.ERROR, "ctx.py", 1,
+        "some other error", None, None,
+    )
+    assert not filt.filter(noisy)
+    assert filt.filter(normal)
+
+
+def test_otel_detach_filter_installed_on_init(monkeypatch) -> None:
+    """LangfuseTracer.init must install the filter on the opentelemetry.context
+    logger so the expected teardown traceback never reaches the log."""
+    import logging
+
+    from src.sdk.langfuse_tracer import LangfuseTracer, _OtelDetachFilter
+
+    langfuse_logger = logging.getLogger("opentelemetry.context")
+    installed = [f for f in langfuse_logger.filters if isinstance(f, _OtelDetachFilter)]
+    try:
+        LangfuseTracer.init("pk-test", "sk-test", "http://localhost:3000")
+        assert any(isinstance(f, _OtelDetachFilter) for f in langfuse_logger.filters)
+    finally:
+        for f in langfuse_logger.filters:
+            if isinstance(f, _OtelDetachFilter) and f not in installed:
+                langfuse_logger.removeFilter(f)
