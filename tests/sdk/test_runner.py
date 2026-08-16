@@ -87,6 +87,22 @@ def _context(session_id="chat-1"):
 
 
 @pytest.mark.asyncio
+async def test_create_sdk_loop_flow_identity_carries_session(loop_factory):
+    """The loop's flow identity must carry the session it was created for.
+
+    Compression contexts derive their session_id from _flow_identity(), and
+    _persist_summary rejects a mismatch — so a loop created via
+    create_sdk_loop (the RunService path) with a real session must report
+    that session. Previously _flow_session_id was only set by the legacy
+    run_sdk_agent/run_sdk_agent_stream, leaving 'default' and silently
+    dropping every summarization persist."""
+    loop = await loop_factory("chat-42")
+    assert loop._flow_session_id == "chat-42"
+    attempt, session_id = loop._flow_identity()
+    assert session_id == "chat-42"
+
+
+@pytest.mark.asyncio
 async def test_create_sdk_loop_wires_typed_summary_sink(loop_factory, monkeypatch):
     from src.sdk.compression import PersistenceStatus
 
