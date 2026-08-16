@@ -209,6 +209,12 @@ class TestTitleGeneration:
         calls = []
 
         class Store:
+            def get_session_title(self, session_id):
+                return None
+
+            def get_sessions(self):
+                return []
+
             def get_messages_by_session_id(self, session_id, limit):
                 calls.append((session_id, limit))
                 return [
@@ -234,6 +240,108 @@ class TestTitleGeneration:
 
         assert result["title"] == "Useful title"
         assert calls == [("session-a", 50)]
+
+    @pytest.mark.asyncio
+    async def test_title_generation_is_idempotent_with_stored_title(self, monkeypatch):
+        from src.http.routers import conversation as conversation_router
+
+        class Store:
+            def get_session_title(self, session_id):
+                return "Existing title"
+
+            def get_messages_by_session_id(self, session_id, limit):
+                raise AssertionError("must not load messages when a title exists")
+
+            def update_session_title(self, session_id, title):
+                raise AssertionError("must not overwrite an existing title")
+
+        async def fake_summarize(*args, **kwargs):
+            raise AssertionError("must not call the LLM when a title exists")
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda user_id: Store())
+        monkeypatch.setattr(conversation_router, "_summarize_title", fake_summarize)
+
+        result = await conversation_router.generate_title(
+            conversation_router.TitleRequest(user_id="u", session_id="session-a"), None
+        )
+
+        assert result == {"title": "Existing title", "session_id": "session-a"}
+
+    @pytest.mark.asyncio
+    async def test_title_generation_passes_existing_titles_to_avoid_duplicates(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from src.http.routers import conversation as conversation_router
+
+        captured = {}
+
+        class Store:
+            def get_session_title(self, session_id):
+                return None
+
+            def get_sessions(self):
+                return [
+                    {"session_id": "other-1", "title": "Project planning", "created_at": ""},
+                    {"session_id": "session-a", "title": "Fallback text", "created_at": ""},
+                    {"session_id": "other-2", "title": "", "created_at": ""},
+                ]
+
+            def get_messages_by_session_id(self, session_id, limit):
+                return [
+                    SimpleNamespace(role="user", content="A useful question"),
+                    SimpleNamespace(role="assistant", content="A useful answer"),
+                ]
+
+            def update_session_title(self, session_id, title):
+                pass
+
+        async def fake_summarize(*args, **kwargs):
+            captured["existing_titles"] = kwargs.get("existing_titles")
+            return "Useful title"
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda user_id: Store())
+        monkeypatch.setattr(conversation_router, "_summarize_title", fake_summarize)
+
+        result = await conversation_router.generate_title(
+            conversation_router.TitleRequest(user_id="u", session_id="session-a"), None
+        )
+
+        assert result["title"] == "Useful title"
+        # Only other sessions' non-empty titles are passed; the current
+        # session's own fallback and empty titles are excluded.
+        assert captured["existing_titles"] == ["Project planning"]
+
+    @pytest.mark.asyncio
+    async def test_summarize_title_prompt_avoids_existing_titles(self, monkeypatch):
+        from src.http.routers import conversation as conversation_router
+        from src.sdk.messages import Message
+
+        captured = {}
+
+        class FakeProvider:
+            async def chat(self, **kwargs):
+                captured["prompt"] = kwargs["messages"][0].content
+                return Message.assistant("Roadmap review")
+
+        def fake_create_model_from_config(model, **kwargs):
+            return FakeProvider()
+
+        monkeypatch.setattr(
+            "src.sdk.providers.factory.create_model_from_config",
+            fake_create_model_from_config,
+        )
+
+        title = await conversation_router._summarize_title(
+            "Plan the project",
+            "Here is the plan",
+            user_id="title_user",
+            existing_titles=["Project planning", "Meeting notes"],
+        )
+
+        assert title == "Roadmap review"
+        assert "Project planning" in captured["prompt"]
+        assert "Meeting notes" in captured["prompt"]
+        assert "Do NOT reuse" in captured["prompt"]
 
 
 class TestStreamEdgeCases:
@@ -901,7 +1009,9 @@ class TestStreamEdgeCases:
                 break
 
         assistant_messages = [args for args, _ in store.messages if args[0] == "assistant"]
-        assert len(assistant_messages) == 1
+        # The final answer is persisted by RunService.persist_run, not the router;
+        # the disconnect must not add a partial duplicate either.
+        assert len(assistant_messages) == 0
 
     @pytest.mark.asyncio
     async def test_reject_uses_default_session_key_when_session_absent(self):

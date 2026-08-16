@@ -173,6 +173,7 @@ def make_run_event_factory(chunk_gen):
                             attempt=1,
                             model="x:y",
                             response=ev.content or "",
+                            final_message_id="msg-1",
                             usage=RunUsage(),
                             verification=VerificationOutcome(),
                             persisted_at=datetime(2026, 1, 1, tzinfo=UTC),

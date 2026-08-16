@@ -22,7 +22,6 @@ from src.app_logging import get_logger
 from src.config.settings import get_settings
 from src.http.auth import verify_key
 from src.http.conversation_persistence import (
-    persist_assistant_message,
     persist_reasoning_message,
     persist_tool_message,
 )
@@ -286,12 +285,9 @@ async def _run_agent_stream(
                         session_id=session_id,
                     )
 
-                msg_id = persist_assistant_message(
-                    conversation,
-                    response,
-                    session_id=session_id,
-                    metadata={"stream": True},
-                )
+                # The final answer is already persisted by RunService.persist_run;
+                # its message id rides on the done result.
+                msg_id = result.get("final_message_id") or ""
                 persisted = True
 
                 await websocket.send_json(

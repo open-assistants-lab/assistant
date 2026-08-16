@@ -345,9 +345,10 @@ class TestWebSocketPersistence:
         assert any(m.get("type") == "text_delta" and m.get("data", {}).get("delta") == "Hello" for m in websocket.sent)
         assert any(m.get("type") == "reasoning_delta" and m.get("data", {}).get("delta") == "Think" for m in websocket.sent)
         assert any(m.get("type") == "tool_input_start" and m.get("data", {}).get("name") == "email_list" for m in websocket.sent)
+        # Reasoning is persisted by the router; the final answer is persisted
+        # by RunService.persist_run (not duplicated here).
         assert [(args, kwargs) for args, kwargs in conversation.calls if args[0] in {"assistant", "reasoning"}] == [
             (("reasoning", "Think"), {"metadata": {}, "session_id": "chat-1"}),
-            (("assistant", "Hello"), {"metadata": {"stream": True}, "session_id": "chat-1"}),
         ]
 
     @pytest.mark.asyncio
@@ -597,10 +598,12 @@ class TestWebSocketPersistence:
         websocket = FakeWebSocket()
         await ws_router._run_agent_stream(websocket, "test_user", [], conversation, session_id="chat-1")
 
-        assert [(args, kwargs) for args, kwargs in conversation.calls if args[0] == "assistant"] == [
-            (("assistant", "final answer"), {"metadata": {"stream": True}, "session_id": "chat-1"})
-        ]
-        assert [m for m in websocket.sent if m.get("type") == "done"][0]["response"] == "final answer"
+        # The final answer is persisted by RunService.persist_run, not the router;
+        # the done message carries the response and the persisted message id.
+        assert [m for m in conversation.calls if m[0][0] == "assistant"] == []
+        done = [m for m in websocket.sent if m.get("type") == "done"][0]
+        assert done["response"] == "final answer"
+        assert done["message_id"] == "msg-1"
 
     @pytest.mark.asyncio
     async def test_run_agent_stream_skips_empty_tool_results(self, monkeypatch):
@@ -1221,6 +1224,8 @@ class TestWebSocketPersistence:
             FakeWebSocket(), "test_user", [], conversation, session_id="chat-1"
         )
 
+        # Tool + reasoning are persisted by the router; the final answer is
+        # persisted by RunService.persist_run (not duplicated here).
         assert conversation.calls == [
             (
                 ("tool", "noon"),
@@ -1230,7 +1235,6 @@ class TestWebSocketPersistence:
                 },
             ),
             (("reasoning", "thinking"), {"metadata": {}, "session_id": "chat-1"}),
-            (("assistant", "final"), {"metadata": {"stream": True}, "session_id": "chat-1"}),
         ]
 
     @pytest.mark.asyncio

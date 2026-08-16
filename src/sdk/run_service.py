@@ -307,7 +307,7 @@ class RunService:
 
             result = await self._run_bounded_orchestration(loop, messages, run_id, session_id, lock, rubric)
 
-            _ = self._message_store.persist_run(
+            persisted_id = self._message_store.persist_run(
                 run_id=run_id,
                 session_id=session_id,
                 user_message_id=user_msg_id,
@@ -323,6 +323,7 @@ class RunService:
                 attempt=result.attempt,
                 model=result.model,
                 response=result.response,
+                final_message_id=persisted_id,
                 usage=result.usage,
                 verification=result.verification,
                 tool_calls=result.tool_calls,
@@ -490,7 +491,7 @@ class RunService:
             if rubric_status == TerminalRubricStatus.NOT_RUN and rubric_availability == RubricAvailability.ON:
                 rubric_status = TerminalRubricStatus.SATISFIED
 
-            _ = self._message_store.persist_run(
+            persisted_id = self._message_store.persist_run(
                 run_id=run_id,
                 session_id=session_id,
                 user_message_id=user_msg_id,
@@ -506,6 +507,7 @@ class RunService:
                 attempt=final_attempt,
                 model=loop.model_id,
                 response=final_response,
+                final_message_id=persisted_id,
                 usage=RunUsage(agent=agent_usage, grader=grader_usage),
                 verification=VerificationOutcome(
                     availability=rubric_availability,

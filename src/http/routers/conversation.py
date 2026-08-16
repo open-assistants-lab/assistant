@@ -454,9 +454,16 @@ class TitleRequest(BaseModel):
 
 
 async def _summarize_title(
-    user_msg: str, assistant_msg: str, user_id: str = "default_user"
+    user_msg: str,
+    assistant_msg: str,
+    user_id: str = "default_user",
+    existing_titles: list[str] | None = None,
 ) -> str | None:
-    """Generate a 3-5 word title via a simple provider.chat() call."""
+    """Generate a 3-5 word title via a simple provider.chat() call.
+
+    When existing_titles is provided, the prompt asks the model to avoid
+    reusing any of them so the sidebar never shows duplicate chat titles.
+    """
     from src.sdk.messages import Message
     from src.sdk.providers.factory import create_model_from_config
 
@@ -466,11 +473,15 @@ async def _summarize_title(
 
     prompt = (
         "Summarize the following conversation in 3-5 words. "
-        "Use a short noun phrase. No punctuation at the end. No quotes.\n\n"
-        f"User: {user_msg}\n"
-        f"Assistant: {assistant_msg}\n\n"
-        "Title:"
+        "Use a short noun phrase. No punctuation at the end. No quotes."
     )
+    if existing_titles:
+        prompt += (
+            " Do NOT reuse any of these existing titles: "
+            + ", ".join(existing_titles)
+            + "."
+        )
+    prompt += f"\n\nUser: {user_msg}\nAssistant: {assistant_msg}\n\nTitle:"
 
     try:
         response = await provider.chat(
@@ -499,6 +510,14 @@ async def _summarize_title(
 async def generate_title(req: TitleRequest, _: None = Depends(require_auth)) -> dict[str, str]:
     """Generate a short title for a chat session."""
     conversation = get_message_store(req.user_id)
+
+    # Idempotent: a session that already has a stored title keeps it — the
+    # LLM is only consulted once per session, and a lost response never
+    # clobbers an existing title.
+    stored_title = conversation.get_session_title(req.session_id)
+    if stored_title:
+        return {"title": stored_title, "session_id": req.session_id}
+
     messages = conversation.get_messages_by_session_id(req.session_id, limit=50)
     if len(messages) < 2:
         raise HTTPException(status_code=400, detail="Need at least user + assistant message")
@@ -523,7 +542,16 @@ async def generate_title(req: TitleRequest, _: None = Depends(require_auth)) -> 
 
     assistant_msg = assistant_msg[:500]
 
-    title = await _summarize_title(user_msg, assistant_msg, user_id=req.user_id)
+    # Collect other sessions' titles so the LLM avoids duplicate titles.
+    existing_titles = [
+        s["title"]
+        for s in conversation.get_sessions()
+        if s["session_id"] != req.session_id and s.get("title")
+    ]
+
+    title = await _summarize_title(
+        user_msg, assistant_msg, user_id=req.user_id, existing_titles=existing_titles
+    )
     if not title:
         raise HTTPException(status_code=500, detail="Title generation failed")
 
@@ -796,9 +824,9 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                     persist_reasoning_message(
                         conversation, "".join(reasoning_parts), session_id=session_id
                     )
-                persist_assistant_message(
-                    conversation, response.strip(), metadata={"stream": True}, session_id=session_id
-                )
+                # The final answer is already persisted by RunService.persist_run
+                # (with run_id metadata); persisting it again here would duplicate
+                # the assistant message in history.
                 persisted = True
                 logger.info(
                     "agent.response_stored", {"response": response[:80], "session_id": session_id, "user_id": user_id}, user_id=user_id, channel="http"
