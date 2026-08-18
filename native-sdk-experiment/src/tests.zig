@@ -144,13 +144,13 @@ test "send message adds user message and starts streaming" {
     try testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
     const request = fx.pendingFetchAt(0).?;
     try testing.expectEqualStrings("http://127.0.0.1:8080/message/stream", request.url);
-    try testing.expect(std.mem.indexOf(u8, request.body, "agnes:agnes-2.0-flash") != null);
+    try testing.expect(std.mem.indexOf(u8, request.body, "ollama-cloud:deepseek-v4-flash:0731") != null);
 }
 
-test "default model falls back to hosted Agnes" {
+test "default model falls back to Ollama Cloud DeepSeek V4 Flash 0731" {
     var model = main.initialModel();
 
-    try testing.expectEqualStrings("agnes:agnes-2.0-flash", model.selectedModel());
+    try testing.expectEqualStrings("ollama-cloud:deepseek-v4-flash:0731", model.selectedModel());
 }
 
 test "models response labels selected model without credential source" {
@@ -195,7 +195,7 @@ test "hosted model shows change button" {
     } }, &fx);
 
     const tree = try buildTree(arena, &model);
-    const btn = findButtonContaining(tree.root, "Agnes · Agnes 2.0 Flash") orelse return error.WidgetNotFound;
+    const btn = findButtonContaining(tree.root, "Agnes 2.0 Flash") orelse return error.WidgetNotFound;
     const send_btn = findButtonContaining(tree.root, "Send") orelse return error.WidgetNotFound;
     // Model button and Send button are in the same row (same y)
     try testing.expectApproxEqAbs(btn.frame.y, send_btn.frame.y, 1.0);

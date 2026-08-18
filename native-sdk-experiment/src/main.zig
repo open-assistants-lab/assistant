@@ -49,15 +49,22 @@ const ProviderInfo = struct {
 
 const SettingsSection = enum { providers_models, general };
 
+/// Which model role the catalog picker is currently editing.
+const ModelRole = enum { agent, grader, title, summarization };
+
 const SettingsState = struct {
     visible: bool = false,
     section: SettingsSection = .providers_models,
+    model_role: ModelRole = .agent,
     loading: bool = false,
     search_text: []const u8 = "",
     search_selection: canvas.TextSelection = .{ .anchor = 0, .focus = 0 },
     search_selection_programmatic: bool = false,
     search_runtime_text_synced: bool = false,
     default_model_id: []const u8 = "",
+    grader_model_id: []const u8 = "",
+    title_model_id: []const u8 = "",
+    summarization_model_id: []const u8 = "",
     providers: [max_providers]ProviderInfo = undefined,
     provider_count: usize = 0,
     selected_model_idx: usize = 0,
@@ -262,6 +269,7 @@ pub const Msg = union(enum) {
     settings_general_saved: native_sdk.EffectResponse,
     grader_prompt_saved: native_sdk.EffectResponse,
     settings_search: canvas.TextInputEvent,
+    set_model_role: ModelRole,
     select_model: usize,
     model_selected: native_sdk.EffectResponse,
     add_key_expand: usize,
@@ -351,12 +359,12 @@ pub const Model = struct {
     }
 
     pub fn selectedModel(self: *const Model) []const u8 {
-        if (self.available_model_count == 0) return "agnes:agnes-2.0-flash";
+        if (self.available_model_count == 0) return "ollama-cloud:deepseek-v4-flash:0731";
         return self.available_models[self.selected_model_idx].id;
     }
 
     pub fn selectedModelLabel(self: *const Model, allocator: std.mem.Allocator) []const u8 {
-        if (self.available_model_count == 0) return "Agnes · Agnes 2.0 Flash";
+        if (self.available_model_count == 0) return "Ollama Cloud · DeepSeek V4 Flash 0731";
         const m = self.available_models[self.selected_model_idx];
         return std.fmt.allocPrint(allocator, "{s} · {s}", .{ m.provider_display, m.name }) catch m.name;
     }
@@ -908,14 +916,16 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 chat.title_generated = true;
             }
         },
-        .models_loaded => |response| {
-            if (response.outcome != .ok) return;
+        .models_loaded => |response| blk: {
+            // Chain the active chat's history fetch (see initFx comment).
+            defer fetchActiveChatHistory(model, fx);
+            if (response.outcome != .ok) break :blk;
             const body = response.body;
-            if (body.len == 0) return;
-            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
+            if (body.len == 0) break :blk;
+            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch break :blk;
             defer parsed.deinit();
             const root = parsed.value;
-            const models_arr = root.object.get("models") orelse return;
+            const models_arr = root.object.get("models") orelse break :blk;
             const arr = switch (models_arr) {
                 .array => |a| a,
                 else => return,
@@ -1103,8 +1113,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 chat.unread_count += 1;
             }
             // Generate title if this was the first exchange (exactly 1 user message)
-            const user_count = countUserMessages(chat);
-            if (user_count == 1 and chat.title.len >= 5) {
+            // Retries on later exchanges if the first attempt failed.
+            if (!chat.title_generated and chat.title.len >= 5) {
                 const body = std.fmt.allocPrint(
                     model.allocator,
                     "{{\"user_id\":\"native_sdk_chat\",\"session_id\":\"{s}\"}}",
@@ -1234,7 +1244,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     }
                 }
             }
-            if (chat.msg_count > 0 and !chat.title_generated) {
+            // Fall back to the first message text only when the chat has no
+            // title yet — a stored/LLM title from the sessions list must not
+            // be clobbered by history reload.
+            if (chat.msg_count > 0 and !chat.title_generated and std.mem.eql(u8, chat.title, "New chat")) {
                 const first = chat._messages[0];
                 if (std.mem.eql(u8, first.role, "user")) {
                     chat.title = model.allocator.dupe(u8, first.content) catch "New chat";
@@ -1284,7 +1297,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     }
                 }
             }
-            if (chat.msg_count > 0 and !chat.title_generated) {
+            // Fall back to the first message text only when the chat has no
+            // title yet — a stored/LLM title from the sessions list must not
+            // be clobbered by history reload.
+            if (chat.msg_count > 0 and !chat.title_generated and std.mem.eql(u8, chat.title, "New chat")) {
                 const first = chat._messages[0];
                 if (std.mem.eql(u8, first.role, "user")) {
                     chat.title = model.allocator.dupe(u8, first.content) catch "New chat";
@@ -1292,20 +1308,23 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
             chat.fetch_key = 0;
         },
-        .sessions_loaded => |response| {
+        .sessions_loaded => |response| blk: {
+            // Chain the models fetch (and from it, history) so startup never
+            // fires concurrent connects to the same host (ISCONN panic race).
+            defer fetchModels(fx);
             if (response.outcome != .ok) {
                 // A3: surface backend connection error
                 const chat = model.activeChat();
                 chat.history_loading = false;
                 addMessage(chat, model.allocator, "system", "Unable to connect to server. Is the backend running?");
-                return;
+                break :blk;
             }
             const body = response.body;
-            if (body.len == 0) return;
-            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch return;
+            if (body.len == 0) break :blk;
+            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch break :blk;
             defer parsed.deinit();
             const root = parsed.value;
-            const sessions_arr = root.object.get("sessions") orelse return;
+            const sessions_arr = root.object.get("sessions") orelse break :blk;
             const arr = switch (sessions_arr) {
                 .array => |a| a,
                 else => return,
@@ -1437,6 +1456,22 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (root.object.get("default_model")) |dm| {
                 if (dm == .string and dm.string.len > 0) {
                     model.settings.default_model_id = model.allocator.dupe(u8, dm.string) catch "";
+                }
+            }
+            // Parse the role models (grader / title / summarization).
+            if (root.object.get("grader_model")) |gm| {
+                if (gm == .string and gm.string.len > 0) {
+                    model.settings.grader_model_id = model.allocator.dupe(u8, gm.string) catch "";
+                }
+            }
+            if (root.object.get("title_model")) |tm| {
+                if (tm == .string and tm.string.len > 0) {
+                    model.settings.title_model_id = model.allocator.dupe(u8, tm.string) catch "";
+                }
+            }
+            if (root.object.get("summarization_model")) |sm| {
+                if (sm == .string and sm.string.len > 0) {
+                    model.settings.summarization_model_id = model.allocator.dupe(u8, sm.string) catch "";
                 }
             }
             model.settings.provider_count = 0;
@@ -1579,6 +1614,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.settings.search_selection = next.selection;
             model.settings.search_selection_programmatic = (event == .set_selection);
         },
+        .set_model_role => |role| {
+            model.settings.model_role = role;
+        },
         .select_model => |idx| {
             if (idx >= model.available_model_count or model.settings.saving_model) return;
             const m = model.available_models[idx];
@@ -1608,9 +1646,18 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.settings.model_error = "Failed to save";
                 return;
             }
-            // Sync composer model selector
-            model.selected_model_idx = model.settings.selected_model_idx;
-            model.settings.default_model_id = model.allocator.dupe(u8, model.available_models[model.settings.selected_model_idx].id) catch "";
+            const saved_id = model.available_models[model.settings.selected_model_idx].id;
+            // Sync composer model selector (agent role only) and the active
+            // role's id in the settings panel.
+            if (model.settings.model_role == .agent) {
+                model.selected_model_idx = model.settings.selected_model_idx;
+            }
+            switch (model.settings.model_role) {
+                .agent => model.settings.default_model_id = model.allocator.dupe(u8, saved_id) catch "",
+                .grader => model.settings.grader_model_id = model.allocator.dupe(u8, saved_id) catch "",
+                .title => model.settings.title_model_id = model.allocator.dupe(u8, saved_id) catch "",
+                .summarization => model.settings.summarization_model_id = model.allocator.dupe(u8, saved_id) catch "",
+            }
         },
         .add_key_expand => |idx| {
             if (idx < model.settings.provider_count) {
@@ -1984,11 +2031,29 @@ fn saveSettingsModel(model: *Model, fx: *Effects, idx: usize) void {
     if (idx >= model.available_model_count or model.settings.saving_model) return;
     const m = model.available_models[idx];
     const escaped_id = escapeJsonString(model.allocator, m.id) catch return;
-    const body = std.fmt.allocPrint(
-        model.allocator,
-        "{{\"default_model\":\"{s}\"}}",
-        .{escaped_id},
-    ) catch return;
+    // The PATCH field depends on which model role is being edited.
+    const body = switch (model.settings.model_role) {
+        .agent => std.fmt.allocPrint(
+            model.allocator,
+            "{{\"default_model\":\"{s}\"}}",
+            .{escaped_id},
+        ) catch return,
+        .grader => std.fmt.allocPrint(
+            model.allocator,
+            "{{\"verification\":{{\"grader_model\":\"{s}\"}}}}",
+            .{escaped_id},
+        ) catch return,
+        .title => std.fmt.allocPrint(
+            model.allocator,
+            "{{\"title_model\":\"{s}\"}}",
+            .{escaped_id},
+        ) catch return,
+        .summarization => std.fmt.allocPrint(
+            model.allocator,
+            "{{\"summarization_model\":\"{s}\"}}",
+            .{escaped_id},
+        ) catch return,
+    };
     model.settings.saving_model = true;
     model.settings.selected_model_idx = idx;
     model.settings.model_error = "";
@@ -2748,6 +2813,26 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     var list_nodes: [max_visible_settings_rows + 4]AppUi.Node = undefined;
     var list_node_count: usize = 0;
 
+    // Role toggle: which model role the catalog edits.
+    var role_nodes: [4]AppUi.Node = undefined;
+    const roles = [_]struct { role: ModelRole, label: []const u8 }{
+        .{ .role = .agent, .label = "Agent" },
+        .{ .role = .grader, .label = "Grader" },
+        .{ .role = .title, .label = "Title" },
+        .{ .role = .summarization, .label = "Summary" },
+    };
+    for (roles, 0..) |r, i| {
+        const active = model.settings.model_role == r.role;
+        role_nodes[i] = ui.button(.{
+            .on_press = .{ .set_model_role = r.role },
+            .variant = if (active) .primary else .ghost,
+            .size = .sm,
+        }, r.label);
+    }
+    const role_slice: []const AppUi.Node = role_nodes[0..4];
+    list_nodes[list_node_count] = ui.row(.{ .gap = 6, .padding = 4, .cross = .center }, role_slice);
+    list_node_count += 1;
+
     // Search input
     list_nodes[list_node_count] = blk: {
         var field = ui.el(.textarea, .{
@@ -2815,7 +2900,13 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                 const model_idx = p.model_indices[mi];
                 const m = model.available_models[model_idx];
                 if (search_active and !provider_matches and !containsIgnoreCase(m.name, search)) continue;
-                const is_selected = std.mem.eql(u8, m.id, model.settings.default_model_id);
+                const active_id: []const u8 = switch (model.settings.model_role) {
+                    .agent => model.settings.default_model_id,
+                    .grader => model.settings.grader_model_id,
+                    .title => model.settings.title_model_id,
+                    .summarization => model.settings.summarization_model_id,
+                };
+                const is_selected = std.mem.eql(u8, m.id, active_id);
                 const state_text: []const u8 = if (!is_selected and !p.has_key) "Add key" else "";
                 const model_label = if (is_selected)
                     std.fmt.allocPrint(ui.arena, "  {s}  ✓", .{m.name}) catch m.name
@@ -3179,11 +3270,17 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     }
 
     // Composer: bordered container with textarea + model button + Send/Stop button
-    const model_label = model.selectedModelLabel(ui.arena);
+    // Composer model label: model name only (the "Provider · Name" form is
+    // for the settings panel). Bounded width keeps the bottom row from
+    // overflowing on narrow windows.
+    const model_label = if (model.available_model_count > 0)
+        model.available_models[model.selected_model_idx].name
+    else
+        "DeepSeek V4 Flash 0731";
     const model_button: AppUi.Node = if (model.available_model_count > 0 and !chat.streaming)
-        ui.button(.{ .on_press = .cycle_model, .variant = .ghost, .style_tokens = .{ .foreground = .text_muted } }, model_label)
+        ui.button(.{ .on_press = .cycle_model, .variant = .ghost, .max_width = 260, .style_tokens = .{ .foreground = .text_muted } }, model_label)
     else if (model.available_model_count > 0)
-        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, model_label)
+        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .max_width = 260 }, model_label)
     else
         ui.text(.{}, "");
 
@@ -3409,7 +3506,10 @@ fn initFx(model: *Model, fx: *Effects) void {
     // Stress-test mode: the transcript is seeded locally; skip all fetches
     // so the test is deterministic and does not need the backend.
     if (model.stress_mode) return;
-    // Fetch all sessions to restore the sidebar
+    // Fetch sessions first; models and history are chained from the
+    // response handlers (see fetchModels / fetchActiveChatHistory) so the
+    // startup never fires concurrent connects to the same host — the Zig
+    // std threaded Io can panic with ISCONN on that race.
     fx.fetch(.{
         .key = sessions_key,
         .url = "http://127.0.0.1:8080/conversation/sessions?user_id=native_sdk_chat",
@@ -3418,7 +3518,9 @@ fn initFx(model: *Model, fx: *Effects) void {
         .response = .buffered,
         .on_response = Effects.responseMsg(.sessions_loaded),
     });
-    // Fetch available models
+}
+
+fn fetchModels(fx: *Effects) void {
     fx.fetch(.{
         .key = models_key,
         .url = "http://127.0.0.1:8080/models?user_id=native_sdk_chat",
@@ -3427,7 +3529,9 @@ fn initFx(model: *Model, fx: *Effects) void {
         .response = .buffered,
         .on_response = Effects.responseMsg(.models_loaded),
     });
-    // Also load the active chat's history
+}
+
+fn fetchActiveChatHistory(model: *Model, fx: *Effects) void {
     const chat = model.activeChat();
     chat.history_loaded = true;
     chat.history_loading = true;

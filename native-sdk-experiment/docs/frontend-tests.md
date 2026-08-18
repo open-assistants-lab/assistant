@@ -8,6 +8,7 @@ Automated tests for the Native SDK chat app, run via `native automate`.
 |------|---------|-------|
 | `tests/frontend_smoke.sh` | Quick smoke test (4 tests, ~30s) | Basic send/receive, sidebar, new chat, theme toggle |
 | `tests/frontend_suite.sh` | Full suite (14 sections, ~5min) | All smoke tests + advanced scenarios |
+| `tests/virtuallist_stress.sh` | Virtual list perf stress test (~2min) | 10k-message transcript: widget_nodes bounded while scrolling full extent, frame p90 stages under 60fps budget, no widget budget errors |
 
 ## Running
 

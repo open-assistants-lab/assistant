@@ -8,7 +8,7 @@ cd "$WORKDIR"
 
 BACKEND=""
 APP=""
-trap 'kill $BACKEND $APP 2>/dev/null; wait $BACKEND $APP 2>/dev/null; true' EXIT
+trap 'kill $BACKEND $APP 2>/dev/null; wait $BACKEND $APP 2>/dev/null; true; lsof -ti:8080 | xargs kill -9 2>/dev/null; pkill -f "\.native/build/.*/assistant" 2>/dev/null; true' EXIT
 
 echo "=== Starting backend ==="
 lsof -ti:8080 | xargs kill -9 2>/dev/null || true
