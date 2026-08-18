@@ -1767,3 +1767,65 @@ test "stream_line text_delta with non-string delta is ignored" {
     try testing.expect(chat.streaming);
     try testing.expectEqual(before, chat.msg_count);
 }
+
+test "findChatByFetchKey matches even when streaming flag is cleared" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "Hello");
+    const chat = model.activeChat();
+    // Simulate the race: the streaming flag is cleared before the terminal
+    // event arrives. The lookup must still find the chat so finalize runs.
+    chat.streaming = false;
+    try testing.expect(model.findChatByFetchKey(fk) != null);
+}
+
+test "stream watchdog force-finalizes a stuck chat" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    _ = sendAndStartStream(&model, &fx, "Hello");
+    const chat = model.activeChat();
+    try testing.expect(chat.streaming);
+    const before = chat.msg_count;
+
+    // Age the stream past the watchdog deadline (terminal event was lost).
+    chat.stream_started_at = main.nowMillis() - main.stream_watchdog_ms - 1000;
+    main.update(&model, .{ .tick = .{ .key = 1 } }, &fx);
+
+    try testing.expect(!chat.streaming);
+    try testing.expectEqual(@as(u64, 0), chat.fetch_key);
+    try testing.expectEqualStrings("", chat.status_text);
+    // The watchdog adds a timed-out error message.
+    try testing.expectEqual(before + 1, chat.msg_count);
+    try testing.expectEqualStrings("Stream error: timed_out", chat._messages[chat.msg_count - 1].content);
+}
+
+test "stream_error finalizes stream state fully" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    _ = sendAndStartStream(&model, &fx, "Hello");
+    const chat = model.activeChat();
+    try testing.expect(chat.streaming);
+
+    main.update(&model, .{ .stream_error = "boom" }, &fx);
+
+    try testing.expect(!chat.streaming);
+    try testing.expectEqual(@as(u64, 0), chat.fetch_key);
+    try testing.expectEqualStrings("", chat.status_text);
+    try testing.expectEqualStrings("", chat.open_bubble_type);
+    try testing.expectEqualStrings("boom", chat._messages[chat.msg_count - 1].content);
+}

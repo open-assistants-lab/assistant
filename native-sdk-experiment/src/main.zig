@@ -104,6 +104,11 @@ const max_visible_settings_rows = 120;
 const first_stream_key: u64 = 100;
 pub const message_list_outer_padding: u32 = 0;
 
+/// Stream watchdog deadline: the fetch timeout is 120s; if a chat is still
+/// streaming this long after it started, the terminal event was lost and the
+/// UI force-finalizes (see the .tick handler).
+pub const stream_watchdog_ms: i64 = 130_000;
+
 const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
 const shell_views = [_]native_sdk.ShellView{
     .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .role = "Chat canvas", .accessibility_label = "Chat", .gpu_backend = .metal, .gpu_pixel_format = .bgra8_unorm, .gpu_present_mode = .timer, .gpu_alpha_mode = .@"opaque", .gpu_color_space = .srgb, .gpu_vsync = true },
@@ -181,6 +186,7 @@ pub const Chat = struct {
     history_loaded: bool = false,
     history_loading: bool = false,
     streaming: bool = false,
+    stream_started_at: i64 = 0,
     fetch_key: u64 = 0,
     has_pending: bool = false,
     pending_tool: []const u8 = "",
@@ -419,7 +425,11 @@ pub const Model = struct {
     pub fn findChatByFetchKey(self: *Model, key: u64) ?*Chat {
         var i: usize = 0;
         while (i < self.chat_count) : (i += 1) {
-            if (self.chats[i].fetch_key == key and self.chats[i].streaming) {
+            // No `streaming` check: the terminal event must always find its
+            // chat so finalizeStream runs, even if the flag was already
+            // cleared by a race. Fetch keys are unique and monotonically
+            // increasing, so a stale key can never match a new fetch.
+            if (self.chats[i].fetch_key == key) {
                 return &self.chats[i];
             }
         }
@@ -713,6 +723,7 @@ fn doSend(model: *Model, fx: *Effects) void {
     chat.draft_selection = .{};
     chat.last_textarea_height = 36;
     chat.streaming = true;
+    chat.stream_started_at = nowMillis();
     chat.fetch_key = model.allocFetchKey();
     chat.open_bubble_type = "";
     chat.status_text = "Thinking...";
@@ -1041,6 +1052,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (!chat.has_pending) return;
             chat.has_pending = false;
             chat.streaming = true;
+            chat.stream_started_at = nowMillis();
             chat.fetch_key = model.allocFetchKey();
             chat.open_bubble_type = "";
             chat.status_text = "Resuming...";
@@ -1135,7 +1147,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             // Attach error to whichever chat is streaming (best-effort: active chat)
             const chat = model.activeChat();
             addMessage(chat, model.allocator, "system", err);
-            chat.streaming = false;
+            // Route through finalizeStream so fetch_key, status_text and
+            // open_bubble_type are cleared consistently with the other
+            // terminal paths (not just the streaming flag).
+            finalizeStream(chat);
         },
         .approve_done => |response| {
             const chat = model.findChatByFetchKey(response.key) orelse return;
@@ -1183,6 +1198,22 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             for (0..model.chat_count) |i| {
                 if (model.chats[i].compression_animation_ticks > 0) {
                     model.chats[i].compression_animation_ticks -= 1;
+                }
+            }
+            // Stream watchdog: if a chat has been streaming past the fetch
+            // timeout (120s) plus slack, the terminal event was lost (timeout
+            // teardown race). Force-finalize so the UI never sticks on
+            // "Stop" with a dead composer. finalizeStream clears fetch_key,
+            // so a late terminal event finds no chat and is ignored — no
+            // double error messages.
+            const now_ms = nowMillis();
+            for (0..model.chat_count) |i| {
+                const chat = &model.chats[i];
+                if (chat.streaming and chat.stream_started_at > 0 and
+                    now_ms - chat.stream_started_at > stream_watchdog_ms)
+                {
+                    addMessage(chat, model.allocator, "system", "Stream error: timed_out");
+                    finalizeStream(chat);
                 }
             }
             // Reschedule timer if any chat is still streaming or has animation
@@ -2128,6 +2159,20 @@ fn escapeJsonString(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
         }
     }
     return buf;
+}
+
+/// Wall clock in milliseconds since the epoch (REALTIME, same source as
+/// currentTimestamp). Used by the stream watchdog deadline.
+pub fn nowMillis() i64 {
+    var ts: std.posix.timespec = undefined;
+    switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
+        .SUCCESS => {
+            const secs: i64 = @intCast(ts.sec);
+            const nsecs: i64 = @intCast(ts.nsec);
+            return secs * 1000 + @divTrunc(nsecs, 1_000_000);
+        },
+        else => return 0,
+    }
 }
 
 fn currentTimestamp(allocator: std.mem.Allocator) []const u8 {
