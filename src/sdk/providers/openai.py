@@ -208,6 +208,9 @@ class OpenAIProvider(LLMProvider):
 
         if hasattr(delta, "reasoning_content") and delta.reasoning_content:
             if isinstance(delta.reasoning_content, str):
+                # Emit the canonical event plus the backward-compat alias,
+                # matching the other providers (Anthropic/Gemini/Ollama).
+                events.append(StreamChunk.reasoning_delta(content=delta.reasoning_content))
                 events.append(StreamChunk.reasoning(content=delta.reasoning_content))
 
         if delta.tool_calls:

@@ -313,6 +313,24 @@ class TestOllamaCloudProvider:
         )
         assert payload["options"]["num_predict"] == 800
         assert "max_tokens" not in payload
+
+    def test_native_payload_does_not_mutate_shared_provider_options(self):
+        """_build_payload must not mutate the caller's provider_options dict
+        (the grader loop shares its run_config.provider_options across calls)."""
+        p = OllamaCloud(api_key="test-key")
+        shared = {"ollama-cloud": {"max_tokens": 800}}
+        p._build_payload([], None, "m", provider_options=shared)
+        assert shared == {"ollama-cloud": {"max_tokens": 800}}
+
+
+    def test_native_payload_maps_kwarg_max_tokens_to_num_predict(self):
+        """max_tokens passed as a direct kwarg must also map to num_predict
+        (Ollama's native API silently ignores a top-level max_tokens)."""
+        p = OllamaCloud(api_key="test-key")
+        payload = p._build_payload([], None, "m", max_tokens=20)
+        assert payload["options"]["num_predict"] == 20
+        assert "max_tokens" not in payload
+
 class TestOpenAIProvider:
     def test_default_config(self):
         p = OpenAIProvider(api_key="sk-test")
@@ -586,6 +604,34 @@ class TestGeminiProvider:
 
 
 # ─── Factory Tests ───
+
+
+    def test_stream_chunk_emits_reasoning_canonical_and_alias(self):
+        """The OpenAI provider must emit reasoning_delta (canonical) AND
+        reasoning (backward-compat alias), matching the other providers —
+        consumers that count only canonical types would otherwise miss it."""
+        p = OpenAIProvider(api_key="sk-test")
+
+        class Delta:
+            content = None
+            reasoning_content = "thinking..."
+            tool_calls = None
+
+        class Choice:
+            delta = Delta()
+            finish_reason = None
+
+        class Chunk:
+            choices = [Choice()]
+            usage = None
+
+        events = p._parse_stream_chunk(Chunk(), {})
+        canonical = [e for e in events if e.type == "reasoning_delta"]
+        alias = [e for e in events if e.type == "reasoning"]
+        assert len(canonical) == 1
+        assert len(alias) == 1
+        assert canonical[0].content == "thinking..."
+        assert alias[0].content == "thinking..."
 
 
 class TestProviderFactory:
@@ -1201,6 +1247,7 @@ class TestProviderFactory:
         assert [c.type for c in chunks] == ["reasoning_delta", "reasoning"]
 
 
+
 # ─── Message Format Conversion Tests ───
 
 
@@ -1237,8 +1284,6 @@ class TestMessageConversion:
         fmt = AnthropicProvider._to_anthropic_tool(tool_defs[0])
         assert fmt["name"] == "time_get"
         assert "input_schema" in fmt
-
-
 class TestOpenAIUsageExtraction:
     def test_parse_response_extracts_usage(self):
         p = OpenAIProvider(api_key="test")

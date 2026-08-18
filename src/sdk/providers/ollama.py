@@ -79,14 +79,23 @@ class OllamaCloud(LLMProvider):
         }
         if tools:
             payload["tools"] = [t.to_openai_format() for t in tools]
-        provider_opts = self._extract_provider_options(provider_options)
+        provider_opts = dict(self._extract_provider_options(provider_options))
         # Map the OpenAI-style max_tokens to Ollama's native
         # options.num_predict so callers can bound output uniformly.
+        # Copy first: _extract_provider_options returns the caller's dict
+        # and popping would mutate shared provider_options (e.g. the
+        # grader loop's run_config).
         if "max_tokens" in provider_opts:
             options = dict(provider_opts.get("options") or {})
             options["num_predict"] = provider_opts.pop("max_tokens")
             provider_opts["options"] = options
         payload.update(kwargs)
+        # max_tokens passed as a direct kwarg (e.g. the title call) is
+        # otherwise silently ignored by Ollama's native API — map it too.
+        if "max_tokens" in payload and "num_predict" not in (payload.get("options") or {}):
+            options = dict(payload.get("options") or {})
+            options["num_predict"] = payload.pop("max_tokens")
+            payload["options"] = options
         payload.update(provider_opts)
         return payload
 
