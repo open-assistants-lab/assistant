@@ -218,6 +218,75 @@ class TestOllamaCloudProvider:
         token = next(c for c in chunks if c.canonical_type == "text_delta")
         assert token.content == "Hi"
 
+    def test_parse_native_response_estimates_reasoning_tokens(self):
+        """Ollama's native API doesn't report reasoning tokens separately;
+        the provider estimates them from the thinking content."""
+        p = OllamaCloud(api_key="test-key")
+        thinking = "Let me think about this carefully before answering."
+        data = {
+            "message": {"role": "assistant", "content": "Answer", "thinking": thinking},
+            "done": True,
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+        msg = p._parse_response(data)
+        assert msg.usage is not None
+        assert msg.usage.reasoning_tokens == len(thinking) // 4
+        assert msg.usage.output_tokens == 5
+
+    def test_parse_native_response_no_thinking_has_zero_reasoning(self):
+        p = OllamaCloud(api_key="test-key")
+        data = {
+            "message": {"role": "assistant", "content": "Answer"},
+            "done": True,
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+        msg = p._parse_response(data)
+        assert msg.usage is not None
+        assert msg.usage.reasoning_tokens == 0
+
+    def test_chat_stream_usage_estimates_reasoning_tokens(self, monkeypatch):
+        """Streaming: reasoning deltas accumulate across chunks and the final
+        usage event carries the estimate."""
+        import asyncio
+        import json
+
+        p = OllamaCloud(api_key="test-key")
+        lines = [
+            json.dumps({"message": {"content": "", "thinking": "Let me think"}, "done": False}),
+            json.dumps({"message": {"content": "Answer"}, "done": True, "usage": {"prompt_tokens": 10, "completion_tokens": 5}}),
+        ]
+
+        class FakeStream:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            def raise_for_status(self):
+                pass
+
+            async def aiter_lines(self):
+                for line in lines:
+                    yield line
+
+        class FakeClient:
+            def stream(self, method, url, json=None):
+                return FakeStream()
+
+        monkeypatch.setattr(p, "_get_client", lambda: FakeClient())
+
+        chunks: list = []
+
+        async def collect():
+            async for c in p.chat_stream([Message.user("hi")]):
+                chunks.append(c)
+
+        asyncio.run(collect())
+        usage = next(c for c in chunks if c.type == "usage")
+        assert usage.usage.reasoning_tokens == len("Let me think") // 4
+        assert usage.usage.output_tokens == 5
+
     def test_count_tokens_returns_positive(self):
         p = OllamaCloud(api_key="test-key")
         assert p.count_tokens("hello world") > 0

@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging as stdlib_logging
 from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 from src.app_logging import get_logger
@@ -226,17 +227,44 @@ class LangfuseTracer:
 
             async def wrapping_generator() -> AsyncIterator[Any]:
                 accumulated_usage = {"input": 0, "output": 0, "reasoning": 0}
+                text_parts: list[str] = []
+                reasoning_parts: list[str] = []
+                first_token_at: datetime | None = None
                 try:
                     async for chunk in original_chat_stream(
                         messages, tools=tools, model=model, provider_options=provider_options, **kwargs
                     ):
-                        if chunk.type == "usage" and chunk.usage:
+                        # Count only the canonical event types — providers
+                        # also emit backward-compat aliases (ai_token,
+                        # reasoning) for the same content.
+                        if chunk.type == "text_delta" and chunk.content:
+                            text_parts.append(chunk.content)
+                        elif chunk.type == "reasoning_delta" and chunk.content:
+                            reasoning_parts.append(chunk.content)
+                        elif chunk.type == "usage" and chunk.usage:
                             accumulated_usage["input"] += chunk.usage.input_tokens
                             accumulated_usage["output"] += chunk.usage.output_tokens
                             accumulated_usage["reasoning"] += chunk.usage.reasoning_tokens
+                        if first_token_at is None and chunk.canonical_type in (
+                            "text_delta",
+                            "reasoning_delta",
+                            "tool_input_delta",
+                        ):
+                            first_token_at = datetime.now(UTC)
                         yield chunk
                     try:
-                        gen.update(usage_details=accumulated_usage)
+                        update_kwargs: dict[str, Any] = {"usage_details": accumulated_usage}
+                        if first_token_at is not None:
+                            # Langfuse derives timeToFirstToken from
+                            # completion_start_time - startTime.
+                            update_kwargs["completion_start_time"] = first_token_at
+                        if text_parts or reasoning_parts:
+                            update_kwargs["output"] = {
+                                "role": "assistant",
+                                "content": "".join(text_parts),
+                                "reasoning": "".join(reasoning_parts) or None,
+                            }
+                        gen.update(**update_kwargs)
                     except Exception:
                         pass
                 finally:

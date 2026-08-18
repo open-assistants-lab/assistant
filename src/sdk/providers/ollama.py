@@ -113,11 +113,15 @@ class OllamaCloud(LLMProvider):
             usage = Usage(
                 input_tokens=raw_usage.get("prompt_tokens", 0),
                 output_tokens=raw_usage.get("completion_tokens", 0),
+                # Ollama's native API doesn't report reasoning tokens
+                # separately; estimate from the thinking content.
+                reasoning_tokens=len(reasoning) // 4 if reasoning else 0,
             )
         elif isinstance(raw_usage, int) and "prompt_eval_count" in data:
             usage = Usage(
                 input_tokens=data.get("prompt_eval_count", 0),
                 output_tokens=raw_usage,
+                reasoning_tokens=len(reasoning) // 4 if reasoning else 0,
             )
 
         result = Message.assistant(content=content, tool_calls=parsed_tcs, usage=usage)
@@ -285,6 +289,7 @@ class OllamaCloud(LLMProvider):
         client = self._get_client()
         current_tool_calls: dict[int, dict[str, Any]] = {}
         emitted_starts: set[tuple[str, str]] = set()
+        total_thinking = ""
         async with client.stream("POST", f"{self.base_url}/api/chat", json=payload) as response:
             try:
                 response.raise_for_status()
@@ -299,6 +304,15 @@ class OllamaCloud(LLMProvider):
                 except json.JSONDecodeError:
                     continue
                 for chunk in self._parse_chunk(data, current_tool_calls, provider_options, emitted_starts):
+                    # Count only the canonical reasoning_delta event — the
+                    # provider also emits the backward-compat `reasoning`
+                    # alias for the same content.
+                    if chunk.type == "reasoning_delta" and chunk.content:
+                        total_thinking += chunk.content
+                    elif chunk.type == "usage" and chunk.usage and total_thinking:
+                        # Ollama's native API doesn't report reasoning tokens
+                        # separately; estimate from the streamed thinking.
+                        chunk.usage.reasoning_tokens = len(total_thinking) // 4
                     yield chunk
 
     def count_tokens(self, text: str, model: str | None = None) -> int:

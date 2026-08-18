@@ -68,6 +68,111 @@ def test_factory_wraps_provider_when_enabled(monkeypatch):
     _cfg._config = None
 
 
+def test_wrap_provider_stream_records_output_and_ttft(monkeypatch):
+    """The streaming wrapper must attach the final output (content +
+    reasoning) and completion_start_time (TTFT) to the generation, and
+    accumulate usage across chunks."""
+    import asyncio
+    from datetime import datetime
+
+    from src.sdk.messages import StreamChunk, Usage
+
+    class FakeGen:
+        def __init__(self):
+            self.updates: list[dict] = []
+            self.ended = False
+
+        def update(self, **kwargs):
+            self.updates.append(kwargs)
+
+        def end(self):
+            self.ended = True
+
+    class FakeClient:
+        def __init__(self):
+            self.gen = FakeGen()
+
+        def start_observation(self, name, as_type, **kw):
+            return self.gen
+
+    class FakeProvider:
+        async def chat(self, messages, **kwargs):
+            return None
+
+        async def chat_stream(self, messages, tools=None, model=None, provider_options=None, **kwargs):
+            yield StreamChunk.reasoning_delta(content="Let me think")
+            yield StreamChunk.text_delta(content="Hello")
+            yield StreamChunk.usage_event(Usage(input_tokens=10, output_tokens=5, reasoning_tokens=3))
+
+    client = FakeClient()
+    monkeypatch.setattr(LangfuseTracer, "_client", object())
+    monkeypatch.setattr(LangfuseTracer, "_get_client", classmethod(lambda cls: client))
+
+    wrapped = LangfuseTracer.wrap_provider(FakeProvider())
+
+    async def collect():
+        out = []
+        async for c in wrapped.chat_stream([], model="m"):
+            out.append(c)
+        return out
+
+    chunks = asyncio.run(collect())
+    assert len(chunks) == 3  # passthrough unchanged
+    assert client.gen.ended
+
+    final = client.gen.updates[-1]
+    assert final["output"] == {"role": "assistant", "content": "Hello", "reasoning": "Let me think"}
+    assert final["usage_details"] == {"input": 10, "output": 5, "reasoning": 3}
+    assert isinstance(final["completion_start_time"], datetime)
+
+
+def test_wrap_provider_stream_no_content_no_ttft(monkeypatch):
+    """A stream with no content chunks records no output and no TTFT."""
+    import asyncio
+
+    from src.sdk.messages import StreamChunk
+
+    class FakeGen:
+        def __init__(self):
+            self.updates: list[dict] = []
+            self.ended = False
+
+        def update(self, **kwargs):
+            self.updates.append(kwargs)
+
+        def end(self):
+            self.ended = True
+
+    class FakeClient:
+        def __init__(self):
+            self.gen = FakeGen()
+
+        def start_observation(self, name, as_type, **kw):
+            return self.gen
+
+    class FakeProvider:
+        async def chat(self, messages, **kwargs):
+            return None
+
+        async def chat_stream(self, messages, tools=None, model=None, provider_options=None, **kwargs):
+            yield StreamChunk.done(content="")
+
+    client = FakeClient()
+    monkeypatch.setattr(LangfuseTracer, "_client", object())
+    monkeypatch.setattr(LangfuseTracer, "_get_client", classmethod(lambda cls: client))
+
+    wrapped = LangfuseTracer.wrap_provider(FakeProvider())
+
+    async def collect():
+        async for _ in wrapped.chat_stream([], model="m"):
+            pass
+
+    asyncio.run(collect())
+    final = client.gen.updates[-1]
+    assert "output" not in final
+    assert "completion_start_time" not in final
+
+
 def test_otel_detach_filter_drops_cross_context_noise() -> None:
     """The OTel detach filter must drop the 'Failed to detach context'
     traceback (expected async-generator teardown noise, swallowed by OTel
