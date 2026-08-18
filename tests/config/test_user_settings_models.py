@@ -51,6 +51,8 @@ def _response(*, secret: str = "known-secret") -> UserSettingsResponse:
         ),
         effective=EffectiveUserSettings(
             default_model="openai:gpt-5",
+            title_model="openai:gpt-5",
+            summarization_model="openai:gpt-5",
             verification=_effective_verification(),
         ),
         provider_status={
@@ -131,6 +133,8 @@ def test_canonical_model_normalization_applies_to_all_model_fields() -> None:
     )
     effective = EffectiveUserSettings(
         default_model=" openai : effective ",
+        title_model=" openai : effective-title ",
+        summarization_model=" openai : effective-summary ",
         verification=EffectiveVerificationSettings(
             state=RubricAvailability.ON,
             grader_model=" openai : effective-grader ",

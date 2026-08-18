@@ -84,6 +84,8 @@ class SavedUserSettings(SettingsModel):
     revision: int = Field(default=0, ge=0)
     provider_keys: Mapping[ProviderId, str] = Field(default_factory=dict)
     default_model: CanonicalModel | None = None
+    title_model: CanonicalModel | None = None
+    summarization_model: CanonicalModel | None = None
     verification: VerificationOverrides = Field(default_factory=VerificationOverrides)
 
     @field_validator(
@@ -120,6 +122,8 @@ class SavedUserSettings(SettingsModel):
 
 class SavedUserSettingsView(SettingsModel):
     default_model: CanonicalModel | None = None
+    title_model: CanonicalModel | None = None
+    summarization_model: CanonicalModel | None = None
     verification: VerificationOverrides = Field(default_factory=VerificationOverrides)
 
 
@@ -157,12 +161,16 @@ class EffectiveVerificationSettings(SettingsModel):
 
 class EffectiveUserSettings(SettingsModel):
     default_model: CanonicalModel
+    title_model: CanonicalModel
+    summarization_model: CanonicalModel
     verification: EffectiveVerificationSettings
 
 
 class UserSettingsPatch(SettingsModel):
     expected_revision: int = Field(ge=0)
     default_model: CanonicalModel | None = None
+    title_model: CanonicalModel | None = None
+    summarization_model: CanonicalModel | None = None
     verification: VerificationOverrides | None = None
 
 

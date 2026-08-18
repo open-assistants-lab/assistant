@@ -1297,3 +1297,69 @@ class TestEditorIntegration:
         assert len(blocks) == 2
         assert blocks[0]["surface_type"] == "canvas"
         assert blocks[1]["surface_type"] == "editor"
+
+
+class TestTitleModelFromSettings:
+    @pytest.mark.asyncio
+    async def test_summarize_title_uses_saved_title_model(self, monkeypatch):
+        from src.config.user_settings import SavedUserSettings
+        from src.http.routers import conversation as conversation_router
+        from src.sdk.messages import Message
+
+        captured = {}
+
+        class FakeProvider:
+            async def chat(self, **kwargs):
+                return Message.assistant("Project Planning")
+
+        def fake_create_model_from_config(model, **kwargs):
+            captured["model"] = model
+            return FakeProvider()
+
+        monkeypatch.setattr(
+            "src.sdk.providers.factory.create_model_from_config",
+            fake_create_model_from_config,
+        )
+        monkeypatch.setattr(
+            "src.config.user_settings_service.load_saved_user_settings",
+            lambda user_id: SavedUserSettings(title_model="anthropic:saved-title"),
+        )
+
+        title = await conversation_router._summarize_title(
+            "Plan the project", "Here is the plan", user_id="title_user"
+        )
+
+        assert title == "Project Planning"
+        assert captured["model"] == "anthropic:saved-title"
+
+    @pytest.mark.asyncio
+    async def test_summarize_title_falls_back_to_host_title_model(self, monkeypatch):
+        from src.config.user_settings import SavedUserSettings
+        from src.http.routers import conversation as conversation_router
+        from src.sdk.messages import Message
+
+        captured = {}
+
+        class FakeProvider:
+            async def chat(self, **kwargs):
+                return Message.assistant("Project Planning")
+
+        def fake_create_model_from_config(model, **kwargs):
+            captured["model"] = model
+            return FakeProvider()
+
+        monkeypatch.setattr(
+            "src.sdk.providers.factory.create_model_from_config",
+            fake_create_model_from_config,
+        )
+        monkeypatch.setattr(
+            "src.config.user_settings_service.load_saved_user_settings",
+            lambda user_id: SavedUserSettings(),
+        )
+
+        title = await conversation_router._summarize_title(
+            "Plan the project", "Here is the plan", user_id="title_user"
+        )
+
+        assert title == "Project Planning"
+        assert captured["model"] == "ollama-cloud:deepseek-v4-flash:0731"

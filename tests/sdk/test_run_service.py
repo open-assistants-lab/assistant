@@ -37,7 +37,7 @@ class InMemoryMessageStore:
 
     def persist_run(self, run_id: str, session_id: str, user_message_id: str,
                     final_answer: Message, audit_records: list[Message],
-                    metadata: dict) -> str:
+                    metadata: dict, pre_messages: list | None = None) -> str:
         self._id_counter += 1
         mid = f"msg-{self._id_counter}"
         self.messages.append({
@@ -56,14 +56,35 @@ class FakeLoop:
         self.model_id = model_id
         self.rubric = None
         self.cancel_event = None
-        self.state = type("State", (), {"messages": []})()
+        self._reset_state()
+
+    def _reset_state(self) -> None:
+        # Mirrors the real AgentLoop: a fresh AgentState per run with
+        # messages + extra (middleware/verification state).
+        self.state = type("State", (), {"messages": [], "extra": {}})()
 
     async def run(self, messages):
-        return [Message.assistant(content="Test response")]
+        self._reset_state()
+        self.state.messages = list(messages) + [Message.assistant(content="Test response")]
+        return self.state.messages
 
     async def run_stream(self, messages):
+        self._reset_state()
+        self.state.messages = list(messages) + [Message.assistant(content="Test response")]
         yield StreamChunk(type="text_delta", content="Test response")
         yield StreamChunk(type="done", content="Test response")
+
+async def _no_rubric(*args: Any, **kwargs: Any) -> None:
+    """Patched load_rubric_middleware: verification disabled."""
+    return None
+
+
+async def _register_rerun_handler() -> None:
+    """Register the default rerun handler (as main.py does at startup)."""
+    from src.sdk.loops.events import default_trigger_handler, get_trigger_registry
+
+    get_trigger_registry().register("rerun", default_trigger_handler)
+
 
 
 @pytest.mark.asyncio
@@ -73,7 +94,7 @@ async def test_execute_enters_trace_run_context(monkeypatch):
     monkeypatch.setattr("src.sdk.run_service.get_sdk_loop", fake_get_sdk_loop)
     monkeypatch.setattr("src.sdk.run_service.register_user_loop", lambda *a, **k: None)
     monkeypatch.setattr("src.sdk.run_service.unregister_user_loop", lambda *a, **k: None)
-    monkeypatch.setattr("src.sdk.run_service.RunService._load_rubric_middleware", lambda *a: None)
+    monkeypatch.setattr("src.sdk.middleware_rubric.load_rubric_middleware", _no_rubric)
 
     entered: list[tuple[str, str]] = []
 
@@ -104,7 +125,7 @@ async def test_execute_stream_enters_trace_run_context(monkeypatch):
     monkeypatch.setattr("src.sdk.run_service.get_sdk_loop", fake_get_sdk_loop)
     monkeypatch.setattr("src.sdk.run_service.register_user_loop", lambda *a, **k: None)
     monkeypatch.setattr("src.sdk.run_service.unregister_user_loop", lambda *a, **k: None)
-    monkeypatch.setattr("src.sdk.run_service.RunService._load_rubric_middleware", lambda *a: None)
+    monkeypatch.setattr("src.sdk.middleware_rubric.load_rubric_middleware", _no_rubric)
 
     entered: list[tuple[str, str]] = []
 
@@ -154,7 +175,7 @@ async def test_load_rubric_middleware_does_not_double_wrap_grader_provider(monke
     store = InMemoryMessageStore()
     service = RunService("test-user", registry, store)
 
-    mw = service._load_rubric_middleware(FakeLoop(), rubric="test rubric")
+    mw = await service._load_rubric_middleware(FakeLoop(), rubric="test rubric")
 
     assert mw is not None
     # The factory (create_model_from_config) owns provider wrapping —
@@ -190,7 +211,7 @@ async def test_load_rubric_middleware_skips_wrap_when_langfuse_disabled(monkeypa
     store = InMemoryMessageStore()
     service = RunService("test-user", registry, store)
 
-    mw = service._load_rubric_middleware(FakeLoop(), rubric="test rubric")
+    mw = await service._load_rubric_middleware(FakeLoop(), rubric="test rubric")
 
     assert mw is not None
     assert isinstance(mw._grader_provider, FakeProvider)
@@ -220,9 +241,10 @@ async def test_grader_failed_result_routes_to_invalid_rubric(monkeypatch):
                 "criteria": [],
             }
 
-    monkeypatch.setattr(
-        "src.sdk.run_service.RunService._load_rubric_middleware", lambda *a: FakeGrader()
-    )
+    async def _load_fake(*a: Any, **k: Any) -> Any:
+        return FakeGrader()
+
+    monkeypatch.setattr("src.sdk.middleware_rubric.load_rubric_middleware", _load_fake)
 
     registry = SessionWorkerRegistry()
     store = InMemoryMessageStore()
@@ -266,13 +288,15 @@ async def test_execute_stream_done_event_attempt_matches_final_rubric_attempt(mo
                 ],
             }
 
-    monkeypatch.setattr(
-        "src.sdk.run_service.RunService._load_rubric_middleware", lambda *a: FakeGrader()
-    )
+    async def _load_fake(*a: Any, **k: Any) -> Any:
+        return FakeGrader()
+
+    monkeypatch.setattr("src.sdk.middleware_rubric.load_rubric_middleware", _load_fake)
 
     registry = SessionWorkerRegistry()
     store = InMemoryMessageStore()
     service = RunService("test-user", registry, store)
+    await _register_rerun_handler()
 
     events = [e async for e in service.execute_stream(session_id="chat-1", prompt="Hello")]
     done = [e for e in events if e.type == "done"]
@@ -319,13 +343,15 @@ async def test_failed_run_after_evaluation_reports_cancelled_not_satisfied(monke
                 "criteria": [{"name": "c", "passed": False, "gap": "x"}],
             }
 
-    monkeypatch.setattr(
-        "src.sdk.run_service.RunService._load_rubric_middleware", lambda *a: FakeGrader()
-    )
+    async def _load_fake(*a: Any, **k: Any) -> Any:
+        return FakeGrader()
+
+    monkeypatch.setattr("src.sdk.middleware_rubric.load_rubric_middleware", _load_fake)
 
     registry = SessionWorkerRegistry()
     store = InMemoryMessageStore()
     service = RunService("test-user", registry, store)
+    await _register_rerun_handler()
 
     result = await service.execute(session_id="chat-1", prompt="Hello")
 
@@ -340,7 +366,7 @@ async def test_run_service_execute_returns_run_result(monkeypatch):
     monkeypatch.setattr("src.sdk.run_service.get_sdk_loop", fake_get_sdk_loop)
     monkeypatch.setattr("src.sdk.run_service.register_user_loop", lambda *a, **k: None)
     monkeypatch.setattr("src.sdk.run_service.unregister_user_loop", lambda *a, **k: None)
-    monkeypatch.setattr("src.sdk.run_service.RunService._load_rubric_middleware", lambda *a: None)
+    monkeypatch.setattr("src.sdk.middleware_rubric.load_rubric_middleware", _no_rubric)
 
     registry = SessionWorkerRegistry()
     store = InMemoryMessageStore()
@@ -364,7 +390,7 @@ async def test_run_service_execute_stream_yields_run_events(monkeypatch):
     monkeypatch.setattr("src.sdk.run_service.get_sdk_loop", fake_get_sdk_loop)
     monkeypatch.setattr("src.sdk.run_service.register_user_loop", lambda *a, **k: None)
     monkeypatch.setattr("src.sdk.run_service.unregister_user_loop", lambda *a, **k: None)
-    monkeypatch.setattr("src.sdk.run_service.RunService._load_rubric_middleware", lambda *a: None)
+    monkeypatch.setattr("src.sdk.middleware_rubric.load_rubric_middleware", _no_rubric)
 
     registry = SessionWorkerRegistry()
     store = InMemoryMessageStore()
@@ -414,7 +440,7 @@ async def test_run_service_different_sessions_concurrent(monkeypatch):
     monkeypatch.setattr("src.sdk.run_service.get_sdk_loop", fake_get_sdk_loop)
     monkeypatch.setattr("src.sdk.run_service.register_user_loop", lambda *a, **k: None)
     monkeypatch.setattr("src.sdk.run_service.unregister_user_loop", lambda *a, **k: None)
-    monkeypatch.setattr("src.sdk.run_service.RunService._load_rubric_middleware", lambda *a: None)
+    monkeypatch.setattr("src.sdk.middleware_rubric.load_rubric_middleware", _no_rubric)
 
     registry = SessionWorkerRegistry()
     store = InMemoryMessageStore()

@@ -57,12 +57,14 @@ def test_sse_stream_resolves_rubric_from_request(monkeypatch):
     async def fake_get_sdk_loop(*args, **kwargs):
         return DummyLoop()
 
-    def fake_load_rubric(self, loop, rubric=None):
-        captured_rubric["rubric"] = rubric
+    async def fake_load_rubric(*args, **kwargs):
+        captured_rubric["rubric"] = kwargs.get("rubric") or (args[2] if len(args) > 2 else None)
         return None
 
     monkeypatch.setattr("src.sdk.run_service.get_sdk_loop", fake_get_sdk_loop)
-    monkeypatch.setattr("src.http.routers.conversation.RunService._load_rubric_middleware", fake_load_rubric)
+    monkeypatch.setattr(
+        "src.sdk.middleware_rubric.load_rubric_middleware", fake_load_rubric
+    )
     monkeypatch.setattr("src.http.routers.conversation.get_message_store", MagicMock(return_value=MagicMock(
         add_message=MagicMock(),
         get_messages_with_summary=MagicMock(return_value=[]),
@@ -81,7 +83,8 @@ def test_sse_stream_resolves_rubric_from_request(monkeypatch):
     assert captured_rubric["rubric"] == "- Must be 3 lines"
 
 
-def test_sse_stream_resolves_rubric_from_settings(monkeypatch):
+@pytest.mark.asyncio
+async def test_sse_stream_resolves_rubric_from_settings(monkeypatch):
     """When verification is enabled globally, RunService uses default_rubric."""
     import src.config.settings as _cfg
     _cfg._config = None
@@ -106,7 +109,7 @@ def test_sse_stream_resolves_rubric_from_settings(monkeypatch):
     from src.sdk.run_service import RunService
 
     loop = MagicMock(model_id="x:y")
-    mw = RunService("u", MagicMock(), MagicMock())._load_rubric_middleware(loop)
+    mw = await RunService("u", MagicMock(), MagicMock())._load_rubric_middleware(loop)
     assert mw is not None
     assert mw._grader_prompt == "- Non-empty"
 
@@ -116,6 +119,7 @@ def test_sse_stream_resolves_rubric_from_settings(monkeypatch):
 # ---------------------------------------------------------------------------
 # Gap 3: REST /message returns verification verdict
 # ---------------------------------------------------------------------------
+
 
 def test_rest_message_returns_verification_verdict(monkeypatch):
     """REST /message includes verification verdict when rubric is set."""
@@ -178,6 +182,16 @@ def test_rest_message_returns_verification_verdict(monkeypatch):
     body = response.json()
     assert body.get("verification") is not None
     assert body["verification"]["status"] == "satisfied"
+    # The verdict must carry the full outcome — attempts, max_attempts,
+    # explanation, criteria and per-attempt evaluations (previously these
+    # fields were dropped by the HTTP model).
+    assert body["verification"]["attempts"] == 1
+    assert body["verification"]["max_attempts"] == 2
+    assert body["verification"]["iterations"] == 1
+    assert body["verification"]["explanation"] == "ok"
+    assert body["verification"]["criteria"] == []
+    assert body["verification"]["evaluations"][0]["attempt"] == 1
+    assert body["verification"]["evaluations"][0]["result"] == "satisfied"
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +418,14 @@ def test_trigger_endpoint_passes_rubric(monkeypatch):
         return [Message.assistant(content="triggered")]
 
     monkeypatch.setattr("src.http.routers.webhooks.run_sdk_agent", fake_run_sdk_agent)
+
+    # Make the fallback path deterministic: the app lifespan may have
+    # registered a 'manual' handler (from an earlier TestClient in the
+    # suite), which would route /trigger through the registry instead of
+    # the patched run_sdk_agent below.
+    from src.sdk.loops.events import get_trigger_registry
+
+    get_trigger_registry().unregister("manual")
 
     client = TestClient(app)
     response = client.post("/trigger", json={

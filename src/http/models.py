@@ -24,6 +24,10 @@ class MessageRequest(BaseModel):
 class VerificationVerdict(BaseModel):
     status: str | None = None
     iterations: int = 0
+    attempts: int = 0
+    max_attempts: int = 1
+    explanation: str | None = None
+    criteria: list[dict[str, Any]] = Field(default_factory=list)
     evaluations: list[dict[str, Any]] = Field(default_factory=list)
 
 

@@ -373,7 +373,15 @@ _STATIC_MODELS = {
             "provider": "agnes",
             "provider_display": "Agnes",
         }
-    ]
+    ],
+    "ollama-cloud": [
+        {
+            "id": "ollama-cloud:deepseek-v4-flash:0731",
+            "name": "DeepSeek V4 Flash 0731",
+            "provider": "ollama-cloud",
+            "provider_display": "Ollama Cloud",
+        }
+    ],
 }
 
 
@@ -468,7 +476,16 @@ async def _summarize_title(
     from src.sdk.providers.factory import create_model_from_config
 
     settings = get_settings()
-    model = settings.agent.title_model or settings.agent.model
+    # User-configured title model wins over the host config; falls back to
+    # the agent model when neither is set.
+    from src.config.user_settings_service import load_saved_user_settings
+
+    saved = load_saved_user_settings(user_id)
+    model = (
+        saved.title_model
+        if saved is not None and saved.title_model
+        else (settings.agent.title_model or settings.agent.model)
+    )
     provider = create_model_from_config(model, user_id=user_id)
 
     prompt = (
@@ -618,10 +635,20 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
             if latest:
                 verification_verdict = VerificationVerdict(
                     status=result.verification.status.value,
+                    iterations=result.verification.attempts,
                     attempts=result.verification.attempts,
                     max_attempts=result.verification.max_attempts,
                     explanation=latest.explanation,
                     criteria=[{"name": c.name, "passed": c.passed, "gap": c.gap} for c in latest.criteria],
+                    evaluations=[
+                        {
+                            "attempt": e.attempt,
+                            "result": e.result.value,
+                            "explanation": e.explanation,
+                            "criteria": [{"name": c.name, "passed": c.passed, "gap": c.gap} for c in e.criteria],
+                        }
+                        for e in result.verification.evaluations
+                    ],
                 )
 
         canvas_blocks = _extract_surfaces(response)
@@ -820,13 +847,11 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                             tool_call_id=call_id,
                         )
 
-                if reasoning_parts:
-                    persist_reasoning_message(
-                        conversation, "".join(reasoning_parts), session_id=session_id
-                    )
-                # The final answer is already persisted by RunService.persist_run
-                # (with run_id metadata); persisting it again here would duplicate
-                # the assistant message in history.
+                # The reasoning is now persisted by RunService.persist_run
+                # (as a pre-message BEFORE the final answer, matching the
+                # stream order) — persisting it again here would duplicate it.
+                # The final answer is also already persisted by
+                # RunService.persist_run (with run_id metadata).
                 persisted = True
                 logger.info(
                     "agent.response_stored", {"response": response[:80], "session_id": session_id, "user_id": user_id}, user_id=user_id, channel="http"

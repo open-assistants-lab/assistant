@@ -98,6 +98,28 @@ def test_parse_grader_response_strips_code_fence():
     assert result.result == "satisfied"
 
 
+def test_parse_grader_response_extracts_json_from_prose():
+    content = (
+        'Here is my evaluation: '
+        '{"result": "needs_revision", "explanation": "fix it", '
+        '"criteria": [{"name": "x", "passed": false, "gap": "g"}]} '
+        'Hope that helps!'
+    )
+    result = _parse_grader_response(content)
+    assert result.result == "needs_revision"
+    assert result.criteria[0]["gap"] == "g"
+
+
+def test_parse_grader_response_empty_raises():
+    with pytest.raises(ValueError, match="empty response"):
+        _parse_grader_response("")
+
+
+def test_parse_grader_response_garbage_raises():
+    with pytest.raises(ValueError, match="not valid JSON"):
+        _parse_grader_response("I have no idea what the rubric means")
+
+
 def test_revision_prompt_includes_failing_criteria():
     evaluation = {
         "result": "needs_revision",
@@ -156,3 +178,85 @@ def test_rubric_middleware_grader_model_id_without_model_id_attr_or_arg() -> Non
     mw = RubricMiddleware(provider, "- Three lines")
     assert isinstance(mw.grader_model_id, str)
     assert mw.grader_model_id  # non-empty
+
+
+@pytest.mark.asyncio
+async def test_load_rubric_middleware_uses_saved_grader_model(monkeypatch):
+    """The user's saved verification.grader_model wins over host config."""
+    from types import SimpleNamespace
+
+    from src.config.user_settings import SavedUserSettings, VerificationOverrides
+    from src.sdk.middleware_rubric import load_rubric_middleware
+
+    captured = {}
+
+    class FakeProvider:
+        pass
+
+    def fake_create_model_from_config(model, user_id=None):
+        captured["model"] = model
+        return FakeProvider()
+
+    settings = SimpleNamespace(verification=SimpleNamespace(
+        enabled=True,
+        grader_model="openai:host-grader",
+        max_iterations=3,
+        default_rubric="- Non-empty",
+    ))
+    monkeypatch.setattr("src.config.get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "src.sdk.providers.factory.create_model_from_config", fake_create_model_from_config
+    )
+    monkeypatch.setattr(
+        "src.config.user_settings_service.load_saved_user_settings",
+        lambda user_id: SavedUserSettings(
+            verification=VerificationOverrides(grader_model="anthropic:saved-grader")
+        ),
+    )
+
+    class FakeLoop:
+        model_id = "openai:agent"
+
+    mw = await load_rubric_middleware("u", FakeLoop(), rubric="- Non-empty")
+    assert mw is not None
+    assert captured["model"] == "anthropic:saved-grader"
+
+
+@pytest.mark.asyncio
+async def test_load_rubric_middleware_falls_back_to_host_grader_model(monkeypatch):
+    """Without a saved override, the host grader model is used."""
+    from types import SimpleNamespace
+
+    from src.config.user_settings import SavedUserSettings
+    from src.sdk.middleware_rubric import load_rubric_middleware
+
+    captured = {}
+
+    class FakeProvider:
+        pass
+
+    def fake_create_model_from_config(model, user_id=None):
+        captured["model"] = model
+        return FakeProvider()
+
+    settings = SimpleNamespace(verification=SimpleNamespace(
+        enabled=True,
+        grader_model="openai:host-grader",
+        max_iterations=3,
+        default_rubric="- Non-empty",
+    ))
+    monkeypatch.setattr("src.config.get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "src.sdk.providers.factory.create_model_from_config", fake_create_model_from_config
+    )
+    monkeypatch.setattr(
+        "src.config.user_settings_service.load_saved_user_settings",
+        lambda user_id: SavedUserSettings(),
+    )
+
+    class FakeLoop:
+        model_id = "openai:agent"
+
+    mw = await load_rubric_middleware("u", FakeLoop(), rubric="- Non-empty")
+    assert mw is not None
+    assert captured["model"] == "openai:host-grader"

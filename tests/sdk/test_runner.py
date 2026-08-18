@@ -41,6 +41,9 @@ def loop_factory(monkeypatch):
     monkeypatch.setattr(runner, "get_native_tools", lambda: [])
     monkeypatch.setattr(runner, "_seed_default_workspace", lambda: None)
     monkeypatch.setattr(runner, "_get_system_prompt", lambda *args, **kwargs: "prompt")
+    monkeypatch.setattr(
+        "src.config.user_settings_service.load_saved_user_settings", lambda user_id: None
+    )
     monkeypatch.setattr("src.sdk.tool_index.get_or_create_index", lambda *args, **kwargs: _FakeIndex())
 
     async def create(
@@ -1089,3 +1092,46 @@ async def test_runner_wraps_loop_with_langfuse(monkeypatch):
 
     LangfuseTracer._client = None
     _cfg._config = None
+
+
+@pytest.mark.asyncio
+async def test_create_sdk_loop_uses_saved_summarization_model(monkeypatch):
+    """The user's saved summarization_model wins over host config."""
+    from src.config.user_settings import SavedUserSettings
+    from src.sdk import runner
+
+    settings = MagicMock()
+    settings.memory.summarization.enabled = True
+    settings.memory.summarization.get_trigger.return_value = ("messages", 2)
+    settings.memory.summarization.get_keep.return_value = ("messages", 1)
+    settings.memory.summarization.model = "openai:host-summary"
+    settings.memory.summarization.trim_tokens_to_summarize = 4000
+    settings.memory.summarization.prompt_file = None
+    settings.verification.enabled = False
+    settings.langfuse.enabled = False
+    monkeypatch.setattr(runner, "get_settings", lambda: settings)
+    monkeypatch.setattr(runner, "get_native_tools", lambda: [])
+    monkeypatch.setattr(runner, "_seed_default_workspace", lambda: None)
+    monkeypatch.setattr(runner, "_get_system_prompt", lambda *args, **kwargs: "prompt")
+    monkeypatch.setattr(
+        "src.config.user_settings_service.load_saved_user_settings",
+        lambda user_id: SavedUserSettings(summarization_model="anthropic:saved-summary"),
+    )
+    monkeypatch.setattr("src.sdk.tool_index.get_or_create_index", lambda *args, **kwargs: _FakeIndex())
+
+    provider = AsyncMock()
+    provider.provider_id = "openai"
+    provider.model = "gpt-4.1"
+    monkeypatch.setattr(runner, "create_model_from_config", lambda *args, **kwargs: provider)
+
+    captured = {}
+
+    def fake_summarization_mw(**kwargs):
+        captured["model"] = kwargs.get("model")
+        return MagicMock()
+
+    monkeypatch.setattr(runner, "SummarizationMiddleware", fake_summarization_mw)
+
+    await runner.create_sdk_loop(user_id="test_user", session_id="s1")
+
+    assert captured["model"] == "anthropic:saved-summary"

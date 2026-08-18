@@ -171,6 +171,10 @@ class UserSettingsStore:
             payload = current.model_dump(mode="json")
             if "default_model" in patch.model_fields_set:
                 payload["default_model"] = patch.default_model
+            if "title_model" in patch.model_fields_set:
+                payload["title_model"] = patch.title_model
+            if "summarization_model" in patch.model_fields_set:
+                payload["summarization_model"] = patch.summarization_model
             if "verification" in patch.model_fields_set:
                 payload["verification"] = self._patched_verification(
                     current.verification, patch.verification

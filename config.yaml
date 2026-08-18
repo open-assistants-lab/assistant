@@ -1,5 +1,5 @@
 agent:
-  model: agnes:agnes-2.0-flash
+  model: ollama-cloud:deepseek-v4-flash:0731
   name: Assistant
   system_prompt: "You are a helpful assistant.\n\nCRITICAL RULES:\n- NEVER guess or\
     \ estimate - always use tools to get exact numbers/facts\n- If you don't know,\

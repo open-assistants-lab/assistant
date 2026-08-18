@@ -13,7 +13,8 @@ When disabled, all methods are no-ops with zero overhead.
 from __future__ import annotations
 
 import logging as stdlib_logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from src.app_logging import get_logger
@@ -79,6 +80,82 @@ class LangfuseTracer:
             return get_client()
         except Exception:
             return cls._client
+
+    @classmethod
+    def ensure_initialized(cls) -> None:
+        """Initialize the client from settings if Langfuse is enabled.
+
+        Idempotent. Called from trace_run/trace_span/wrap_provider so the
+        client exists before the first run-level context opens (the loop
+        wrapper inits it lazily, which is too late for RunService's
+        trace_run on the first run).
+        """
+        if cls._client is not None:
+            return
+        try:
+            from src.config import get_settings
+
+            lf = get_settings().langfuse
+            if lf.enabled and lf.public_key and lf.secret_key:
+                cls.init(public_key=lf.public_key, secret_key=lf.secret_key, host=lf.host)
+        except Exception:
+            pass
+
+    @classmethod
+    @contextmanager
+    def trace_run(cls, user_id: str, session_id: str) -> Iterator[Any]:
+        """Open a run-level trace root.
+
+        The loop's agent_run span and the rubric grader both nest under this
+        root, so one run = one trace containing agent + grader observations.
+        No-op (yields None) when Langfuse is disabled.
+        """
+        cls.ensure_initialized()
+        client = cls._get_client()
+        if client is None:
+            yield None
+            return
+        from langfuse import propagate_attributes
+
+        try:
+            with client.start_as_current_observation(as_type="span", name="run") as trace:
+                with propagate_attributes(
+                    user_id=user_id,
+                    session_id=session_id,
+                    tags=["agent"],
+                ):
+                    try:
+                        trace.update(input={"session_id": session_id})
+                    except Exception:
+                        pass
+                    yield trace
+        except ValueError as exc:
+            # Suppress the OTel cross-context detach error on early teardown
+            # (client disconnect); re-raise any other ValueError.
+            if "was created in a different Context" in str(exc):
+                return
+            raise
+
+    @classmethod
+    @contextmanager
+    def trace_span(cls, name: str) -> Iterator[Any]:
+        """Open a named span under the current observation.
+
+        Used for phases that run outside the loop's own spans (e.g. the
+        rubric grader). No-op (yields None) when Langfuse is disabled.
+        """
+        cls.ensure_initialized()
+        client = cls._get_client()
+        if client is None:
+            yield None
+            return
+        try:
+            with client.start_as_current_observation(as_type="span", name=name) as span:
+                yield span
+        except ValueError as exc:
+            if "was created in a different Context" in str(exc):
+                return
+            raise
 
     @classmethod
     def wrap_provider(cls, provider: Any) -> Any:

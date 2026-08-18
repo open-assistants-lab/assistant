@@ -84,7 +84,7 @@ def test_get_settings_returns_canonical_secret_free_shape(client, settings_api, 
     assert response.status_code == 200
     body = response.json()
     assert set(body) == {"schema_version", "revision", "saved", "effective", "provider_status"}
-    assert set(body["saved"]) == {"default_model", "verification"}
+    assert set(body["saved"]) == {"default_model", "title_model", "summarization_model", "verification"}
     assert body["provider_status"]["openai"] == {
         "name": "OpenAI",
         "has_key": True,
@@ -113,6 +113,8 @@ def test_get_settings_distinguishes_saved_and_effective_values(client, settings_
 
     assert body["saved"] == {
         "default_model": "openai:gpt-4.1",
+        "title_model": None,
+        "summarization_model": None,
         "verification": {
             "enabled": True,
             "grader_model": "openai:gpt-4.1",
@@ -440,7 +442,7 @@ def test_model_catalog_keeps_native_shape_with_effective_status_and_revision(
 
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"revision", "default_model", "total_providers", "providers"}
+    assert set(body) == {"revision", "default_model", "grader_model", "title_model", "summarization_model", "total_providers", "providers"}
     assert body["revision"] == 1
     assert body["default_model"] == "openai:gpt-4.1"
     openai = next(provider for provider in body["providers"] if provider["id"] == "openai")

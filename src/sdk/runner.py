@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import collections.abc
+import dataclasses
 import hashlib
 import json
 from pathlib import Path
@@ -474,6 +476,17 @@ async def create_sdk_loop(
 
     summary_config = settings.memory.summarization
 
+    # User-configured summarization model wins over the host config; falls
+    # back to the agent model when neither is set.
+    from src.config.user_settings_service import load_saved_user_settings
+
+    _saved_settings = load_saved_user_settings(user_id)
+    summarization_model = (
+        _saved_settings.summarization_model
+        if _saved_settings is not None and _saved_settings.summarization_model
+        else (summary_config.model or model_id)
+    )
+
     middlewares: list[Any] = []
 
     if summary_config.enabled:
@@ -537,7 +550,7 @@ async def create_sdk_loop(
 
         middlewares.append(
             SummarizationMiddleware(
-                model=summary_config.model or model_id,
+                model=summarization_model,
                 trigger=summary_config.get_trigger(),
                 keep=summary_config.get_keep(),
                 trim_tokens_to_summarize=summary_config.trim_tokens_to_summarize,
@@ -843,6 +856,378 @@ def _messages_from_conversation(messages: list[Any]) -> list[Message]:
     return sdk_messages
 
 
+# ── Verification engine (single grading + rerun mechanism) ───────────────────
+#
+# Every agent execution path (RunService chat paths, webhooks, scheduler
+# triggers) funnels through these two functions. The engine owns the
+# attempt loop: run agent → grade → queue a rerun AgentEvent (producer) →
+# fire it through the trigger registry (consumer) → the registered 'rerun'
+# handler appends the revision feedback → the engine re-runs the agent in
+# its own mode. Streaming executors stream the revision attempt natively.
+
+
+@dataclasses.dataclass
+class AttemptResult:
+    """One agent attempt: its result messages plus the grader's verdict."""
+
+    attempt: int
+    messages: list[Message]
+    evaluation: dict[str, Any] | None = None
+    feedback: str | None = None
+
+
+@dataclasses.dataclass
+class VerificationResult:
+    """Outcome of a full verification run (all attempts)."""
+
+    attempts: list[AttemptResult]
+    rubric_status: str = "off"  # TerminalRubricStatus value, or "off" when disabled
+    rubric_available: bool = False
+    max_attempts: int = 1
+    grader_model_id: str | None = None
+
+
+class ChunkItem:
+    __slots__ = ("attempt", "chunk")
+
+    def __init__(self, attempt: int, chunk: StreamChunk) -> None:
+        self.attempt = attempt
+        self.chunk = chunk
+
+
+class GradeStartItem:
+    __slots__ = ("attempt", "max_attempts")
+
+    def __init__(self, attempt: int, max_attempts: int) -> None:
+        self.attempt = attempt
+        self.max_attempts = max_attempts
+
+
+class GradeEndItem:
+    __slots__ = ("attempt", "evaluation", "feedback", "terminal", "max_attempts")
+
+    def __init__(
+        self,
+        attempt: int,
+        evaluation: dict[str, Any] | None,
+        feedback: str | None,
+        terminal: bool,
+        max_attempts: int,
+    ) -> None:
+        self.attempt = attempt
+        self.evaluation = evaluation
+        self.feedback = feedback
+        self.terminal = terminal
+        self.max_attempts = max_attempts
+
+
+class AttemptItem:
+    __slots__ = (
+        "attempt",
+        "messages",
+        "evaluation",
+        "feedback",
+        "rubric_status",
+        "rubric_available",
+        "max_attempts",
+        "grader_model_id",
+    )
+
+    def __init__(
+        self,
+        attempt: int,
+        messages: list[Message],
+        evaluation: dict[str, Any] | None,
+        feedback: str | None,
+        rubric_status: str,
+        rubric_available: bool,
+        max_attempts: int,
+        grader_model_id: str | None,
+    ) -> None:
+        self.attempt = attempt
+        self.messages = messages
+        self.evaluation = evaluation
+        self.feedback = feedback
+        self.rubric_status = rubric_status
+        self.rubric_available = rubric_available
+        self.max_attempts = max_attempts
+        self.grader_model_id = grader_model_id
+
+
+async def _fire_pending_reruns(
+    loop: AgentLoop,
+    user_id: str,
+    session_id: str,
+    model: str | None,
+) -> list[list[Message]]:
+    """Fire queued rerun events via the trigger registry.
+
+    Returns the feedback-appended message lists of the fired rerun events
+    (in order). The registered 'rerun' handler appends the feedback to
+    event.metadata["previous_messages"]; the executor uses the last list as
+    the next attempt's input.
+    """
+    if loop.state is None:
+        return []
+    extra = getattr(loop.state, "extra", None)
+    if extra is None:
+        return []
+    events = extra.pop("_pending_rerun_events", [])
+    if not events:
+        return []
+    from src.sdk.loops.events import get_trigger_registry
+
+    registry = get_trigger_registry()
+    message_lists: list[list[Message]] = []
+    for event in events:
+        event.user_id = user_id
+        event.session_id = session_id
+        event.model = model
+        try:
+            await registry.fire(event)
+        except KeyError:
+            logger.warning(
+                "sdk_runner.no_rerun_handler",
+                {"trigger_type": event.trigger_type},
+                user_id=user_id,
+            )
+            continue
+        except Exception as exc:
+            logger.error(
+                "sdk_runner.rerun_failed", {"error": str(exc)}, user_id=user_id
+            )
+            continue
+        if event.trigger_type == "rerun":
+            prev = event.metadata.get("previous_messages")
+            if prev is not None:
+                message_lists.append(list(prev))
+    return message_lists
+
+
+def _last_assistant_message(messages: list[Message]) -> Message | None:
+    for msg in reversed(messages):
+        if msg.role == "assistant":
+            return msg
+    return None
+
+
+async def _verification_engine(
+    loop: AgentLoop,
+    messages: list[Message],
+    user_id: str,
+    session_id: str,
+    rubric: str | None,
+    model: str | None,
+    is_cancelled: collections.abc.Callable[[], bool] | None,
+    stream: bool,
+) -> collections.abc.AsyncIterator[Any]:
+    """Core verification attempt loop.
+
+    In stream mode, agent chunks are yielded as ChunkItem so the caller
+    can forward them live; in non-stream mode the agent runs via loop.run()
+    and no chunk items are produced. Reruns always go through the trigger
+    registry (queue → fire → handler appends feedback → next attempt).
+    """
+    from src.sdk import middleware_rubric as _mw
+    from src.sdk.run_models import (
+        RubricEvaluationResult as _EvalResult,
+    )
+
+    rubric_mw = await _mw.load_rubric_middleware(user_id, loop, rubric)
+    max_attempts = rubric_mw.max_iterations if rubric_mw else 1
+    rubric_available = rubric_mw is not None
+    grader_model_id = (
+        getattr(rubric_mw, "grader_model_id", None) if rubric_mw else None
+    )
+
+    attempt = 1
+    evaluations: list[dict[str, Any]] = []
+    terminal_status = "not_run"
+    input_messages = list(messages)
+    # Set when the first grading phase starts; callers use it to map a
+    # mid-verification exception (run FAILED) to rubric CANCELLED instead
+    # of leaving verification "not_run". Reset per engine run.
+    loop._rubric_started = False  # type: ignore[attr-defined]
+
+    while True:
+        if is_cancelled is not None and is_cancelled():
+            terminal_status = "cancelled"
+            yield AttemptItem(
+                attempt, input_messages, None, None, terminal_status,
+                rubric_available, max_attempts, grader_model_id,
+            )
+            break
+
+        # 1. Run one attempt.
+        result_messages: list[Message] = []
+        if stream:
+            async for chunk in loop.run_stream(input_messages):
+                yield ChunkItem(attempt, chunk)
+            result_messages = list(loop.state.messages) if loop.state else []
+        else:
+            result_messages = await loop.run(input_messages)
+
+        # 2. Drain middleware-queued rerun events from this run.
+        fired = await _fire_pending_reruns(loop, user_id, session_id, model)
+        if fired:
+            input_messages = fired[-1]
+            attempt += 1
+            continue
+
+        # 3. Grade when verification is active.
+        if rubric_mw is None:
+            terminal_status = "off"
+            yield AttemptItem(
+                attempt, result_messages, None, None, terminal_status,
+                rubric_available, max_attempts, grader_model_id,
+            )
+            break
+
+        # No assistant output means the attempt failed — verification never
+        # ran, so no grading phase starts (no dangling rubric_start event).
+        last_assistant = _last_assistant_message(result_messages)
+        if last_assistant is None:
+            terminal_status = "failed"
+            yield AttemptItem(
+                attempt, result_messages, None, None, terminal_status,
+                rubric_available, max_attempts, grader_model_id,
+            )
+            break
+
+        if is_cancelled is not None and is_cancelled():
+            terminal_status = "cancelled"
+            yield AttemptItem(
+                attempt, result_messages, None, None, terminal_status,
+                rubric_available, max_attempts, grader_model_id,
+            )
+            break
+
+        yield GradeStartItem(attempt, max_attempts)
+        loop._rubric_started = True  # type: ignore[attr-defined]
+
+        evaluation = await rubric_mw.grade(
+            list(input_messages) + [last_assistant], attempt - 1
+        )
+        evaluations.append(evaluation)
+        raw_result = evaluation["result"]
+        eval_result = (
+            _EvalResult.INVALID_RUBRIC
+            if raw_result == "failed"
+            else _EvalResult(raw_result)
+        )
+
+        if eval_result in (
+            _EvalResult.SATISFIED,
+            _EvalResult.INVALID_RUBRIC,
+            _EvalResult.GRADER_ERROR,
+        ) or attempt >= max_attempts:
+            terminal_status = {
+                _EvalResult.SATISFIED: "satisfied",
+                _EvalResult.INVALID_RUBRIC: "invalid_rubric",
+                _EvalResult.GRADER_ERROR: "grader_error",
+            }.get(eval_result, "max_attempts_reached")
+            yield GradeEndItem(attempt, evaluation, None, True, max_attempts)
+            yield AttemptItem(
+                attempt, result_messages, evaluation, None, terminal_status,
+                rubric_available, max_attempts, grader_model_id,
+            )
+            break
+
+        feedback = _mw._revision_prompt(evaluation)
+        yield GradeEndItem(attempt, evaluation, feedback, False, max_attempts)
+
+        # 4. Producer: queue the rerun event for the registry.
+        _mw.queue_rerun_event(
+            loop,
+            feedback,
+            user_id,
+            session_id,
+            model,
+            attempt,
+            max_attempts,
+            input_messages,
+            stream=stream,
+        )
+
+        # 5. Consumer: fire queued events; the handler appends the feedback.
+        fired = await _fire_pending_reruns(loop, user_id, session_id, model)
+        if not fired:
+            terminal_status = "max_attempts_reached"
+            yield AttemptItem(
+                attempt, result_messages, evaluation, None, terminal_status,
+                rubric_available, max_attempts, grader_model_id,
+            )
+            break
+        input_messages = fired[-1]
+        yield AttemptItem(
+            attempt, result_messages, evaluation, feedback, "needs_revision",
+            rubric_available, max_attempts, grader_model_id,
+        )
+        attempt += 1
+
+    # Store the verdict for the runner's finally block (loop._verification_verdict).
+    if loop.state is not None and hasattr(loop.state, "extra"):
+        loop.state.extra["_rubric_status"] = terminal_status
+        loop.state.extra["_rubric_iterations"] = len(evaluations)
+        loop.state.extra["_rubric_evaluations"] = evaluations
+
+
+async def run_with_verification_stream(
+    loop: AgentLoop,
+    messages: list[Message],
+    user_id: str,
+    session_id: str,
+    rubric: str | None = None,
+    model: str | None = None,
+    is_cancelled: collections.abc.Callable[[], bool] | None = None,
+) -> collections.abc.AsyncIterator[Any]:
+    """Streaming verification run: yields chunks + attempt/grade markers."""
+    async for item in _verification_engine(
+        loop, messages, user_id, session_id, rubric, model, is_cancelled, stream=True
+    ):
+        yield item
+
+
+async def run_with_verification(
+    loop: AgentLoop,
+    messages: list[Message],
+    user_id: str,
+    session_id: str,
+    rubric: str | None = None,
+    model: str | None = None,
+    is_cancelled: collections.abc.Callable[[], bool] | None = None,
+) -> VerificationResult:
+    """Non-streaming verification run: returns all attempts + verdict."""
+    attempts: list[AttemptResult] = []
+    rubric_status = "off"
+    rubric_available = False
+    max_attempts = 1
+    grader_model_id: str | None = None
+    async for item in _verification_engine(
+        loop, messages, user_id, session_id, rubric, model, is_cancelled, stream=False
+    ):
+        if isinstance(item, AttemptItem):
+            attempts.append(
+                AttemptResult(
+                    attempt=item.attempt,
+                    messages=item.messages,
+                    evaluation=item.evaluation,
+                    feedback=item.feedback,
+                )
+            )
+            rubric_status = item.rubric_status
+            rubric_available = item.rubric_available
+            max_attempts = item.max_attempts
+            grader_model_id = item.grader_model_id
+    return VerificationResult(
+        attempts=attempts,
+        rubric_status=rubric_status,
+        rubric_available=rubric_available,
+        max_attempts=max_attempts,
+        grader_model_id=grader_model_id,
+    )
+
+
 async def run_sdk_agent(
     user_id: str,
     messages: list[Message],
@@ -880,38 +1265,24 @@ async def run_sdk_agent(
     loop._flow_session_id = runtime_session_id  # type: ignore[attr-defined]
     loop._flow_model = loop.model_id  # type: ignore[attr-defined]
     loop._flow_attempt = 1  # type: ignore[attr-defined]
-    # Store user_id/session_id on loop state for middleware to use in rerun triggers
     try:
-        result = await loop.run(messages)
+        # Run-level trace root: agent_run and grader_run both nest under it.
+        from src.sdk.langfuse_tracer import LangfuseTracer
 
-        # Check if middleware queued rerun events (e.g. rubric needs_revision)
-        if loop.state and loop.state.extra.get("_pending_rerun_events"):
-            from src.sdk.loops.events import get_trigger_registry
-
-            registry = get_trigger_registry()
-            for event in loop.state.extra.pop("_pending_rerun_events"):
-                # Update event with actual user_id/session_id/model
-                event.user_id = user_id
-                event.session_id = runtime_session_id
-                event.model = model
-                event.metadata["previous_messages"] = result
-                try:
-                    await registry.fire(event)
-                    # Use rerun result as the final result
-                    rerun_result = event.metadata.get("_rerun_result")
-                    if rerun_result:
-                        result = rerun_result
-                except KeyError:
-                    # No rerun handler registered — skip rerun
-                    logger.warning("sdk_runner.no_rerun_handler", {}, user_id=user_id)
-                except Exception as e:
-                    logger.error("sdk_runner.rerun_failed", {"error": str(e)}, user_id=user_id)
+        with LangfuseTracer.trace_run(user_id, runtime_session_id):
+            vresult = await run_with_verification(
+                loop,
+                messages,
+                user_id,
+                runtime_session_id,
+                rubric=rubric,
+                model=loop.model_id,
+            )
+        result = vresult.attempts[-1].messages if vresult.attempts else messages
 
         # Persist RunOutcome for loop 4 (hill-climbing)
         await _persist_run_outcome(user_id, runtime_session_id, result, loop, "manual")
         # Flush Langfuse traces if enabled
-        from src.sdk.langfuse_tracer import LangfuseTracer
-
         LangfuseTracer.flush()
         return result
     finally:
@@ -954,22 +1325,46 @@ async def run_sdk_agent_stream(
     loop._flow_attempt = 1  # type: ignore[attr-defined]
     register_user_loop(user_id, loop, session_id=runtime_session_id)
 
+    final_messages: list[Message] = list(messages)
     try:
-        async for chunk in loop.run_stream(messages):
-            yield chunk
+        # Run-level trace root covering the whole stream (agent + grader).
+        from src.sdk.langfuse_tracer import LangfuseTracer
+
+        with LangfuseTracer.trace_run(user_id, runtime_session_id):
+            async for item in run_with_verification_stream(
+                loop,
+                messages,
+                user_id,
+                runtime_session_id,
+                rubric=rubric,
+                model=loop.model_id,
+            ):
+                if isinstance(item, ChunkItem):
+                    yield item.chunk
+                elif isinstance(item, AttemptItem):
+                    final_messages = item.messages
     except Exception as e:
         logger.error("sdk_runner.stream_error", {"error": str(e)}, user_id=user_id)
         yield StreamChunk.error(message=str(e))
     finally:
         # Persist RunOutcome for loop 4 (hill-climbing)
-        if hasattr(loop, "state") and loop.state:
-            await _persist_run_outcome(
-                user_id, runtime_session_id, loop.state.messages, loop, "manual"
-            )
+        await _persist_run_outcome(
+            user_id, runtime_session_id, final_messages, loop, "manual"
+        )
+        # Store verification verdict on loop so the router can read it
+        if loop.state and loop.state.extra.get("_rubric_status"):
+            loop._verification_verdict = {  # type: ignore[attr-defined]
+                "status": loop.state.extra.get("_rubric_status"),
+                "iterations": loop.state.extra.get("_rubric_iterations", 0),
+                "evaluations": loop.state.extra.get("_rubric_evaluations", []),
+            }
+        else:
+            loop._verification_verdict = None  # type: ignore[attr-defined]
         # Flush Langfuse traces if enabled
-        from src.sdk.langfuse_tracer import LangfuseTracer
+        from src.sdk.langfuse_tracer import LangfuseTracer as _LangfuseTracer
 
-        LangfuseTracer.flush()
+        _LangfuseTracer.flush()
+        loop.rubric = None
         unregister_user_loop(user_id, loop, session_id=runtime_session_id)
 
 

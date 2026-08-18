@@ -158,6 +158,26 @@ def _to_evaluation_result(raw: str) -> RubricEvaluationResult:
     return RubricEvaluationResult(raw)
 
 
+def _evaluation_from_dict(evaluation: dict[str, Any], attempt: int) -> RubricEvaluation:
+    """Build the contract RubricEvaluation from a grader verdict dict."""
+    return RubricEvaluation(
+        grading_run_id=evaluation["grading_run_id"],
+        attempt=attempt,
+        result=_to_evaluation_result(evaluation["result"]),
+        explanation=evaluation["explanation"],
+        criteria=tuple(
+            CriterionEvaluation(
+                name=c["name"],
+                passed=c["passed"],
+                gap=c.get("gap"),
+            )
+            for c in evaluation["criteria"]
+        ),
+        passed_count=sum(1 for c in evaluation["criteria"] if c["passed"]),
+        total_count=len(evaluation["criteria"]),
+    )
+
+
 def _revision_prompt(evaluation: dict[str, Any]) -> str:
     from src.sdk.middleware_rubric import _revision_prompt as _rp
     return _rp(evaluation)
@@ -391,9 +411,13 @@ class RunService:
             history = self._message_store.get_messages_with_summary(session_id, limit=50)
             messages = _storage_messages_to_sdk(list(history)) + [Message.user(prompt)]
 
-            rubric_mw = self._load_rubric_middleware(loop, rubric)
-            rubric_enabled = rubric_mw is not None
-            max_attempts = rubric_mw.max_iterations if rubric_mw else 1
+            from src.sdk.runner import (
+                AttemptItem,
+                ChunkItem,
+                GradeEndItem,
+                GradeStartItem,
+                run_with_verification_stream,
+            )
 
             evaluations: list[RubricEvaluation] = []
             final_response = ""
@@ -404,17 +428,23 @@ class RunService:
             agent_usage = UsageAggregate()
             grader_usage = UsageAggregate()
             accumulated_args: dict[str, str] = {}
+            max_attempts = 1
 
-            for attempt in range(1, max_attempts + 1):
-                if lock.cancelled:
-                    run_status = RunStatus.CANCELLED
-                    break
-
-                try:
-                    async for chunk in loop.run_stream(messages):
+            try:
+                async for item in run_with_verification_stream(
+                    loop,
+                    messages,
+                    self._user_id,
+                    session_id,
+                    rubric=rubric,
+                    model=loop.model_id,
+                    is_cancelled=lambda: lock.cancelled,
+                ):
+                    if isinstance(item, ChunkItem):
+                        chunk = item.chunk
                         if chunk.type == "done":
                             final_response = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
-                            final_attempt = attempt
+                            final_attempt = item.attempt
                             if chunk.usage:
                                 agent_usage = UsageAggregate(
                                     available=True,
@@ -427,83 +457,59 @@ class RunService:
                         elif chunk.type == "error":
                             run_status = RunStatus.FAILED
                             break
-                        ev = _stream_chunk_to_event(chunk, _emit, attempt, loop.model_id, accumulated_args)
+                        ev = _stream_chunk_to_event(chunk, _emit, item.attempt, loop.model_id, accumulated_args)
                         if ev is not None:
                             yield ev
-                except Exception as exc:
-                    logger.error("run_service.agent_error", {"error": str(exc)}, user_id=self._user_id)
-                    run_status = RunStatus.FAILED
-                    break
-
-                if run_status == RunStatus.FAILED:
-                    break
-
-                if not rubric_enabled:
-                    break
-
-                assert rubric_mw is not None
-                rubric_availability = RubricAvailability.ON
-                if lock.cancelled:
+                    elif isinstance(item, GradeStartItem):
+                        rubric_availability = RubricAvailability.ON
+                        max_attempts = item.max_attempts
+                        yield _emit(RubricStartEvent, RubricStartData(
+                            grading_run_id=str(uuid.uuid4()),
+                            max_attempts=item.max_attempts,
+                        ).model_dump(), item.attempt)
+                    elif isinstance(item, GradeEndItem):
+                        if item.evaluation is not None:
+                            evaluation = _evaluation_from_dict(item.evaluation, item.attempt)
+                            evaluations.append(evaluation)
+                            yield _emit(RubricEndEvent, RubricEndData(
+                                evaluation=evaluation,
+                                max_attempts=item.max_attempts,
+                            ).model_dump(), item.attempt)
+                        if item.feedback is not None:
+                            yield _emit(RevisionStartEvent, RevisionStartData(
+                                previous_attempt=item.attempt,
+                                new_attempt=item.attempt + 1,
+                                max_attempts=item.max_attempts,
+                            ).model_dump(), item.attempt + 1)
+                    elif isinstance(item, AttemptItem):
+                        final_attempt = item.attempt
+                        if item.rubric_status == "failed":
+                            # No assistant output — the run failed and
+                            # verification never ran (OFF/NOT_RUN).
+                            run_status = RunStatus.FAILED
+                        elif item.rubric_status == "cancelled":
+                            run_status = RunStatus.CANCELLED
+                            rubric_availability = RubricAvailability.ON
+                            rubric_status = TerminalRubricStatus.CANCELLED
+                        elif item.rubric_available and item.rubric_status != "needs_revision":
+                            # 'needs_revision' is an intermediate verdict, not
+                            # a terminal rubric status — only map terminal ones.
+                            rubric_availability = RubricAvailability.ON
+                            rubric_status = TerminalRubricStatus(item.rubric_status)
+                            if evaluations and item.grader_model_id:
+                                grader_usage = UsageAggregate(
+                                    available=True,
+                                    calls=len(evaluations),
+                                    models=(item.grader_model_id,),
+                                )
+            except Exception as exc:
+                logger.error("run_service.agent_error", {"error": str(exc)}, user_id=self._user_id)
+                run_status = RunStatus.FAILED
+                # If the agent died after verification started, report the
+                # rubric as CANCELLED (never satisfied).
+                if getattr(loop, "_rubric_started", False):
+                    rubric_availability = RubricAvailability.ON
                     rubric_status = TerminalRubricStatus.CANCELLED
-                    break
-
-                yield _emit(RubricStartEvent, RubricStartData(
-                    grading_run_id=str(uuid.uuid4()),
-                    max_attempts=max_attempts,
-                ).model_dump(), attempt)
-
-                grading_messages = list(messages) + [Message.assistant(content=final_response)]
-                evaluation_result = await rubric_mw.grade(grading_messages, attempt - 1)
-
-                grader_usage = UsageAggregate(available=True, calls=1, models=(rubric_mw.grader_model_id,))
-
-                evaluation = RubricEvaluation(
-                    grading_run_id=evaluation_result["grading_run_id"],
-                    attempt=attempt,
-                    result=_to_evaluation_result(evaluation_result["result"]),
-                    explanation=evaluation_result["explanation"],
-                    criteria=tuple(
-                        CriterionEvaluation(
-                            name=c["name"],
-                            passed=c["passed"],
-                            gap=c.get("gap"),
-                        )
-                        for c in evaluation_result["criteria"]
-                    ),
-                    passed_count=sum(1 for c in evaluation_result["criteria"] if c["passed"]),
-                    total_count=len(evaluation_result["criteria"]),
-                )
-                evaluations.append(evaluation)
-
-                yield _emit(RubricEndEvent, RubricEndData(
-                    evaluation=evaluation,
-                    max_attempts=max_attempts,
-                ).model_dump(), attempt)
-
-                if evaluation.result in (
-                    RubricEvaluationResult.SATISFIED,
-                    RubricEvaluationResult.INVALID_RUBRIC,
-                    RubricEvaluationResult.GRADER_ERROR,
-                ):
-                    rubric_status = {
-                        RubricEvaluationResult.SATISFIED: TerminalRubricStatus.SATISFIED,
-                        RubricEvaluationResult.INVALID_RUBRIC: TerminalRubricStatus.INVALID_RUBRIC,
-                        RubricEvaluationResult.GRADER_ERROR: TerminalRubricStatus.GRADER_ERROR,
-                    }[evaluation.result]
-                    break
-
-                if attempt == max_attempts:
-                    rubric_status = TerminalRubricStatus.MAX_ATTEMPTS_REACHED
-                    break
-
-                yield _emit(RevisionStartEvent, RevisionStartData(
-                    previous_attempt=attempt,
-                    new_attempt=attempt + 1,
-                    max_attempts=max_attempts,
-                ).model_dump(), attempt + 1)
-
-                feedback = _revision_prompt(evaluation_result)
-                messages = list(messages) + [Message.user(content=feedback)]
 
             if rubric_status == TerminalRubricStatus.NOT_RUN and rubric_availability == RubricAvailability.ON:
                 # The verification loop ended without a terminal verdict. Only
@@ -519,12 +525,31 @@ class RunService:
                     else TerminalRubricStatus.CANCELLED
                 )
 
+            # The assistant's reasoning arrived BEFORE the answer in the
+            # stream — persist it first so the stored transcript order matches
+            # what the client saw (otherwise the reasoning would land below
+            # the answer after a history reload).
+            pre_messages: list[StorageMessage] = []
+            if loop.state is not None:
+                for msg in reversed(loop.state.messages):
+                    if msg.role == "assistant" and getattr(msg, "reasoning", None):
+                        pre_messages.append(StorageMessage(
+                            id="",
+                            ts=datetime.now(UTC),
+                            role="reasoning",
+                            content=str(msg.reasoning or ""),
+                            metadata={"stream": True},
+                            session_id=session_id,
+                        ))
+                        break
+
             persisted_id = self._message_store.persist_run(
                 run_id=run_id,
                 session_id=session_id,
                 user_message_id=user_msg_id,
                 final_answer=_sdk_message_to_storage(Message.assistant(content=final_response), session_id),
                 audit_records=[],
+                pre_messages=pre_messages,
                 metadata={"model": loop.model_id},
             )
 
@@ -581,9 +606,7 @@ class RunService:
         lock: SessionLock,
         rubric: str | None = None,
     ) -> RunResult:
-        rubric_mw = self._load_rubric_middleware(loop, rubric)
-        rubric_enabled = rubric_mw is not None
-        max_attempts = rubric_mw.max_iterations if rubric_mw else 1
+        from src.sdk.runner import run_with_verification
 
         evaluations: list[RubricEvaluation] = []
         final_response = ""
@@ -594,37 +617,78 @@ class RunService:
         agent_usage = UsageAggregate()
         grader_usage = UsageAggregate()
         result_tool_calls: list[dict[str, Any]] = []
+        max_attempts = 1
+        outcome_attempts = 0
 
-        for attempt in range(1, max_attempts + 1):
-            if lock.cancelled:
-                run_status = RunStatus.CANCELLED
-                break
+        try:
+            vresult = await run_with_verification(
+                loop,
+                messages,
+                self._user_id,
+                session_id,
+                rubric=rubric,
+                model=loop.model_id,
+                is_cancelled=lambda: lock.cancelled,
+            )
+        except Exception as exc:
+            logger.error("run_service.agent_error", {"error": str(exc)}, user_id=self._user_id)
+            run_status = RunStatus.FAILED
+            # If the agent died after verification started, report the rubric
+            # as CANCELLED (never satisfied) so the outcome stays consistent.
+            if getattr(loop, "_rubric_started", False):
+                rubric_availability = RubricAvailability.ON
+                rubric_status = TerminalRubricStatus.CANCELLED
+                outcome_attempts = 1
+            vresult = None
 
-            try:
-                result_messages = await loop.run(messages)
-            except Exception as exc:
-                logger.error("run_service.agent_error", {"error": str(exc)}, user_id=self._user_id)
-                run_status = RunStatus.FAILED
-                break
+        if vresult is not None and vresult.attempts:
+            attempts = vresult.attempts
+            max_attempts = vresult.max_attempts
+            # Outcome attempts only count when verification was active; an
+            # OFF outcome must report zero attempts.
+            if vresult.rubric_available:
+                outcome_attempts = len(attempts)
+            final_attempt = attempts[-1].attempt
+            final_messages = attempts[-1].messages
 
-            last_assistant = None
-            for msg in reversed(result_messages):
-                if msg.role == "assistant":
-                    last_assistant = msg
-                    break
-            if last_assistant is None:
-                run_status = RunStatus.FAILED
-                break
+            # Rubric outcome from the engine's verdict.
+            if vresult.rubric_available:
+                if vresult.rubric_status == "failed":
+                    # No assistant output — the run failed and verification
+                    # never ran (matches the pre-engine behavior: OFF/NOT_RUN).
+                    run_status = RunStatus.FAILED
+                elif vresult.rubric_status == "cancelled":
+                    run_status = RunStatus.CANCELLED
+                    rubric_availability = RubricAvailability.ON
+                    rubric_status = TerminalRubricStatus.CANCELLED
+                else:
+                    rubric_availability = RubricAvailability.ON
+                    rubric_status = TerminalRubricStatus(vresult.rubric_status)
+                for at in attempts:
+                    if at.evaluation is not None:
+                        evaluations.append(_evaluation_from_dict(at.evaluation, at.attempt))
+                if evaluations and vresult.grader_model_id:
+                    grader_usage = UsageAggregate(
+                        available=True,
+                        calls=len(evaluations),
+                        models=(vresult.grader_model_id,),
+                    )
 
-            final_response = last_assistant.content if isinstance(last_assistant.content, str) else str(last_assistant.content)
-            final_attempt = attempt
+            # Only derive the response from a completed agent attempt.
+            if run_status is RunStatus.COMPLETED:
+                last_assistant = None
+                for msg in reversed(final_messages):
+                    if msg.role == "assistant":
+                        last_assistant = msg
+                        break
+                if last_assistant is None:
+                    run_status = RunStatus.FAILED
+                else:
+                    final_response = last_assistant.content if isinstance(last_assistant.content, str) else str(last_assistant.content)
 
-            # Extract tool call info from result messages for the non-streaming response.
-            # The loop's result_messages contain assistant tool_call requests (role=assistant
-            # with tool_calls) and tool results (role=tool with content + name).
-            if attempt == 1:
+                # Extract tool call info from attempt 1's result messages.
                 tool_call_records: list[dict[str, Any]] = []
-                for msg in result_messages:
+                for msg in attempts[0].messages:
                     if msg.role == "assistant" and msg.tool_calls:
                         for tc in msg.tool_calls:
                             tool_call_records.append({
@@ -634,7 +698,6 @@ class RunService:
                                 "status": "called",
                             })
                     elif msg.role == "tool" and msg.tool_call_id:
-                        # Find the matching tool call and update with result
                         for record in tool_call_records:
                             if record.get("id") == msg.tool_call_id:
                                 record["status"] = "done"
@@ -643,66 +706,22 @@ class RunService:
                 if tool_call_records:
                     result_tool_calls = tool_call_records
 
-            if last_assistant.usage:
-                agent_usage = UsageAggregate(
-                    available=True,
-                    calls=agent_usage.calls + 1,
-                    models=(loop.model_id,),
-                    input_tokens=agent_usage.input_tokens + (last_assistant.usage.input_tokens or 0),
-                    output_tokens=agent_usage.output_tokens + (last_assistant.usage.output_tokens or 0),
-                    reasoning_tokens=agent_usage.reasoning_tokens + (last_assistant.usage.reasoning_tokens or 0),
-                )
-
-            if not rubric_enabled:
-                break
-
-            assert rubric_mw is not None
-            rubric_availability = RubricAvailability.ON
-            if lock.cancelled:
-                rubric_status = TerminalRubricStatus.CANCELLED
-                break
-
-            grading_messages = list(messages) + [last_assistant]
-            evaluation_result = await rubric_mw.grade(grading_messages, attempt - 1)
-
-            grader_usage = UsageAggregate(available=True, calls=1, models=(rubric_mw.grader_model_id,))
-
-            evaluation = RubricEvaluation(
-                grading_run_id=evaluation_result["grading_run_id"],
-                attempt=attempt,
-                result=_to_evaluation_result(evaluation_result["result"]),
-                explanation=evaluation_result["explanation"],
-                criteria=tuple(
-                    CriterionEvaluation(
-                        name=c["name"],
-                        passed=c["passed"],
-                        gap=c.get("gap"),
-                    )
-                    for c in evaluation_result["criteria"]
-                ),
-                passed_count=sum(1 for c in evaluation_result["criteria"] if c["passed"]),
-                total_count=len(evaluation_result["criteria"]),
-            )
-            evaluations.append(evaluation)
-
-            if evaluation.result in (
-                RubricEvaluationResult.SATISFIED,
-                RubricEvaluationResult.INVALID_RUBRIC,
-                RubricEvaluationResult.GRADER_ERROR,
-            ):
-                rubric_status = {
-                    RubricEvaluationResult.SATISFIED: TerminalRubricStatus.SATISFIED,
-                    RubricEvaluationResult.INVALID_RUBRIC: TerminalRubricStatus.INVALID_RUBRIC,
-                    RubricEvaluationResult.GRADER_ERROR: TerminalRubricStatus.GRADER_ERROR,
-                }[evaluation.result]
-                break
-
-            if attempt == max_attempts:
-                rubric_status = TerminalRubricStatus.MAX_ATTEMPTS_REACHED
-                break
-
-            feedback = _revision_prompt(evaluation_result)
-            messages = list(messages) + [Message.user(content=feedback)]
+                # Agent usage summed across attempts.
+                for at in attempts:
+                    la = None
+                    for msg in reversed(at.messages):
+                        if msg.role == "assistant":
+                            la = msg
+                            break
+                    if la is not None and la.usage:
+                        agent_usage = UsageAggregate(
+                            available=True,
+                            calls=agent_usage.calls + 1,
+                            models=(loop.model_id,),
+                            input_tokens=agent_usage.input_tokens + (la.usage.input_tokens or 0),
+                            output_tokens=agent_usage.output_tokens + (la.usage.output_tokens or 0),
+                            reasoning_tokens=agent_usage.reasoning_tokens + (la.usage.reasoning_tokens or 0),
+                        )
 
         if rubric_status == TerminalRubricStatus.NOT_RUN and rubric_availability == RubricAvailability.ON:
             # Only claim satisfaction when the agent run completed (see the
@@ -724,58 +743,19 @@ class RunService:
             verification=VerificationOutcome(
                 availability=rubric_availability,
                 status=rubric_status,
-                attempts=len(evaluations),
+                attempts=outcome_attempts,
                 max_attempts=max_attempts,
                 evaluations=tuple(evaluations),
             ),
             tool_calls=result_tool_calls,
         )
 
-    def _load_rubric_middleware(self, loop: AgentLoop, rubric: str | None = None) -> RubricMiddleware | None:
+    async def _load_rubric_middleware(self, loop: AgentLoop, rubric: str | None = None) -> RubricMiddleware | None:
         """Load rubric configuration and create RubricMiddleware if enabled.
 
-        A request-level rubric (MessageRequest.verification.rubric) overrides the
-        stored/settings grader prompt.
+        Delegates to the shared loader in middleware_rubric (the single
+        rubric-loading site used by the verification engine).
         """
-        try:
-            from src.config import get_settings
-            from src.sdk.providers.factory import create_model_from_config
+        from src.sdk.middleware_rubric import load_rubric_middleware
 
-            settings = get_settings()
-            vc = settings.verification
-            if vc.enabled is not True:
-                return None
-
-            grader_model = vc.grader_model or loop.model_id
-            # create_model_from_config already wraps the provider with
-            # LangfuseTracer.wrap_provider when enabled — do NOT wrap again
-            # here or the grader's LLM calls get double-traced.
-            grader_provider = create_model_from_config(grader_model, user_id=self._user_id)
-
-            grader_prompt: str | None = rubric
-            if grader_prompt is None:
-                try:
-                    from src.config.user_settings_store import UserSettingsStore
-
-                    store = UserSettingsStore(self._user_id)
-                    loaded = store.load_grader_prompt()
-                    # load_grader_prompt() returns a GraderPromptResponse pydantic model
-                    # (with a .content: str field), not a plain str. Extract the text so
-                    # _build_grader_payload's rubric.strip() doesn't crash with
-                    # "'GraderPromptResponse' object has no attribute 'strip'".
-                    grader_prompt = getattr(loaded, "content", None) if loaded else None
-                except Exception:
-                    grader_prompt = vc.default_rubric or None
-
-            if not grader_prompt:
-                logger.warning("rubric.no_prompt", {}, user_id=self._user_id)
-                return None
-
-            return RubricMiddleware(
-                grader_provider=grader_provider,
-                grader_prompt=grader_prompt,
-                max_iterations=vc.max_iterations,
-            )
-        except Exception as exc:
-            logger.warning("rubric.load_failed", {"error": str(exc)}, user_id=self._user_id)
-            return None
+        return await load_rubric_middleware(self._user_id, loop, rubric)

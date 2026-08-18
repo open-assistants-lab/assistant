@@ -76,6 +76,27 @@ def test_message_session_id_is_preserved() -> None:
     assert messages[0].session_id == "session-a"
 
 
+def test_get_session_title_returns_stored_title_only() -> None:
+    store = _store()
+    _insert_raw_messages(
+        store,
+        [
+            ("m1", "user", "First question", "s1", {"session_title": "Roadmap review"}),
+            ("m2", "assistant", "Answer", "s1", None),
+        ],
+    )
+    assert store.get_session_title("s1") == "Roadmap review"
+    # A session without a stored title returns None — no content fallback,
+    # so callers can distinguish "never titled" from "titled with the first
+    # message text".
+    _insert_raw_messages(
+        store,
+        [("m3", "user", "Second question", "s2", None)],
+    )
+    assert store.get_session_title("s2") is None
+    assert store.get_session_title("missing-session") is None
+
+
 def test_get_messages_by_session_queries_sql_and_ignores_coremem_backend() -> None:
     store = _store()
     store.add_message("user", "allowed", session_id="session-a")

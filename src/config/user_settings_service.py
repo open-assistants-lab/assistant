@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
 
 from src.config.user_settings import (
+    CanonicalModel,
     EffectiveUserSettings,
     EffectiveVerificationSettings,
     GraderPromptResponse,
@@ -84,11 +85,28 @@ def resolve_provider_statuses(
     return MappingProxyType(statuses)
 
 
+def load_saved_user_settings(user_id: str) -> SavedUserSettings | None:
+    """Load a user's saved settings, or None when unavailable.
+
+    Shared by the runtime paths (grader loader, title generation,
+    summarization) so user-configured models take effect without the
+    settings router being involved.
+    """
+    try:
+        from src.config.user_settings_store import UserSettingsStore
+
+        return UserSettingsStore(user_id).load()
+    except Exception:
+        return None
+
+
 def resolve_effective_user_settings(
     *,
     saved: SavedUserSettings,
     prompt: GraderPromptResponse | None,
     host_default_model: str,
+    host_title_model: str | None = None,
+    host_summarization_model: str | None = None,
     host_verification_enabled: bool,
     host_grader_model: str | None,
     host_max_attempts: int,
@@ -103,6 +121,14 @@ def resolve_effective_user_settings(
         raise SettingsResolutionError("Invalid host default model configuration") from None
     if default_model is None:
         raise SettingsResolutionError("Invalid host default model configuration")
+
+    def _resolve_role_model(saved_value: str | None, host_value: str | None) -> CanonicalModel:
+        candidate = saved_value or host_value or default_model
+        resolved = canonical_model(candidate)
+        return resolved if resolved is not None else default_model
+
+    title_model = _resolve_role_model(saved.title_model, host_title_model)
+    summarization_model = _resolve_role_model(saved.summarization_model, host_summarization_model)
 
     enabled = (
         saved.verification.enabled
@@ -166,7 +192,12 @@ def resolve_effective_user_settings(
             grader_prompt_hash=prompt_hash,
         )
 
-    return EffectiveUserSettings(default_model=default_model, verification=verification)
+    return EffectiveUserSettings(
+        default_model=default_model,
+        title_model=title_model,
+        summarization_model=summarization_model,
+        verification=verification,
+    )
 
 
 def build_user_settings_response(
@@ -179,6 +210,8 @@ def build_user_settings_response(
         revision=saved.revision,
         saved=SavedUserSettingsView(
             default_model=saved.default_model,
+            title_model=saved.title_model,
+            summarization_model=saved.summarization_model,
             verification=saved.verification,
         ),
         effective=effective,

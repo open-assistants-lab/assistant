@@ -49,6 +49,8 @@ class UpdateSettingsRequest(BaseModel):
 
     expected_revision: int | None = None
     default_model: CanonicalModel | None = None
+    title_model: CanonicalModel | None = None
+    summarization_model: CanonicalModel | None = None
     verification: VerificationOverrides | None = None
 
 
@@ -194,6 +196,14 @@ _STATIC_MODELS = {
             "provider_display": "Google Gemini",
         }
     ],
+    "ollama-cloud": [
+        {
+            "id": "ollama-cloud:deepseek-v4-flash:0731",
+            "name": "DeepSeek V4 Flash 0731",
+            "provider": "ollama-cloud",
+            "provider_display": "Ollama Cloud",
+        }
+    ],
 }
 
 
@@ -314,6 +324,8 @@ def _preflight_settings(
         saved=SavedUserSettings(),
         prompt=prompt,
         host_default_model=host.agent.model,
+        host_title_model=host.agent.title_model,
+        host_summarization_model=host.memory.summarization.model,
         host_verification_enabled=host.verification.enabled,
         host_grader_model=host.verification.grader_model,
         host_max_attempts=host.verification.max_iterations,
@@ -325,6 +337,8 @@ def _preflight_settings(
         saved=resolved_saved,
         prompt=prompt,
         host_default_model=host.agent.model,
+        host_title_model=host.agent.title_model,
+        host_summarization_model=host.memory.summarization.model,
         host_verification_enabled=host.verification.enabled,
         host_grader_model=host.verification.grader_model,
         host_max_attempts=host.verification.max_iterations,
@@ -347,6 +361,10 @@ def _preview_patch(current: SavedUserSettings, patch: UserSettingsPatch) -> Save
     payload = current.model_dump(mode="json")
     if "default_model" in patch.model_fields_set:
         payload["default_model"] = patch.default_model
+    if "title_model" in patch.model_fields_set:
+        payload["title_model"] = patch.title_model
+    if "summarization_model" in patch.model_fields_set:
+        payload["summarization_model"] = patch.summarization_model
     if "verification" in patch.model_fields_set:
         if patch.verification is None:
             payload["verification"] = VerificationOverrides().model_dump(mode="json")
@@ -431,6 +449,9 @@ def model_catalog(
     return {
         "revision": preflight.saved.revision,
         "default_model": preflight.effective.default_model,
+        "grader_model": preflight.effective.verification.grader_model,
+        "title_model": preflight.effective.title_model,
+        "summarization_model": preflight.effective.summarization_model,
         "total_providers": total_providers,
         "providers": shown_providers,
     }
@@ -452,7 +473,7 @@ def update_settings(
             else current.revision
         )
         patch_payload: dict[str, Any] = {"expected_revision": expected_revision}
-        for field in ("default_model", "verification"):
+        for field in ("default_model", "title_model", "summarization_model", "verification"):
             if field in request.model_fields_set:
                 patch_payload[field] = getattr(request, field)
         patch = UserSettingsPatch.model_validate(patch_payload)

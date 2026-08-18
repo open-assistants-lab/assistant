@@ -46,6 +46,8 @@ def _resolve(
     saved: SavedUserSettings | None = None,
     prompt: GraderPromptResponse | None | object = _DEFAULT_PROMPT,
     host_default_model: str = "openai:host-chat",
+    host_title_model: str | None = None,
+    host_summarization_model: str | None = None,
     host_verification_enabled: bool = True,
     host_grader_model: str | None = "openai:host-grader",
     host_max_attempts: int = 2,
@@ -57,6 +59,8 @@ def _resolve(
         saved=saved or SavedUserSettings(),
         prompt=_prompt() if prompt is _DEFAULT_PROMPT else prompt,  # type: ignore[arg-type]
         host_default_model=host_default_model,
+        host_title_model=host_title_model,
+        host_summarization_model=host_summarization_model,
         host_verification_enabled=host_verification_enabled,
         host_grader_model=host_grader_model,
         host_max_attempts=host_max_attempts,
@@ -89,6 +93,38 @@ def test_saved_grader_model_overrides_host() -> None:
         verification=VerificationOverrides(grader_model="openai:saved-grader")
     )
     assert _resolve(saved=saved).verification.grader_model == "openai:saved-grader"
+
+
+def test_saved_title_model_overrides_host_and_default() -> None:
+    saved = SavedUserSettings(title_model="openai:saved-title")
+    effective = _resolve(saved=saved, host_title_model="openai:host-title")
+    assert effective.title_model == "openai:saved-title"
+
+
+def test_host_title_model_used_when_unsaved() -> None:
+    effective = _resolve(host_title_model="openai:host-title")
+    assert effective.title_model == "openai:host-title"
+
+
+def test_title_model_defaults_to_default_model() -> None:
+    effective = _resolve(host_default_model="openai:chat")
+    assert effective.title_model == "openai:chat"
+
+
+def test_saved_summarization_model_overrides_host_and_default() -> None:
+    saved = SavedUserSettings(summarization_model="openai:saved-summary")
+    effective = _resolve(saved=saved, host_summarization_model="openai:host-summary")
+    assert effective.summarization_model == "openai:saved-summary"
+
+
+def test_host_summarization_model_used_when_unsaved() -> None:
+    effective = _resolve(host_summarization_model="openai:host-summary")
+    assert effective.summarization_model == "openai:host-summary"
+
+
+def test_summarization_model_defaults_to_default_model() -> None:
+    effective = _resolve(host_default_model="openai:chat")
+    assert effective.summarization_model == "openai:chat"
 
 
 def test_host_grader_model_is_canonicalized() -> None:
@@ -337,6 +373,8 @@ def test_response_contains_exact_saved_view_and_no_secrets() -> None:
     payload = json.loads(response.model_dump_json())
     assert payload["saved"] == {
         "default_model": "openai:chat",
+        "title_model": None,
+        "summarization_model": None,
         "verification": {"enabled": True, "grader_model": None, "max_attempts": 3},
     }
     assert payload["revision"] == 3

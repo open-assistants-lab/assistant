@@ -662,6 +662,28 @@ class MessageStore:
             if row[0]
         ]
 
+    def get_session_title(self, session_id: str) -> str | None:
+        """Return the stored title for a session (metadata session_title only).
+
+        Unlike get_sessions(), this does NOT fall back to the first message
+        content — a session without a stored title returns None so callers can
+        distinguish "never titled" from "titled with the first message text".
+        """
+        try:
+            with self._core.db._connect() as cur:
+                row = cur.execute(
+                    "SELECT json_extract(metadata, '$.session_title') "
+                    "FROM messages "
+                    "WHERE session_id = ? AND role = 'user' "
+                    "ORDER BY ts ASC LIMIT 1",
+                    [session_id],
+                ).fetchone()
+            if not row or not row[0]:
+                return None
+            return str(row[0])
+        except Exception:
+            return None
+
     def update_session_title(self, session_id: str, title: str) -> None:
         """Update the title for a chat session (stored on first user message metadata)."""
         try:
@@ -962,17 +984,21 @@ class MessageStore:
         final_answer: Message,
         audit_records: list[Message],
         metadata: dict[str, Any],
+        pre_messages: list[Message] | None = None,
     ) -> str:
         """Persist a completed run's final answer and audit records.
 
-        The final answer is persisted with run_id in metadata.
-        Audit records (reasoning, tools, rubric feedback) are stored with
+        The final answer is persisted with run_id in metadata. pre_messages
+        (e.g. the assistant's reasoning, which arrived BEFORE the answer in
+        the stream) are inserted first so transcript ordering matches the
+        stream. Audit records (tools, rubric feedback) are stored with
         include_in_model_context: false so they are excluded from future
-        model context loading.
+        model context loading; pre_messages stay in context.
 
         Idempotent on run_id — retry after uncertain disconnect reads
         existing run instead of writing duplicates.
         """
+        pre_messages = list(pre_messages or [])
         session_id = self._require_session_id(session_id)
         with self._core.db._connect() as cur:
             cur.execute("BEGIN IMMEDIATE")
@@ -988,6 +1014,27 @@ class MessageStore:
                 answer_metadata = dict(metadata)
                 answer_metadata["run_id"] = run_id
                 answer_metadata["include_in_model_context"] = True
+
+                # Insert pre-messages (reasoning etc.) BEFORE the final
+                # answer so the stored transcript matches the stream order.
+                for pre in pre_messages:
+                    pre_metadata = dict(metadata)
+                    pre_metadata["run_id"] = run_id
+                    pre_metadata["include_in_model_context"] = True
+                    pre_mid = str(uuid.uuid4())[:12]
+                    cur.execute(
+                        "INSERT INTO messages (id, role, content, session_id, metadata, ts) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        [
+                            pre_mid,
+                            pre.role,
+                            pre.content or "(empty)",
+                            session_id,
+                            json.dumps(pre_metadata),
+                            datetime.now(UTC).isoformat(),
+                        ],
+                    )
+
                 answer_mid = str(uuid.uuid4())[:12]
                 cur.execute(
                     "INSERT INTO messages (id, role, content, session_id, metadata, ts) "

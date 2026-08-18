@@ -78,18 +78,30 @@ async def default_trigger_handler(event: AgentEvent) -> None:
 
     Used by all trigger types (cron, webhook, file_change, manual, rerun).
     For 'rerun' triggers, the event.message is feedback to append to the
-    existing conversation before re-running.
+    existing conversation; the EXECUTOR owns the re-run (in its own
+    streaming or non-streaming mode) after this handler returns — this
+    handler only prepares the rerun, it never executes the agent.
     """
     from src.sdk.messages import Message
     from src.sdk.runner import run_sdk_agent
 
     if event.trigger_type == "rerun":
-        # Rerun: append feedback as user message, then re-run with full history
-        messages = event.metadata.get("previous_messages", [])
-        messages = list(messages) + [Message(role="user", content=event.message, source="rubric_middleware")]
-    else:
-        messages = [Message.user(event.message)]
+        # Append feedback as a user message; the executor re-runs the agent
+        # with these messages. No execution here — the executor owns the
+        # attempt loop so streaming reruns stream natively.
+        previous = event.metadata.get("previous_messages", [])
+        previous = list(previous) + [
+            Message(role="user", content=event.message, source="rubric_middleware")
+        ]
+        event.metadata["previous_messages"] = previous
+        logger.info(
+            "trigger_handler.rerun_prepared",
+            {"trigger_id": event.trigger_id, "user_id": event.user_id},
+            user_id=event.user_id,
+        )
+        return
 
+    messages = [Message.user(event.message)]
     result = await run_sdk_agent(
         user_id=event.user_id,
         messages=messages,
@@ -97,10 +109,6 @@ async def default_trigger_handler(event: AgentEvent) -> None:
         model=event.model,
         rubric=event.rubric,
     )
-
-    # Store rerun result so the caller can retrieve it
-    if event.trigger_type == "rerun":
-        event.metadata["_rerun_result"] = result
 
     response = ""
     for msg in reversed(result):
