@@ -180,8 +180,12 @@ class LangfuseTracer:
                 )
 
             model_name = model or getattr(provider, "model", "unknown")
+            # Callers can name the generation via a reserved provider_options
+            # key (e.g. title generation) — the provider itself ignores it.
+            lf_opts = (provider_options or {}).get("langfuse") or {}
+            gen_name = lf_opts.get("name") or f"{provider_class}_{model_name}"
             with client.start_as_current_observation(
-                as_type="generation", name=f"{provider_class}_{model_name}", model=model_name
+                as_type="generation", name=gen_name, model=model_name
             ) as gen:
                 try:
                     gen.update(
@@ -217,7 +221,11 @@ class LangfuseTracer:
                 )
 
             model_name = model or getattr(provider, "model", "unknown")
-            gen = client.start_observation(name=f"{provider_class}_{model_name}", as_type="generation")
+            # Callers can name the generation via a reserved provider_options
+            # key (e.g. title generation) — the provider itself ignores it.
+            lf_opts = (provider_options or {}).get("langfuse") or {}
+            gen_name = lf_opts.get("name") or f"{provider_class}_{model_name}"
+            gen = client.start_observation(name=gen_name, as_type="generation")
             try:
                 gen.update(
                     input=[m.model_dump() if hasattr(m, "model_dump") else str(m) for m in messages]

@@ -504,7 +504,12 @@ async def _summarize_title(
         response = await provider.chat(
             messages=[Message.user(prompt)],
             tools=None,
-            provider_options={"agnes": {"chat_template_kwargs": {"enable_thinking": False}}},
+            provider_options={
+                # Reserved key: names the Langfuse generation (the provider
+                # ignores it).
+                "langfuse": {"name": "title_generation"},
+                "agnes": {"chat_template_kwargs": {"enable_thinking": False}},
+            },
             max_tokens=20,
             temperature=0.3,
         )

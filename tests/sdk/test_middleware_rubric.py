@@ -260,3 +260,15 @@ async def test_load_rubric_middleware_falls_back_to_host_grader_model(monkeypatc
     mw = await load_rubric_middleware("u", FakeLoop(), rubric="- Non-empty")
     assert mw is not None
     assert captured["model"] == "openai:host-grader"
+
+
+@pytest.mark.asyncio
+async def test_grader_loop_bounds_output_tokens():
+    """The grader's loop must cap output tokens so a verbose verdict can't
+    blow up latency or hit the provider timeout."""
+    provider = FakeGraderProvider("{}")
+    mw = RubricMiddleware(provider, "- Three lines")
+    loop = await mw._ensure_loop()
+    opts = loop.run_config.provider_options or {}
+    assert opts["ollama-cloud"]["max_tokens"] == 800
+    assert opts["openai"]["max_tokens"] == 800

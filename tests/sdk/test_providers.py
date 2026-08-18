@@ -301,6 +301,18 @@ class TestOllamaCloudProvider:
 # ─── OpenAI Provider Tests ───
 
 
+
+
+    def test_native_payload_maps_max_tokens_to_num_predict(self):
+        """OpenAI-style max_tokens must map to Ollama's options.num_predict."""
+        p = OllamaCloud(api_key="test-key")
+        msgs = [Message.user("hi")]
+        payload = p._build_payload(
+            msgs, None, "minimax-m2.5",
+            provider_options={"ollama-cloud": {"max_tokens": 800}},
+        )
+        assert payload["options"]["num_predict"] == 800
+        assert "max_tokens" not in payload
 class TestOpenAIProvider:
     def test_default_config(self):
         p = OpenAIProvider(api_key="sk-test")

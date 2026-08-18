@@ -80,6 +80,12 @@ class OllamaCloud(LLMProvider):
         if tools:
             payload["tools"] = [t.to_openai_format() for t in tools]
         provider_opts = self._extract_provider_options(provider_options)
+        # Map the OpenAI-style max_tokens to Ollama's native
+        # options.num_predict so callers can bound output uniformly.
+        if "max_tokens" in provider_opts:
+            options = dict(provider_opts.get("options") or {})
+            options["num_predict"] = provider_opts.pop("max_tokens")
+            provider_opts["options"] = options
         payload.update(kwargs)
         payload.update(provider_opts)
         return payload

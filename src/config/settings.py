@@ -35,7 +35,7 @@ class AgentConfig(_BaseSettings):
     """Agent configuration."""
 
     name: str = Field(default="Assistant")
-    model: str = Field(default="ollama:minimax-m2.5")
+    model: str = Field(default="ollama-cloud:deepseek-v4-flash:0731")
     title_model: str = Field(
         default="", description="Model for chat title summarization (empty = use model)"
     )
@@ -73,7 +73,7 @@ class SummarizationConfig(_BaseSettings):
     """Summarization middleware configuration (short-term token reduction)."""
 
     enabled: bool = True
-    model: str = Field(default="ollama:minimax-m2.5")
+    model: str = Field(default="ollama-cloud:deepseek-v4-flash:0731")
     trigger: list[Any] = Field(default_factory=lambda: ["tokens", 50000])
     keep: list[Any] = Field(default_factory=lambda: ["messages", 20])
     trim_tokens_to_summarize: int | None = 4000
@@ -304,10 +304,24 @@ class AppConfig(_BaseSettings):
         return self.deployment.data_path
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> "AppConfig":
-        """Load configuration from YAML file."""
+    def from_yaml(cls, path: str | Path | None = None) -> "AppConfig":
+        """Load configuration from YAML file.
+
+        The path defaults to ``config.yaml`` at the repository root (resolved
+        from this file, not the process CWD) so every process finds it
+        regardless of where it was launched. A missing file falls back to
+        defaults with a warning — callers that rely on the defaults should
+        not silently get a stale model.
+        """
+        if path is None:
+            path = Path(__file__).resolve().parents[2] / "config.yaml"
         path = Path(path)
         if not path.exists():
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "config.yaml not found at %s — using defaults", path
+            )
             return cls()
 
         with open(path) as f:

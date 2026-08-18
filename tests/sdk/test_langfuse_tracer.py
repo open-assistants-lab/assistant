@@ -210,3 +210,50 @@ def test_otel_detach_filter_installed_on_init(monkeypatch) -> None:
         for f in langfuse_logger.filters:
             if isinstance(f, _OtelDetachFilter) and f not in installed:
                 langfuse_logger.removeFilter(f)
+
+
+def test_wrap_provider_uses_langfuse_name_override(monkeypatch):
+    """A reserved provider_options key names the generation (e.g. title)."""
+    import asyncio
+
+    from src.sdk.messages import StreamChunk
+
+    class FakeGen:
+        def __init__(self):
+            self.updates: list[dict] = []
+            self.ended = False
+
+        def update(self, **kwargs):
+            self.updates.append(kwargs)
+
+        def end(self):
+            self.ended = True
+
+    class FakeClient:
+        def __init__(self):
+            self.gen = FakeGen()
+            self.gen_name = None
+
+        def start_observation(self, name, as_type, **kw):
+            self.gen_name = name
+            return self.gen
+
+    class FakeProvider:
+        async def chat(self, messages, **kwargs):
+            return None
+
+        async def chat_stream(self, messages, tools=None, model=None, provider_options=None, **kwargs):
+            yield StreamChunk.done(content="")
+
+    client = FakeClient()
+    monkeypatch.setattr(LangfuseTracer, "_client", object())
+    monkeypatch.setattr(LangfuseTracer, "_get_client", classmethod(lambda cls: client))
+
+    wrapped = LangfuseTracer.wrap_provider(FakeProvider())
+
+    async def collect():
+        async for _ in wrapped.chat_stream([], model="m", provider_options={"langfuse": {"name": "title_generation"}}):
+            pass
+
+    asyncio.run(collect())
+    assert client.gen_name == "title_generation"

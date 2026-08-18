@@ -18,7 +18,7 @@ from pydantic import BaseModel, model_validator
 
 from src.app_logging import get_logger
 from src.sdk.langfuse_tracer import LangfuseTracer
-from src.sdk.loop import AgentLoop
+from src.sdk.loop import AgentLoop, RunConfig
 from src.sdk.messages import Message
 
 logger = get_logger()
@@ -133,6 +133,8 @@ Allowed result values:
 - failed: the rubric is malformed, contradictory, or otherwise impossible to evaluate.
 
 Be conservative: every criterion you cannot positively confirm should be marked failed with a gap.
+
+Keep the explanation concise: at most 2 sentences (under 200 characters). Do not restate the transcript.
 
 You must respond with ONLY the JSON object matching this schema. No markdown, no code fences, no commentary, no trailing text:
 {
@@ -317,6 +319,18 @@ class RubricMiddleware:
                 system_prompt=GRADER_SYSTEM_PROMPT,
                 middlewares=[],
                 max_iterations=1,
+                # Bound the grader's output so a verbose verdict can never
+                # blow up latency or hit the provider's 45s timeout. The
+                # prompt also caps the explanation; this is the hard ceiling.
+                run_config=RunConfig(
+                    provider_options={
+                        "ollama-cloud": {"max_tokens": 800},
+                        "ollama": {"max_tokens": 800},
+                        "openai": {"max_tokens": 800},
+                        "anthropic": {"max_tokens": 800},
+                        "gemini": {"max_tokens": 800},
+                    }
+                ),
             )
         return self._loop
 
