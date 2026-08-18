@@ -2371,6 +2371,17 @@ pub fn buildView(ui: *AppUi, model: *const Model) AppUi.Node {
     else
         buildChatPanel(ui, model);
 
+    // Reading-width cap: the chat panel (messages + composer) and the
+    // settings form both read better below ~full-width. Cap at 768px and
+    // center the column in the space right of the sidebar. The cap is a
+    // maximum only — on narrow windows the panel shrinks naturally.
+    const panel_container = ui.row(.{
+        .grow = 1,
+        .main = .center,
+        .cross = .stretch,
+        .style_tokens = .{ .background = .surface },
+    }, .{right_panel});
+
     const split = ui.split(.{
         .value = model.sidebar_split,
         .on_resize = AppUi.valueMsg(.sidebar_resized),
@@ -2378,7 +2389,7 @@ pub fn buildView(ui: *AppUi, model: *const Model) AppUi.Node {
         .grow = 1,
     }, .{
         buildSidebar(ui, model),
-        right_panel,
+        panel_container,
     });
 
     var root = ui.el(.card, .{
@@ -3101,6 +3112,7 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
 
     return ui.scroll(.{
         .grow = 1,
+        .max_width = 768,
         .padding = 12,
         .opacity = settings_eased,
         .style_tokens = .{ .background = .surface },
@@ -3349,6 +3361,8 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         .style_tokens = .{ .background = .surface },
         .gap = 2,
         .min_width = 320,
+        .max_width = 768,
+        .grow = 1,
         .padding = 12,
     }, children_slice);
 }
