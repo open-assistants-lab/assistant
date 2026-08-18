@@ -311,6 +311,158 @@ async def test_create_sdk_loop_uses_actual_local_ollama_identity(loop_factory, m
     assert loop.middlewares[0].model == "ollama:qwen3:8b"
 
 
+@pytest.mark.asyncio
+async def test_create_sdk_loop_caches_connectkit_discovery(monkeypatch, loop_factory):
+    """Two loop creations for the same user within the TTL share one
+    ConnectKit discovery and the same bridge instance."""
+    from src.sdk import runner
+
+    discover_calls = {"n": 0}
+
+    class FakeConnectorBridge:
+        def __init__(self, user_id):
+            self.user_id = user_id
+
+        async def discover(self):
+            discover_calls["n"] += 1
+
+        def get_tool_definitions(self):
+            return []
+
+    monkeypatch.setattr("connectkit.bridge.ConnectKitBridge", FakeConnectorBridge)
+    monkeypatch.setattr(runner, "_CONNECTKIT_CACHE_TTL_SECONDS", 3600.0)
+    runner.clear_connectkit_cache()
+
+    loop1 = await loop_factory(user_id="ck_test_user")
+    loop2 = await loop_factory(user_id="ck_test_user")
+
+    assert discover_calls["n"] == 1
+    assert loop1._connectkit_bridge is loop2._connectkit_bridge
+
+
+@pytest.mark.asyncio
+async def test_connectkit_cache_re_discovers_after_ttl(monkeypatch, loop_factory):
+    """Once the TTL elapses, discovery runs again for the same user."""
+    import time
+
+    from src.sdk import runner
+
+    discover_calls = {"n": 0}
+
+    class FakeConnectorBridge:
+        def __init__(self, user_id):
+            self.user_id = user_id
+
+        async def discover(self):
+            discover_calls["n"] += 1
+
+        def get_tool_definitions(self):
+            return []
+
+    monkeypatch.setattr("connectkit.bridge.ConnectKitBridge", FakeConnectorBridge)
+    monkeypatch.setattr(runner, "_CONNECTKIT_CACHE_TTL_SECONDS", 60.0)
+    runner.clear_connectkit_cache()
+
+    await loop_factory(user_id="ck_test_user")
+    assert discover_calls["n"] == 1
+
+    # Age the cached entry past the TTL, then the next call re-discovers.
+    runner._connectkit_cache["ck_test_user"] = (time.monotonic() - 61.0, None, [])
+    await loop_factory(user_id="ck_test_user")
+    assert discover_calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_connectkit_cache_is_per_user(monkeypatch, loop_factory):
+    """Different users each get their own discovery (and cache entry)."""
+    from src.sdk import runner
+
+    discover_calls = {"n": 0}
+
+    class FakeConnectorBridge:
+        def __init__(self, user_id):
+            self.user_id = user_id
+
+        async def discover(self):
+            discover_calls["n"] += 1
+
+        def get_tool_definitions(self):
+            return []
+
+    monkeypatch.setattr("connectkit.bridge.ConnectKitBridge", FakeConnectorBridge)
+    monkeypatch.setattr(runner, "_CONNECTKIT_CACHE_TTL_SECONDS", 3600.0)
+    runner.clear_connectkit_cache()
+
+    await loop_factory(user_id="ck_user_a")
+    await loop_factory(user_id="ck_user_b")
+    await loop_factory(user_id="ck_user_a")
+
+    assert discover_calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_connectkit_failure_is_not_cached(monkeypatch, loop_factory):
+    """A failed discovery is never cached, so the next call retries."""
+    from src.sdk import runner
+
+    attempts = {"n": 0}
+
+    class FlakyConnectorBridge:
+        def __init__(self, user_id):
+            self.user_id = user_id
+
+        async def discover(self):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise RuntimeError("boom")
+
+        def get_tool_definitions(self):
+            return []
+
+    monkeypatch.setattr("connectkit.bridge.ConnectKitBridge", FlakyConnectorBridge)
+    monkeypatch.setattr(runner, "_CONNECTKIT_CACHE_TTL_SECONDS", 3600.0)
+    runner.clear_connectkit_cache()
+
+    loop = await loop_factory(user_id="ck_test_user")
+    assert attempts["n"] == 1  # first failure swallowed, loop still created
+    assert getattr(loop, "_connectkit_bridge", None) is None
+
+    await loop_factory(user_id="ck_test_user")
+    assert attempts["n"] == 2  # not cached → retried
+
+
+@pytest.mark.asyncio
+async def test_connectkit_cache_is_bounded(monkeypatch, loop_factory):
+    """The cache evicts least-recently-used users beyond the cap."""
+    from src.sdk import runner
+
+    discover_calls = {"n": 0}
+
+    class FakeConnectorBridge:
+        def __init__(self, user_id):
+            self.user_id = user_id
+
+        async def discover(self):
+            discover_calls["n"] += 1
+
+        def get_tool_definitions(self):
+            return []
+
+    monkeypatch.setattr("connectkit.bridge.ConnectKitBridge", FakeConnectorBridge)
+    monkeypatch.setattr(runner, "_CONNECTKIT_CACHE_TTL_SECONDS", 3600.0)
+    monkeypatch.setattr(runner, "_CONNECTKIT_CACHE_MAX_ENTRIES", 3)
+    runner.clear_connectkit_cache()
+
+    for i in range(4):
+        await loop_factory(user_id=f"ck_user_{i}")
+    assert len(runner._connectkit_cache) <= 3
+
+    # The first user was evicted, so its next loop re-discovers; the
+    # fourth user's entry is still cached.
+    await loop_factory(user_id="ck_user_0")
+    assert discover_calls["n"] == 5  # 4 initial + 1 re-discovery
+
+
 def test_messages_from_conversation_preserves_user_storage_identity():
     from src.sdk.runner import _messages_from_conversation
 

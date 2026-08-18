@@ -22,6 +22,7 @@ import collections.abc
 import dataclasses
 import hashlib
 import json
+import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -323,8 +324,6 @@ async def create_sdk_loop(
     session_id: str | None = None,
 ) -> AgentLoop:
     """Create an AgentLoop for a user with all wiring."""
-    import time
-
     del workspace_id
     runtime_workspace_id = "personal"
     runtime_session_id = _normalize_session_id(session_id)
@@ -368,13 +367,10 @@ async def create_sdk_loop(
     connector_tools: list[Any] = []
     connectkit_bridge = None
     try:
-        from connectkit.bridge import ConnectKitBridge
-
-        connectkit_bridge = ConnectKitBridge(user_id=user_id)
-        await connectkit_bridge.discover()
+        connectkit_bridge, discovered = await _get_connectkit_bridge(user_id)
         connector_tools = [
             td
-            for td in connectkit_bridge.get_tool_definitions()
+            for td in discovered
             if _resource_enabled(caps, "tools", _tool_name(td))
         ]
         if connector_tools:
@@ -1404,6 +1400,54 @@ def reset_sdk_loop(
     return removed
 
 
+# ── ConnectKit discovery cache ────────────────────────────────────────────
+# ConnectKitBridge.discover() refreshes OAuth tokens and loads connector
+# specs — ~1.15s on every AgentLoop creation, even with no connectors
+# configured. Connector tool sets change only when connectors are added
+# or removed (or OAuth tokens rotate), so cache the discovered bridge
+# per user for a short TTL. reset_user_sdk_loops / reset_all_sdk_loops
+# clear it on explicit changes.
+_CONNECTKIT_CACHE_TTL_SECONDS = 60.0
+_CONNECTKIT_CACHE_MAX_ENTRIES = 128
+_connectkit_cache: collections.OrderedDict[str, tuple[float, Any, list[Any]]] = collections.OrderedDict()
+
+
+def clear_connectkit_cache(user_id: str | None = None) -> None:
+    """Drop cached ConnectKit bridges for one user (or all users)."""
+    if user_id is None:
+        _connectkit_cache.clear()
+    else:
+        _connectkit_cache.pop(user_id, None)
+
+
+async def _get_connectkit_bridge(user_id: str) -> tuple[Any, list[Any]]:
+    """Return (bridge, tool_definitions) with a per-user TTL cache.
+
+    The bridge instance is shared across loops (it is attached for tool
+    invocation); tool definitions are the plain dicts returned by
+    ``ConnectKitBridge.get_tool_definitions()``. Failures are never
+    cached, so a transient error re-runs discovery on the next call.
+    """
+    now = time.monotonic()
+    cached = _connectkit_cache.get(user_id)
+    if cached is not None and now - cached[0] < _CONNECTKIT_CACHE_TTL_SECONDS:
+        _connectkit_cache.move_to_end(user_id)  # LRU touch
+        return cached[1], cached[2]
+    # Drop expired entries so the map stays bounded even under churn.
+    for uid in list(_connectkit_cache):
+        if now - _connectkit_cache[uid][0] >= _CONNECTKIT_CACHE_TTL_SECONDS:
+            del _connectkit_cache[uid]
+    from connectkit.bridge import ConnectKitBridge
+
+    bridge = ConnectKitBridge(user_id=user_id)
+    await bridge.discover()
+    tools = bridge.get_tool_definitions()
+    _connectkit_cache[user_id] = (now, bridge, tools)
+    while len(_connectkit_cache) > _CONNECTKIT_CACHE_MAX_ENTRIES:
+        _connectkit_cache.popitem(last=False)  # evict least-recently-used
+    return bridge, tools
+
+
 def reset_user_sdk_loops(user_id: str, reason: str | None = None) -> int:
     """Reset all cached SDK agent loops for a user."""
     removed = 0
@@ -1412,6 +1456,7 @@ def reset_user_sdk_loops(user_id: str, reason: str | None = None) -> int:
         if cache_key.startswith(cache_prefix):
             del _loop_cache[cache_key]
             removed += 1
+    clear_connectkit_cache(user_id)
     logger.info(
         "sdk_runner.user_loops_reset",
         {"user_id": user_id, "reason": reason, "removed": removed},
@@ -1423,6 +1468,7 @@ def reset_user_sdk_loops(user_id: str, reason: str | None = None) -> int:
 def reset_all_sdk_loops() -> None:
     """Reset all cached agent loops."""
     _loop_cache.clear()
+    clear_connectkit_cache()
     logger.info("sdk_runner.all_loops_reset", {})
 
 
