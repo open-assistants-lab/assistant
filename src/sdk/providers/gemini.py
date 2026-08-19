@@ -19,7 +19,12 @@ from uuid import uuid4
 import httpx
 
 from src.sdk.messages import Message, StreamChunk, ToolCall, Usage
-from src.sdk.providers.base import LLMProvider, ModelInfo, raise_if_context_overflow
+from src.sdk.providers.base import (
+    LLMProvider,
+    ModelInfo,
+    is_timeout_error,
+    raise_if_context_overflow,
+)
 from src.sdk.tools import ToolDefinition
 
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
@@ -121,7 +126,17 @@ class GeminiProvider(LLMProvider):
         model = model or self.model
         payload = self._build_payload(messages, tools, provider_options=provider_options, **kwargs)
         client = self._get_client()
-        response = await client.post(self._url(model, stream=False), json=payload)
+        # One retry on transient timeout/connect errors.
+        attempts = 0
+        while True:
+            try:
+                response = await client.post(self._url(model, stream=False), json=payload)
+                break
+            except Exception as e:
+                if attempts == 0 and is_timeout_error(e):
+                    attempts += 1
+                    continue
+                raise
         try:
             response.raise_for_status()
         except Exception as e:
@@ -200,30 +215,44 @@ class GeminiProvider(LLMProvider):
         client = self._get_client()
         url = self._url(model, stream=True)
 
-        current_tool_calls: dict[int, dict[str, Any]] = {}
-
-        async with client.stream("POST", url, json=payload) as response:
+        # Retry the stream once on a timeout, but only if NO content has
+        # been emitted yet — a mid-stream retry would re-emit the partial
+        # text the loop already appended (duplication).
+        attempts = 0
+        while True:
+            current_tool_calls: dict[int, dict[str, Any]] = {}
+            emitted = False
             try:
-                response.raise_for_status()
-            except Exception as e:
-                raise_if_context_overflow(e)
-                raise
-            buffer = ""
-            async for chunk_bytes in response.aiter_bytes():
-                buffer += chunk_bytes.decode("utf-8")
-                while "[\n" in buffer or "]\n" in buffer:
-                    chunk_str = buffer
+                async with client.stream("POST", url, json=payload) as response:
+                    try:
+                        response.raise_for_status()
+                    except Exception as e:
+                        raise_if_context_overflow(e)
+                        raise
                     buffer = ""
-                    for line in chunk_str.split(",\n"):
-                        line = line.strip().strip("[]")
-                        if not line:
-                            continue
-                        try:
-                            data = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        for event in self._parse_stream_chunk(data, current_tool_calls):
-                            yield event
+                    async for chunk_bytes in response.aiter_bytes():
+                        buffer += chunk_bytes.decode("utf-8")
+                        while "[\n" in buffer or "]\n" in buffer:
+                            chunk_str = buffer
+                            buffer = ""
+                            for line in chunk_str.split(",\n"):
+                                line = line.strip().strip("[]")
+                                if not line:
+                                    continue
+                                try:
+                                    data = json.loads(line)
+                                except json.JSONDecodeError:
+                                    continue
+                                for event in self._parse_stream_chunk(data, current_tool_calls):
+                                    if event.canonical_type in ("text_delta", "reasoning_delta", "tool_input_delta"):
+                                        emitted = True
+                                    yield event
+                return
+            except Exception as e:
+                if attempts == 0 and not emitted and is_timeout_error(e):
+                    attempts += 1
+                    continue
+                raise
 
     def _parse_stream_chunk(
         self, data: dict[str, Any], current_tool_calls: dict[int, dict[str, Any]]

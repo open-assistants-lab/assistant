@@ -16,7 +16,12 @@ from uuid import uuid4
 from openai import AsyncOpenAI
 
 from src.sdk.messages import Message, StreamChunk, ToolCall, Usage
-from src.sdk.providers.base import LLMProvider, ModelInfo, raise_if_context_overflow
+from src.sdk.providers.base import (
+    LLMProvider,
+    ModelInfo,
+    is_timeout_error,
+    raise_if_context_overflow,
+)
 from src.sdk.tools import ToolDefinition
 
 OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
@@ -83,11 +88,18 @@ class OpenAIProvider(LLMProvider):
         params.update(provider_opts)
         self._move_extension_fields_to_extra_body(params)
 
-        try:
-            response = await self._client.chat.completions.create(**params)
-        except Exception as e:
-            raise_if_context_overflow(e)
-            raise
+        # One retry on transient timeout/connect errors.
+        attempts = 0
+        while True:
+            try:
+                response = await self._client.chat.completions.create(**params)
+                break
+            except Exception as e:
+                if attempts == 0 and is_timeout_error(e):
+                    attempts += 1
+                    continue
+                raise_if_context_overflow(e)
+                raise
         return self._parse_response(response)
 
     async def chat_stream(
@@ -116,14 +128,33 @@ class OpenAIProvider(LLMProvider):
 
         current_tool_calls: dict[int, dict[str, Any]] = {}
 
-        try:
-            stream = await self._client.chat.completions.create(**params)
-        except Exception as e:
-            raise_if_context_overflow(e)
-            raise
-        async for chunk in stream:
-            for event in self._parse_stream_chunk(chunk, current_tool_calls):
-                yield event
+        # Retry the stream once on a timeout, but only if NO content has
+        # been emitted yet — a mid-stream retry would re-emit the partial
+        # text the loop already appended (duplication).
+        attempts = 0
+        while True:
+            current_tool_calls = {}
+            emitted = False
+            try:
+                stream = await self._client.chat.completions.create(**params)
+            except Exception as e:
+                if attempts == 0 and is_timeout_error(e):
+                    attempts += 1
+                    continue
+                raise_if_context_overflow(e)
+                raise
+            try:
+                async for chunk in stream:
+                    for event in self._parse_stream_chunk(chunk, current_tool_calls):
+                        if event.canonical_type in ("text_delta", "reasoning_delta", "tool_input_delta"):
+                            emitted = True
+                        yield event
+                return
+            except Exception as e:
+                if attempts == 0 and not emitted and is_timeout_error(e):
+                    attempts += 1
+                    continue
+                raise
 
     def _parse_response(self, response: Any) -> Message:
         choice = response.choices[0] if response.choices else None

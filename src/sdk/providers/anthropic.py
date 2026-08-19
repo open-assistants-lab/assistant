@@ -17,7 +17,12 @@ from uuid import uuid4
 import httpx
 
 from src.sdk.messages import Message, StreamChunk, ToolCall, Usage
-from src.sdk.providers.base import LLMProvider, ModelInfo, raise_if_context_overflow
+from src.sdk.providers.base import (
+    LLMProvider,
+    ModelInfo,
+    is_timeout_error,
+    raise_if_context_overflow,
+)
 from src.sdk.tools import ToolDefinition
 
 ANTHROPIC_BASE_URL = "https://api.anthropic.com"
@@ -131,7 +136,17 @@ class AnthropicProvider(LLMProvider):
             messages, tools, model, stream=False, provider_options=provider_options, **kwargs
         )
         client = self._get_client()
-        response = await client.post(f"{self.base_url}/v1/messages", json=payload)
+        # One retry on transient timeout/connect errors.
+        attempts = 0
+        while True:
+            try:
+                response = await client.post(f"{self.base_url}/v1/messages", json=payload)
+                break
+            except Exception as e:
+                if attempts == 0 and is_timeout_error(e):
+                    attempts += 1
+                    continue
+                raise
         try:
             response.raise_for_status()
         except Exception as e:
@@ -191,26 +206,40 @@ class AnthropicProvider(LLMProvider):
             messages, tools, model, stream=True, provider_options=provider_options, **kwargs
         )
         client = self._get_client()
-        current_tool_calls: dict[int, dict[str, Any]] = {}
-
-        async with client.stream("POST", f"{self.base_url}/v1/messages", json=payload) as response:
+        # Retry the stream once on a timeout, but only if NO content has
+        # been emitted yet — a mid-stream retry would re-emit the partial
+        # text the loop already appended (duplication).
+        attempts = 0
+        while True:
+            current_tool_calls: dict[int, dict[str, Any]] = {}
+            emitted = False
             try:
-                response.raise_for_status()
+                async with client.stream("POST", f"{self.base_url}/v1/messages", json=payload) as response:
+                    try:
+                        response.raise_for_status()
+                    except Exception as e:
+                        raise_if_context_overflow(e)
+                        raise
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        data_str = line[6:].strip()
+                        if not data_str:
+                            continue
+                        try:
+                            data = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+                        for event in self._parse_sse_event(data, current_tool_calls):
+                            if event.canonical_type in ("text_delta", "reasoning_delta", "tool_input_delta"):
+                                emitted = True
+                            yield event
+                return
             except Exception as e:
-                raise_if_context_overflow(e)
+                if attempts == 0 and not emitted and is_timeout_error(e):
+                    attempts += 1
+                    continue
                 raise
-            async for line in response.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                data_str = line[6:].strip()
-                if not data_str:
-                    continue
-                try:
-                    data = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
-                for event in self._parse_sse_event(data, current_tool_calls):
-                    yield event
 
     def _parse_sse_event(
         self, data: dict[str, Any], current_tool_calls: dict[int, dict[str, Any]]

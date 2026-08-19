@@ -17,7 +17,12 @@ from uuid import uuid4
 import httpx
 
 from src.sdk.messages import Message, StreamChunk, ToolCall, Usage
-from src.sdk.providers.base import LLMProvider, ModelInfo, raise_if_context_overflow
+from src.sdk.providers.base import (
+    LLMProvider,
+    ModelInfo,
+    is_timeout_error,
+    raise_if_context_overflow,
+)
 from src.sdk.tools import ToolDefinition
 
 
@@ -281,7 +286,18 @@ class OllamaCloud(LLMProvider):
             messages, tools, model, stream=False, provider_options=provider_options, **kwargs
         )
         client = self._get_client()
-        response = await client.post(f"{self.base_url}/api/chat", json=payload)
+        # One retry on transient timeout/connect errors — the stalls we see
+        # are provider-side silence that usually recovers on the next call.
+        attempts = 0
+        while True:
+            try:
+                response = await client.post(f"{self.base_url}/api/chat", json=payload)
+                break
+            except Exception as e:
+                if attempts == 0 and is_timeout_error(e):
+                    attempts += 1
+                    continue
+                raise
         try:
             response.raise_for_status()
         except Exception as e:
@@ -302,33 +318,48 @@ class OllamaCloud(LLMProvider):
             messages, tools, model, stream=True, provider_options=provider_options, **kwargs
         )
         client = self._get_client()
-        current_tool_calls: dict[int, dict[str, Any]] = {}
-        emitted_starts: set[tuple[str, str]] = set()
-        total_thinking = ""
-        async with client.stream("POST", f"{self.base_url}/api/chat", json=payload) as response:
+        # Retry the stream once on a timeout, but only if NO content has
+        # been emitted yet — a mid-stream retry would re-emit the partial
+        # text the loop already appended (duplication).
+        attempts = 0
+        while True:
+            current_tool_calls: dict[int, dict[str, Any]] = {}
+            emitted_starts: set[tuple[str, str]] = set()
+            total_thinking = ""
+            emitted = False
             try:
-                response.raise_for_status()
+                async with client.stream("POST", f"{self.base_url}/api/chat", json=payload) as response:
+                    try:
+                        response.raise_for_status()
+                    except Exception as e:
+                        raise_if_context_overflow(e)
+                        raise
+                    async for line in response.aiter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            data = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        for chunk in self._parse_chunk(data, current_tool_calls, provider_options, emitted_starts):
+                            # Count only the canonical reasoning_delta event — the
+                            # provider also emits the backward-compat `reasoning`
+                            # alias for the same content.
+                            if chunk.type == "reasoning_delta" and chunk.content:
+                                total_thinking += chunk.content
+                            elif chunk.type == "usage" and chunk.usage and total_thinking:
+                                # Ollama's native API doesn't report reasoning tokens
+                                # separately; estimate from the streamed thinking.
+                                chunk.usage.reasoning_tokens = len(total_thinking) // 4
+                            if chunk.canonical_type in ("text_delta", "reasoning_delta", "tool_input_delta"):
+                                emitted = True
+                            yield chunk
+                return
             except Exception as e:
-                raise_if_context_overflow(e)
+                if attempts == 0 and not emitted and is_timeout_error(e):
+                    attempts += 1
+                    continue
                 raise
-            async for line in response.aiter_lines():
-                if not line.strip():
-                    continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                for chunk in self._parse_chunk(data, current_tool_calls, provider_options, emitted_starts):
-                    # Count only the canonical reasoning_delta event — the
-                    # provider also emits the backward-compat `reasoning`
-                    # alias for the same content.
-                    if chunk.type == "reasoning_delta" and chunk.content:
-                        total_thinking += chunk.content
-                    elif chunk.type == "usage" and chunk.usage and total_thinking:
-                        # Ollama's native API doesn't report reasoning tokens
-                        # separately; estimate from the streamed thinking.
-                        chunk.usage.reasoning_tokens = len(total_thinking) // 4
-                    yield chunk
 
     def count_tokens(self, text: str, model: str | None = None) -> int:
         return max(1, len(text) // 4)

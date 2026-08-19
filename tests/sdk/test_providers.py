@@ -331,6 +331,149 @@ class TestOllamaCloudProvider:
         assert payload["options"]["num_predict"] == 20
         assert "max_tokens" not in payload
 
+
+    def test_is_timeout_error_classifies_transient_errors(self):
+        import httpx
+
+        from src.sdk.providers.base import is_timeout_error
+        assert is_timeout_error(httpx.ReadTimeout("stall"))
+        assert is_timeout_error(httpx.ConnectTimeout("no route"))
+        assert is_timeout_error(httpx.ConnectError("refused"))
+        assert not is_timeout_error(ValueError("bad"))
+        assert not is_timeout_error(RuntimeError("boom"))
+
+    @pytest.mark.asyncio
+    async def test_chat_retries_once_on_timeout(self, monkeypatch):
+        import httpx
+
+        p = OllamaCloud(api_key="test-key")
+        calls = {"n": 0}
+
+        class FakeResp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"message": {"role": "assistant", "content": "Hello"}, "done": True}
+
+        class FakeClient:
+            async def post(self, url, json=None):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise httpx.ReadTimeout("stall")
+                return FakeResp()
+
+        monkeypatch.setattr(p, "_get_client", lambda: FakeClient())
+        msg = await p.chat([Message.user("hi")])
+        assert msg.content == "Hello"
+        assert calls["n"] == 2  # exactly one retry
+
+    @pytest.mark.asyncio
+    async def test_chat_retries_at_most_once(self, monkeypatch):
+        import httpx
+
+        p = OllamaCloud(api_key="test-key")
+        calls = {"n": 0}
+
+        class FakeClient:
+            async def post(self, url, json=None):
+                calls["n"] += 1
+                raise httpx.ReadTimeout("stall")
+
+        monkeypatch.setattr(p, "_get_client", lambda: FakeClient())
+        with pytest.raises(httpx.ReadTimeout):
+            await p.chat([Message.user("hi")])
+        assert calls["n"] == 2  # first + one retry, then give up
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_retries_before_first_token(self, monkeypatch):
+        import json
+
+        import httpx
+
+        p = OllamaCloud(api_key="test-key")
+        attempts = {"n": 0}
+        lines = [json.dumps({"message": {"content": "Hi"}, "done": True, "usage": {"prompt_tokens": 1, "completion_tokens": 1}})]
+
+        class FakeStream:
+            def __init__(self):
+                attempts["n"] += 1
+
+            async def __aenter__(self):
+                if attempts["n"] == 1:
+                    raise httpx.ReadTimeout("stall")
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            def raise_for_status(self):
+                pass
+
+            async def aiter_lines(self):
+                for line in lines:
+                    yield line
+
+        class FakeClient:
+            def stream(self, method, url, json=None):
+                return FakeStream()
+
+        monkeypatch.setattr(p, "_get_client", lambda: FakeClient())
+
+        chunks = []
+
+        async def collect():
+            async for c in p.chat_stream([Message.user("hi")]):
+                chunks.append(c)
+
+        await collect()
+        assert attempts["n"] == 2  # timed out before any content → retried
+        assert any(c.canonical_type == "text_delta" for c in chunks)
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_does_not_retry_after_content(self, monkeypatch):
+        import json
+
+        import httpx
+
+        p = OllamaCloud(api_key="test-key")
+        attempts = {"n": 0}
+
+        class FakeStream:
+            def __init__(self):
+                attempts["n"] += 1
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            def raise_for_status(self):
+                pass
+
+            async def aiter_lines(self):
+                yield json.dumps({"message": {"content": "partial"}, "done": False})
+                raise httpx.ReadTimeout("stall")
+
+        class FakeClient:
+            def stream(self, method, url, json=None):
+                return FakeStream()
+
+        monkeypatch.setattr(p, "_get_client", lambda: FakeClient())
+
+        got = []
+
+        async def collect():
+            async for c in p.chat_stream([Message.user("hi")]):
+                got.append(c)
+
+        with pytest.raises(httpx.ReadTimeout):
+            await collect()
+        assert attempts["n"] == 1  # content was already emitted → no retry
+        assert any(c.canonical_type == "text_delta" for c in got)
+
+
 class TestOpenAIProvider:
     def test_default_config(self):
         p = OpenAIProvider(api_key="sk-test")

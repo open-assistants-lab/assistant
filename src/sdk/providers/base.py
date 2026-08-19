@@ -11,8 +11,32 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
+
 from src.sdk.messages import Message, StreamChunk
 from src.sdk.tools import ToolDefinition
+
+_TIMEOUT_ERRORS: tuple[type[BaseException], ...] = (
+    httpx.ReadTimeout,
+    httpx.ConnectTimeout,
+    httpx.ConnectError,
+)
+
+
+def is_timeout_error(exc: BaseException) -> bool:
+    """True for transient timeout/connect errors worth one retry.
+
+    Covers httpx-based providers (Ollama, Anthropic, Gemini) and the
+    OpenAI SDK's wrapped variants (APITimeoutError / APIConnectionError,
+    used by OpenAI and OllamaLocal).
+    """
+    if isinstance(exc, _TIMEOUT_ERRORS):
+        return True
+    try:
+        import openai
+    except ImportError:
+        return False
+    return isinstance(exc, (openai.APITimeoutError, openai.APIConnectionError))
 
 
 @dataclass
