@@ -322,9 +322,12 @@ class RubricMiddleware:
                 # Bound the grader's output so a verbose verdict can never
                 # blow up latency or hit the provider's 45s timeout. The
                 # prompt also caps the explanation; this is the hard ceiling.
+                # think=false: the verdict is structured JSON — the model's
+                # ~970-token reasoning chain (median) is half the cost and
+                # never shown. Disabling it cuts grader latency ~2-3x.
                 run_config=RunConfig(
                     provider_options={
-                        "ollama-cloud": {"max_tokens": 800},
+                        "ollama-cloud": {"max_tokens": 800, "think": False},
                         "ollama": {"max_tokens": 800},
                         "openai": {"max_tokens": 800},
                         "anthropic": {"max_tokens": 800},
