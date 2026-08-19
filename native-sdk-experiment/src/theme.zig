@@ -34,6 +34,11 @@ pub const dark_tokens: canvas.DesignTokens = .{
         .lg = 14,
         .xl = 18,
     },
+    .typography = .{
+        .font_id = 64, // Geist Regular
+        .mono_font_id = 67, // Geist Mono
+        .button_font_id = 65, // Geist Medium
+    },
 };
 
 pub const light_tokens: canvas.DesignTokens = .{
@@ -65,6 +70,11 @@ pub const light_tokens: canvas.DesignTokens = .{
         .md = 12,
         .lg = 14,
         .xl = 18,
+    },
+    .typography = .{
+        .font_id = 64, // Geist Regular
+        .mono_font_id = 67, // Geist Mono
+        .button_font_id = 65, // Geist Medium
     },
 };
 

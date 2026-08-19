@@ -343,6 +343,7 @@ pub const Model = struct {
     settings_entrance: f32 = 1,
     hitl_entrance: f32 = 1,
     empty_entrance: f32 = 1,
+    composer_entrance: f32 = 0,
     search_query: []const u8 = "",
     sidebar_split: f32 = 0.2,
     available_models: [max_models]ModelOption = undefined,
@@ -1257,6 +1258,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 }
                 if (model.empty_entrance < 1) {
                     model.empty_entrance = @min(1, model.empty_entrance + entrance_step);
+                    any_entrance = true;
+                }
+                if (model.composer_entrance < 1) {
+                    model.composer_entrance = @min(1, model.composer_entrance + entrance_step);
                     any_entrance = true;
                 }
             }
@@ -3360,11 +3365,16 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                 }
             }.build;
             const heading = ui.text(.{ .size = .heading }, "How can I help?");
+            const eyebrow = ui.text(.{
+                .size = .sm,
+                .padding = 8,
+                .style_tokens = .{ .foreground = .accent, .background = .surface_subtle, .radius = .md },
+            }, "YOUR ASSISTANT");
             const subtitle = ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Ask me anything, or try one of these:");
             const suggestions = ui.row(.{ .gap = 8 }, .{
-                ui.button(.{ .on_press = .suggestion_inbox, .variant = .ghost }, "Triage my inbox"),
-                ui.button(.{ .on_press = .suggestion_summary, .variant = .ghost }, "Draft a weekly summary"),
-                ui.button(.{ .on_press = .suggestion_contacts, .variant = .ghost }, "Find contacts in marketing"),
+                ui.button(.{ .on_press = .suggestion_inbox, .variant = .ghost, .style = .{ .radius = 999 } }, "Triage my inbox"),
+                ui.button(.{ .on_press = .suggestion_summary, .variant = .ghost, .style = .{ .radius = 999 } }, "Draft a weekly summary"),
+                ui.button(.{ .on_press = .suggestion_contacts, .variant = .ghost, .style = .{ .radius = 999 } }, "Find contacts in marketing"),
             });
             children[child_count] = ui.column(.{
                 .grow = 1,
@@ -3374,8 +3384,9 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                 .main = .center,
                 .style_tokens = .{ .background = .surface },
             }, .{
-                fade_node(ui, e0, rise, heading),
-                fade_node(ui, e1, rise, subtitle),
+                fade_node(ui, e0, rise, eyebrow),
+                fade_node(ui, e1, rise, heading),
+                fade_node(ui, e2, rise, subtitle),
                 fade_node(ui, e2, rise, suggestions),
             });
         }
@@ -3484,7 +3495,7 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     else
         "DeepSeek V4 Flash 0731";
     const model_button: AppUi.Node = if (model.available_model_count > 0 and !chat.streaming)
-        ui.button(.{ .on_press = .toggle_model_menu, .variant = .ghost, .max_width = 260, .style_tokens = .{ .foreground = .text_muted } }, model_label)
+        ui.button(.{ .on_press = .toggle_model_menu, .variant = .ghost, .max_width = 260, .icon = "chevron-down", .icon_placement = .trailing, .style_tokens = .{ .foreground = .text_muted } }, model_label)
     else if (model.available_model_count > 0)
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .max_width = 260 }, model_label)
     else
@@ -3511,12 +3522,12 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
             .on_submit = .send_message,
             .semantics = .{ .label = "Message" },
             .height = textarea_height,
-            .style_tokens = .{ .background = .surface_subtle, .border_color = .surface_subtle },
+            .style_tokens = .{ .background = .surface_subtle, .border_color = .surface_subtle, .radius = .md },
         }, .{});
         if (chat.draft_selection_programmatic) {
             field.widget.text_selection = chat.draft_selection;
         }
-        field.widget.style.radius = 8;
+        field.widget.style.radius = 12;
         field.widget.style.focus_ring = canvas.Color.rgba8(0, 0, 0, 0);
         break :blk field;
     };
@@ -3524,21 +3535,21 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     const send_button: AppUi.Node = if (chat.streaming)
         ui.button(.{ .on_press = .cancel, .variant = .ghost }, "Stop")
     else
-        ui.button(.{ .on_press = .send_message, .variant = .primary }, "Send");
+        ui.button(.{ .on_press = .send_message, .variant = .primary, .icon = "send" }, "Send");
 
-    // Textarea in its own card — no padding, no gap, edge-to-edge.
-    // The bottom row (model + status + Send) is a SEPARATE row below the card
-    // so it stays pinned regardless of textarea height.
-
+    // Textarea in its own nested card — an outer shell (hairline border +
+    // padding + large radius) with the textarea as the inner core (its own
+    // surface + concentric radius). The two-tone nesting reads as machined
+    // hardware instead of a flat box.
     const ci = &chat.context_info;
     const tokens_text = std.fmt.allocPrint(ui.arena, "{d} in / {d} out", .{ ci.input_tokens, ci.output_tokens }) catch "";
     const freshness_style: canvas.ColorTokenName = if (std.mem.eql(u8, ci.freshness, "live")) .success else .text_muted;
 
     children[child_count] = ui.column(.{
         .grow = 0,
-        .padding = 0,
+        .padding = 6,
         .gap = 0,
-        .style_tokens = .{ .background = .surface_subtle, .radius = .md },
+        .style_tokens = .{ .background = .surface, .border_color = .border, .radius = .lg },
     }, .{
         composer_textarea,
     });
@@ -3562,7 +3573,12 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     child_count += 1;
 
     const children_slice: []const AppUi.Node = children[0..child_count];
-    return ui.column(.{
+    // Composer entrance: a one-time fade-up on app start (reduced motion:
+    // fade only). The composer is the app's home surface — it should settle
+    // in, not teleport.
+    const composer_eased = smoothstep(model.composer_entrance);
+    const composer_rise: f32 = if (model.settings.reduced_motion) 0.0 else 6.0;
+    var composer_node = ui.column(.{
         .style_tokens = .{ .background = .surface },
         .gap = 2,
         .min_width = 320,
@@ -3570,6 +3586,9 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         .grow = 1,
         .padding = 12,
     }, children_slice);
+    composer_node.widget.opacity = std.math.clamp(composer_eased, 0, 1);
+    composer_node.widget.transform = canvas.Affine.translate(0, composer_rise * (1 - std.math.clamp(composer_eased, 0, 1)));
+    return composer_node;
 }
 
 fn toolIconName(tool_name: []const u8) []const u8 {
@@ -3657,20 +3676,27 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage, status_text: []const u8
             });
         }
     } else {
-        // Assistant text bubble
+        // Assistant text bubble — nested card (outer shell + inner core).
         if (msg.isEmpty()) {
             const typing_text: []const u8 = if (status_text.len > 0) status_text else "typing...";
             return ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, typing_text);
         } else {
             return ui.column(.{
                 .gap = 0,
-                .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
+                .padding = 4,
+                .style_tokens = .{ .background = .surface, .border_color = .border, .radius = .lg },
             }, .{
+                ui.column(.{
+                    .gap = 0,
+                    .padding = 10,
+                    .style_tokens = .{ .background = .surface_subtle, .radius = .md },
+                }, .{
                     ui.text(.{ .wrap = true }, msg.content),
                     if (msg.timestamp.len > 0)
                         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, msg.timestamp)
                     else
                         ui.text(.{}, ""),
+                }),
             });
         }
     }
@@ -3678,7 +3704,9 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage, status_text: []const u8
 
 fn buildMessageBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
     if (msg.isUser()) {
-        // User message: right-aligned, no role label
+        // User message: right-aligned, no role label. Nested card: an outer
+        // shell (hairline border + padding + large radius) with the content
+        // as the inner core (its own surface + concentric radius).
         const ts_node: AppUi.Node = if (msg.timestamp.len > 0)
             ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, msg.timestamp)
         else
@@ -3689,10 +3717,17 @@ fn buildMessageBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
         }, .{
             ui.column(.{
                 .gap = 0,
-                .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
+                .padding = 4,
+                .style_tokens = .{ .background = .surface, .border_color = .border, .radius = .lg },
             }, .{
+                ui.column(.{
+                    .gap = 0,
+                    .padding = 10,
+                    .style_tokens = .{ .background = .surface_subtle, .radius = .md },
+                }, .{
                     ui.text(.{ .wrap = true }, msg.content),
                     ts_node,
+                }),
             }),
         });
     } else if (std.mem.eql(u8, msg.role, "system")) {
@@ -3792,6 +3827,17 @@ pub fn main(init: std.process.Init) !void {
         .tokens_fn = tokensFn,
         .sync = syncModelFromLayout,
         .view = buildView,
+        // Geist (SIL OFL 1.1, Vercel) — the house face. Registered before
+        // the first view build so layout measures with it. Ids 64+ are
+        // the app range (see canvas.min_registered_font_id); the theme
+        // tokens reference them (typography.font_id / mono_font_id /
+        // button_font_id).
+        .fonts = &.{
+            .{ .id = 64, .name = "Geist-Regular.ttf", .ttf = @embedFile("fonts/Geist-Regular.ttf") },
+            .{ .id = 65, .name = "Geist-Medium.ttf", .ttf = @embedFile("fonts/Geist-Medium.ttf") },
+            .{ .id = 66, .name = "Geist-SemiBold.ttf", .ttf = @embedFile("fonts/Geist-SemiBold.ttf") },
+            .{ .id = 67, .name = "GeistMono-Regular.ttf", .ttf = @embedFile("fonts/GeistMono-Regular.ttf") },
+        },
     });
     app_state.model = initialModel();
     app_state.model.allocator = allocator;
