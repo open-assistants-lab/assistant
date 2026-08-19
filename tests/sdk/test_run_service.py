@@ -454,3 +454,57 @@ async def test_run_service_different_sessions_concurrent(monkeypatch):
     assert len(results) == 2
     assert results[0].session_id == "chat-1"
     assert results[1].session_id == "chat-2"
+
+
+@pytest.mark.asyncio
+async def test_execute_stream_persists_verification_metadata(monkeypatch):
+    """The stored turn metadata carries the verification verdict so a reload
+    can render the settled Rubric row (status, attempts, evaluations)."""
+    async def fake_get_sdk_loop(*args, **kwargs):
+        return FakeLoop()
+    monkeypatch.setattr("src.sdk.run_service.get_sdk_loop", fake_get_sdk_loop)
+    monkeypatch.setattr("src.sdk.run_service.register_user_loop", lambda *a, **k: None)
+    monkeypatch.setattr("src.sdk.run_service.unregister_user_loop", lambda *a, **k: None)
+
+    class FakeGrader:
+        max_iterations = 3
+        grader_model_id = "test:grader"
+
+        async def grade(self, messages, iteration):
+            result = "needs_revision" if iteration == 0 else "satisfied"
+            return {
+                "grading_run_id": f"grading-{iteration + 1}",
+                "iteration": iteration,
+                "result": result,
+                "explanation": "revise once then pass",
+                "criteria": [
+                    {"name": "c", "passed": result == "satisfied", "gap": "revise" if result != "satisfied" else None}
+                ],
+            }
+
+    async def _load_fake(*a: Any, **k: Any) -> Any:
+        return FakeGrader()
+
+    monkeypatch.setattr("src.sdk.middleware_rubric.load_rubric_middleware", _load_fake)
+
+    registry = SessionWorkerRegistry()
+    store = InMemoryMessageStore()
+    service = RunService("test-user", registry, store)
+    await _register_rerun_handler()
+
+    events = [e async for e in service.execute_stream(session_id="chat-1", prompt="Hello")]
+    assert any(e.type == "done" for e in events)
+
+    stored = [m for m in store.messages if m["role"] == "assistant"]
+    assert stored, "expected a persisted assistant message"
+    meta = stored[-1]["metadata"]
+    verification = meta.get("verification")
+    assert verification is not None, "verification must be persisted in turn metadata"
+    assert verification["status"] == "satisfied"
+    assert verification["attempts"] == 2
+    assert verification["max_attempts"] == 3
+    assert len(verification["evaluations"]) == 2
+    last = verification["evaluations"][-1]
+    assert last["result"] == "satisfied"
+    assert last["criteria"][0]["name"] == "c"
+    assert last["criteria"][0]["passed"] is True

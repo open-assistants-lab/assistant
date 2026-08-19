@@ -282,6 +282,11 @@ def _revision_prompt(evaluation: dict[str, Any]) -> str:
     lines.append(
         "Please address every failing criterion and respond when you believe the rubric is satisfied."
     )
+    lines.append("")
+    lines.append(
+        "Apply the feedback silently: your answer must not mention the grader, the rubric, "
+        "this feedback, or any revision process. Just produce the improved answer."
+    )
     return "\n".join(lines)
 
 

@@ -1930,3 +1930,61 @@ test "model menu lists only ready models and selects one" {
     try testing.expectEqualStrings("ollama-cloud:deepseek-v4-flash:0731", model.selectedModel());
     try testing.expectEqual(before + 1, fx.pendingFetchCount());
 }
+
+test "rubric verdict settles a collapsed row from the done verification" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    const chat = model.activeChat();
+
+    const parsed = std.json.parseFromSlice(
+        std.json.Value,
+        arena,
+        \\{"status":"satisfied","attempts":1,"max_attempts":3,"evaluations":[{"result":"satisfied","explanation":"ok","criteria":[{"name":"a","passed":true},{"name":"b","passed":true}]}]}
+    , .{}) catch return;
+    main.addRubricRowFromVerdict(chat, arena, parsed.value.object);
+
+    try testing.expectEqual(@as(usize, 1), chat.msg_count);
+    try testing.expectEqualStrings("rubric", chat._messages[0].role);
+    try testing.expectEqualStrings("Rubric", chat._messages[0].tool_name);
+    try testing.expectEqualStrings("Passed (2/2)", chat._messages[0].tool_status);
+    try testing.expect(chat._messages[0].collapsed);
+    try testing.expect(std.mem.indexOf(u8, chat._messages[0].content, "2/2 criteria passed") != null);
+}
+
+test "in-place revision keeps one answer bubble and drops the rubric row" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    const chat = model.activeChat();
+
+    main.addMessage(chat, arena, "user", "hi");
+    main.addMessage(chat, arena, "assistant", "first attempt");
+    main.upsertRubricRow(chat, arena, "Needs revision (1/2)", "1/2 criteria passed\ngap", false);
+    try testing.expectEqual(@as(usize, 3), chat.msg_count);
+
+    // Simulate the response_revision_start handler body: remove the row,
+    // clear the answer, open the assistant bubble for the revised stream.
+    main.removeRubricRows(chat);
+    try testing.expectEqual(@as(usize, 2), chat.msg_count);
+    var i: usize = chat.msg_count;
+    while (i > 0) {
+        i -= 1;
+        if (std.mem.eql(u8, chat._messages[i].role, "assistant")) {
+            chat._messages[i].content = "";
+            break;
+        }
+    }
+    try testing.expectEqualStrings("", chat._messages[1].content);
+
+    // The revised deltas append into the SAME assistant bubble.
+    main.appendToLastMessage(chat, arena, "assistant", "revised answer");
+    try testing.expectEqual(@as(usize, 2), chat.msg_count);
+    try testing.expectEqualStrings("revised answer", chat._messages[1].content);
+}

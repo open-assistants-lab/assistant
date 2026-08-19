@@ -272,3 +272,16 @@ async def test_grader_loop_bounds_output_tokens():
     opts = loop.run_config.provider_options or {}
     assert opts["ollama-cloud"]["max_tokens"] == 800
     assert opts["openai"]["max_tokens"] == 800
+
+
+def test_revision_prompt_forbids_mentioning_the_grader():
+    evaluation = {
+        "result": "needs_revision",
+        "explanation": "too short",
+        "criteria": [{"name": "non-empty", "passed": False, "gap": "add detail"}],
+    }
+    prompt = _revision_prompt(evaluation)
+    # The revision must apply the feedback silently — the answer must never
+    # reference the grader, the rubric, or the revision process.
+    assert "must not mention the grader" in prompt
+    assert "must not mention" in prompt

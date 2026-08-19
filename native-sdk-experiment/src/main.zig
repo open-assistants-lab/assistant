@@ -199,7 +199,6 @@ pub const Chat = struct {
     transcript_scroll_generation: u64 = 0,
     last_textarea_height: f32 = 36,
     created_at: []const u8 = "",
-    rubric_status: []const u8 = "",
     rubric_attempts: u32 = 0,
     compression_animation_ticks: u32 = 0,
     context_info: ContextInfo = .{},
@@ -567,17 +566,17 @@ fn processSSEEvent(model: *Model, chat: *Chat, sse_body: []const u8, fx: *Effect
     } else if (std.mem.eql(u8, event_type, "rubric_evaluation_start")) {
         chat.status_text = "Checking rubric...";
         removeTrailingEmptyAssistant(chat);
-        addMessage(chat, model.allocator, "system", "🔎 Checking response against rubric...");
+        upsertRubricRow(chat, model.allocator, "checking…", "Checking response against rubric...", false);
     } else if (std.mem.eql(u8, event_type, "rubric_evaluation_end")) {
         const eval_obj = jsonObject(data.get("evaluation") orelse return) orelse return;
         const result = jsonString(eval_obj.get("result") orelse return) orelse {
             chat.status_text = "";
             return;
         };
-        chat.rubric_status = model.allocator.dupe(u8, result) catch "";
         chat.rubric_attempts += 1;
 
-        // Build a visible rubric result message
+        // Build the settled rubric row (same shape as a tool artifact):
+        // label = verdict + criteria counts, body = explanation.
         const explanation_val = eval_obj.get("explanation");
         const explanation: []const u8 = if (explanation_val) |ev| switch (ev) {
             .string => |s| s,
@@ -596,48 +595,44 @@ fn processSSEEvent(model: *Model, chat: *Chat, sse_body: []const u8, fx: *Effect
             }
         }
         const verdict: []const u8 = if (std.mem.eql(u8, result, "satisfied"))
-            "✅ Rubric passed"
+            std.fmt.allocPrint(model.allocator, "Passed ({d}/{d})", .{ passed_count, total_count }) catch "Passed"
         else if (std.mem.eql(u8, result, "needs_revision"))
-            "⚠️ Rubric needs revision"
+            std.fmt.allocPrint(model.allocator, "Needs revision ({d}/{d})", .{ passed_count, total_count }) catch "Needs revision"
         else if (std.mem.eql(u8, result, "grader_error"))
-            "❌ Rubric check failed"
+            "Check failed"
         else if (std.mem.eql(u8, result, "invalid_rubric"))
-            "❌ Rubric configuration invalid"
+            "Invalid rubric"
         else
-            "Rubric complete";
+            "Complete";
 
-        const rubric_msg = std.fmt.allocPrint(model.allocator, "{s} ({d}/{d} criteria passed)\n{s}", .{ verdict, passed_count, total_count, explanation }) catch verdict;
-        removeTrailingEmptyAssistant(chat);
-        addMessage(chat, model.allocator, "system", rubric_msg);
+        const rubric_msg = std.fmt.allocPrint(model.allocator, "{d}/{d} criteria passed\n{s}", .{ passed_count, total_count, explanation }) catch verdict;
+        upsertRubricRow(chat, model.allocator, verdict, rubric_msg, false);
         chat.status_text = model.allocator.dupe(u8, verdict) catch "";
     } else if (std.mem.eql(u8, event_type, "response_revision_start")) {
+        // In-place revision: keep one stable answer bubble. The attempt-1
+        // content is cleared (the empty bubble shows "Revising..." via
+        // status_text); the revised attempt streams into the same bubble.
+        // The live rubric row is dropped — the next evaluation re-adds it.
+        removeRubricRows(chat);
         if (chat.msg_count > 0) {
             var i: usize = chat.msg_count;
             while (i > 0) {
                 i -= 1;
                 if (std.mem.eql(u8, chat._messages[i].role, "assistant")) {
-                    chat.msg_count = i;
-                    chat.messages = chat._messages[0..chat.msg_count];
+                    chat._messages[i].content = "";
+                    chat._messages[i].collapsed = false;
                     break;
                 }
             }
         }
-        chat.open_bubble_type = "";
+        chat.open_bubble_type = "assistant";
         chat.status_text = "Revising...";
-        removeTrailingEmptyAssistant(chat);
-        const attempt = if (data.get("new_attempt")) |a| switch (a) {
-            .integer => |n| n,
-            .float => |n| @as(i64, @intFromFloat(n)),
-            else => 0,
-        } else 0;
-        const rev_msg = std.fmt.allocPrint(model.allocator, "🔄 Revising response (attempt {d})...", .{attempt}) catch "Revising...";
-        addMessage(chat, model.allocator, "system", rev_msg);
     } else if (std.mem.eql(u8, event_type, "context_compressed")) {
         chat.compression_animation_ticks = 8;
         const status = jsonString(data.get("status") orelse return) orelse "succeeded";
         if (std.mem.eql(u8, status, "succeeded")) {
             removeTrailingEmptyAssistant(chat);
-            addMessage(chat, model.allocator, "system", "📝 Conversation summarized to fit context window.");
+            addMessage(chat, model.allocator, "system", "Conversation summarized to fit context window.");
         }
     } else if (std.mem.eql(u8, event_type, "usage")) {
         const usage_data = jsonObject(data.get("usage") orelse return) orelse return;
@@ -651,18 +646,8 @@ fn processSSEEvent(model: *Model, chat: *Chat, sse_body: []const u8, fx: *Effect
         const result_data = jsonObject(data.get("result") orelse return) orelse return;
         if (result_data.get("verification")) |verification_val| {
             const verification = jsonObject(verification_val) orelse return;
-            const status_str = jsonString(verification.get("status") orelse return) orelse return;
-            if (std.mem.eql(u8, status_str, "satisfied")) {
-                chat.rubric_status = "Rubric passed";
-            } else if (std.mem.eql(u8, status_str, "max_attempts_reached")) {
-                chat.rubric_status = "Max revisions reached";
-            } else if (std.mem.eql(u8, status_str, "grader_error")) {
-                chat.rubric_status = "Rubric check failed";
-            } else if (std.mem.eql(u8, status_str, "invalid_rubric")) {
-                chat.rubric_status = "Rubric configuration invalid";
-            } else if (std.mem.eql(u8, status_str, "cancelled")) {
-                chat.rubric_status = "Rubric cancelled";
-            }
+            // Settle the rubric row with the terminal verdict (collapsed).
+            addRubricRowFromVerdict(chat, model.allocator, verification);
         }
         if (result_data.get("model")) |model_val| {
             if (jsonString(model_val)) |model_str| {
@@ -1357,6 +1342,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     if (meta.object.get("model")) |m| {
                         chat.context_info.model = model.allocator.dupe(u8, m.string) catch "";
                     }
+                    // Reload renders the settled Rubric row from the stored
+                    // verification verdict (collapsed), matching the live view.
+                    if (meta.object.get("verification")) |ver| {
+                        if (ver == .object) addRubricRowFromVerdict(chat, model.allocator, ver.object);
+                    }
                 }
             }
             // Fall back to the first message text only when the chat has no
@@ -1412,6 +1402,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 if (turn.get("metadata")) |meta| {
                     if (meta.object.get("model")) |m| {
                         chat.context_info.model = model.allocator.dupe(u8, m.string) catch "";
+                    }
+                    // Reload renders the settled Rubric row from the stored
+                    // verification verdict (collapsed), matching the live view.
+                    if (meta.object.get("verification")) |ver| {
+                        if (ver == .object) addRubricRowFromVerdict(chat, model.allocator, ver.object);
                     }
                 }
             }
@@ -2393,6 +2388,101 @@ fn addToolMessage(chat: *Chat, allocator: std.mem.Allocator, tool_name: []const 
     chat.messages = chat._messages[0..chat.msg_count];
 }
 
+/// The rubric row is the turn's verification artifact, rendered in the same
+/// shape as a tool row (glyph + label + muted preview). One row per turn:
+/// update the trailing one if present, else append after the answer.
+pub fn upsertRubricRow(chat: *Chat, allocator: std.mem.Allocator, status: []const u8, content: []const u8, collapsed: bool) void {
+    var i: usize = chat.msg_count;
+    while (i > 0) {
+        i -= 1;
+        if (std.mem.eql(u8, chat._messages[i].role, "rubric")) {
+            chat._messages[i].tool_status = allocator.dupe(u8, status) catch return;
+            chat._messages[i].content = allocator.dupe(u8, content) catch return;
+            chat._messages[i].collapsed = collapsed;
+            return;
+        }
+    }
+    ensureMessageCapacity(chat, allocator, chat.msg_count + 1);
+    chat._messages[chat.msg_count] = .{
+        .id = chat.next_id,
+        .role = allocator.dupe(u8, "rubric") catch return,
+        .content = allocator.dupe(u8, content) catch return,
+        .tool_name = allocator.dupe(u8, "Rubric") catch return,
+        .tool_status = allocator.dupe(u8, status) catch return,
+        .collapsed = collapsed,
+    };
+    chat.next_id += 1;
+    chat.msg_count += 1;
+    chat.messages = chat._messages[0..chat.msg_count];
+}
+
+/// Drop live rubric rows (an in-place revision re-adds the row at the next
+/// evaluation, so the answer deltas keep appending to the same bubble).
+pub fn removeRubricRows(chat: *Chat) void {
+    var i: usize = 0;
+    var out: usize = 0;
+    while (i < chat.msg_count) : (i += 1) {
+        if (std.mem.eql(u8, chat._messages[i].role, "rubric")) continue;
+        if (out != i) chat._messages[out] = chat._messages[i];
+        out += 1;
+    }
+    chat.msg_count = out;
+    chat.messages = chat._messages[0..chat.msg_count];
+}
+
+/// Settle the rubric row from a terminal verification verdict (the done
+/// event or the stored turn metadata on reload). Collapsed by default.
+pub fn addRubricRowFromVerdict(chat: *Chat, allocator: std.mem.Allocator, verification: std.json.ObjectMap) void {
+    const status = jsonString(verification.get("status") orelse return) orelse return;
+    var passed: u32 = 0;
+    var total: u32 = 0;
+    var attempts: u32 = 0;
+    var max_attempts: u32 = 0;
+    var explanation: []const u8 = "";
+    if (verification.get("attempts")) |a| {
+        if (jsonCount(a)) |n| attempts = n;
+    }
+    if (verification.get("max_attempts")) |m| {
+        if (jsonCount(m)) |n| max_attempts = n;
+    }
+    if (verification.get("evaluations")) |evals| {
+        if (evals == .array and evals.array.items.len > 0) {
+            const last = evals.array.items[evals.array.items.len - 1];
+            if (last == .object) {
+                if (last.object.get("explanation")) |x| {
+                    if (x == .string) explanation = x.string;
+                }
+                if (last.object.get("criteria")) |c| {
+                    if (c == .array) {
+                        total = @intCast(c.array.items.len);
+                        for (c.array.items) |ci| {
+                            if (ci == .object) {
+                                if (ci.object.get("passed")) |p| {
+                                    if (p == .bool and p.bool) passed += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    const label: []const u8 = if (std.mem.eql(u8, status, "satisfied"))
+        std.fmt.allocPrint(allocator, "Passed ({d}/{d})", .{ passed, total }) catch "Passed"
+    else if (std.mem.eql(u8, status, "max_attempts_reached"))
+        std.fmt.allocPrint(allocator, "Max revisions ({d}/{d})", .{ attempts, max_attempts }) catch "Max revisions"
+    else if (std.mem.eql(u8, status, "grader_error"))
+        "Check failed"
+    else if (std.mem.eql(u8, status, "invalid_rubric"))
+        "Invalid rubric"
+    else if (std.mem.eql(u8, status, "cancelled"))
+        "Cancelled"
+    else
+        "Complete";
+    const content = std.fmt.allocPrint(allocator, "{d}/{d} criteria passed\n{s}", .{ passed, total, explanation }) catch label;
+    upsertRubricRow(chat, allocator, label, content, true);
+}
+
 /// Serialize tool-call arguments for display in the tool bubble title.
 /// Empty objects render as "" (matching the pre-existing behavior); non-empty
 /// values render as compact JSON.
@@ -2478,7 +2568,7 @@ fn queueHistoryFetch(model: *Model, chat: *Chat, fx: *Effects) void {
     });
 }
 
-fn appendToLastMessage(chat: *Chat, allocator: std.mem.Allocator, role: []const u8, content: []const u8) void {
+pub fn appendToLastMessage(chat: *Chat, allocator: std.mem.Allocator, role: []const u8, content: []const u8) void {
     if (chat.msg_count == 0) {
         addMessage(chat, allocator, role, content);
         return;
@@ -3649,15 +3739,65 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage, status_text: []const u8
             .cross = .start,
             .style_tokens = .{ .border_color = .border },
         }, .{
-                ui.el(.text, .{
-                    .on_press = .{ .toggle_bubble = msg.id },
-                    .text = toggle_label,
-                    .size = .sm,
-                    .style_tokens = .{ .foreground = .accent },
-                    .semantics = .{ .role = .button, .label = expand_label },
-                }, .{}),
+                ui.row(.{ .gap = 8, .cross = .center }, .{
+                    ui.iconGlyph(.{ .style_tokens = .{ .foreground = .accent } }, "circle-dot"),
+                    ui.el(.text, .{
+                        .on_press = .{ .toggle_bubble = msg.id },
+                        .text = toggle_label,
+                        .size = .sm,
+                        .style_tokens = .{ .foreground = .accent },
+                        .semantics = .{ .role = .button, .label = expand_label },
+                    }, .{}),
+                }),
                 ui.text(.{ .wrap = true, .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, display_text),
         });
+    } else if (std.mem.eql(u8, msg.role, "rubric")) {
+        // Rubric row: the turn's verification artifact, same shape as a
+        // tool row — glyph + label + muted preview. Checking/revising
+        // render as the running state (accent); settled renders the
+        // toggle label (collapsed shows the first line).
+        const icon: []const u8 = if (std.mem.startsWith(u8, msg.tool_status, "Passed")) "check-circle" else "circle-dot";
+        const running = std.mem.startsWith(u8, msg.tool_status, "checking") or std.mem.startsWith(u8, msg.tool_status, "Revising");
+        if (running) {
+            return ui.column(.{
+                .gap = 4,
+                .cross = .start,
+                .style_tokens = .{ .border_color = .border },
+            }, .{
+                    ui.row(.{ .gap = 8, .cross = .center }, .{
+                        ui.iconGlyph(.{ .style_tokens = .{ .foreground = .accent } }, icon),
+                        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .accent } }, msg.tool_name),
+                        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .accent } }, msg.tool_status),
+                    }),
+                    ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, msg.content),
+            });
+        } else {
+            const display: []const u8 = if (msg.collapsed) blk: {
+                const newline = std.mem.indexOf(u8, msg.content, "\n");
+                break :blk if (newline) |n| msg.content[0..n] else msg.content;
+            } else msg.content;
+            const label = std.fmt.allocPrint(ui.arena, "Rubric  {s}", .{msg.tool_status}) catch "Rubric";
+            return ui.column(.{
+                .gap = 4,
+                .cross = .start,
+                .style_tokens = .{ .border_color = .border },
+            }, .{
+                    ui.row(.{ .gap = 8, .cross = .center }, .{
+                        ui.iconGlyph(.{ .style_tokens = .{ .foreground = .accent } }, icon),
+                        ui.el(.text, .{
+                            .on_press = .{ .toggle_bubble = msg.id },
+                            .text = label,
+                            .size = .sm,
+                            .style_tokens = .{ .foreground = .accent },
+                            .semantics = .{ .role = .button, .label = msg.tool_status },
+                        }, .{}),
+                    }),
+                    if (display.len > 0)
+                        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, display)
+                    else
+                        ui.text(.{}, ""),
+            });
+        }
     } else if (msg.isTool()) {
         const icon = toolIconName(msg.tool_name);
         if (std.mem.eql(u8, msg.tool_status, "running")) {
@@ -3684,13 +3824,16 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage, status_text: []const u8
                 .cross = .start,
                 .style_tokens = .{ .border_color = .border },
             }, .{
-                    ui.el(.text, .{
-                        .on_press = .{ .toggle_bubble = msg.id },
-                        .text = tool_label,
-                        .size = .sm,
-                        .style_tokens = .{ .foreground = .accent },
-                        .semantics = .{ .role = .button, .label = msg.tool_status },
-                    }, .{}),
+                    ui.row(.{ .gap = 8, .cross = .center }, .{
+                        ui.iconGlyph(.{ .style_tokens = .{ .foreground = .accent } }, toolIconName(msg.tool_name)),
+                        ui.el(.text, .{
+                            .on_press = .{ .toggle_bubble = msg.id },
+                            .text = tool_label,
+                            .size = .sm,
+                            .style_tokens = .{ .foreground = .accent },
+                            .semantics = .{ .role = .button, .label = msg.tool_status },
+                        }, .{}),
+                    }),
                     ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, display_result),
             });
         }

@@ -169,6 +169,33 @@ def _tool_audit_records(
     ]
 
 
+
+def _verification_metadata(verification: Any) -> dict[str, Any] | None:
+    """The verification verdict for the stored turn metadata (reload renders
+    the Rubric row from it). None when verification never ran."""
+    if verification is None:
+        return None
+    availability = getattr(verification, "availability", None)
+    if availability is None or availability.value != "on":
+        return None
+    evaluations = getattr(verification, "evaluations", None) or []
+    if not evaluations:
+        return None
+    return {
+        "status": verification.status.value,
+        "attempts": verification.attempts,
+        "max_attempts": verification.max_attempts,
+        "evaluations": [
+            {
+                "attempt": e.attempt,
+                "result": e.result.value,
+                "explanation": e.explanation,
+                "criteria": [{"name": c.name, "passed": c.passed, "gap": c.gap} for c in e.criteria],
+            }
+            for e in evaluations
+        ],
+    }
+
 def _to_evaluation_result(raw: str) -> RubricEvaluationResult:
     """Map the grader's raw result string to RubricEvaluationResult.
 
@@ -372,7 +399,7 @@ class RunService:
                 user_message_id=user_msg_id,
                 final_answer=_sdk_message_to_storage(Message.assistant(content=result.response), session_id),
                 audit_records=_tool_audit_records(loop, session_id),
-                metadata={"model": result.model},
+                metadata={"model": result.model, "verification": _verification_metadata(result.verification)},
             )
 
             return RunResult(
@@ -565,6 +592,23 @@ class RunService:
                         ))
                         break
 
+            verification_meta = None
+            if rubric_availability == RubricAvailability.ON and evaluations:
+                verification_meta = {
+                    "status": rubric_status.value,
+                    "attempts": len(evaluations),
+                    "max_attempts": max_attempts,
+                    "evaluations": [
+                        {
+                            "attempt": e.attempt,
+                            "result": e.result.value,
+                            "explanation": e.explanation,
+                            "criteria": [{"name": c.name, "passed": c.passed, "gap": c.gap} for c in e.criteria],
+                        }
+                        for e in evaluations
+                    ],
+                }
+
             persisted_id = self._message_store.persist_run(
                 run_id=run_id,
                 session_id=session_id,
@@ -572,7 +616,7 @@ class RunService:
                 final_answer=_sdk_message_to_storage(Message.assistant(content=final_response), session_id),
                 audit_records=_tool_audit_records(loop, session_id),
                 pre_messages=pre_messages,
-                metadata={"model": loop.model_id},
+                metadata={"model": loop.model_id, "verification": verification_meta},
             )
 
             run_result = RunResult(
