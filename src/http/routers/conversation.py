@@ -508,9 +508,12 @@ async def _summarize_title(
                 # Reserved key: names the Langfuse generation (the provider
                 # ignores it).
                 "langfuse": {"name": "title_generation"},
+                # A title needs no reasoning — disable thinking so the token
+                # budget goes to the title, not a thinking chain.
+                "ollama-cloud": {"think": False},
                 "agnes": {"chat_template_kwargs": {"enable_thinking": False}},
             },
-            max_tokens=20,
+            max_tokens=100,
             temperature=0.3,
         )
         content_preview = response.content[:80] if len(response.content) > 80 else response.content

@@ -237,6 +237,7 @@ pub const Chat = struct {
 pub const Msg = union(enum) {
     input_changed: canvas.TextInputEvent,
     send_message,
+    retry,
     cancel,
     approve,
     reject,
@@ -1017,6 +1018,22 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .send_message => {
             doSend(model, fx);
         },
+        .retry => {
+            // Re-send the last user message as a new turn. The failed
+            // attempt's user message stays in the transcript (the backend
+            // already stored it) — the retry is an honest second send.
+            const chat = model.activeChat();
+            if (chat.streaming) return;
+            var i = chat.msg_count;
+            while (i > 0) {
+                i -= 1;
+                if (std.mem.eql(u8, chat._messages[i].role, "user")) {
+                    chat.draft_text = chat._messages[i].content;
+                    doSend(model, fx);
+                    return;
+                }
+            }
+        },
         .cancel => {
             const chat = model.activeChat();
             if (!chat.streaming) return;
@@ -1214,6 +1231,19 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 {
                     addMessage(chat, model.allocator, "system", "Stream error: timed_out");
                     finalizeStream(chat);
+                }
+            }
+            // Elapsed-time indicator: show how long the current response has
+            // been streaming so a slow provider doesn't read as "stuck".
+            for (0..model.chat_count) |i| {
+                const chat = &model.chats[i];
+                if (chat.streaming and chat.stream_started_at > 0 and
+                    std.mem.startsWith(u8, chat.status_text, "Thinking"))
+                {
+                    const elapsed_s = @max(0, @divTrunc(now_ms - chat.stream_started_at, 1000));
+                    chat.status_text = std.fmt.allocPrint(
+                        model.allocator, "Thinking… {d}s", .{elapsed_s},
+                    ) catch "Thinking...";
                 }
             }
             // Reschedule timer if any chat is still streaming or has animation
@@ -3537,12 +3567,19 @@ fn buildMessageBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
         });
     } else if (std.mem.eql(u8, msg.role, "system")) {
         // System/error: muted, no card, no role label, padded to align with messages
+        const is_stream_error = std.mem.startsWith(u8, msg.content, "Stream error");
         return ui.row(.{}, .{
-            ui.text(.{
-                .size = .sm,
-                .style_tokens = .{ .foreground = .text_muted },
-                .wrap = true,
-            }, msg.content),
+            ui.column(.{ .gap = 6, .cross = .start }, .{
+                ui.text(.{
+                    .size = .sm,
+                    .style_tokens = .{ .foreground = .text_muted },
+                    .wrap = true,
+                }, msg.content),
+                if (is_stream_error)
+                    ui.button(.{ .on_press = .retry, .variant = .ghost, .size = .sm }, "Retry")
+                else
+                    ui.text(.{}, ""),
+            }),
         });
     } else {
         // Fallback for any standalone assistant/tool/reasoning (shouldn't normally happen)

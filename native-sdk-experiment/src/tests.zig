@@ -1829,3 +1829,56 @@ test "stream_error finalizes stream state fully" {
     try testing.expectEqualStrings("", chat.open_bubble_type);
     try testing.expectEqualStrings("boom", chat._messages[chat.msg_count - 1].content);
 }
+
+test "retry re-sends the last user message" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const chat = model.activeChat();
+    main.addMessage(chat, arena, "user", "hello");
+    main.addMessage(chat, arena, "system", "Stream error: timed_out");
+    const before = fx.pendingFetchCount();
+
+    main.update(&model, .retry, &fx);
+
+    try testing.expectEqual(before + 1, fx.pendingFetchCount());
+    try testing.expect(chat.streaming);
+    try testing.expectEqualStrings("hello", chat._messages[chat.msg_count - 2].content);
+}
+
+test "retry is a no-op while streaming" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    _ = sendAndStartStream(&model, &fx, "hello");
+    const before = fx.pendingFetchCount();
+
+    main.update(&model, .retry, &fx);
+
+    try testing.expectEqual(before, fx.pendingFetchCount());
+}
+
+test "tick shows elapsed seconds in the thinking indicator" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    _ = sendAndStartStream(&model, &fx, "hello");
+    const chat = model.activeChat();
+    chat.stream_started_at = main.nowMillis() - 12_000;
+
+    main.update(&model, .{ .tick = .{ .key = 1 } }, &fx);
+
+    try testing.expectEqualStrings("Thinking… 12s", chat.status_text);
+}
