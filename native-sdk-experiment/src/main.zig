@@ -3511,17 +3511,19 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         model.available_models[model.selected_model_idx].name
     else
         "DeepSeek V4 Flash 0731";
-    const model_button: AppUi.Node = if (model.available_model_count > 0 and !chat.streaming)
+    // Always a button — even while streaming — so the user can switch the
+    // model mid-run; the new selection applies from the next send. Keeping
+    // the button (chevron + padding) in both states also stops the row's
+    // trailing group from shifting when a stream starts.
+    const model_button: AppUi.Node = if (model.available_model_count > 0)
         ui.button(.{ .on_press = .toggle_model_menu, .variant = .ghost, .max_width = 260, .icon = "chevron-down", .icon_placement = .trailing, .style_tokens = .{ .foreground = .text_muted } }, model_label)
-    else if (model.available_model_count > 0)
-        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .max_width = 260 }, model_label)
     else
         ui.text(.{}, "");
 
     // The model picker: the button is the dropdown's anchor (stack sibling).
     // The stack exists only while open — a closed menu's empty placeholder
     // would layer on top of the button and swallow its clicks.
-    const model_selector: AppUi.Node = if (model.available_model_count > 0 and !chat.streaming)
+    const model_selector: AppUi.Node = if (model.available_model_count > 0)
         if (model.model_menu_open)
             ui.stack(.{}, .{ model_button, buildModelMenu(ui, model) })
         else
@@ -3550,9 +3552,9 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     };
 
     const send_button: AppUi.Node = if (chat.streaming)
-        ui.button(.{ .on_press = .cancel, .variant = .ghost }, "Stop")
+        ui.button(.{ .on_press = .cancel, .variant = .ghost, .min_width = 76 }, "Stop")
     else
-        ui.button(.{ .on_press = .send_message, .variant = .primary, .icon = "send" }, "Send");
+        ui.button(.{ .on_press = .send_message, .variant = .primary, .icon = "send", .min_width = 76 }, "Send");
 
     // Textarea in its own nested card — an outer shell (hairline border +
     // padding + large radius) with the textarea as the inner core (its own

@@ -991,14 +991,16 @@ for wid, name, x, y, actions in buttons:
     fail "no model button found"
   fi
 
-  # --- 14b: Send a message → streaming starts → model becomes text (disabled) ---
+  # --- 14b: Send a message → streaming starts → model stays pressable ---
+  # The model selector intentionally remains a button while the agent runs:
+  # the user can switch models mid-stream and the selection applies to the
+  # next round.
   native automate widget-action main-canvas "$TEXTBOX" focus > /dev/null
   native automate widget-key main-canvas a "say ok" > /dev/null
   native automate widget-click main-canvas "$SEND" > /dev/null
   sleep 2
 
-  # Check model state during streaming: the model becomes a text node
-  # (no pressable button) in the composer's bottom band.
+  # Check model state during streaming: a pressable button must still exist.
   SNAPSHOT=$(native automate snapshot)
   MODEL_BTN_DURING=$(echo "$SNAPSHOT" | python3 -c "
 import re,sys
@@ -1012,21 +1014,47 @@ for wid, name, x, y, actions in buttons:
     if float(y) > 500 and float(x) > 250:
         print(wid); break
 ")
-  MODEL_TEXT_DURING=$(echo "$SNAPSHOT" | python3 -c "
+  if [ -n "$MODEL_BTN_DURING" ]; then
+    pass "model button stays pressable during streaming"
+  else
+    fail "model button not pressable during streaming"
+  fi
+
+  # --- 14b2: Pick a different model while the run is active ---
+  # widget-hold (press without release) opens the menu deterministically:
+  # a full click's release lands after the toggle re-render and can hit the
+  # freshly-opened menu, closing it again.
+  native automate widget-hold main-canvas "$MODEL_BTN_DURING" > /dev/null
+  sleep 1
+  # 3rd row = a different ollama-cloud model (1st=alpha-first, 2nd=the current default)
+  MENU_ROW=$(native automate snapshot | grep -E 'role=menuitem' | grep -oE 'name="[^"]*"' | grep -vE 'Manage' | sed -n '3p' | cut -d'"' -f2)
+  PICKED=$(native automate snapshot | grep -oE "widget @w1/main-canvas#[0-9]+ role=menuitem name=\"$MENU_ROW\"" | head -1 | sed 's/.*#//' | cut -d' ' -f1)
+  if [ -n "$PICKED" ]; then
+    native automate widget-click main-canvas "$PICKED" > /dev/null
+    sleep 1
+    # The composer button sits in the bottom band right of the sidebar
+    # (same position filter as the 14a lookup); suggestion chips live above it.
+    LABEL_NOW=$(native automate snapshot | python3 -c "
 import re,sys
 s=sys.stdin.read()
-texts = re.findall(r'widget @w1/main-canvas#(\d+) role=text name=\"([^\"]*)\"[^)]*bounds=\(([0-9.]+),([0-9.]+)', s)
-for wid, name, x, y in texts:
+buttons = re.findall(r'widget @w1/main-canvas#(\d+) role=button name=\"([^\"]*)\"[^)]*bounds=\(([0-9.]+),([0-9.]+).*actions=\[([^\]]*)\]', s)
+skip = {'Send','Stop','Approve','Reject'}
+for wid, name, x, y, actions in buttons:
+    if 'press' not in actions: continue
+    if name in skip: continue
     if not name: continue
     if float(y) > 500 and float(x) > 250:
-        print(wid); break
+        print(name); break
 ")
-  if [ -z "$MODEL_BTN_DURING" ] && [ -n "$MODEL_TEXT_DURING" ]; then
-    pass "model button disabled (text only) during streaming"
-  elif [ -n "$MODEL_BTN_DURING" ]; then
-    fail "model button still clickable during streaming"
+    # The menu row reads "Provider · Model"; the composer button shows the model name only.
+    EXPECTED=$(echo "$MENU_ROW" | sed 's/^[^·]*· //')
+    if [ -n "$LABEL_NOW" ] && [ "$LABEL_NOW" = "$EXPECTED" ]; then
+      pass "mid-stream model pick applied (composer shows $EXPECTED)"
+    else
+      fail "mid-stream pick: expected '$EXPECTED', composer shows '$LABEL_NOW'"
+    fi
   else
-    skip "model widget not found during streaming"
+    fail "model picker did not open during streaming"
   fi
 
   # Wait for streaming to complete (long story may take 20s+)
