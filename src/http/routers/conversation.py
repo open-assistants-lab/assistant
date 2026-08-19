@@ -31,6 +31,7 @@ from src.http.conversation_persistence import (
 from src.http.models import MessageRequest, MessageResponse, VerificationVerdict
 from src.http.stream_adapter import adapt_stream_chunk
 from src.sdk.messages import Message, ToolCall
+from src.sdk.run_models import display_model_name
 from src.sdk.run_service import RunService
 from src.sdk.runner import (
     _messages_from_conversation,
@@ -444,7 +445,7 @@ async def list_available_models(
             registry_models = [
                 {
                     "id": f"{provider}:{m.id}",
-                    "name": m.name,
+                    "name": display_model_name(m.id, m.name),
                     "provider": provider,
                     "provider_display": _PROVIDER_DISPLAY.get(provider, provider.title()),
                 }

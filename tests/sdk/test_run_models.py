@@ -620,3 +620,22 @@ def test_terminal_verification_requires_evaluation_for_final_attempt() -> None:
             max_attempts=3,
             evaluations=(_evaluation(),),
         )
+
+
+def test_display_model_name_keeps_explicit_names() -> None:
+    from src.sdk.run_models import display_model_name
+
+    # models.dev's explicit display name wins.
+    assert display_model_name("deepseek-v4-flash:0731", "DeepSeek V4 Flash 0731") == "DeepSeek V4 Flash 0731"
+
+
+def test_display_model_name_titles_raw_ids() -> None:
+    from src.sdk.run_models import display_model_name
+
+    # Raw-id names (most ollama-cloud models) get a consistent title.
+    assert display_model_name("deepseek-v4-flash", "deepseek-v4-flash") == "DeepSeek V4 Flash"
+    assert display_model_name("kimi-k2.7-code", "kimi-k2.7-code") == "Kimi K2.7 Code"
+    assert display_model_name("gpt-oss:20b", "gpt-oss:20b") == "GPT OSS 20B"
+    assert display_model_name("minimax-m3", "minimax-m3") == "MiniMax M3"
+    assert display_model_name("qwen3.5:397b", "qwen3.5:397b") == "Qwen3.5 397B"
+    assert display_model_name("nemotron-3-nano:30b", "nemotron-3-nano:30b") == "Nemotron 3 Nano 30B"

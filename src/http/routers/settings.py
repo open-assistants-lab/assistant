@@ -39,7 +39,7 @@ from src.config.user_settings_store import (
     SettingsWriteError,
     UserSettingsStore,
 )
-from src.sdk.run_models import CanonicalModel
+from src.sdk.run_models import CanonicalModel, display_model_name
 
 
 class UpdateSettingsRequest(BaseModel):
@@ -240,7 +240,7 @@ def _provider_models(provider_id: str, provider_name: str) -> list[dict[str, str
         registry_models = [
             {
                 "id": f"{provider_id}:{model.id}",
-                "name": model.name,
+                "name": display_model_name(model.id, model.name),
                 "provider": provider_id,
                 "provider_display": provider_name,
             }

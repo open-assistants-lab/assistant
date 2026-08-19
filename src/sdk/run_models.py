@@ -335,3 +335,47 @@ class RunResult(ContractModel):
             ):
                 raise ValueError(f"{field_name} model and attempt must match run")
         return self
+
+
+# Display names for models whose models.dev entry uses the raw id as its
+# name (most ollama-cloud models). models.dev gives a few models explicit
+# display names (e.g. "DeepSeek V4 Flash 0731") — those are kept as-is;
+# everything else gets a consistent readable title so the picker doesn't
+# mix styles.
+_MODEL_BRAND_NAMES = {
+    "deepseek": "DeepSeek",
+    "minimax": "MiniMax",
+    "kimi": "Kimi",
+    "nemotron": "Nemotron",
+    "mistral": "Mistral",
+    "gemma": "Gemma",
+    "qwen": "Qwen",
+    "glm": "GLM",
+    "gpt": "GPT",
+    "oss": "OSS",
+    "ai": "AI",
+    "api": "API",
+    "ui": "UI",
+}
+
+
+def display_model_name(model_id: str, name: str) -> str:
+    """Consistent picker display name: models.dev's explicit name when it
+    provides one, otherwise a title-case derived from the id."""
+    if name != model_id or not model_id:
+        return name
+    segments = re.split(r"[-:]", model_id)
+    parts: list[str] = []
+    for seg in segments:
+        if not seg:
+            continue
+        lowered = seg.lower()
+        if lowered in _MODEL_BRAND_NAMES:
+            parts.append(_MODEL_BRAND_NAMES[lowered])
+        else:
+            # "deepseek" -> "Deepseek", "20b" -> "20B", "m3" -> "M3"
+            head = seg[:1].upper() + seg[1:]
+            if len(head) >= 2 and head[-1] == "b" and head[-2].isdigit():
+                head = head[:-1] + "B"
+            parts.append(head)
+    return " ".join(parts)
