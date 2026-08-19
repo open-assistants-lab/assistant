@@ -22,10 +22,6 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from src.app_logging import get_logger
 from src.config.settings import get_settings
 from src.http.auth import verify_key
-from src.http.conversation_persistence import (
-    persist_reasoning_message,
-    persist_tool_message,
-)
 from src.http.routers.conversation import (
     _extract_surfaces,
     _persist_collected_stream_state,
@@ -265,29 +261,11 @@ async def _run_agent_stream(
 
                 response = _strip_canvas_fences(response)
 
-                reasoning_content = "".join(reasoning_parts) if reasoning_parts else None
-
-                for tm in tool_metadata_list:
-                    call_id = tm.get("tool_call_id", "")
-                    result_content = tool_results.get(call_id, "")
-                    if result_content:
-                        persist_tool_message(
-                            conversation,
-                            result_content,
-                            session_id=session_id,
-                            tool_name=tm.get("tool_name", "unknown"),
-                            tool_call_id=tm.get("tool_call_id", ""),
-                        )
-
-                if reasoning_content:
-                    persist_reasoning_message(
-                        conversation,
-                        reasoning_content,
-                        session_id=session_id,
-                    )
-
-                # The final answer is already persisted by RunService.persist_run;
-                # its message id rides on the done result.
+                # Tool messages and reasoning are persisted by
+                # RunService.persist_run (tools as audit records with run_id +
+                # tool_name metadata, reasoning as a pre-message) — persisting
+                # them again here would duplicate them without run_id. The WS
+                # path only persists collected state on failure/cancel paths.
                 msg_id = result.get("final_message_id") or ""
                 persisted = True
 

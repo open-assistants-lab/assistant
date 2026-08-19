@@ -855,7 +855,14 @@ def test_persist_run_stores_audit_records_with_include_in_model_context_false() 
     answer = Message(id="", ts=datetime.now(UTC), role="assistant", content="answer", session_id="a")
     audit = [
         Message(id="", ts=datetime.now(UTC), role="reasoning", content="thinking...", session_id="a"),
-        Message(id="", ts=datetime.now(UTC), role="tool", content='{"result": "ok"}', session_id="a"),
+        Message(
+            id="",
+            ts=datetime.now(UTC),
+            role="tool",
+            content='{"result": "ok"}',
+            session_id="a",
+            metadata={"tool_name": "time_get", "tool_call_id": "call-1"},
+        ),
     ]
     store.persist_run(
         run_id="run-2",
@@ -870,6 +877,17 @@ def test_persist_run_stores_audit_records_with_include_in_model_context_false() 
     assert len(audit_persisted) == 2
     for m in audit_persisted:
         assert m.metadata.get("include_in_model_context") is False
+    # Audit records (reasoning + tools) are inserted BEFORE the final answer
+    # so the stored transcript matches the stream order (reasoning, tools,
+    # answer) — a reload must not flip the tools below the answer.
+    ordered = [m.role for m in messages if m.metadata.get("run_id") == "run-2"]
+    assert ordered == ["reasoning", "tool", "assistant"]
+    # The record's own metadata (tool_name, tool_call_id) survives the
+    # merge with the run metadata — a reload renders the tool rows with
+    # their names and icons.
+    tool = next(m for m in messages if m.role == "tool" and m.metadata.get("run_id") == "run-2")
+    assert tool.metadata.get("tool_name") == "time_get"
+    assert tool.metadata.get("tool_call_id") == "call-1"
 
 
 def test_persist_run_is_idempotent_on_run_id() -> None:

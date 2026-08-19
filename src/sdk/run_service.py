@@ -162,11 +162,26 @@ def _tool_audit_records(
     state = getattr(loop, "state", None)
     if state is None:
         return []
-    return [
-        _sdk_message_to_storage(m, session_id)
-        for m in state.messages
-        if m.role == "tool"
-    ]
+    records: list[StorageMessage] = []
+    for m in state.messages:
+        if m.role != "tool":
+            continue
+        meta: dict[str, Any] = {"stream": True}
+        if getattr(m, "name", None):
+            meta["tool_name"] = m.name
+        if getattr(m, "tool_call_id", None):
+            meta["tool_call_id"] = m.tool_call_id
+        records.append(
+            StorageMessage(
+                id="",
+                ts=datetime.now(UTC),
+                role="tool",
+                content=str(m.content or ""),
+                metadata=meta,
+                session_id=session_id,
+            )
+        )
+    return records
 
 
 

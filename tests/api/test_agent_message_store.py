@@ -170,10 +170,11 @@ async def test_verbose_message_persists_tool_results(monkeypatch) -> None:
         MessageRequest(message="List emails", user_id="u", verbose=True)
     )
 
+    # The router no longer persists on success — RunService.persist_run owns
+    # tool persistence (audit records with run_id + tool_name metadata). The
+    # router only persists collected state on failure/cancel paths.
     tool_messages = [m for m in store.messages if m.role == "tool"]
-    assert [(m.content, m.metadata) for m in tool_messages] == [
-        ("5 unread emails", {"tool_name": "email_list", "tool_call_id": "call_1"})
-    ]
+    assert tool_messages == []
 
 
 @pytest.mark.skip(
@@ -267,10 +268,11 @@ async def test_stream_message_persists_tool_result_content(monkeypatch) -> None:
     async for _ in response.body_iterator:
         pass
 
+    # The router no longer persists on success — RunService.persist_run owns
+    # tool persistence (audit records with run_id + tool_name metadata). The
+    # router only persists collected state on failure/cancel paths.
     tool_messages = [m for m in store.messages if m.role == "tool"]
-    assert [(m.content, m.metadata) for m in tool_messages] == [
-        ("5 unread emails", {"tool_name": "email_list", "tool_call_id": "call_1"})
-    ]
+    assert tool_messages == []
 
 
 @pytest.mark.asyncio
@@ -303,9 +305,9 @@ async def test_stream_message_dedupes_alias_text_and_tool_end(monkeypatch) -> No
     assert output.count('"delta": "Hello"') == 1
     assert output.count('"delta": "Think"') == 1
     assert "legacy result" not in output
-    assert [(m.content, m.metadata) for m in store.messages if m.role == "tool"] == [
-        ("canonical result", {"tool_name": "email_list", "tool_call_id": "call_1"})
-    ]
+    # Success-path persistence is owned by RunService.persist_run — the
+    # router stores nothing here.
+    assert [m for m in store.messages if m.role == "tool"] == []
 
 
 @pytest.mark.asyncio

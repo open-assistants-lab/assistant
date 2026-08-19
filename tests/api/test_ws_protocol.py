@@ -345,11 +345,10 @@ class TestWebSocketPersistence:
         assert any(m.get("type") == "text_delta" and m.get("data", {}).get("delta") == "Hello" for m in websocket.sent)
         assert any(m.get("type") == "reasoning_delta" and m.get("data", {}).get("delta") == "Think" for m in websocket.sent)
         assert any(m.get("type") == "tool_input_start" and m.get("data", {}).get("name") == "email_list" for m in websocket.sent)
-        # Reasoning is persisted by the router; the final answer is persisted
-        # by RunService.persist_run (not duplicated here).
-        assert [(args, kwargs) for args, kwargs in conversation.calls if args[0] in {"assistant", "reasoning"}] == [
-            (("reasoning", "Think"), {"metadata": {}, "session_id": "chat-1"}),
-        ]
+        # Success-path persistence is owned by RunService.persist_run (tools
+        # as audit records, reasoning as pre-messages, the answer as the run's
+        # final message) — the WS router persists nothing on success.
+        assert conversation.calls == []
 
     @pytest.mark.asyncio
     async def test_run_agent_stream_cancelled_error_persists_partial_state(self, monkeypatch):
@@ -509,15 +508,9 @@ class TestWebSocketPersistence:
 
         tool_result_payloads = [m for m in websocket.sent if m.get("type") == "tool_result"]
         assert [m["result_preview"] for m in tool_result_payloads] == ["canonical"]
-        assert [(args, kwargs) for args, kwargs in conversation.calls if args[0] == "tool"] == [
-            (
-                ("tool", "canonical"),
-                {
-                    "metadata": {"tool_name": "email_list", "tool_call_id": "call-1"},
-                    "session_id": "chat-1",
-                },
-            )
-        ]
+        # The router forwards the canonical result but does not persist it on
+        # success — RunService.persist_run owns the tool audit records.
+        assert [args for args, kwargs in conversation.calls if args[0] == "tool"] == []
 
     @pytest.mark.asyncio
     async def test_run_agent_stream_persists_partial_state_on_interrupt(self, monkeypatch):
@@ -1224,18 +1217,10 @@ class TestWebSocketPersistence:
             FakeWebSocket(), "test_user", [], conversation, session_id="chat-1"
         )
 
-        # Tool + reasoning are persisted by the router; the final answer is
-        # persisted by RunService.persist_run (not duplicated here).
-        assert conversation.calls == [
-            (
-                ("tool", "noon"),
-                {
-                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1"},
-                    "session_id": "chat-1",
-                },
-            ),
-            (("reasoning", "thinking"), {"metadata": {}, "session_id": "chat-1"}),
-        ]
+        # A done-send failure must not trigger the failure-path fallback
+        # persist (the success path persisted nothing — RunService owns it),
+        # so nothing is written twice.
+        assert conversation.calls == []
 
     @pytest.mark.asyncio
     async def test_ws_disconnect_cancels_running_stream_task(self, monkeypatch):

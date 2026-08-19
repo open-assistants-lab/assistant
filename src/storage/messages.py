@@ -1035,22 +1035,13 @@ class MessageStore:
                         ],
                     )
 
-                answer_mid = str(uuid.uuid4())[:12]
-                cur.execute(
-                    "INSERT INTO messages (id, role, content, session_id, metadata, ts) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    [
-                        answer_mid,
-                        final_answer.role,
-                        final_answer.content or "(empty)",
-                        session_id,
-                        json.dumps(answer_metadata),
-                        datetime.now(UTC).isoformat(),
-                    ],
-                )
-
+                # Audit records (tool executions) are inserted BEFORE the
+                # final answer so the stored transcript matches the stream
+                # order (reasoning, tools, answer) — tools ran before the
+                # answer, and a reload must not flip them below it.
                 for record in audit_records:
                     record_metadata = dict(metadata)
+                    record_metadata.update(record.metadata or {})
                     record_metadata["run_id"] = run_id
                     record_metadata["include_in_model_context"] = False
                     record_mid = str(uuid.uuid4())[:12]
@@ -1066,6 +1057,20 @@ class MessageStore:
                             datetime.now(UTC).isoformat(),
                         ],
                     )
+
+                answer_mid = str(uuid.uuid4())[:12]
+                cur.execute(
+                    "INSERT INTO messages (id, role, content, session_id, metadata, ts) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    [
+                        answer_mid,
+                        final_answer.role,
+                        final_answer.content or "(empty)",
+                        session_id,
+                        json.dumps(answer_metadata),
+                        datetime.now(UTC).isoformat(),
+                    ],
+                )
 
                 cur.execute("COMMIT")
                 return answer_mid

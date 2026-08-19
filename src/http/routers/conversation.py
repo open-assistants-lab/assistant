@@ -853,23 +853,12 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                 if not response:
                     response = "Task completed."
 
-                for tm in tool_metadata_list:
-                    call_id = tm.get("tool_call_id", "")
-                    output = tool_results.get(call_id, "")
-                    if output:
-                        persist_tool_message(
-                            conversation,
-                            output,
-                            session_id=session_id,
-                            tool_name=tm.get("tool_name", "unknown"),
-                            tool_call_id=call_id,
-                        )
-
-                # The reasoning is now persisted by RunService.persist_run
-                # (as a pre-message BEFORE the final answer, matching the
-                # stream order) — persisting it again here would duplicate it.
-                # The final answer is also already persisted by
-                # RunService.persist_run (with run_id metadata).
+                # Tool messages, reasoning and the final answer are all
+                # persisted by RunService.persist_run (tools as audit records
+                # with run_id + tool_name metadata, reasoning as a pre-message,
+                # the answer as the run's final message). Persisting the tools
+                # again here would duplicate them without run_id — the router
+                # only persists collected state on failure/cancel paths.
                 persisted = True
                 logger.info(
                     "agent.response_stored", {"response": response[:80], "session_id": session_id, "user_id": user_id}, user_id=user_id, channel="http"
