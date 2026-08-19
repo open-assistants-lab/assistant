@@ -3772,6 +3772,10 @@ fn initFx(model: *Model, fx: *Effects) void {
     // Stress-test mode: the transcript is seeded locally; skip all fetches
     // so the test is deterministic and does not need the backend.
     if (model.stress_mode) return;
+    // Prime the entrance animation tick (composer fade-up) — nothing else
+    // fires the first tick at a quiet startup, so without this the chat
+    // panel would stay at entrance opacity 0 (blank).
+    fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
     // Fetch sessions first; models and history are chained from the
     // response handlers (see fetchModels / fetchActiveChatHistory) so the
     // startup never fires concurrent connects to the same host — the Zig
