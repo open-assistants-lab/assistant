@@ -677,11 +677,11 @@ test_search() {
 }
 
 # ============================================================
-# 10. MODEL CYCLING — Cycle model and verify the label changes
+# 10. MODEL PICKER — dropdown selection changes the label
 # ============================================================
 test_model() {
   echo ""
-  echo "=== 10. Model Cycling: Cycle model ==="
+  echo "=== 10. Model Picker: dropdown selection ==="
 
   start_backend
 
@@ -718,7 +718,29 @@ for wid, name, x, y, actions in buttons:
   fi
 
   BEFORE=$(widget_name "$MODEL_BTN")
+  # Clicking the model button opens the dropdown picker (no more cycling).
   native automate widget-click main-canvas "$MODEL_BTN" > /dev/null
+  sleep 1
+  SNAPSHOT=$(native automate snapshot)
+  # Pick the first menu item that is a different model (skip the current
+  # one and the "Manage models…" footer).
+  PICK=$(python3 -c "
+import re,sys
+s=sys.stdin.read()
+before='$BEFORE'
+items = re.findall(r'widget @w1/main-canvas#(\d+) role=menuitem name=\"([^\"]*)\"', s)
+for wid, name in items:
+    if name == 'Manage models…': continue
+    if before in name or name in before: continue
+    print(wid); break
+" <<< "$SNAPSHOT")
+  if [ -z "$PICK" ]; then
+    fail "model picker: no alternative model in menu"
+    cleanup
+    return
+  fi
+  native automate widget-click main-canvas "$PICK" > /dev/null
+  sleep 1.5
   # Re-snapshot and read the (possibly new id) label.
   SNAPSHOT=$(native automate snapshot)
   MODEL_BTN_AFTER=$(python3 -c "
@@ -736,9 +758,9 @@ for wid, name, x, y, actions in buttons:
   AFTER=$(widget_name "$MODEL_BTN_AFTER")
 
   if [ -n "$BEFORE" ] && [ -n "$AFTER" ] && [ "$BEFORE" != "$AFTER" ]; then
-    pass "model cycle changed label ('$BEFORE' -> '$AFTER')"
+    pass "model picker changed label ('$BEFORE' -> '$AFTER')"
   else
-    fail "model cycle did not change label ('$BEFORE' -> '$AFTER')"
+    fail "model picker did not change label ('$BEFORE' -> '$AFTER')"
   fi
 
   cleanup

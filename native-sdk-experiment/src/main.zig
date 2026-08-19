@@ -239,6 +239,11 @@ pub const Msg = union(enum) {
     send_message,
     retry,
     cancel,
+    toggle_model_menu,
+    close_model_menu,
+    model_menu_search_input: canvas.TextInputEvent,
+    model_menu_select: usize,
+    model_menu_manage,
     approve,
     reject,
     stream_line: native_sdk.EffectLine,
@@ -343,6 +348,9 @@ pub const Model = struct {
     available_models: [max_models]ModelOption = undefined,
     available_model_count: usize = 0,
     selected_model_idx: usize = 0,
+    model_menu_open: bool = false,
+    model_menu_search: []const u8 = "",
+    model_menu_search_selection: canvas.TextSelection = .{ .anchor = 0, .focus = 0 },
     settings: SettingsState = .{},
     allocator: std.mem.Allocator = undefined,
 
@@ -977,6 +985,47 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     }
                 }
             }
+        },
+        .toggle_model_menu => {
+            model.model_menu_open = !model.model_menu_open;
+            if (model.model_menu_open) {
+                model.model_menu_search = "";
+                model.model_menu_search_selection = .{ .anchor = 0, .focus = 0 };
+            }
+        },
+        .close_model_menu => {
+            model.model_menu_open = false;
+        },
+        .model_menu_search_input => |event| {
+            const output = model.allocator.alloc(u8, model.model_menu_search.len + 256) catch return;
+            const next = (canvas.TextEditState{
+                .text = model.model_menu_search,
+                .selection = model.model_menu_search_selection,
+            }).apply(event, output) catch return;
+            model.model_menu_search = next.text;
+            model.model_menu_search_selection = next.selection;
+        },
+        .model_menu_select => |filtered_idx| {
+            // Map the filtered (ready + search-matching) index to the real
+            // catalog index, select it, persist it, and close the menu.
+            var seen: usize = 0;
+            for (0..model.available_model_count) |i| {
+                const m = model.available_models[i];
+                if (std.mem.eql(u8, m.key_source, "none")) continue;
+                if (!modelMatchesSearch(model, m)) continue;
+                if (seen == filtered_idx) {
+                    model.selected_model_idx = i;
+                    model.model_menu_open = false;
+                    saveSettingsModel(model, fx, i);
+                    return;
+                }
+                seen += 1;
+            }
+        },
+        .model_menu_manage => {
+            model.model_menu_open = false;
+            model.settings.visible = true;
+            model.settings.section = .providers_models;
         },
         .search_input => |event| {
             switch (event) {
@@ -2863,6 +2912,76 @@ pub fn addHistoryMessage(chat: *Chat, allocator: std.mem.Allocator, item: std.js
     }
 }
 
+/// A model is selectable in the composer menu when it has a key and its
+/// name or provider matches the menu's search text.
+fn modelMatchesSearch(model: *const Model, m: ModelOption) bool {
+    if (model.model_menu_search.len == 0) return true;
+    return containsIgnoreCase(m.name, model.model_menu_search) or
+        containsIgnoreCase(m.provider_display, model.model_menu_search);
+}
+
+/// The composer's model picker: an anchored dropdown listing ready-to-use
+/// models (key present) with a search field. Selecting persists the choice
+/// via the settings API; "Manage models…" opens the full catalog.
+fn buildModelMenu(ui: *AppUi, model: *const Model) AppUi.Node {
+    if (!model.model_menu_open) return ui.text(.{}, "");
+
+    // Bounded: the search field narrows the list; a stack array of the full
+    // catalog (8192) would overflow the test/UI stack.
+    const max_menu_items = 64;
+    var items: [max_menu_items]AppUi.Node = undefined;
+    var count: usize = 0;
+
+    items[count] = ui.textField(.{
+        .text = model.model_menu_search,
+        .placeholder = "Search models…",
+        .on_input = AppUi.inputMsg(.model_menu_search_input),
+        .semantics = .{ .label = "Search models" },
+        .style_tokens = .{ .background = .surface_subtle, .radius = .md },
+    });
+    count += 1;
+
+    var filtered_idx: usize = 0;
+    for (0..model.available_model_count) |i| {
+        if (count >= max_menu_items - 3) break;
+        const m = model.available_models[i];
+        if (std.mem.eql(u8, m.key_source, "none")) continue;
+        if (!modelMatchesSearch(model, m)) continue;
+        const is_current = i == model.selected_model_idx;
+        const label = std.fmt.allocPrint(ui.arena, "{s} · {s}", .{ m.provider_display, m.name }) catch m.name;
+        items[count] = ui.el(.menu_item, .{
+            .key = .{ .int = filtered_idx },
+            .text = label,
+            .selected = is_current,
+            .on_press = .{ .model_menu_select = filtered_idx },
+        }, .{});
+        count += 1;
+        filtered_idx += 1;
+    }
+
+    if (filtered_idx == 0) {
+        items[count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "No models match");
+        count += 1;
+    }
+
+    items[count] = ui.el(.separator, .{}, .{});
+    count += 1;
+    items[count] = ui.el(.menu_item, .{
+        .text = "Manage models…",
+        .on_press = .model_menu_manage,
+    }, .{});
+    count += 1;
+
+    return ui.el(.dropdown_menu, .{
+        .anchor = .above,
+        .anchor_alignment = .start,
+        .anchor_offset = 4,
+        .on_dismiss = .close_model_menu,
+        .min_width = 280,
+        .max_width = 360,
+    }, items[0..count]);
+}
+
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     if (needle.len == 0) return true;
     if (needle.len > haystack.len) return false;
@@ -3365,11 +3484,22 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     else
         "DeepSeek V4 Flash 0731";
     const model_button: AppUi.Node = if (model.available_model_count > 0 and !chat.streaming)
-        ui.button(.{ .on_press = .cycle_model, .variant = .ghost, .max_width = 260, .style_tokens = .{ .foreground = .text_muted } }, model_label)
+        ui.button(.{ .on_press = .toggle_model_menu, .variant = .ghost, .max_width = 260, .style_tokens = .{ .foreground = .text_muted } }, model_label)
     else if (model.available_model_count > 0)
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .max_width = 260 }, model_label)
     else
         ui.text(.{}, "");
+
+    // The model picker: the button is the dropdown's anchor (stack sibling).
+    // The stack exists only while open — a closed menu's empty placeholder
+    // would layer on top of the button and swallow its clicks.
+    const model_selector: AppUi.Node = if (model.available_model_count > 0 and !chat.streaming)
+        if (model.model_menu_open)
+            ui.stack(.{}, .{ model_button, buildModelMenu(ui, model) })
+        else
+            model_button
+    else
+        model_button;
 
     const textarea_height: f32 = chat.last_textarea_height;
 
@@ -3421,7 +3551,7 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         .grow = 0,
         .padding = 12,
     }, .{
-        model_button,
+        model_selector,
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "•"),
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, tokens_text),
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "•"),

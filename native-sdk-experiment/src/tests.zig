@@ -1882,3 +1882,51 @@ test "tick shows elapsed seconds in the thinking indicator" {
 
     try testing.expectEqualStrings("Thinking… 12s", chat.status_text);
 }
+
+test "model menu lists only ready models and selects one" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    const models_body =
+        \\{"models":[
+        \\{"id":"agnes:agnes-2.0-flash","name":"Agnes 2.0 Flash","provider":"agnes","provider_display":"Agnes","key_source":"hosted","billing_mode":"hosted"},
+        \\{"id":"openai:gpt-4.1","name":"GPT-4.1","provider":"openai","provider_display":"OpenAI","key_source":"none","billing_mode":"api_key"},
+        \\{"id":"ollama-cloud:deepseek-v4-flash:0731","name":"DeepSeek V4 Flash 0731","provider":"ollama-cloud","provider_display":"Ollama Cloud","key_source":"hosted","billing_mode":"hosted"}
+        \\]}
+    ;
+    main.update(&model, .{ .models_loaded = .{
+        .key = 9,
+        .outcome = .ok,
+        .body = models_body,
+    } }, &fx);
+
+    // Open the menu.
+    main.update(&model, .toggle_model_menu, &fx);
+    try testing.expect(model.model_menu_open);
+
+    const tree = try buildTree(arena, &model);
+    // Ready models are listed; the keyless model is not.
+    try testing.expect(findByText(tree.root, .menu_item, "Agnes · Agnes 2.0 Flash") != null);
+    try testing.expect(findByText(tree.root, .menu_item, "Ollama Cloud · DeepSeek V4 Flash 0731") != null);
+    try testing.expect(findByText(tree.root, .menu_item, "OpenAI · GPT-4.1") == null);
+
+    // Search narrows the list.
+    main.update(&model, .{ .model_menu_search_input = .{ .insert_text = "deepseek" } }, &fx);
+    try testing.expectEqualStrings("deepseek", model.model_menu_search);
+    const tree2 = try buildTree(arena, &model);
+    try testing.expect(findByText(tree2.root, .menu_item, "Ollama Cloud · DeepSeek V4 Flash 0731") != null);
+    try testing.expect(findByText(tree2.root, .menu_item, "Agnes · Agnes 2.0 Flash") == null);
+
+    // Selecting the filtered model (index 0 = DeepSeek) updates the
+    // composer selection and fires a save.
+    const before = fx.pendingFetchCount();
+    main.update(&model, .{ .model_menu_select = 0 }, &fx);
+    try testing.expect(!model.model_menu_open);
+    try testing.expectEqualStrings("ollama-cloud:deepseek-v4-flash:0731", model.selectedModel());
+    try testing.expectEqual(before + 1, fx.pendingFetchCount());
+}
