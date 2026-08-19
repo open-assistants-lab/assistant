@@ -13,6 +13,7 @@ Uses the SDK AgentLoop for all agent execution.
 
 import asyncio
 import json
+import secrets
 import uuid
 from typing import Any, Literal, cast
 
@@ -531,6 +532,8 @@ async def ws_conversation(websocket: WebSocket) -> None:
                             arguments=pending_container[0].get("args") or {},
                         )
                     )
+                    approved_args = pending_container[0].get("args") or {}
+                    approved_call_id = pending_container[0].get("call_id") or msg.call_id
                     pending_container[0] = None
                     conversation = get_message_store(user_id, workspace_id)
                     retry_msgs = _messages_from_conversation(
@@ -538,7 +541,20 @@ async def ws_conversation(websocket: WebSocket) -> None:
                             session_id=run_session_id, limit=50
                         )
                     )
-                    retry_msgs.append(Message.user(f"approve: please proceed with {tool_name}"))
+                    # Execute the approved tool directly — see
+                    # conversation._execute_approved_tool (re-proposals never
+                    # match the approved call, so the old instruction-only
+                    # flow looped on HITL interrupts).
+                    from src.http.routers.conversation import _execute_approved_tool
+
+                    retry_msgs.extend(
+                        await _execute_approved_tool(
+                            loop,
+                            tool_name,
+                            approved_args,
+                            approved_call_id or f"call_{secrets.token_hex(4)}",
+                        )
+                    )
                     await _run_agent_stream(
                         websocket, user_id, retry_msgs, conversation, run_session_id,
                         pending_ref=pending_container, workspace_id=workspace_id,

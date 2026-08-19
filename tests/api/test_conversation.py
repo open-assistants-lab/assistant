@@ -478,6 +478,10 @@ class TestStreamEdgeCases:
             def approve_tool_call(self, tool_call):
                 pass
 
+            async def _execute_tool(self, tc):
+                from src.sdk.tools import ToolResult
+                return ToolResult(content="noon")
+
         store = FakeConversation()
         captured_get_loop = {}
         captured_streams = []
@@ -545,6 +549,10 @@ class TestStreamEdgeCases:
             def approve_tool_call(self, tool_call):
                 pass
 
+            async def _execute_tool(self, tc):
+                from src.sdk.tools import ToolResult
+                return ToolResult(content="noon")
+
         store = FakeConversation()
         captured_get_loop = {}
         captured_streams = []
@@ -611,6 +619,10 @@ class TestStreamEdgeCases:
         class Loop:
             def approve_tool_call(self, tool_call):
                 pass
+
+            async def _execute_tool(self, tc):
+                from src.sdk.tools import ToolResult
+                return ToolResult(content="noon")
 
         captured = {}
         conversation_router._pending_interrupts["u:session-a"] = {
@@ -757,6 +769,10 @@ class TestStreamEdgeCases:
             def approve_tool_call(self, tool_call):
                 self.approved.append(tool_call)
 
+            async def _execute_tool(self, tc):
+                from src.sdk.tools import ToolResult
+                return ToolResult(content="noon")
+
         store = FakeConversation()
         conversation_router._pending_interrupts["u:default"] = {"tool": "time_get", "call_id": "call-1"}
 
@@ -800,6 +816,10 @@ class TestStreamEdgeCases:
 
             def approve_tool_call(self, tool_call):
                 self.approved.append(tool_call)
+
+            async def _execute_tool(self, tc):
+                from src.sdk.tools import ToolResult
+                return ToolResult(content="noon")
 
         loop = FakeLoop()
         conversation_router._pending_interrupts["u:default"] = {
@@ -850,6 +870,10 @@ class TestStreamEdgeCases:
             def approve_tool_call(self, tool_call):
                 self.approved.append(tool_call)
 
+            async def _execute_tool(self, tc):
+                from src.sdk.tools import ToolResult
+                return ToolResult(content="noon")
+
         store = FakeConversation()
         conversation_router._pending_interrupts["u:default"] = {"tool": "time_get", "call_id": "call-1"}
 
@@ -892,6 +916,10 @@ class TestStreamEdgeCases:
 
             def approve_tool_call(self, tool_call):
                 self.approved.append(tool_call)
+
+            async def _execute_tool(self, tc):
+                from src.sdk.tools import ToolResult
+                return ToolResult(content="noon")
 
         store = FakeConversation()
         conversation_router._pending_interrupts["u:default"] = {
@@ -941,6 +969,10 @@ class TestStreamEdgeCases:
         class FakeLoop:
             def approve_tool_call(self, tool_call):
                 pass
+
+            async def _execute_tool(self, tc):
+                from src.sdk.tools import ToolResult
+                return ToolResult(content="noon")
 
         store = FakeConversation()
         conversation_router._pending_interrupts["u:default"] = {

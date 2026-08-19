@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import re
+import secrets
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
@@ -472,7 +473,6 @@ async def _summarize_title(
     When existing_titles is provided, the prompt asks the model to avoid
     reusing any of them so the sidebar never shows duplicate chat titles.
     """
-    from src.sdk.messages import Message
     from src.sdk.providers.factory import create_model_from_config
 
     settings = get_settings()
@@ -940,6 +940,43 @@ class CancelRequest(BaseModel):
     session_id: str | None = None
 
 
+async def _execute_approved_tool(
+    loop: Any,
+    tool_name: str,
+    args: dict[str, Any],
+    call_id: str,
+) -> list[Any]:
+    """Execute an approved tool via the loop and build the continuation messages.
+
+    The approve flow used to re-run the agent with an instruction like
+    "approve: please proceed with files_write" and rely on the model
+    re-proposing the EXACT approved call — but each generation produces
+    fresh call ids/args, so the loop's (name, args) approval match never
+    fired and every re-run interrupted again: an approve loop. Executing
+    the pending call directly puts the actual outcome in the model's
+    context, so the agent continues from the real result instead of
+    re-proposing the same tool.
+    """
+    from src.sdk.loop import AgentLoop  # noqa: F401  (type hint only)
+    from src.sdk.messages import ToolCall
+
+    result = await loop._execute_tool(
+        ToolCall(id=call_id, name=tool_name, arguments=args)
+    )
+    return [
+        Message.assistant(
+            content="",
+            tool_calls=[ToolCall(id=call_id, name=tool_name, arguments=args)],
+        ),
+        Message.tool_result(
+            tool_call_id=call_id, content=result.content, name=tool_name
+        ),
+        Message.user(
+            f"continue: the approved {tool_name} call above has been executed"
+        ),
+    ]
+
+
 @router.post("/message/approve")
 async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> StreamingResponse:
     """Approve a pending tool call (HITL) and resume the agent as an SSE stream.
@@ -997,7 +1034,15 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
         try:
             recent = conversation.get_messages_with_summary(session_id=session_id, limit=50)
             retry_msgs = _messages_from_conversation(recent)
-            retry_msgs.append(Message.user(f"approve: please proceed with {tool_name}"))
+            # Execute the approved tool directly — see _execute_approved_tool.
+            retry_msgs.extend(
+                await _execute_approved_tool(
+                    loop,
+                    tool_name,
+                    pending.get("args") or {},
+                    pending.get("call_id") or f"call_{secrets.token_hex(4)}",
+                )
+            )
 
             async for chunk in run_sdk_agent_stream(
                 user_id=req.user_id,
