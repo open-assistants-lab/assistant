@@ -1369,6 +1369,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 }
             }
             chat.fetch_key = 0;
+            // Startup chain end: fetch the saved default model so the
+            // composer selects it (the settings panel also fetches on open).
+            fetchSettingsCatalog(fx);
         },
         .chat_history_loaded => |response| {
             if (response.outcome != .ok) {
@@ -1571,6 +1574,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (root.object.get("default_model")) |dm| {
                 if (dm == .string and dm.string.len > 0) {
                     model.settings.default_model_id = model.allocator.dupe(u8, dm.string) catch "";
+                }
+            }
+            // Select the saved default in the composer (startup or revisit).
+            if (model.settings.default_model_id.len > 0) {
+                for (0..model.available_model_count) |i| {
+                    if (std.mem.eql(u8, model.available_models[i].id, model.settings.default_model_id)) {
+                        model.selected_model_idx = i;
+                        break;
+                    }
                 }
             }
             // Parse the role models (grader / title / summarization).
@@ -3798,6 +3810,17 @@ fn fetchModels(fx: *Effects) void {
         .headers = &.{.{ .name = "Accept", .value = "application/json" }},
         .response = .buffered,
         .on_response = Effects.responseMsg(.models_loaded),
+    });
+}
+
+fn fetchSettingsCatalog(fx: *Effects) void {
+    fx.fetch(.{
+        .key = settings_key,
+        .url = "http://127.0.0.1:8080/settings/model-catalog?user_id=native_sdk_chat&max_models_per_provider=20&max_providers=64",
+        .method = .GET,
+        .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+        .response = .buffered,
+        .on_response = Effects.responseMsg(.settings_loaded),
     });
 }
 
