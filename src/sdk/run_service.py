@@ -147,6 +147,28 @@ def _sdk_message_to_storage(msg: Message, session_id: str) -> StorageMessage:
     )
 
 
+
+
+def _tool_audit_records(
+    loop: Any, session_id: str
+) -> list[StorageMessage]:
+    """Collect the run's executed tool messages for persistence.
+
+    Tool executions are visible in the transcript but excluded from the
+    model context (audit records) — without this they were silently
+    dropped from the stored history on the success path, so a reload
+    showed the response without the tool calls that produced it.
+    """
+    state = getattr(loop, "state", None)
+    if state is None:
+        return []
+    return [
+        _sdk_message_to_storage(m, session_id)
+        for m in state.messages
+        if m.role == "tool"
+    ]
+
+
 def _to_evaluation_result(raw: str) -> RubricEvaluationResult:
     """Map the grader's raw result string to RubricEvaluationResult.
 
@@ -349,7 +371,7 @@ class RunService:
                 session_id=session_id,
                 user_message_id=user_msg_id,
                 final_answer=_sdk_message_to_storage(Message.assistant(content=result.response), session_id),
-                audit_records=[],
+                audit_records=_tool_audit_records(loop, session_id),
                 metadata={"model": result.model},
             )
 
@@ -548,7 +570,7 @@ class RunService:
                 session_id=session_id,
                 user_message_id=user_msg_id,
                 final_answer=_sdk_message_to_storage(Message.assistant(content=final_response), session_id),
-                audit_records=[],
+                audit_records=_tool_audit_records(loop, session_id),
                 pre_messages=pre_messages,
                 metadata={"model": loop.model_id},
             )

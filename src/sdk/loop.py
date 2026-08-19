@@ -306,19 +306,30 @@ class AgentLoop:
             state.update(updates)
 
     def _should_interrupt(self, tc: ToolCall) -> bool:
-        tool_def = self._registry.get(tc.name)
-        if tool_def and tool_def.annotations.destructive and not tool_def.annotations.read_only:
-            call_key = (tc.id, tc.name, self._tool_args_key(tc))
-            if call_key in self._approved_tool_calls:
-                self._approved_tool_calls.discard(call_key)
-                return False
-            if tc.arguments:
-                args_key = (tc.name, json.dumps(tc.arguments, sort_keys=True))
-                if args_key in self._approved_tools:
-                    self._approved_tools.discard(args_key)
-                    return False
-            return True
+        """Whether a tool call needs human approval before execution.
+
+        HITL IS DISABLED FOR SHIP: destructive tools execute without
+        approval. The interrupt machinery (classify/emit/pending store/
+        approve/reject endpoints and the app's Approve/Reject bar) is
+        kept dormant behind this gate — flip to the annotation check
+        below to re-enable human-in-the-loop.
+        """
+        _ = tc
         return False
+        # Re-enable HITL by restoring the annotation-based check:
+        # tool_def = self._registry.get(tc.name)
+        # if tool_def and tool_def.annotations.destructive and not tool_def.annotations.read_only:
+        #     call_key = (tc.id, tc.name, self._tool_args_key(tc))
+        #     if call_key in self._approved_tool_calls:
+        #         self._approved_tool_calls.discard(call_key)
+        #         return False
+        #     if tc.arguments:
+        #         args_key = (tc.name, json.dumps(tc.arguments, sort_keys=True))
+        #         if args_key in self._approved_tools:
+        #             self._approved_tools.discard(args_key)
+        #             return False
+        #     return True
+        # return False
 
     def _is_parallel_safe(self, tc: ToolCall) -> bool:
         """Check if a tool call is safe to execute in parallel with others.

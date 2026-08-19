@@ -725,12 +725,13 @@ class TestAgentLoopHITL:
 
         result = await loop.run([Message.user("Create subagent")])
 
-        interrupt_result = next(m for m in result if m.role == "tool")
-        content = json.loads(interrupt_result.content)
-        assert content["args"] == {"user_id": "real_user", "workspace_id": "test12345"}
+        # HITL disabled: the tool executes with the runtime context injected.
+        tool_result = next(m for m in result if m.role == "tool")
+        content = json.loads(tool_result.content)
+        assert content == {"user_id": "real_user", "workspace_id": "test12345"}
 
-    async def test_interrupt_on_destructive_tool_stream(self):
-        """run_stream yields interrupt chunk when a destructive tool is called."""
+    async def test_no_interrupt_on_destructive_tool_stream(self):
+        """HITL disabled: a destructive tool executes; no interrupt chunk."""
         provider = MockProvider()
         provider.set_stream_events(
             [
@@ -755,8 +756,9 @@ class TestAgentLoopHITL:
             chunks.append(chunk)
 
         interrupt_chunks = [c for c in chunks if c.type == "interrupt"]
-        assert len(interrupt_chunks) >= 1
-        assert interrupt_chunks[0].tool == "files_delete"
+        assert len(interrupt_chunks) == 0
+        tool_results = [c for c in chunks if c.type == "tool_result"]
+        assert len(tool_results) >= 1
 
     async def test_no_interrupt_for_safe_tools(self):
         """Tools without destructive=True execute normally."""
@@ -800,7 +802,9 @@ class TestAgentLoopHITL:
         result = await loop.run([Message.user("Audit log")])
         assert len(result) >= 3
 
-    def test_call_scoped_approval_matches_args_across_retry_call_id_once(self):
+    def test_should_interrupt_disabled_for_ship(self):
+        """HITL is disabled for ship: destructive tools never interrupt,
+        regardless of approval state."""
         destructive_delete = ToolDefinition(
             name="files_delete",
             description="Delete a file",
@@ -811,12 +815,11 @@ class TestAgentLoopHITL:
         loop = AgentLoop(provider=MockProvider(), tools=[destructive_delete])
         original = ToolCall(id="call-1", name="files_delete", arguments={"path": "/one"})
         retry = ToolCall(id="call-2", name="files_delete", arguments={"path": "/one"})
-        subsequent = ToolCall(id="call-3", name="files_delete", arguments={"path": "/one"})
 
         loop.approve_tool_call(original)
 
+        assert loop._should_interrupt(original) is False
         assert loop._should_interrupt(retry) is False
-        assert loop._should_interrupt(subsequent) is True
 
 
 class TestAgentLoopRunSingle:
@@ -1075,7 +1078,8 @@ class TestParallelToolExecution:
         assert len(interrupts) == 0
 
     def test_classify_destructive_sequential(self):
-        """A destructive write is classified as an interrupt (needs HITL approval)."""
+        """HITL disabled: a destructive write is sequential (executed one at
+        a time, no approval interrupt)."""
         loop = AgentLoop(provider=MockProvider(), tools=[echo, destructive_write])
         tc1 = ToolCall(id="c1", name="echo", arguments={"text": "a"})
         tc2 = ToolCall(id="c2", name="destructive_write", arguments={"path": "/x"})
@@ -1083,18 +1087,18 @@ class TestParallelToolExecution:
         parallel, sequential, interrupts = loop._classify_tool_calls([tc1, tc2])
         assert len(parallel) == 1
         assert parallel[0].name == "echo"
-        assert len(sequential) == 0
-        assert len(interrupts) == 1
-        assert interrupts[0].name == "destructive_write"
+        assert len(sequential) == 1
+        assert sequential[0].name == "destructive_write"
+        assert len(interrupts) == 0
 
-    def test_classify_interrupts(self):
+    def test_classify_no_interrupts_hitl_disabled(self):
         loop = AgentLoop(provider=MockProvider(), tools=[destructive_write])
         tc1 = ToolCall(id="c1", name="destructive_write", arguments={"path": "/x"})
 
         parallel, sequential, interrupts = loop._classify_tool_calls([tc1])
         assert len(parallel) == 0
-        assert len(sequential) == 0
-        assert len(interrupts) == 1
+        assert len(sequential) == 1
+        assert len(interrupts) == 0
 
     def test_classify_mixed(self):
         """Mixed: read-only goes parallel, stateful goes parallel, destructive goes sequential or interrupt."""
@@ -1109,11 +1113,12 @@ class TestParallelToolExecution:
 
         parallel, sequential, interrupts = loop._classify_tool_calls([tc1, tc2, tc3, tc4])
         assert len(parallel) == 3  # echo, add, stateful_action
-        assert len(sequential) == 0
-        assert len(interrupts) == 1  # destructive_write
+        assert len(sequential) == 1  # destructive_write (HITL disabled)
+        assert len(interrupts) == 0
 
     async def test_parallel_execution_order_run(self):
-        """Parallel-safe tools execute concurrently, destructive tools interrupt."""
+        """Parallel-safe tools execute concurrently, destructive sequentially
+        (HITL disabled — no interrupts)."""
         provider = MockProvider(
             responses=[
                 Message.assistant(
@@ -1139,7 +1144,7 @@ class TestParallelToolExecution:
 
         assert "a" in results_by_name["echo"]
         assert "3" in results_by_name["add"]
-        assert any("interrupt" in c for c in results_by_name["destructive_write"])
+        assert "wrote:/x" in results_by_name["destructive_write"]
 
     async def test_parallel_execution_concurrency(self):
         """Multiple read-only tools actually execute concurrently (faster than sequential)."""
@@ -1169,8 +1174,8 @@ class TestParallelToolExecution:
             f"Parallel execution should be faster than sequential (took {elapsed:.2f}s)"
         )
 
-    async def test_interrupt_with_parallel_safe_batch(self):
-        """Interrupts are reported but parallel-safe tools still execute."""
+    async def test_destructive_with_parallel_safe_batch(self):
+        """HITL disabled: destructive + safe tools both execute."""
         provider = MockProvider(
             responses=[
                 Message.assistant(
@@ -1192,8 +1197,8 @@ class TestParallelToolExecution:
         safe_result = next(m for m in tool_res if m.name == "echo")
         assert safe_result.content == "safe"
 
-        interrupt_result = next(m for m in tool_res if m.name == "destructive_write")
-        assert "interrupt" in interrupt_result.content
+        destructive_result = next(m for m in tool_res if m.name == "destructive_write")
+        assert destructive_result.content == "wrote:/x"
 
     async def test_parallel_execution_streaming(self):
         """Parallel execution works in streaming mode too."""

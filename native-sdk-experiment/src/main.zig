@@ -3464,9 +3464,9 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     }
     child_count += 1;
 
-    // HITL bar (if pending for the active chat) — fades in with a small
-    // upward slide so "a decision is waiting" reads as a surface appearing,
-    // not teleporting. Reduced motion: fade only.
+    // HITL bar — DISABLED FOR SHIP: the backend never emits interrupts
+    // (loop._should_interrupt returns false), so has_pending is always
+    // false and this block never renders. Kept dormant for re-enable.
     if (chat.has_pending) {
         const approve_text = std.fmt.allocPrint(ui.arena, "Approve: {s}?", .{chat.pending_tool}) catch "Approve?";
         const hitl_eased = smoothstep(model.hitl_entrance);

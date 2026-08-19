@@ -297,7 +297,7 @@ class MockProvider(LLMProvider):
 
 class TestAutoApproval:
     @pytest.mark.asyncio
-    async def test_destructive_tool_interrupts(self):
+    async def test_destructive_tool_executes_hitl_disabled(self):
         @tool
         def delete_file(path: str) -> str:
             """Delete a file."""
@@ -315,10 +315,10 @@ class TestAutoApproval:
         )
         loop = AgentLoop(provider=provider, tools=[delete_file], max_iterations=5)
         result = await loop.run([Message.user("delete /x")])
-        tool_results = [
-            m for m in result if m.role == "tool" and m.content and "interrupt" in m.content
-        ]
+        tool_results = [m for m in result if m.role == "tool"]
+        # HITL disabled: the destructive tool executes without approval.
         assert len(tool_results) >= 1
+        assert "interrupt" not in tool_results[0].content
 
     @pytest.mark.asyncio
     async def test_read_only_tool_no_interrupt(self):
