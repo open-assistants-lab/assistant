@@ -2931,51 +2931,42 @@ fn modelMatchesSearch(model: *const Model, m: ModelOption) bool {
 fn buildModelMenu(ui: *AppUi, model: *const Model) AppUi.Node {
     if (!model.model_menu_open) return ui.text(.{}, "");
 
-    // Bounded: the search field narrows the list; a stack array of the full
-    // catalog (8192) would overflow the test/UI stack.
-    const max_menu_items = 64;
-    var items: [max_menu_items]AppUi.Node = undefined;
-    var count: usize = 0;
-
-    items[count] = ui.textField(.{
-        .text = model.model_menu_search,
-        .placeholder = "Search models…",
-        .on_input = AppUi.inputMsg(.model_menu_search_input),
-        .semantics = .{ .label = "Search models" },
-        .style_tokens = .{ .background = .surface_subtle, .radius = .md },
-    });
-    count += 1;
-
+    // Cap the catalog (8192) with a bounded array; the scroll region
+    // handles overflow (common practice: ~8 visible rows, rest scrolls).
+    const max_menu_items = 256;
+    var rows: [max_menu_items]AppUi.Node = undefined;
+    var row_count: usize = 0;
     var filtered_idx: usize = 0;
+
     for (0..model.available_model_count) |i| {
-        if (count >= max_menu_items - 3) break;
+        if (row_count >= max_menu_items) break;
         const m = model.available_models[i];
         if (std.mem.eql(u8, m.key_source, "none")) continue;
         if (!modelMatchesSearch(model, m)) continue;
         const is_current = i == model.selected_model_idx;
         const label = std.fmt.allocPrint(ui.arena, "{s} · {s}", .{ m.provider_display, m.name }) catch m.name;
-        items[count] = ui.el(.menu_item, .{
+        rows[row_count] = ui.el(.menu_item, .{
             .key = .{ .int = filtered_idx },
             .text = label,
             .selected = is_current,
             .on_press = .{ .model_menu_select = filtered_idx },
         }, .{});
-        count += 1;
+        row_count += 1;
         filtered_idx += 1;
     }
 
-    if (filtered_idx == 0) {
-        items[count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "No models match");
-        count += 1;
-    }
-
-    items[count] = ui.el(.separator, .{}, .{});
-    count += 1;
-    items[count] = ui.el(.menu_item, .{
-        .text = "Manage models…",
-        .on_press = .model_menu_manage,
-    }, .{});
-    count += 1;
+    // The list scrolls within a fixed-height region; the search field and
+    // the "Manage models…" footer stay pinned above and below it.
+    const scroll_rows: AppUi.Node = if (row_count > 0)
+        ui.scroll(.{
+            .height = 260,
+            .max_width = 360,
+            .style_tokens = .{ .background = .surface },
+        }, .{
+            ui.column(.{ .gap = 2 }, rows[0..row_count]),
+        })
+    else
+        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "No models match");
 
     return ui.el(.dropdown_menu, .{
         .anchor = .above,
@@ -2984,7 +2975,21 @@ fn buildModelMenu(ui: *AppUi, model: *const Model) AppUi.Node {
         .on_dismiss = .close_model_menu,
         .min_width = 280,
         .max_width = 360,
-    }, items[0..count]);
+    }, .{
+        ui.textField(.{
+            .text = model.model_menu_search,
+            .placeholder = "Search models…",
+            .on_input = AppUi.inputMsg(.model_menu_search_input),
+            .semantics = .{ .label = "Search models" },
+            .style_tokens = .{ .background = .surface_subtle, .radius = .md },
+        }),
+        scroll_rows,
+        ui.el(.separator, .{}, .{}),
+        ui.el(.menu_item, .{
+            .text = "Manage models…",
+            .on_press = .model_menu_manage,
+        }, .{}),
+    });
 }
 
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
