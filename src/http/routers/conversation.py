@@ -436,9 +436,12 @@ async def list_available_models(
 
     models = []
     for provider in configured:
-        provider_models = _STATIC_MODELS.get(provider)
-        if provider_models is None:
-            provider_models = [
+        # Static seed is a fallback, NOT authoritative — merge with the
+        # registry (models.dev) so providers like ollama-cloud expose their
+        # full catalog (the seed held only one model).
+        static_models = _STATIC_MODELS.get(provider) or []
+        try:
+            registry_models = [
                 {
                     "id": f"{provider}:{m.id}",
                     "name": m.name,
@@ -447,6 +450,12 @@ async def list_available_models(
                 }
                 for m in list_models(provider=provider)
             ]
+        except Exception:
+            registry_models = []
+        by_id: dict[str, dict[str, str]] = {}
+        for m in registry_models + static_models:
+            by_id.setdefault(m["id"], m)
+        provider_models = list(by_id.values()) if registry_models else static_models
         key_source = _provider_key_source(provider, user_id) or "unknown"
         for m in provider_models:
             models.append({

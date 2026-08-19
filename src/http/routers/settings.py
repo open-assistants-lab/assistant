@@ -229,14 +229,15 @@ def _catalog_providers() -> list[dict[str, Any]]:
 
 
 def _provider_models(provider_id: str, provider_name: str) -> list[dict[str, str]]:
-    static_models = _STATIC_MODELS.get(provider_id)
-    if static_models is not None:
-        return sorted(static_models, key=lambda model: model["name"].lower())
-
+    """Models for one provider: the registry (models.dev) when available,
+    merged with the static seed list (a fallback, NOT authoritative —
+    otherwise a provider like ollama-cloud is stuck at the one seeded
+    model even though the registry knows 28)."""
+    static_models = _STATIC_MODELS.get(provider_id) or []
     try:
         from src.sdk.registry import list_models
 
-        models = [
+        registry_models = [
             {
                 "id": f"{provider_id}:{model.id}",
                 "name": model.name,
@@ -247,12 +248,17 @@ def _provider_models(provider_id: str, provider_name: str) -> list[dict[str, str
         ]
     except Exception:
         logger.warning("settings.provider_models_failed", {"provider_id": provider_id})
-        models = []
+        registry_models = []
 
-    deduped: dict[str, dict[str, str]] = {}
-    for model in sorted(models, key=lambda item: (item["name"].lower(), item["id"].lower())):
-        deduped.setdefault(model["name"].lower(), model)
-    return list(deduped.values())
+    if not registry_models:
+        return sorted(static_models, key=lambda model: model["name"].lower())
+
+    # Registry wins; static entries fill gaps the registry lacks. Dedupe by
+    # the fully-qualified id (the registry and the seed use the same ids).
+    by_id: dict[str, dict[str, str]] = {}
+    for model in registry_models + static_models:
+        by_id.setdefault(model["id"], model)
+    return sorted(by_id.values(), key=lambda item: (item["name"].lower(), item["id"].lower()))
 
 
 def _catalog_snapshot() -> tuple[list[dict[str, Any]], dict[str, list[dict[str, str]]]]:
