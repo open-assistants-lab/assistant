@@ -123,9 +123,18 @@ def resolve_effective_user_settings(
         raise SettingsResolutionError("Invalid host default model configuration")
 
     def _resolve_role_model(saved_value: str | None, host_value: str | None) -> CanonicalModel:
-        candidate = saved_value or host_value or default_model
-        resolved = canonical_model(candidate)
-        return resolved if resolved is not None else default_model
+        # Catalog drift: a saved/host model that models.dev removed or
+        # renamed must not 404 at runtime. Walk the chain (saved → host →
+        # default) to the first model the catalog knows; the static seeds
+        # guarantee the default is always catalogued, so the terminal is
+        # effectively always valid.
+        for candidate in (saved_value, host_value, default_model):
+            if not candidate:
+                continue
+            resolved = canonical_model(candidate)
+            if resolved is not None and model_available(resolved):
+                return resolved
+        return default_model
 
     title_model = _resolve_role_model(saved.title_model, host_title_model)
     summarization_model = _resolve_role_model(saved.summarization_model, host_summarization_model)

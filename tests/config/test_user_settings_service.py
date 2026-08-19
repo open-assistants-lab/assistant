@@ -177,7 +177,9 @@ def test_off_retains_valid_diagnostics_without_callbacks() -> None:
     )
     assert effective.verification.grader_model == "openai:host-grader"
     assert effective.verification.grader_prompt_hash == _HASH
-    assert calls == []
+    # The role models (title/summarization) are catalog-validated, but the
+    # grader is never evaluated while verification is off.
+    assert calls == ["openai:host-chat", "openai:host-chat"]
 
 
 def test_enabled_without_prompt_is_unavailable_before_callbacks() -> None:
@@ -197,7 +199,9 @@ def test_enabled_without_prompt_is_unavailable_before_callbacks() -> None:
         provider_available=record_provider,
     )
     assert effective.verification.unavailable_reason is RubricUnavailableReason.MISSING_PROMPT
-    assert calls == []
+    # Role-model catalog checks run first; the grader is never evaluated
+    # once the missing prompt short-circuits the verification.
+    assert calls == ["openai:host-chat", "openai:host-chat"]
 
 
 def test_enabled_with_defensively_constructed_blank_prompt_is_unavailable() -> None:
@@ -398,5 +402,52 @@ def test_availability_callbacks_have_deterministic_order_only_after_prompt() -> 
         model_available=record_model,
     )
     assert effective.verification.state is RubricAvailability.ON
-    assert calls == ["provider:openai", "model:openai:host-grader"]
+    # Deterministic order: role-model catalog checks, then the grader's
+    # provider, then the grader model.
+    assert calls == [
+        "model:openai:host-chat",
+        "model:openai:host-chat",
+        "provider:openai",
+        "model:openai:host-grader",
+    ]
     assert effective.verification.grader_prompt_hash == _HASH
+
+
+def test_stale_saved_title_model_falls_back_to_host() -> None:
+    """A saved title model the catalog no longer knows degrades to the
+    host value instead of 404ing at runtime."""
+    saved = SavedUserSettings(title_model="openai:ghost-model")
+    effective = _resolve(
+        saved=saved,
+        host_title_model="openai:host-title",
+        model_available=lambda m: m in {"openai:host-title", "openai:host-chat"},
+    )
+    assert effective.title_model == "openai:host-title"
+
+
+def test_all_stale_title_models_fall_back_to_default() -> None:
+    """When the whole chain is stale, the (seeded) default is used."""
+    saved = SavedUserSettings(title_model="openai:ghost")
+    effective = _resolve(
+        saved=saved,
+        host_title_model="openai:ghost-host",
+        model_available=lambda m: m == "openai:host-chat",
+    )
+    assert effective.title_model == "openai:host-chat"
+
+
+def test_valid_saved_title_model_wins() -> None:
+    """A saved title model that IS in the catalog is used unchanged."""
+    saved = SavedUserSettings(title_model="openai:my-title")
+    effective = _resolve(saved=saved, model_available=lambda m: m == "openai:my-title")
+    assert effective.title_model == "openai:my-title"
+
+
+def test_stale_saved_summarization_model_falls_back_to_host() -> None:
+    saved = SavedUserSettings(summarization_model="openai:ghost-model")
+    effective = _resolve(
+        saved=saved,
+        host_summarization_model="openai:host-summary",
+        model_available=lambda m: m in {"openai:host-summary", "openai:host-chat"},
+    )
+    assert effective.summarization_model == "openai:host-summary"
