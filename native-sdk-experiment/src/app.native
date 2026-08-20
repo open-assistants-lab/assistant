@@ -35,7 +35,7 @@
       </column>
     </scroll>
     <column gap="2" padding="8" background="surface">
-      <row gap="8" padding="8" radius="sm" cross="center">
+      <row gap="8" padding="8" radius="sm" cross="center" on-press="open_tools">
         <icon name="wrench" foreground="text_muted"/>
         <text size="sm" foreground="text_muted">Tools</text>
       </row>

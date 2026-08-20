@@ -49,6 +49,14 @@ const ProviderInfo = struct {
 
 const SettingsSection = enum { providers_models, general };
 
+const ToolsSection = enum { builtin, connections };
+
+const ToolsState = struct {
+    visible: bool = false,
+    section: ToolsSection = .builtin,
+    loading: bool = false,
+};
+
 /// Which model role the catalog picker is currently editing.
 const ModelRole = enum { agent, grader, title, summarization };
 
@@ -272,6 +280,10 @@ pub const Msg = union(enum) {
     reached_bottom,
     open_settings,
     close_settings,
+    open_tools,
+    close_tools,
+    tools_tab_builtin,
+    tools_tab_connections,
     settings_providers_models,
     settings_general,
     settings_loaded: native_sdk.EffectResponse,
@@ -352,6 +364,7 @@ pub const Model = struct {
     model_menu_search: []const u8 = "",
     model_menu_search_selection: canvas.TextSelection = .{ .anchor = 0, .focus = 0 },
     settings: SettingsState = .{},
+    tools: ToolsState = .{},
     allocator: std.mem.Allocator = undefined,
 
     pub const view_unbound = .{
@@ -1539,6 +1552,24 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .close_settings => {
             model.settings.visible = false;
         },
+        .open_tools => {
+            if (model.tools.visible) {
+                model.tools.visible = false;
+                return;
+            }
+            model.settings.visible = false; // tools wins precedence
+            model.tools.visible = true;
+            model.tools.loading = true;
+        },
+        .close_tools => {
+            model.tools.visible = false;
+        },
+        .tools_tab_builtin => {
+            model.tools.section = .builtin;
+        },
+        .tools_tab_connections => {
+            model.tools.section = .connections;
+        },
         .settings_providers_models => {
             model.settings.section = .providers_models;
         },
@@ -2597,7 +2628,9 @@ const ChatApp = native_sdk.UiApp(Model, Msg);
 // ── View builders (Zig view replacing markup) ──────────────────────────────
 
 pub fn buildView(ui: *AppUi, model: *const Model) AppUi.Node {
-    const right_panel: AppUi.Node = if (model.settings.visible)
+    const right_panel: AppUi.Node = if (model.tools.visible)
+        buildToolsPanel(ui, model)
+    else if (model.settings.visible)
         buildSettingsPanel(ui, model)
     else
         buildChatPanel(ui, model);
@@ -2780,7 +2813,12 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
 
     // Bottom nav: Tools, Skills, Subagents
     var nav_nodes: [3]AppUi.Node = undefined;
-    nav_nodes[0] = ui.row(.{ .gap = 8, .padding = 8, .cross = .center }, .{
+    nav_nodes[0] = ui.row(.{
+        .gap = 8,
+        .padding = 8,
+        .cross = .center,
+        .on_press = .open_tools,
+    }, .{
         ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "wrench"),
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Tools"),
     });
@@ -3425,6 +3463,44 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     }, .{
         ui.column(.{ .gap = 12 }, children_slice),
     });
+}
+
+fn buildToolsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
+    var children: [4]AppUi.Node = undefined;
+    var child_count: usize = 0;
+
+    children[child_count] = ui.row(.{ .gap = 12, .padding = 16, .cross = .center, .style_tokens = .{ .background = .surface } }, .{
+        ui.text(.{ .size = .heading }, "Tools"),
+        ui.spacer(1),
+    });
+    child_count += 1;
+
+    var tab_nodes: [2]AppUi.Node = undefined;
+    const tabs = [_]struct { section: ToolsSection, label: []const u8 }{
+        .{ .section = .builtin, .label = "Built-in" },
+        .{ .section = .connections, .label = "Connections" },
+    };
+    for (tabs, 0..) |t, i| {
+        const active = model.tools.section == t.section;
+        tab_nodes[i] = ui.button(.{
+            .on_press = switch (t.section) {
+                .builtin => .tools_tab_builtin,
+                .connections => .tools_tab_connections,
+            },
+            .variant = if (active) .primary else .ghost,
+            .size = .sm,
+        }, t.label);
+    }
+    const tab_slice: []const AppUi.Node = tab_nodes[0..2];
+    children[child_count] = ui.row(.{ .gap = 6, .padding = 4, .cross = .center }, tab_slice);
+    child_count += 1;
+
+    children[child_count] = ui.scroll(.{ .grow = 1, .padding = 16 }, .{
+        ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Loading…"),
+    });
+    child_count += 1;
+
+    return ui.column(.{ .grow = 1, .style_tokens = .{ .background = .background } }, children[0..child_count]);
 }
 
 fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {

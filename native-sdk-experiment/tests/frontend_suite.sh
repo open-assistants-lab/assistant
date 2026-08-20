@@ -1,8 +1,8 @@
 #!/bin/bash
 # Unified frontend test suite for Native SDK chat app
 # Tests: chat flow, screenshot diffing, keyboard, bridge, chat management,
-#        suggestions, settings, cancel, search, model cycling, sidebar resize, unread dot
-# Usage: ./tests/frontend_suite.sh [--all|--record|--screenshot|--keyboard|--bridge|--chats|--suggestions|--settings|--cancel|--search|--model|--sidebar|--unread]
+#        suggestions, settings, tools, cancel, search, model cycling, sidebar resize, unread dot
+# Usage: ./tests/frontend_suite.sh [--all|--record|--screenshot|--keyboard|--bridge|--chats|--suggestions|--settings|--tools|--cancel|--search|--model|--sidebar|--unread]
 set -uo pipefail
 
 WORKDIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -543,6 +543,48 @@ test_settings() {
     else
       fail "settings did not close"
     fi
+  fi
+
+  cleanup
+}
+
+# NOTE: Tools row in the sidebar is a pressable row (role=group, name="")
+# with the "Tools" label on a child text — located like Settings.
+test_tools() {
+  echo ""
+  echo "=== 8. Tools Panel: Open, tabs, close ==="
+
+  start_backend
+  start_app
+
+  SNAPSHOT=$(native automate snapshot)
+  TOOLS=$(find_pressable_by_child_text "Tools")
+  if [ -z "$TOOLS" ]; then
+    fail "Tools pressable row not found"
+    cleanup
+    return 1
+  fi
+  native automate widget-click main-canvas "$TOOLS" > /dev/null 2>&1
+  if native automate assert --timeout-ms 3000 'role=text name="Tools"' > /dev/null 2>&1; then
+    pass "tools panel opens with a Tools header"
+  else
+    fail "tools panel did not open"
+  fi
+  # Both tab labels present (tab buttons expose as role=button)
+  if native automate assert --timeout-ms 3000 'role=button name="Built-in"' > /dev/null 2>&1 &&
+     native automate assert --timeout-ms 3000 'role=button name="Connections"' > /dev/null 2>&1; then
+    pass "tools panel shows Built-in and Connections tabs"
+  else
+    fail "tools panel tabs missing"
+  fi
+  # Toggle close (press the sidebar Tools row again)
+  SNAPSHOT=$(native automate snapshot)
+  TOOLS=$(find_pressable_by_child_text "Tools")
+  native automate widget-click main-canvas "$TOOLS" > /dev/null 2>&1
+  if native automate assert --timeout-ms 3000 'role=textbox name="Message"' > /dev/null 2>&1; then
+    pass "tools closes and shows chat"
+  else
+    fail "tools did not close"
   fi
 
   cleanup
@@ -1100,6 +1142,7 @@ case "$MODE" in
     test_chats
     test_suggestions
     test_settings
+    test_tools
     test_cancel
     test_search
     test_model
@@ -1129,6 +1172,9 @@ case "$MODE" in
   --settings)
     test_settings
     ;;
+  --tools)
+    test_tools
+    ;;
   --cancel)
     test_cancel
     ;;
@@ -1151,7 +1197,7 @@ case "$MODE" in
     test_model_midstream
     ;;
   *)
-    echo "Usage: $0 [--all|--record|--screenshot|--keyboard|--bridge|--chats|--suggestions|--settings|--cancel|--search|--model|--sidebar|--unread|--textarea|--midstream]"
+    echo "Usage: $0 [--all|--record|--screenshot|--keyboard|--bridge|--chats|--suggestions|--settings|--tools|--cancel|--search|--model|--sidebar|--unread|--textarea|--midstream]"
     exit 1
     ;;
 esac
