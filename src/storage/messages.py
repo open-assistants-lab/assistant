@@ -793,7 +793,8 @@ class MessageStore:
                 rows_raw = cur.execute(
                     "SELECT rowid, id, ts, role, content, metadata, session_id "
                     "FROM messages "
-                    "WHERE session_id = ? AND role != 'summary' "
+                    "WHERE session_id = ? AND role != 'summary' AND role != 'tool' "
+                    "AND COALESCE(json_extract(metadata, '$.include_in_model_context'), 1) != 0 "
                     "ORDER BY rowid DESC LIMIT ?",
                     [session_id, limit],
                 ).fetchall()
@@ -843,8 +844,10 @@ class MessageStore:
             row
             for row in rows
             if row.role != "summary"
+            and row.role != "tool"
             and row.id not in summarized_ids
             and (row.id in preserved_ids or row.sequence > summary.sequence)
+            and (row.metadata or {}).get("include_in_model_context") is not False
         ]
         if limit == 1:
             return [self._stored_to_message(summary)]

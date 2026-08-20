@@ -152,6 +152,16 @@ class RunConfig:
     verification_grader_system_prompt: str | None = None
     verification_grader_tools: list[str] | None = None
     verification_max_iterations: int = 3
+    # Soft duplicate-call guard: when the model re-proposes a (tool, args)
+    # pair already executed this run, the loop does not re-execute it — it
+    # injects a system message with the existing result and asks the model
+    # to answer directly. Up to `max_duplicate_tool_nudges` nudges; after
+    # that the loop requests one brief final text response (capped) instead.
+    max_duplicate_tool_nudges: int = 3
+
+
+# Token cap for the post-nudge final text response (FR-9).
+DUPLICATE_TOOL_FINAL_MAX_TOKENS = 200
 
 
 class CostTracker:
@@ -367,6 +377,76 @@ class AgentLoop:
                 sequential.append(tc)
 
         return parallel_safe, sequential, interrupts
+
+    @staticmethod
+    def _tool_call_key(tc: ToolCall) -> tuple[str, str]:
+        """Identity key for the duplicate-call guard: (name, normalized args)."""
+        return (tc.name, json.dumps(tc.arguments or {}, sort_keys=True))
+
+    @staticmethod
+    def _record_executed_tools(tool_calls: list[ToolCall], state: AgentState) -> None:
+        """Track executed (tool, args) pairs for the duplicate-call guard."""
+        executed = state.extra.setdefault("_executed_tool_calls", [])
+        for tc in tool_calls:
+            key = AgentLoop._tool_call_key(tc)
+            if key not in executed:
+                executed.append(key)
+
+    def _seed_executed_tool_calls(self, state: AgentState) -> None:
+        """Seed the executed set from tool calls already present in the run's
+        messages. The grader re-run (attempt 2+) rebuilds the state from the
+        previous attempt's messages, so without this the re-run would treat
+        the previous attempt's calls as fresh and re-execute them."""
+        executed = state.extra.setdefault("_executed_tool_calls", [])
+        if executed:
+            return
+        for msg in state.messages:
+            if msg.role == "assistant" and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    key = self._tool_call_key(tc)
+                    if key not in executed:
+                        executed.append(key)
+
+    def _split_duplicate_tool_calls(
+        self, tool_calls: list[ToolCall], state: AgentState
+    ) -> tuple[list[ToolCall], list[ToolCall]]:
+        """Soft duplicate-call guard: split proposed calls into fresh and
+        already-executed-this-run (same tool + same args). The executed set
+        is tracked in state.extra['_executed_tool_calls']."""
+        executed = set(state.extra.get("_executed_tool_calls", []))
+        fresh: list[ToolCall] = []
+        dupes: list[ToolCall] = []
+        for tc in tool_calls:
+            if self._tool_call_key(tc) in executed:
+                dupes.append(tc)
+            else:
+                fresh.append(tc)
+        return fresh, dupes
+
+    @staticmethod
+    def _last_tool_result(state: AgentState, name: str, limit: int = 200) -> str:
+        """The most recent tool-result content for `name` (capped) — shown in
+        the nudge so the model answers from the result it already has."""
+        for msg in reversed(state.messages):
+            if msg.role == "tool" and getattr(msg, "name", None) == name:
+                content = str(msg.content or "")
+                return content if len(content) <= limit else content[:limit] + "…"
+        return "(result unavailable)"
+
+    @staticmethod
+    def _with_final_response_cap(
+        provider_options: dict[str, dict[str, Any]] | None,
+    ) -> dict[str, dict[str, Any]] | None:
+        """Merge the ~200-token cap into a copy of the provider options for
+        the post-nudge final text response (FR-9). Never mutates the caller's
+        dict (the provider copies options per call, but be explicit)."""
+        if not provider_options:
+            return {"ollama-cloud": {"max_tokens": DUPLICATE_TOOL_FINAL_MAX_TOKENS}}
+        merged: dict[str, dict[str, Any]] = {}
+        for key, opts in provider_options.items():
+            merged[key] = dict(opts)
+            merged[key]["max_tokens"] = DUPLICATE_TOOL_FINAL_MAX_TOKENS
+        return merged
 
     async def _execute_tool(self, tc: ToolCall) -> ToolResult:
         """Execute a tool call, returning a ToolResult with structured content."""
@@ -1088,6 +1168,7 @@ class AgentLoop:
 
     async def _run_react_loop(self, state: AgentState, cost_tracker: CostTracker) -> None:
         """Run the ReAct loop body — LLM calls and tool execution."""
+        self._seed_executed_tool_calls(state)
         for iteration in range(self.run_config.max_iterations):
             limit_reason = cost_tracker.exceeds_limits(self.run_config)
             if limit_reason:
@@ -1100,6 +1181,12 @@ class AgentLoop:
                 await self._check_subagent_before_llm(state)
                 prepared, tools = await self._prepare_agent_call(state)
                 call_index = await self._record_agent_call(prepared, tools)
+                # The post-nudge final response is capped (FR-9).
+                call_options = (
+                    self._with_final_response_cap(self.run_config.provider_options)
+                    if state.extra.get("_final_answer_requested")
+                    else self.run_config.provider_options
+                )
 
                 try:
                     if self.trace_provider:
@@ -1110,7 +1197,7 @@ class AgentLoop:
                                 prepared,
                                 tools=tools,
                                 model=None,
-                                provider_options=self.run_config.provider_options,
+                                provider_options=call_options,
                             )
                             span.set_meta("has_tool_calls", bool(response.tool_calls))
                             if response.usage:
@@ -1128,7 +1215,7 @@ class AgentLoop:
                             prepared,
                             tools=tools,
                             model=None,
-                            provider_options=self.run_config.provider_options,
+                            provider_options=call_options,
                         )
                         cost_tracker.add_usage(
                             input_tokens=response.usage.input_tokens if response.usage else 0,
@@ -1161,6 +1248,21 @@ class AgentLoop:
 
             await self._run_hooks("aafter_model", state)
 
+            # Post-nudge final response (FR-9): suppress any tool calls and
+            # use the text as the answer (checked before the FR-4 hold so the
+            # final text is not stripped).
+            if state.extra.get("_final_answer_requested"):
+                if response.tool_calls:
+                    response.tool_calls = []
+                output_text = response.content if isinstance(response.content, str) else ""
+                break
+
+            # FR-4: text bundled with a tool call is held back — it must not
+            # be committed as an answer while the loop still calls tools (the
+            # deepseek 'cut off' regression feeds on it).
+            if response.tool_calls and response.content:
+                response.content = ""
+
             if not response.tool_calls:
                 output_text = response.content if isinstance(response.content, str) else ""
                 try:
@@ -1172,6 +1274,37 @@ class AgentLoop:
                 break
 
             effective_tool_calls = [self._with_runtime_context(tc) for tc in response.tool_calls]
+
+            # Soft duplicate-call guard (US-003): a (tool, args) pair already
+            # executed this run is not executed again. The model gets a system
+            # message with the existing result (repeatable up to
+            # max_duplicate_tool_nudges); after that, one brief final text
+            # response is requested with a capped output.
+            fresh_calls, duplicate_calls = self._split_duplicate_tool_calls(
+                effective_tool_calls, state
+            )
+            if duplicate_calls:
+                nudges = state.extra.get("_duplicate_tool_nudges", 0)
+                max_nudges = self.run_config.max_duplicate_tool_nudges
+                if nudges < max_nudges:
+                    state.extra["_duplicate_tool_nudges"] = nudges + 1
+                    tool_result = self._last_tool_result(state, duplicate_calls[0].name)
+                    state.add_message(
+                        Message.system(
+                            f"The tool '{duplicate_calls[0].name}' was already called with the "
+                            f"same arguments and returned: {tool_result}. Do not call it again — "
+                            "answer the user directly."
+                        )
+                    )
+                    continue
+                state.extra["_final_answer_requested"] = True
+                state.add_message(
+                    Message.system(
+                        "Respond now with a brief final answer. Do not call any tools."
+                    )
+                )
+                continue
+            effective_tool_calls = fresh_calls
 
             # Classify tool calls: parallel-safe, sequential, interrupts
             parallel_safe, sequential, interrupts = self._classify_tool_calls(effective_tool_calls)
@@ -1197,10 +1330,12 @@ class AgentLoop:
             # Execute parallel-safe tools concurrently
             if parallel_safe:
                 await self._execute_tool_batch(parallel_safe, state)
+                self._record_executed_tools(parallel_safe, state)
 
             # Execute sequential (destructive) tools one-at-a-time
             for tc in sequential:
                 await self._execute_single_tool(tc, state)
+                self._record_executed_tools([tc], state)
 
     async def run_stream(self, messages: list[Message]) -> AsyncIterator[StreamChunk]:
         """Run the agent loop, yielding StreamChunk events in real-time.
@@ -1227,6 +1362,7 @@ class AgentLoop:
         state.extra["_user_id"] = getattr(self, "_flow_user_id", "default")
         state.extra["_session_id"] = getattr(self, "_flow_session_id", "default")
         state.extra["_model"] = getattr(self, "_flow_model", None)
+        self._seed_executed_tool_calls(state)
         cost_tracker = CostTracker()
         all_tool_calls: list[dict[str, Any]] = []
 
@@ -1283,6 +1419,12 @@ class AgentLoop:
 
                 await self._check_subagent_before_llm(state)
                 prepared, tools = await self._prepare_agent_call(state)
+                # The post-nudge final response is capped (FR-9).
+                call_options = (
+                    self._with_final_response_cap(self.run_config.provider_options)
+                    if state.extra.get("_final_answer_requested")
+                    else self.run_config.provider_options
+                )
 
                 stream_content_parts: list[str] = []
                 stream_tool_calls: list[ToolCall] = []
@@ -1302,7 +1444,7 @@ class AgentLoop:
                                 prepared,
                                 tools=tools,
                                 model=None,
-                                provider_options=self.run_config.provider_options,
+                                provider_options=call_options,
                             ):
                                 # Cooperative cancellation during token streaming
                                 if self.cancel_event and self.cancel_event.is_set():
@@ -1349,7 +1491,7 @@ class AgentLoop:
                             prepared,
                             tools=tools,
                             model=None,
-                            provider_options=self.run_config.provider_options,
+                            provider_options=call_options,
                         ):
                             # Cooperative cancellation during token streaming
                             if self.cancel_event and self.cancel_event.is_set():
@@ -1447,6 +1589,25 @@ class AgentLoop:
 
                 await self._run_hooks("aafter_model", state)
 
+                # Post-nudge final response (FR-9): suppress any tool calls
+                # and use the text as the answer (checked before the FR-4
+                # hold so the final text is not stripped).
+                if state.extra.get("_final_answer_requested"):
+                    if stream_tool_calls:
+                        stream_tool_calls = []
+                    output_text = assistant_content
+                    try:
+                        await self._check_output_guardrails(output_text, state)
+                    except GuardrailTripwire as e:
+                        yield StreamChunk.error(message=f"Output blocked: {e.result.message}")
+                    break
+
+                # FR-4: text bundled with a tool call is held back from the
+                # model context (the streaming client still saw the deltas,
+                # but the next LLM call must not see a partial answer).
+                if stream_tool_calls and assistant_msg.content:
+                    assistant_msg.content = ""
+
                 if not stream_tool_calls:
                     output_text = assistant_content
                     try:
@@ -1471,6 +1632,44 @@ class AgentLoop:
                         len(stream_tool_calls) - len(deduped_calls),
                     )
                 stream_tool_calls = [self._with_runtime_context(tc) for tc in deduped_calls]
+
+                # Soft duplicate-call guard (US-003): a (tool, args) pair
+                # already executed this run is not executed again. The model
+                # gets a system message with the existing result (repeatable
+                # up to max_duplicate_tool_nudges); after that, one brief
+                # final text response is requested with a capped output.
+                fresh_calls, duplicate_calls = self._split_duplicate_tool_calls(
+                    stream_tool_calls, state
+                )
+                if duplicate_calls:
+                    logger.info(
+                        "sdk.duplicate_guard fired",
+                        extra={"tool": duplicate_calls[0].name,
+                               "args": duplicate_calls[0].arguments,
+                               "executed": [k[0] for k in state.extra.get("_executed_tool_calls", [])],
+                               "nudges": state.extra.get("_duplicate_tool_nudges", 0)},
+                    )
+                    nudges = state.extra.get("_duplicate_tool_nudges", 0)
+                    max_nudges = self.run_config.max_duplicate_tool_nudges
+                    if nudges < max_nudges:
+                        state.extra["_duplicate_tool_nudges"] = nudges + 1
+                        tool_result = self._last_tool_result(state, duplicate_calls[0].name)
+                        state.add_message(
+                            Message.system(
+                                f"The tool '{duplicate_calls[0].name}' was already called with the "
+                                f"same arguments and returned: {tool_result}. Do not call it again — "
+                                "answer the user directly."
+                            )
+                        )
+                        continue
+                    state.extra["_final_answer_requested"] = True
+                    state.add_message(
+                        Message.system(
+                            "Respond now with a brief final answer. Do not call any tools."
+                        )
+                    )
+                    continue
+                stream_tool_calls = fresh_calls
 
                 # Record tool calls AFTER dedup so only unique names are reported
                 all_tool_calls.extend([{"name": tc.name, "call_id": tc.id} for tc in stream_tool_calls])
@@ -1512,6 +1711,7 @@ class AgentLoop:
                         return
                     async for event in self._execute_tool_batch_streaming(parallel_safe, state):
                         yield event
+                    self._record_executed_tools(parallel_safe, state)
 
                 # Execute sequential (destructive) tools one-at-a-time
                 for tc in sequential:
@@ -1520,6 +1720,7 @@ class AgentLoop:
                         return
                     async for event in self._execute_single_tool_streaming(tc, state):
                         yield event
+                    self._record_executed_tools([tc], state)
 
                 overflow_retries = 0
                 iteration += 1

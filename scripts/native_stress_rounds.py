@@ -62,6 +62,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--rounds", type=int, default=50)
     ap.add_argument("--start-round", type=int, default=1)
+    ap.add_argument("--message", type=str, default="Reply exactly: round {i}",
+                    help="Message template; {i} is replaced with the round number")
     ap.add_argument("--launch", action="store_true", help="launch the app first")
     args = ap.parse_args()
 
@@ -97,7 +99,7 @@ def main() -> None:
             print(f"round {i}: textbox not found — aborting", flush=True)
             break
         focus(tb)
-        type_text(f"Reply exactly: round {i}")
+        type_text(args.message.format(i=i))
         s = snap()
         send = widget_id(s, "button", "Send")
         if send is None:

@@ -890,6 +890,42 @@ def test_persist_run_stores_audit_records_with_include_in_model_context_false() 
     assert tool.metadata.get("tool_call_id") == "call-1"
 
 
+def test_get_messages_with_summary_excludes_audit_records() -> None:
+    """Audit records (include_in_model_context=False) must never re-enter the
+    model context: get_messages_with_summary filters them in both branches."""
+    store = _store()
+    store.add_message("user", "hello", session_id="a")
+    answer = Message(id="", ts=datetime.now(UTC), role="assistant", content="answer", session_id="a")
+    audit = [
+        Message(
+            id="",
+            ts=datetime.now(UTC),
+            role="tool",
+            content="tool output",
+            session_id="a",
+            metadata={"tool_name": "time_get", "tool_call_id": "call-1"},
+        ),
+    ]
+    pre = [
+        Message(id="", ts=datetime.now(UTC), role="reasoning", content="thinking", session_id="a"),
+    ]
+    store.persist_run(
+        run_id="run-excl",
+        session_id="a",
+        user_message_id="msg-1",
+        final_answer=answer,
+        audit_records=audit,
+        pre_messages=pre,
+        metadata={"model": "test:model"},
+    )
+
+    msgs = store.get_messages_with_summary("a", limit=50)
+    roles = [m.role for m in msgs]
+    assert "tool" not in roles, f"audit tool row leaked into context: {roles}"
+    assert "user" in roles and "assistant" in roles
+    assert "reasoning" in roles  # pre-messages stay in context
+
+
 def test_persist_run_is_idempotent_on_run_id() -> None:
     store = _store()
     store.add_message("user", "hello", session_id="a")

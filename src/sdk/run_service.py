@@ -166,6 +166,12 @@ def _tool_audit_records(
     for m in state.messages:
         if m.role != "tool":
             continue
+        # History-loaded tool rows (previous runs) carry storage provenance;
+        # only the current run's executions have storage_id=None. Without
+        # this, each run re-persisted earlier runs' stale tool rows and the
+        # transcript grew on every round.
+        if getattr(m, "storage_id", None):
+            continue
         meta: dict[str, Any] = {"stream": True}
         if getattr(m, "name", None):
             meta["tool_name"] = m.name

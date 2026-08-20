@@ -508,3 +508,24 @@ async def test_execute_stream_persists_verification_metadata(monkeypatch):
     assert last["result"] == "satisfied"
     assert last["criteria"][0]["name"] == "c"
     assert last["criteria"][0]["passed"] is True
+
+
+def test_tool_audit_records_excludes_history_loaded_rows() -> None:
+    """The audit must persist only the CURRENT run's tool executions — rows
+    loaded from history carry storage provenance and must not be re-stored
+    (each run previously re-persisted earlier runs' stale tool rows)."""
+    from src.sdk.run_service import _tool_audit_records
+
+    loop = FakeLoop()
+    loop.state.messages = [
+        # History-loaded row from a previous run (storage provenance set).
+        Message(role="tool", content="old result", name="time_get", storage_id="stored-1"),
+        Message(role="user", content="what time is it"),
+        # The current run's execution — no storage provenance.
+        Message(role="tool", content="Current time: 13:00 UTC", name="time_get"),
+    ]
+
+    records = _tool_audit_records(loop, "chat-1")
+    assert len(records) == 1, f"expected only the current run's tool row, got {len(records)}"
+    assert records[0].content == "Current time: 13:00 UTC"
+    assert records[0].metadata["tool_name"] == "time_get"

@@ -42,6 +42,7 @@ class MockProvider(LLMProvider):
         self._call_count = 0
         self._last_messages: list[Message] | None = None
         self._last_tools: list[ToolDefinition] | None = None
+        self._last_kwargs: dict | None = None
         self._stream_events: list[list[StreamChunk]] = []
 
     def set_responses(self, responses: list[Message]) -> None:
@@ -60,6 +61,7 @@ class MockProvider(LLMProvider):
     ) -> Message:
         self._last_messages = messages
         self._last_tools = tools
+        self._last_kwargs = kwargs
         if self._call_count < len(self.responses):
             response = self.responses[self._call_count]
             self._call_count += 1
@@ -1818,3 +1820,131 @@ async def test_run_stream_completes_normally_resets_context_var():
         pass
 
     assert _current_agent_loop.get() is None
+
+
+class TestDuplicateToolCallGuard:
+    """US-003: soft duplicate-call guard — an already-executed (tool, args)
+    pair is never executed again; the model gets a system-message nudge, and
+    after K nudges a brief capped final text response is requested."""
+
+    async def test_repeated_tool_call_is_nudged_not_reexecuted(self):
+        provider = MockProvider(
+            responses=[
+                Message.assistant(
+                    content="",
+                    tool_calls=[
+                        ToolCall(id="call_1", name="echo", arguments={"text": "hi"}),
+                    ],
+                ),
+                # The model re-proposes the SAME call (the deepseek regression).
+                Message.assistant(
+                    content="The current time is 13:43:55 UTC",
+                    tool_calls=[
+                        ToolCall(id="call_2", name="echo", arguments={"text": "hi"}),
+                    ],
+                ),
+                Message.assistant(content="The result is: hi"),
+            ]
+        )
+        loop = AgentLoop(provider=provider, tools=[echo])
+        result = await loop.run([Message.user("Say hi")])
+
+        tool_res = [m for m in result if m.role == "tool"]
+        assert len(tool_res) == 1, "the duplicate call must NOT be re-executed"
+        nudge_msgs = [m for m in result if m.role == "system" and "already called" in str(m.content)]
+        assert len(nudge_msgs) == 1
+        final = [m for m in result if m.role == "assistant" and m.content == "The result is: hi"]
+        assert final, "the final text answer must be used"
+
+    async def test_duplicate_guard_escalates_to_capped_final_response(self):
+        """After max_duplicate_tool_nudges nudges, the loop requests one brief
+        final text response; tool calls in it are suppressed and its text used."""
+        provider = MockProvider(
+            responses=[
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="c1", name="echo", arguments={"text": "x"})],
+                ),
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="c2", name="echo", arguments={"text": "x"})],
+                ),
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="c3", name="echo", arguments={"text": "x"})],
+                ),
+                # The K-th re-proposal triggers the final-response escalation.
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="c4", name="echo", arguments={"text": "x"})],
+                ),
+                # The final capped call: still proposes the tool — must be
+                # suppressed and the text used.
+                Message.assistant(content="brief final", tool_calls=[ToolCall(id="c5", name="echo", arguments={"text": "x"})]),
+            ]
+        )
+        loop = AgentLoop(
+            provider=provider,
+            tools=[echo],
+            run_config=RunConfig(max_duplicate_tool_nudges=2),
+        )
+        result = await loop.run([Message.user("say")])
+
+        tool_res = [m for m in result if m.role == "tool"]
+        assert len(tool_res) == 1, "only the first execution happens"
+        finals = [m for m in result if m.role == "assistant" and m.content == "brief final"]
+        assert finals, "the final response text must be used"
+        # The final call must have been capped via provider options.
+        final_kwargs = provider._last_kwargs or {}
+        assert final_kwargs.get("provider_options"), "final call must carry capped provider_options"
+        assert provider._last_kwargs["provider_options"]["ollama-cloud"]["max_tokens"] == 200
+
+    async def test_streaming_guard_emits_single_tool_input(self):
+        provider = MockProvider(
+            responses=[
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="c1", name="echo", arguments={"text": "x"})],
+                ),
+                Message.assistant(
+                    content="partial text",
+                    tool_calls=[ToolCall(id="c2", name="echo", arguments={"text": "x"})],
+                ),
+                Message.assistant(content="final answer"),
+            ]
+        )
+        loop = AgentLoop(provider=provider, tools=[echo])
+        chunks = [c async for c in loop.run_stream([Message.user("say")])]
+        tool_starts = [c for c in chunks if c.type == "tool_input_start"]
+        assert len(tool_starts) == 1
+        done = [c for c in chunks if c.type == "done"]
+        assert done and "final answer" in str(done[-1].content)
+
+    async def test_rerun_seeds_executed_set_from_previous_attempt(self):
+        """The grader re-run rebuilds the state from the previous attempt's
+        messages — the guard must seed the executed set from the assistant
+        tool_calls already present, so the re-run does not re-execute them."""
+        provider = MockProvider(
+            responses=[
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="c2", name="echo", arguments={"text": "x"})],
+                ),
+                Message.assistant(content="final"),
+            ]
+        )
+        previous = [
+            Message.user("what time is it"),
+            Message.assistant(
+                content="",
+                tool_calls=[ToolCall(id="c1", name="echo", arguments={"text": "x"})],
+            ),
+            Message.tool_result(tool_call_id="c1", content="13:00 UTC", name="echo"),
+        ]
+        loop = AgentLoop(provider=provider, tools=[echo])
+        result = await loop.run(previous)
+
+        tool_res = [m for m in result if m.role == "tool"]
+        assert len(tool_res) == 1, "the re-run must not re-execute the previous attempt's call"
+        nudge = [m for m in result if m.role == "system" and "already called" in str(m.content)]
+        assert nudge, "the re-run should nudge instead of re-executing"
