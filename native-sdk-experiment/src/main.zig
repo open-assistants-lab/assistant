@@ -22,6 +22,8 @@ const models_key: u64 = 9;
 const settings_key: u64 = 10;
 const settings_general_key: u64 = 11;
 const grader_prompt_key: u64 = 12;
+const tools_key: u64 = 20;
+const tools_toggle_key: u64 = 21;
 
 const max_providers = 128;
 const max_provider_models = 512;
@@ -51,10 +53,24 @@ const SettingsSection = enum { providers_models, general };
 
 const ToolsSection = enum { builtin, connections };
 
+const ToolRow = struct {
+    name: []const u8,
+    description: []const u8,
+    category: []const u8,
+    enabled: bool,
+    destructive: bool,
+};
+const max_visible_tools_rows = 200;
+
 const ToolsState = struct {
     visible: bool = false,
     section: ToolsSection = .builtin,
     loading: bool = false,
+    tools: [max_visible_tools_rows]ToolRow = undefined,
+    tool_count: usize = 0,
+    search_text: []const u8 = "",
+    search_selection: canvas.TextSelection = .{ .anchor = 0, .focus = 0 },
+    tool_error: []const u8 = "",
 };
 
 /// Which model role the catalog picker is currently editing.
@@ -284,6 +300,8 @@ pub const Msg = union(enum) {
     close_tools,
     tools_tab_builtin,
     tools_tab_connections,
+    tools_loaded: native_sdk.EffectResponse,
+    tools_search: canvas.TextInputEvent,
     settings_providers_models,
     settings_general,
     settings_loaded: native_sdk.EffectResponse,
@@ -1560,6 +1578,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.settings.visible = false; // tools wins precedence
             model.tools.visible = true;
             model.tools.loading = true;
+            fx.fetch(.{
+                .key = tools_key,
+                .url = "http://127.0.0.1:8080/tools?user_id=native_sdk_chat&workspace_id=personal",
+                .method = .GET,
+                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.tools_loaded),
+            });
         },
         .close_tools => {
             model.tools.visible = false;
@@ -1569,6 +1595,73 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .tools_tab_connections => {
             model.tools.section = .connections;
+        },
+        .tools_loaded => |response| {
+            model.tools.loading = false;
+            if (response.outcome != .ok) return;
+            const body = response.body;
+            if (body.len == 0) return;
+            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch {
+                model.tools.tool_error = "Failed to parse tools response";
+                return;
+            };
+            defer parsed.deinit();
+            const root = parsed.value;
+            if (root.object.get("tools")) |tools_val| {
+                const tools_arr = switch (tools_val) {
+                    .array => |a| a,
+                    else => return,
+                };
+                model.tools.tool_count = 0;
+                for (tools_arr.items) |item| {
+                    if (model.tools.tool_count >= max_visible_tools_rows) break;
+                    const name_val = item.object.get("name") orelse continue;
+                    const name = switch (name_val) {
+                        .string => |s| s,
+                        else => continue,
+                    };
+                    if (name.len == 0) continue;
+                    const description = if (item.object.get("description")) |v| switch (v) {
+                        .string => |s| s,
+                        else => "",
+                    } else "";
+                    const category = if (item.object.get("category")) |v| switch (v) {
+                        .string => |s| s,
+                        else => "",
+                    } else "";
+                    const enabled = if (item.object.get("enabled")) |v| v.bool else true;
+                    var destructive = false;
+                    if (item.object.get("annotations")) |ann_val| {
+                        if (ann_val == .object) {
+                            if (ann_val.object.get("destructive")) |d_val| {
+                                destructive = d_val == .bool and d_val.bool;
+                            }
+                        }
+                    }
+                    model.tools.tools[model.tools.tool_count] = .{
+                        .name = model.allocator.dupe(u8, name) catch continue,
+                        .description = model.allocator.dupe(u8, description) catch continue,
+                        .category = model.allocator.dupe(u8, category) catch continue,
+                        .enabled = enabled,
+                        .destructive = destructive,
+                    };
+                    model.tools.tool_count += 1;
+                }
+            }
+        },
+        .tools_search => |event| {
+            const extra = switch (event) {
+                .insert_text => |text| text.len,
+                .set_composition => |composition| composition.text.len,
+                else => 0,
+            };
+            const output = model.allocator.alloc(u8, model.tools.search_text.len + extra + 8) catch return;
+            const next = (canvas.TextEditState{
+                .text = model.tools.search_text,
+                .selection = model.tools.search_selection,
+            }).apply(event, output) catch return;
+            model.tools.search_text = next.text;
+            model.tools.search_selection = next.selection;
         },
         .settings_providers_models => {
             model.settings.section = .providers_models;
@@ -3495,10 +3588,55 @@ fn buildToolsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     children[child_count] = ui.row(.{ .gap = 6, .padding = 4, .cross = .center }, tab_slice);
     child_count += 1;
 
-    children[child_count] = ui.scroll(.{ .grow = 1, .padding = 16 }, .{
-        ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Loading…"),
-    });
-    child_count += 1;
+    if (model.tools.section == .builtin) {
+        // search field
+        var list_nodes: [max_visible_tools_rows + 4]AppUi.Node = undefined;
+        var list_node_count: usize = 0;
+        list_nodes[list_node_count] = blk: {
+            const field = ui.el(.textarea, .{
+                .text = model.tools.search_text,
+                .placeholder = "Search tools...",
+                .on_input = AppUi.inputMsg(.tools_search),
+                .height = 36,
+                .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
+            }, .{});
+            break :blk field;
+        };
+        list_node_count += 1;
+
+        if (model.tools.tool_error.len > 0) {
+            list_nodes[list_node_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .destructive }, .wrap = true }, model.tools.tool_error);
+            list_node_count += 1;
+        } else if (model.tools.loading) {
+            list_nodes[list_node_count] = ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Loading...");
+            list_node_count += 1;
+        } else {
+            var rendered: usize = 0;
+            for (0..model.tools.tool_count) |tool_idx| {
+                const t = model.tools.tools[tool_idx];
+                if (model.tools.search_text.len > 0 and !containsIgnoreCase(t.name, model.tools.search_text) and
+                    !containsIgnoreCase(t.description, model.tools.search_text)) continue;
+                list_nodes[list_node_count] = ui.row(.{ .gap = 8, .padding = 8, .cross = .center }, .{
+                    ui.text(.{ .size = .sm, .grow = 1 }, t.name),
+                    ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, t.category),
+                });
+                list_node_count += 1;
+                rendered += 1;
+                if (list_node_count >= max_visible_tools_rows) break;
+            }
+            if (rendered == 0) {
+                list_nodes[list_node_count] = ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "No tools match");
+                list_node_count += 1;
+            }
+        }
+        children[child_count] = ui.scroll(.{ .grow = 1, .padding = 16 }, .{ui.column(.{ .gap = 2 }, list_nodes[0..list_node_count])});
+        child_count += 1;
+    } else {
+        children[child_count] = ui.scroll(.{ .grow = 1, .padding = 16 }, .{
+            ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Loading…"),
+        });
+        child_count += 1;
+    }
 
     return ui.column(.{ .grow = 1, .style_tokens = .{ .background = .background } }, children[0..child_count]);
 }

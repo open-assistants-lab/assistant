@@ -577,6 +577,12 @@ test_tools() {
   else
     fail "tools panel tabs missing"
   fi
+  # Built-in tools list renders a known native tool
+  if native automate assert --timeout-ms 5000 'role=text name="time_get"' > /dev/null 2>&1; then
+    pass "built-in tools list shows time_get"
+  else
+    fail "built-in tools list missing time_get"
+  fi
   # Toggle close (press the sidebar Tools row again)
   SNAPSHOT=$(native automate snapshot)
   TOOLS=$(find_pressable_by_child_text "Tools")
