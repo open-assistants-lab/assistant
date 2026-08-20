@@ -67,6 +67,10 @@ const max_visible_tools_rows = 200;
 const RequiredField = struct {
     name: []const u8,
     label: []const u8,
+    placeholder: []const u8,
+    input_type: []const u8,
+    optional: bool,
+    help_text: []const u8,
 };
 const max_required_fields = 4;
 
@@ -1749,7 +1753,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .connectors_loaded => |response| {
             model.tools.connectors_loading = false;
-            if (response.outcome != .ok) return;
+            if (response.outcome != .ok) {
+                model.tools.connector_error = "Failed to load connectors";
+                return;
+            }
             const body = response.body;
             if (body.len == 0) return;
             const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch {
@@ -1761,11 +1768,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.tools.connector_error = "";
             const arr = switch (root) {
                 .array => |a| a,
-                else => return,
+                else => {
+                    model.tools.connector_error = "Failed to parse connectors response";
+                    return;
+                },
             };
             model.tools.connector_count = 0;
             for (arr.items) |item| {
                 if (model.tools.connector_count >= max_connector_rows) break;
+                if (item != .object) continue;
                 const name = if (item.object.get("name")) |v| switch (v) {
                     .string => |s| s,
                     else => "",
@@ -1803,6 +1814,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     if (rf_val == .array) {
                         for (rf_val.array.items) |rf| {
                             if (row.field_count >= max_required_fields) break;
+                            if (rf != .object) continue;
                             const rf_name = if (rf.object.get("name")) |v| switch (v) {
                                 .string => |s| s,
                                 else => "",
@@ -1811,9 +1823,29 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                                 .string => |s| s,
                                 else => "",
                             } else "";
+                            const rf_placeholder = if (rf.object.get("placeholder")) |v| switch (v) {
+                                .string => |s| s,
+                                else => "",
+                            } else "";
+                            const rf_input_type = if (rf.object.get("input_type")) |v| switch (v) {
+                                .string => |s| s,
+                                else => "",
+                            } else "";
+                            const rf_optional = if (rf.object.get("optional")) |v| switch (v) {
+                                .bool => |b| b,
+                                else => false,
+                            } else false;
+                            const rf_help_text = if (rf.object.get("help_text")) |v| switch (v) {
+                                .string => |s| s,
+                                else => "",
+                            } else "";
                             row.required_fields[row.field_count] = .{
                                 .name = model.allocator.dupe(u8, rf_name) catch break,
                                 .label = model.allocator.dupe(u8, rf_label) catch break,
+                                .placeholder = model.allocator.dupe(u8, rf_placeholder) catch break,
+                                .input_type = model.allocator.dupe(u8, rf_input_type) catch break,
+                                .optional = rf_optional,
+                                .help_text = model.allocator.dupe(u8, rf_help_text) catch break,
                             };
                             row.field_count += 1;
                         }

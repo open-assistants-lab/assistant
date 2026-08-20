@@ -649,9 +649,10 @@ test_tools() {
     fail "tool toggle did not re-enable time_get (backend enabled=$ENABLED)"
   fi
 
-  # Connections tab: catalog renders real rows (not the empty state)
-  # Before implementation the tab shows "Loading..." (no "Not connected" text)
-  # so this assert fails red; after implementation the catalog rows render.
+  # Connections tab: catalog renders real rows (not the empty state).
+  # Structural assertion: a rendered catalog row always shows a status text
+  # ("Connected" or "Not connected"), so we pass if either appears and fail
+  # only on the empty state / error / stuck-loading states.
   SNAPSHOT=$(native automate snapshot)
   CONN_TAB=$(locate_widget button Connections)
   if [ -n "$CONN_TAB" ]; then
@@ -660,6 +661,8 @@ test_tools() {
       fail "connections tab shows empty state instead of catalog"
     elif native automate assert --timeout-ms 5000 'role=text name="Not connected"' > /dev/null 2>&1; then
       pass "connections tab renders catalog rows"
+    elif native automate assert --timeout-ms 5000 'role=text name="Connected"' > /dev/null 2>&1; then
+      pass "connections tab renders catalog rows (all connected)"
     else
       fail "connections tab did not render catalog"
     fi
