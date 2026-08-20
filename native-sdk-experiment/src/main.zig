@@ -29,6 +29,10 @@ const connector_disconnect_key: u64 = 23;
 const auth_poll_key: u64 = 24;
 const connector_connect_key: u64 = 25;
 
+/// OAuth poll budget: 2s timer × 60 ticks = 120s before the authorization
+/// is declared timed out.
+const max_oauth_poll_ticks: u16 = 60;
+
 /// Captured from `std.process.Init.io` in main() — the app's real I/O
 /// instance, needed to spawn child processes (openSystemBrowser). Zig
 /// 0.16's std.process.run requires an Io argument; the SDK's own
@@ -112,6 +116,7 @@ const ToolsState = struct {
     form_open: bool = false,
     connecting: bool = false,
     polling: bool = false,
+    poll_ticks: u16 = 0,
     connect_service: []const u8 = "",
     field_buffers: [max_required_fields][]const u8 = .{ "", "", "", "" },
     field_selections: [max_required_fields]canvas.TextSelection = .{
@@ -1673,6 +1678,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .close_tools => {
             if (model.tools.polling) {
                 model.tools.polling = false;
+                model.tools.poll_ticks = 0;
                 fx.cancelTimer(auth_poll_key);
             }
             model.tools.visible = false;
@@ -1891,18 +1897,30 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.tools.connector_count += 1;
             }
             // OAuth poll: if the service we are authorizing flipped to
-            // connected, stop polling and drop the waiting state.
+            // connected, stop polling and drop the waiting state. If it
+            // vanished from the catalog, stop with an error.
             if (model.tools.polling) {
+                var found: bool = false;
                 for (0..model.tools.connector_count) |i| {
                     if (std.mem.eql(u8, model.tools.connectors[i].name, model.tools.connect_service)) {
+                        found = true;
                         if (model.tools.connectors[i].connected) {
                             model.tools.polling = false;
                             model.tools.connecting = false;
                             model.tools.connect_service = "";
+                            model.tools.connect_error = "";
                             fx.cancelTimer(auth_poll_key);
                         }
                         break;
                     }
+                }
+                if (model.tools.polling and !found) {
+                    // The connector disappeared from the catalog mid-flow
+                    // (e.g. its spec was removed) — stop, don't poll forever.
+                    model.tools.polling = false;
+                    model.tools.connecting = false;
+                    model.tools.connect_error = "Service no longer available";
+                    fx.cancelTimer(auth_poll_key);
                 }
             }
         },
@@ -1971,27 +1989,33 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 // browser and poll until the catalog flips connected.
                 model.tools.connecting = true;
                 model.tools.polling = true;
+                model.tools.poll_ticks = 0;
                 model.tools.connect_service = connector.name;
                 model.tools.connect_error = "";
                 const post_url = std.fmt.allocPrint(
                     model.allocator,
                     "http://127.0.0.1:8080/connectors/connect?service={s}&user_id=native_sdk_chat",
                     .{connector.name},
-                ) catch null;
-                if (post_url) |purl| {
-                    fx.fetch(.{
-                        .key = connector_connect_key,
-                        .url = purl,
-                        .method = .POST,
-                        .headers = &.{
-                            .{ .name = "Content-Type", .value = "application/json" },
-                            .{ .name = "Accept", .value = "application/json" },
-                        },
-                        .body = "{}",
-                        .response = .buffered,
-                        .on_response = Effects.responseMsg(.connector_connected),
-                    });
-                }
+                ) catch {
+                    // URL build failure: abort rather than starting the
+                    // browser flow with a broken POST.
+                    model.tools.connecting = false;
+                    model.tools.polling = false;
+                    model.tools.connect_error = "Failed to prepare request";
+                    return;
+                };
+                fx.fetch(.{
+                    .key = connector_connect_key,
+                    .url = post_url,
+                    .method = .POST,
+                    .headers = &.{
+                        .{ .name = "Content-Type", .value = "application/json" },
+                        .{ .name = "Accept", .value = "application/json" },
+                    },
+                    .body = "{}",
+                    .response = .buffered,
+                    .on_response = Effects.responseMsg(.connector_connected),
+                });
                 startOAuthBrowserFlow(model, fx);
                 return;
             }
@@ -2050,10 +2074,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             // fire-and-forget: keep the waiting state, the poll decides.
             if (!model.tools.polling) model.tools.connecting = false;
             if (response.outcome != .ok) {
-                // oauth2: a failed creds POST is the normal direct-flow
-                // outcome (the browser authorize does the work) — keep the
-                // waiting state; the poll decides. api_key: hard error.
-                if (isOAuth2Service(model)) return;
+                // Direct oauth2 flow: a 4xx on the empty creds POST is the
+                // normal outcome (the browser authorize does the work) —
+                // tolerate it, the poll decides. Any other failure
+                // (api_key connect, or an oauth2 credential-form submit)
+                // surfaces to the user.
+                if (model.tools.polling) return;
                 model.tools.connect_error = "Failed to connect service";
                 return;
             }
@@ -2083,6 +2109,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .auth_poll => {
             if (!model.tools.polling) return;
+            // Poll budget: stop after max_oauth_poll_ticks (120s at 2s).
+            model.tools.poll_ticks += 1;
+            if (model.tools.poll_ticks >= max_oauth_poll_ticks) {
+                model.tools.polling = false;
+                model.tools.connecting = false;
+                model.tools.connect_error = "Authorization timed out — press Connect to retry";
+                fx.cancelTimer(auth_poll_key);
+                return;
+            }
             fx.fetch(.{
                 .key = connectors_key,
                 .url = "http://127.0.0.1:8080/connectors/catalog?user_id=native_sdk_chat",
@@ -3715,6 +3750,7 @@ fn startOAuthBrowserFlow(model: *Model, fx: *Effects) void {
     openSystemBrowser(url) catch {
         model.tools.connect_error = "Could not open your browser — authorize manually at the login URL";
     };
+    model.tools.poll_ticks = 0;
     fx.startTimer(.{
         .key = auth_poll_key,
         .interval_ms = 2000,
@@ -3723,13 +3759,18 @@ fn startOAuthBrowserFlow(model: *Model, fx: *Effects) void {
     });
 }
 
-/// Open a URL in the platform default browser (macOS `open`). Uses
-/// `std.testing.io` for the spawn, matching the SDK's own app_assets.zig
-/// pattern (Zig 0.16 moved Child.run to std.process.run(io, ...)).
+/// Open a URL in the platform default browser (macOS `open`). Spawns via
+/// `std.process.run` with the process Io captured in main() (`g_process_io`).
+/// Zig 0.16 moved Child.run to std.process.run(gpa, io, options).
 fn openSystemBrowser(url: []const u8) !void {
     const result = try std.process.run(std.heap.page_allocator, g_process_io, .{
         .argv = &.{ "open", url },
     });
+    defer {
+        // run() allocates stdout/stderr with the passed gpa — free them.
+        std.heap.page_allocator.free(result.stdout);
+        std.heap.page_allocator.free(result.stderr);
+    }
     if (result.term != .exited or result.term.exited != 0) return error.OpenFailed;
 }
 
