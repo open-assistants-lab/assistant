@@ -133,9 +133,15 @@ else:
             break
     if pid is None:
         print(''); sys.exit(0)
-for wid, (role, name, parent) in widgets.items():
-    if role == 'button' and parent == pid:
-        print(wid); sys.exit(0)
+# Walk up the ancestor chain until a widget with a button child is found
+# (connector rows nest the display text inside a column, one level deeper
+# than the flat tool rows Task 3 targets).
+cur = pid
+while cur is not None:
+    for wid, (role, name, parent) in widgets.items():
+        if role == 'button' and parent == cur:
+            print(wid); sys.exit(0)
+    cur = widgets[cur][2] if cur in widgets else None
 print('')
 " "$target" <<< "$SNAPSHOT"
 }
@@ -669,6 +675,36 @@ test_tools() {
   else
     fail "Connections tab button not found"
   fi
+
+  # api_key connect flow: pick the first non-connected api_key connector,
+  # open its credential form, verify the form renders, then Cancel to leave
+  # the catalog untouched. Label is derived from the catalog (dynamic).
+  API_NAME=$(curl -s 'http://127.0.0.1:8080/connectors/catalog?user_id=native_sdk_chat' | python3 -c "import sys,json; d=json.load(sys.stdin); c=next((c for c in d if c['auth_type']=='api_key' and not c['connected']), None); print(c['name'] if c else '')")
+  API_DISPLAY=$(curl -s 'http://127.0.0.1:8080/connectors/catalog?user_id=native_sdk_chat' | python3 -c "import sys,json; d=json.load(sys.stdin); c=next((c for c in d if c['auth_type']=='api_key' and not c['connected']), None); print(c['display'] if c else '')")
+  API_LABEL=$(curl -s 'http://127.0.0.1:8080/connectors/catalog?user_id=native_sdk_chat' | python3 -c "import sys,json; d=json.load(sys.stdin); c=next((c for c in d if c['auth_type']=='api_key' and not c['connected']), None); print(c['required_fields'][0]['label'] if c and c.get('required_fields') else '')")
+  if [ -n "$API_NAME" ] && [ -n "$API_LABEL" ]; then
+    SNAPSHOT=$(native automate snapshot)
+    BTN=$(find_sibling_button "$API_DISPLAY")
+    if [ -z "$BTN" ]; then
+      fail "connect button for $API_DISPLAY not found"
+    else
+      native automate widget-action main-canvas "$BTN" press > /dev/null 2>&1
+      if native automate assert --timeout-ms 3000 "role=text name=\"$API_LABEL\"" > /dev/null 2>&1; then
+        pass "api_key connector opens credential form ($API_NAME)"
+      else
+        fail "api_key credential form missing for $API_NAME (label $API_LABEL)"
+      fi
+    fi
+    # Dismiss the form so the rest of the test runs from the catalog list
+    SNAPSHOT=$(native automate snapshot)
+    CANCEL=$(locate_widget button Cancel)
+    if [ -n "$CANCEL" ]; then
+      native automate widget-action main-canvas "$CANCEL" press > /dev/null 2>&1
+    fi
+  else
+    skip "no api_key connector in catalog"
+  fi
+
   # Switch back to Built-in for the close-toggle check
   SNAPSHOT=$(native automate snapshot)
   BUILTIN=$(locate_widget button Built-in)

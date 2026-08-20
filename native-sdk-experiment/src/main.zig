@@ -26,6 +26,7 @@ const tools_key: u64 = 20;
 const tools_toggle_key: u64 = 21;
 const connectors_key: u64 = 22;
 const connector_disconnect_key: u64 = 23;
+const connector_connect_key: u64 = 25;
 
 const max_providers = 128;
 const max_provider_models = 512;
@@ -99,6 +100,18 @@ const ToolsState = struct {
     connector_count: usize = 0,
     connector_error: []const u8 = "",
     connectors_loading: bool = false,
+    // api_key connect form state
+    form_open: bool = false,
+    connecting: bool = false,
+    connect_service: []const u8 = "",
+    field_buffers: [max_required_fields][]const u8 = .{ "", "", "", "" },
+    field_selections: [max_required_fields]canvas.TextSelection = .{
+        .{ .anchor = 0, .focus = 0 },
+        .{ .anchor = 0, .focus = 0 },
+        .{ .anchor = 0, .focus = 0 },
+        .{ .anchor = 0, .focus = 0 },
+    },
+    connect_error: []const u8 = "",
 };
 
 /// Which model role the catalog picker is currently editing.
@@ -335,6 +348,14 @@ pub const Msg = union(enum) {
     connectors_loaded: native_sdk.EffectResponse,
     connector_disconnected: native_sdk.EffectResponse,
     disconnect_connector: usize,
+    connect_connector: usize,
+    submit_connector,
+    close_form,
+    connector_connected: native_sdk.EffectResponse,
+    tools_field_0: canvas.TextInputEvent,
+    tools_field_1: canvas.TextInputEvent,
+    tools_field_2: canvas.TextInputEvent,
+    tools_field_3: canvas.TextInputEvent,
     settings_providers_models,
     settings_general,
     settings_loaded: native_sdk.EffectResponse,
@@ -1887,6 +1908,85 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .on_response = Effects.responseMsg(.connectors_loaded),
             });
         },
+        .connect_connector => |idx| {
+            if (idx >= model.tools.connector_count) return;
+            const connector = model.tools.connectors[idx];
+            // Task 5 wires api_key; Task 6 extends this handler for oauth2.
+            if (!std.mem.eql(u8, connector.auth_type, "api_key")) return;
+            model.tools.form_open = true;
+            model.tools.connecting = false;
+            model.tools.connect_service = connector.name;
+            model.tools.connect_error = "";
+            model.tools.field_buffers = .{ "", "", "", "" };
+            model.tools.field_selections = .{
+                .{ .anchor = 0, .focus = 0 },
+                .{ .anchor = 0, .focus = 0 },
+                .{ .anchor = 0, .focus = 0 },
+                .{ .anchor = 0, .focus = 0 },
+            };
+        },
+        .submit_connector => {
+            if (model.tools.connecting or model.tools.connect_service.len == 0) return;
+            var connector_idx: ?usize = null;
+            for (0..model.tools.connector_count) |i| {
+                if (std.mem.eql(u8, model.tools.connectors[i].name, model.tools.connect_service)) {
+                    connector_idx = i;
+                    break;
+                }
+            }
+            const cidx = connector_idx orelse return;
+            const connector = model.tools.connectors[cidx];
+            const body = connectorConnectBody(model.allocator, &connector, &model.tools.field_buffers) catch return;
+            const url = std.fmt.allocPrint(
+                model.allocator,
+                "http://127.0.0.1:8080/connectors/connect?service={s}&user_id=native_sdk_chat",
+                .{connector.name},
+            ) catch return;
+            model.tools.connecting = true;
+            model.tools.connect_error = "";
+            fx.fetch(.{
+                .key = connector_connect_key,
+                .url = url,
+                .method = .POST,
+                .headers = &.{
+                    .{ .name = "Content-Type", .value = "application/json" },
+                    .{ .name = "Accept", .value = "application/json" },
+                },
+                .body = body,
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.connector_connected),
+            });
+        },
+        .connector_connected => |response| {
+            model.tools.connecting = false;
+            if (response.outcome != .ok) {
+                model.tools.connect_error = "Failed to connect service";
+                return;
+            }
+            // api_key connect returns {"status":"connected"}; the catalog
+            // refetch flips the row to Connected (server truth). oauth2
+            // returns "configured" and is handled in Task 6.
+            model.tools.form_open = false;
+            model.tools.connect_error = "";
+            fx.fetch(.{
+                .key = connectors_key,
+                .url = "http://127.0.0.1:8080/connectors/catalog?user_id=native_sdk_chat",
+                .method = .GET,
+                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.connectors_loaded),
+            });
+        },
+        .close_form => {
+            model.tools.form_open = false;
+            model.tools.connecting = false;
+            model.tools.connect_error = "";
+            model.tools.connect_service = "";
+        },
+        .tools_field_0 => |field| applyConnectorField(model, 0, field),
+        .tools_field_1 => |field| applyConnectorField(model, 1, field),
+        .tools_field_2 => |field| applyConnectorField(model, 2, field),
+        .tools_field_3 => |field| applyConnectorField(model, 3, field),
         .settings_providers_models => {
             model.settings.section = .providers_models;
         },
@@ -3453,6 +3553,67 @@ fn toolToggleBody(enable: bool) []const u8 {
     return if (enable) "{\"scope\": \"all\"}" else "{\"scope\": \"none\"}";
 }
 
+/// Apply a text-input event to one credential form field, mirroring the
+/// `.tools_search` handler (TextEditState + 256-byte reserve + selection).
+fn applyConnectorField(model: *Model, index: usize, event: canvas.TextInputEvent) void {
+    if (index >= max_required_fields) return;
+    const extra = switch (event) {
+        .insert_text => |text| text.len,
+        .set_composition => |composition| composition.text.len,
+        else => 0,
+    };
+    const old = model.tools.field_buffers[index];
+    const output = model.allocator.alloc(u8, old.len + extra + 256) catch return;
+    const next = (canvas.TextEditState{
+        .text = old,
+        .selection = model.tools.field_selections[index],
+    }).apply(event, output) catch return;
+    model.tools.field_buffers[index] = next.text;
+    model.tools.field_selections[index] = next.selection;
+}
+
+/// Append `s` to `out` as a JSON string literal (quoted + escaped).
+fn appendJsonString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
+    try out.append(allocator, '"');
+    for (s) |ch| {
+        switch (ch) {
+            '"' => try out.appendSlice(allocator, "\\\""),
+            '\\' => try out.appendSlice(allocator, "\\\\"),
+            '\n' => try out.appendSlice(allocator, "\\n"),
+            '\r' => try out.appendSlice(allocator, "\\r"),
+            '\t' => try out.appendSlice(allocator, "\\t"),
+            else => try out.append(allocator, ch),
+        }
+    }
+    try out.append(allocator, '"');
+}
+
+/// Build the POST /connectors/connect JSON body: one field per non-empty
+/// credential buffer, keyed by the connector's required field names.
+fn connectorConnectBody(
+    allocator: std.mem.Allocator,
+    connector: *const ConnectorRow,
+    buffers: *const [max_required_fields][]const u8,
+) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.append(allocator, '{');
+    var first: bool = true;
+    var i: usize = 0;
+    while (i < connector.field_count) : (i += 1) {
+        const field = connector.required_fields[i];
+        const value = buffers[i];
+        if (value.len == 0) continue;
+        if (!first) try out.append(allocator, ',');
+        first = false;
+        try appendJsonString(allocator, &out, field.name);
+        try out.append(allocator, ':');
+        try appendJsonString(allocator, &out, value);
+    }
+    try out.append(allocator, '}');
+    return out.toOwnedSlice(allocator);
+}
+
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     if (needle.len == 0) return true;
     if (needle.len > haystack.len) return false;
@@ -3865,35 +4026,90 @@ fn buildToolsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         children[child_count] = ui.scroll(.{ .grow = 1, .padding = 16 }, .{ui.column(.{ .gap = 2 }, list_nodes[0..list_node_count])});
         child_count += 1;
     } else if (model.tools.section == .connections) {
-        var list_nodes: [max_connector_rows + 2]AppUi.Node = undefined;
-        var list_node_count: usize = 0;
-        if (model.tools.connector_error.len > 0) {
-            list_nodes[list_node_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .destructive }, .wrap = true }, model.tools.connector_error);
-            list_node_count += 1;
-        } else if (model.tools.connectors_loading) {
-            list_nodes[list_node_count] = ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Loading...");
-            list_node_count += 1;
-        } else if (model.tools.connector_count == 0) {
-            list_nodes[list_node_count] = ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "No connectors");
-            list_node_count += 1;
-        } else for (0..model.tools.connector_count) |connector_index| {
-            const c = model.tools.connectors[connector_index];
-            const status_text = if (c.connected) "Connected" else "Not connected";
-            list_nodes[list_node_count] = ui.row(.{ .gap = 8, .padding = 8, .cross = .center }, .{
-                ui.column(.{ .grow = 1, .gap = 2 }, .{
-                    ui.text(.{ .size = .sm }, c.display),
-                    ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, c.description),
-                }),
-                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = if (c.connected) .success else .text_muted } }, status_text),
-                if (c.connected)
-                    ui.button(.{ .on_press = .{ .disconnect_connector = connector_index }, .variant = .ghost, .size = .sm }, "Disconnect")
-                else
-                    ui.button(.{ .disabled = true, .variant = .primary, .size = .sm }, "Connect"), // wired in Task 5/6
-            });
-            list_node_count += 1;
+        if (model.tools.form_open) {
+            var form_idx: ?usize = null;
+            for (0..model.tools.connector_count) |i| {
+                if (std.mem.eql(u8, model.tools.connectors[i].name, model.tools.connect_service)) {
+                    form_idx = i;
+                    break;
+                }
+            }
+            if (form_idx) |cidx| {
+                const c = model.tools.connectors[cidx];
+                var form_nodes: [max_required_fields + 6]AppUi.Node = undefined;
+                var form_count: usize = 0;
+                form_nodes[form_count] = ui.text(.{ .size = .heading }, c.display);
+                form_count += 1;
+                form_nodes[form_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Enter credentials to connect");
+                form_count += 1;
+                if (model.tools.connect_error.len > 0) {
+                    form_nodes[form_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .destructive }, .wrap = true }, model.tools.connect_error);
+                    form_count += 1;
+                }
+                for (0..c.field_count) |fidx| {
+                    const f = c.required_fields[fidx];
+                    form_nodes[form_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, f.label);
+                    form_count += 1;
+                    form_nodes[form_count] = ui.el(.textarea, .{
+                        .text = model.tools.field_buffers[fidx],
+                        .placeholder = f.placeholder,
+                        .on_input = switch (fidx) {
+                            0 => AppUi.inputMsg(.tools_field_0),
+                            1 => AppUi.inputMsg(.tools_field_1),
+                            2 => AppUi.inputMsg(.tools_field_2),
+                            else => AppUi.inputMsg(.tools_field_3),
+                        },
+                        .height = 44,
+                        .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
+                    }, .{});
+                    form_count += 1;
+                }
+                form_nodes[form_count] = ui.row(.{ .gap = 8, .padding = 4, .cross = .center }, .{
+                    ui.button(.{
+                        .on_press = .submit_connector,
+                        .variant = .primary,
+                        .size = .sm,
+                        .disabled = model.tools.connecting,
+                    }, if (model.tools.connecting) "Connecting…" else "Connect"),
+                    ui.button(.{ .on_press = .close_form, .variant = .ghost, .size = .sm }, "Cancel"),
+                });
+                form_count += 1;
+                children[child_count] = ui.scroll(.{ .grow = 1, .padding = 16 }, .{ui.column(.{ .gap = 10 }, form_nodes[0..form_count])});
+                child_count += 1;
+            }
+        } else {
+            var list_nodes: [max_connector_rows + 2]AppUi.Node = undefined;
+            var list_node_count: usize = 0;
+            if (model.tools.connector_error.len > 0) {
+                list_nodes[list_node_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .destructive }, .wrap = true }, model.tools.connector_error);
+                list_node_count += 1;
+            } else if (model.tools.connectors_loading) {
+                list_nodes[list_node_count] = ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Loading...");
+                list_node_count += 1;
+            } else if (model.tools.connector_count == 0) {
+                list_nodes[list_node_count] = ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "No connectors");
+                list_node_count += 1;
+            } else for (0..model.tools.connector_count) |connector_index| {
+                const c = model.tools.connectors[connector_index];
+                const status_text = if (c.connected) "Connected" else "Not connected";
+                list_nodes[list_node_count] = ui.row(.{ .gap = 8, .padding = 8, .cross = .center }, .{
+                    ui.column(.{ .grow = 1, .gap = 2 }, .{
+                        ui.text(.{ .size = .sm }, c.display),
+                        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, c.description),
+                    }),
+                    ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = if (c.connected) .success else .text_muted } }, status_text),
+                    if (c.connected)
+                        ui.button(.{ .on_press = .{ .disconnect_connector = connector_index }, .variant = .ghost, .size = .sm }, "Disconnect")
+                    else if (std.mem.eql(u8, c.auth_type, "api_key"))
+                        ui.button(.{ .on_press = .{ .connect_connector = connector_index }, .variant = .primary, .size = .sm }, "Connect")
+                    else
+                        ui.button(.{ .disabled = true, .variant = .primary, .size = .sm }, "Connect"), // oauth2 wired in Task 6
+                });
+                list_node_count += 1;
+            }
+            children[child_count] = ui.scroll(.{ .grow = 1, .padding = 16 }, .{ui.column(.{ .gap = 2 }, list_nodes[0..list_node_count])});
+            child_count += 1;
         }
-        children[child_count] = ui.scroll(.{ .grow = 1, .padding = 16 }, .{ui.column(.{ .gap = 2 }, list_nodes[0..list_node_count])});
-        child_count += 1;
     } else {
         children[child_count] = ui.scroll(.{ .grow = 1, .padding = 16 }, .{
             ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Loading…"),
