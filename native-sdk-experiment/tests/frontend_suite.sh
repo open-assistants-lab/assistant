@@ -705,6 +705,36 @@ test_tools() {
     skip "no api_key connector in catalog"
   fi
 
+  # OAuth connect flow: pick the first non-connected oauth2 connector that
+  # needs NO credentials (the direct browser-authorize path — connectors
+  # with required fields open the credential form instead, covered by the
+  # api_key form test), press its Connect button, assert the waiting state
+  # appears. (No real browser flow in CI — the waiting state is the
+  # automated assertion; full E2E is manual.) Cancel to stop the poll.
+  OAUTH_DISPLAY=$(curl -s 'http://127.0.0.1:8080/connectors/catalog?user_id=native_sdk_chat' | python3 -c "import sys,json; d=json.load(sys.stdin); c=next((c for c in d if c['auth_type']=='oauth2' and not c['connected'] and not any(not f.get('optional', False) for f in c.get('required_fields', []))), None); print(c['display'] if c else '')")
+  if [ -n "$OAUTH_DISPLAY" ]; then
+    SNAPSHOT=$(native automate snapshot)
+    OAUTH_BTN=$(find_sibling_button "$OAUTH_DISPLAY")
+    if [ -z "$OAUTH_BTN" ]; then
+      fail "connect button for $OAUTH_DISPLAY not found"
+    else
+      native automate widget-action main-canvas "$OAUTH_BTN" press > /dev/null 2>&1
+      if native automate assert --timeout-ms 3000 'role=text name="Authorize in your browser"' > /dev/null 2>&1; then
+        pass "oauth connect shows browser-authorize state"
+      else
+        fail "oauth authorize state missing for $OAUTH_DISPLAY"
+      fi
+      # Stop the poll so the suite leaves no running timer
+      SNAPSHOT=$(native automate snapshot)
+      CANCEL=$(locate_widget button Cancel)
+      if [ -n "$CANCEL" ]; then
+        native automate widget-action main-canvas "$CANCEL" press > /dev/null 2>&1
+      fi
+    fi
+  else
+    skip "no oauth2 connector in catalog"
+  fi
+
   # Switch back to Built-in for the close-toggle check
   SNAPSHOT=$(native automate snapshot)
   BUILTIN=$(locate_widget button Built-in)

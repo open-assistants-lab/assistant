@@ -26,7 +26,15 @@ const tools_key: u64 = 20;
 const tools_toggle_key: u64 = 21;
 const connectors_key: u64 = 22;
 const connector_disconnect_key: u64 = 23;
+const auth_poll_key: u64 = 24;
 const connector_connect_key: u64 = 25;
+
+/// Captured from `std.process.Init.io` in main() — the app's real I/O
+/// instance, needed to spawn child processes (openSystemBrowser). Zig
+/// 0.16's std.process.run requires an Io argument; the SDK's own
+/// app_assets.zig uses std.testing.io, which is test-build-only, so the
+/// production code carries the process Io here instead.
+var g_process_io: std.Io = undefined;
 
 const max_providers = 128;
 const max_provider_models = 512;
@@ -103,6 +111,7 @@ const ToolsState = struct {
     // api_key connect form state
     form_open: bool = false,
     connecting: bool = false,
+    polling: bool = false,
     connect_service: []const u8 = "",
     field_buffers: [max_required_fields][]const u8 = .{ "", "", "", "" },
     field_selections: [max_required_fields]canvas.TextSelection = .{
@@ -356,6 +365,8 @@ pub const Msg = union(enum) {
     tools_field_1: canvas.TextInputEvent,
     tools_field_2: canvas.TextInputEvent,
     tools_field_3: canvas.TextInputEvent,
+    auth_poll: native_sdk.EffectTimer,
+    cancel_connect,
     settings_providers_models,
     settings_general,
     settings_loaded: native_sdk.EffectResponse,
@@ -1660,6 +1671,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             });
         },
         .close_tools => {
+            if (model.tools.polling) {
+                model.tools.polling = false;
+                fx.cancelTimer(auth_poll_key);
+            }
             model.tools.visible = false;
         },
         .tools_tab_builtin => {
@@ -1875,6 +1890,21 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.tools.connectors[model.tools.connector_count] = row;
                 model.tools.connector_count += 1;
             }
+            // OAuth poll: if the service we are authorizing flipped to
+            // connected, stop polling and drop the waiting state.
+            if (model.tools.polling) {
+                for (0..model.tools.connector_count) |i| {
+                    if (std.mem.eql(u8, model.tools.connectors[i].name, model.tools.connect_service)) {
+                        if (model.tools.connectors[i].connected) {
+                            model.tools.polling = false;
+                            model.tools.connecting = false;
+                            model.tools.connect_service = "";
+                            fx.cancelTimer(auth_poll_key);
+                        }
+                        break;
+                    }
+                }
+            }
         },
         .disconnect_connector => |idx| {
             if (idx >= model.tools.connector_count) return;
@@ -1911,8 +1941,60 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .connect_connector => |idx| {
             if (idx >= model.tools.connector_count) return;
             const connector = model.tools.connectors[idx];
-            // Task 5 wires api_key; Task 6 extends this handler for oauth2.
-            if (!std.mem.eql(u8, connector.auth_type, "api_key")) return;
+            if (std.mem.eql(u8, connector.auth_type, "oauth2")) {
+                // OAuth2: if the connector needs non-optional credentials,
+                // reuse the api_key form flow (submit then authorize).
+                // Otherwise start the browser-authorize step directly.
+                var needs_form = false;
+                for (0..connector.field_count) |f| {
+                    if (!connector.required_fields[f].optional) {
+                        needs_form = true;
+                        break;
+                    }
+                }
+                if (needs_form) {
+                    model.tools.form_open = true;
+                    model.tools.connecting = false;
+                    model.tools.connect_service = connector.name;
+                    model.tools.connect_error = "";
+                    model.tools.field_buffers = .{ "", "", "", "" };
+                    model.tools.field_selections = .{
+                        .{ .anchor = 0, .focus = 0 },
+                        .{ .anchor = 0, .focus = 0 },
+                        .{ .anchor = 0, .focus = 0 },
+                        .{ .anchor = 0, .focus = 0 },
+                    };
+                    return;
+                }
+                // Direct authorize: POST empty creds (a 4xx is expected for
+                // gateway-configured services and ignored), then open the
+                // browser and poll until the catalog flips connected.
+                model.tools.connecting = true;
+                model.tools.polling = true;
+                model.tools.connect_service = connector.name;
+                model.tools.connect_error = "";
+                const post_url = std.fmt.allocPrint(
+                    model.allocator,
+                    "http://127.0.0.1:8080/connectors/connect?service={s}&user_id=native_sdk_chat",
+                    .{connector.name},
+                ) catch null;
+                if (post_url) |purl| {
+                    fx.fetch(.{
+                        .key = connector_connect_key,
+                        .url = purl,
+                        .method = .POST,
+                        .headers = &.{
+                            .{ .name = "Content-Type", .value = "application/json" },
+                            .{ .name = "Accept", .value = "application/json" },
+                        },
+                        .body = "{}",
+                        .response = .buffered,
+                        .on_response = Effects.responseMsg(.connector_connected),
+                    });
+                }
+                startOAuthBrowserFlow(model, fx);
+                return;
+            }
             model.tools.form_open = true;
             model.tools.connecting = false;
             model.tools.connect_service = connector.name;
@@ -1966,12 +2048,26 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .connector_connected => |response| {
             model.tools.connecting = false;
             if (response.outcome != .ok) {
+                // oauth2: a failed creds POST is the normal direct-flow
+                // outcome (the browser authorize does the work) — keep the
+                // waiting state; the poll decides. api_key: hard error.
+                if (isOAuth2Service(model)) return;
                 model.tools.connect_error = "Failed to connect service";
                 return;
             }
+            if (isOAuth2Service(model)) {
+                // Form submit succeeded for an oauth2 service — enter the
+                // browser-authorize step (direct flow already started it).
+                if (!model.tools.polling) {
+                    model.tools.form_open = false;
+                    model.tools.connecting = true;
+                    model.tools.polling = true;
+                    startOAuthBrowserFlow(model, fx);
+                }
+                return;
+            }
             // api_key connect returns {"status":"connected"}; the catalog
-            // refetch flips the row to Connected (server truth). oauth2
-            // returns "configured" and is handled in Task 6.
+            // refetch flips the row to Connected (server truth).
             model.tools.form_open = false;
             model.tools.connect_error = "";
             fx.fetch(.{
@@ -1982,6 +2078,26 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.connectors_loaded),
             });
+        },
+        .auth_poll => {
+            if (!model.tools.polling) return;
+            fx.fetch(.{
+                .key = connectors_key,
+                .url = "http://127.0.0.1:8080/connectors/catalog?user_id=native_sdk_chat",
+                .method = .GET,
+                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.connectors_loaded),
+            });
+        },
+        .cancel_connect => {
+            if (model.tools.polling) {
+                model.tools.polling = false;
+                fx.cancelTimer(auth_poll_key);
+            }
+            model.tools.connecting = false;
+            model.tools.connect_service = "";
+            model.tools.connect_error = "";
         },
         .close_form => {
             model.tools.form_open = false;
@@ -3567,6 +3683,54 @@ fn toolToggleBody(enable: bool) []const u8 {
     return if (enable) "{\"scope\": \"all\"}" else "{\"scope\": \"none\"}";
 }
 
+/// True when the connector currently being connected (`connect_service`)
+/// is an oauth2 service (vs api_key). Used to route the connect response
+/// into the browser-authorize flow.
+fn isOAuth2Service(model: *const Model) bool {
+    for (0..model.tools.connector_count) |i| {
+        if (std.mem.eql(u8, model.tools.connectors[i].name, model.tools.connect_service)) {
+            return std.mem.eql(u8, model.tools.connectors[i].auth_type, "oauth2");
+        }
+    }
+    return false;
+}
+
+/// Open the connector's authorize URL in the system browser and start the
+/// catalog poll. The poll runs until the connector flips connected or the
+/// user cancels; a failed browser open does not stop the poll (the user
+/// can still complete authorization in another browser).
+fn startOAuthBrowserFlow(model: *Model, fx: *Effects) void {
+    const url = std.fmt.allocPrint(
+        model.allocator,
+        "http://127.0.0.1:8080/auth/login?service={s}&user_id=native_sdk_chat",
+        .{model.tools.connect_service},
+    ) catch {
+        model.tools.connecting = false;
+        model.tools.polling = false;
+        model.tools.connect_error = "Failed to prepare authorization URL";
+        return;
+    };
+    openSystemBrowser(url) catch {
+        model.tools.connect_error = "Could not open your browser — authorize manually at the login URL";
+    };
+    fx.startTimer(.{
+        .key = auth_poll_key,
+        .interval_ms = 2000,
+        .mode = .repeating,
+        .on_fire = Effects.timerMsg(.auth_poll),
+    });
+}
+
+/// Open a URL in the platform default browser (macOS `open`). Uses
+/// `std.testing.io` for the spawn, matching the SDK's own app_assets.zig
+/// pattern (Zig 0.16 moved Child.run to std.process.run(io, ...)).
+fn openSystemBrowser(url: []const u8) !void {
+    const result = try std.process.run(std.heap.page_allocator, g_process_io, .{
+        .argv = &.{ "open", url },
+    });
+    if (result.term != .exited or result.term.exited != 0) return error.OpenFailed;
+}
+
 /// Apply a text-input event to one credential form field, mirroring the
 /// `.tools_search` handler (TextEditState + 256-byte reserve + selection).
 fn applyConnectorField(model: *Model, index: usize, event: canvas.TextInputEvent) void {
@@ -4103,6 +4267,24 @@ fn buildToolsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                 children[child_count] = ui.scroll(.{ .grow = 1, .padding = 16 }, .{ui.column(.{ .gap = 10 }, form_nodes[0..form_count])});
                 child_count += 1;
             }
+        } else if (model.tools.connecting) {
+            // OAuth waiting state: browser-authorize step in progress.
+            var wait_nodes: [5]AppUi.Node = undefined;
+            var wait_count: usize = 0;
+            wait_nodes[wait_count] = ui.text(.{ .size = .heading }, "Authorizing…");
+            wait_count += 1;
+            wait_nodes[wait_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, "Authorize in your browser");
+            wait_count += 1;
+            if (model.tools.connect_error.len > 0) {
+                wait_nodes[wait_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .destructive }, .wrap = true }, model.tools.connect_error);
+                wait_count += 1;
+            }
+            wait_nodes[wait_count] = ui.row(.{ .gap = 8, .padding = 4, .cross = .center }, .{
+                ui.button(.{ .on_press = .cancel_connect, .variant = .ghost, .size = .sm }, "Cancel"),
+            });
+            wait_count += 1;
+            children[child_count] = ui.scroll(.{ .grow = 1, .padding = 16 }, .{ui.column(.{ .gap = 10 }, wait_nodes[0..wait_count])});
+            child_count += 1;
         } else {
             var list_nodes: [max_connector_rows + 2]AppUi.Node = undefined;
             var list_node_count: usize = 0;
@@ -4126,10 +4308,8 @@ fn buildToolsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                     ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = if (c.connected) .success else .text_muted } }, status_text),
                     if (c.connected)
                         ui.button(.{ .on_press = .{ .disconnect_connector = connector_index }, .variant = .ghost, .size = .sm }, "Disconnect")
-                    else if (std.mem.eql(u8, c.auth_type, "api_key"))
-                        ui.button(.{ .on_press = .{ .connect_connector = connector_index }, .variant = .primary, .size = .sm }, "Connect")
                     else
-                        ui.button(.{ .disabled = true, .variant = .primary, .size = .sm }, "Connect"), // oauth2 wired in Task 6
+                        ui.button(.{ .on_press = .{ .connect_connector = connector_index }, .variant = .primary, .size = .sm }, "Connect"),
                 });
                 list_node_count += 1;
             }
@@ -4710,6 +4890,7 @@ fn fetchActiveChatHistory(model: *Model, fx: *Effects) void {
 }
 
 pub fn main(init: std.process.Init) !void {
+    g_process_io = init.io;
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
