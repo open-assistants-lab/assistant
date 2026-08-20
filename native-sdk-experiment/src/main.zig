@@ -2046,7 +2046,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             });
         },
         .connector_connected => |response| {
-            model.tools.connecting = false;
+            // During an oauth2 direct-flow poll the creds POST is
+            // fire-and-forget: keep the waiting state, the poll decides.
+            if (!model.tools.polling) model.tools.connecting = false;
             if (response.outcome != .ok) {
                 // oauth2: a failed creds POST is the normal direct-flow
                 // outcome (the browser authorize does the work) — keep the
