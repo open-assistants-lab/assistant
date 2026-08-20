@@ -24,6 +24,8 @@ const settings_general_key: u64 = 11;
 const grader_prompt_key: u64 = 12;
 const tools_key: u64 = 20;
 const tools_toggle_key: u64 = 21;
+const connectors_key: u64 = 22;
+const connector_disconnect_key: u64 = 23;
 
 const max_providers = 128;
 const max_provider_models = 512;
@@ -62,6 +64,24 @@ const ToolRow = struct {
 };
 const max_visible_tools_rows = 200;
 
+const RequiredField = struct {
+    name: []const u8,
+    label: []const u8,
+};
+const max_required_fields = 4;
+
+const ConnectorRow = struct {
+    name: []const u8,
+    display: []const u8,
+    description: []const u8,
+    category: []const u8,
+    auth_type: []const u8,
+    connected: bool,
+    required_fields: [max_required_fields]RequiredField = undefined,
+    field_count: usize = 0,
+};
+const max_connector_rows = 128;
+
 const ToolsState = struct {
     visible: bool = false,
     section: ToolsSection = .builtin,
@@ -71,6 +91,10 @@ const ToolsState = struct {
     search_text: []const u8 = "",
     search_selection: canvas.TextSelection = .{ .anchor = 0, .focus = 0 },
     tool_error: []const u8 = "",
+    connectors: [max_connector_rows]ConnectorRow = undefined,
+    connector_count: usize = 0,
+    connector_error: []const u8 = "",
+    connectors_loading: bool = false,
 };
 
 /// Which model role the catalog picker is currently editing.
@@ -304,6 +328,9 @@ pub const Msg = union(enum) {
     tools_search: canvas.TextInputEvent,
     toggle_tool: usize,
     tool_toggled: native_sdk.EffectResponse,
+    connectors_loaded: native_sdk.EffectResponse,
+    connector_disconnected: native_sdk.EffectResponse,
+    disconnect_connector: usize,
     settings_providers_models,
     settings_general,
     settings_loaded: native_sdk.EffectResponse,
@@ -1592,6 +1619,20 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.tools_loaded),
             });
+            // Connections catalog fetches alongside the tools list, but must
+            // not share `loading` — whichever response lands first would clear
+            // the other's spinner (controller pre-flight ruling).
+            model.tools.connectors_loading = true;
+            model.tools.connector_error = "";
+            model.tools.connector_count = 0;
+            fx.fetch(.{
+                .key = connectors_key,
+                .url = "http://127.0.0.1:8080/connectors/catalog?user_id=native_sdk_chat",
+                .method = .GET,
+                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.connectors_loaded),
+            });
         },
         .close_tools => {
             model.tools.visible = false;
@@ -1704,6 +1745,114 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .headers = &.{.{ .name = "Accept", .value = "application/json" }},
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.tools_loaded),
+            });
+        },
+        .connectors_loaded => |response| {
+            model.tools.connectors_loading = false;
+            if (response.outcome != .ok) return;
+            const body = response.body;
+            if (body.len == 0) return;
+            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch {
+                model.tools.connector_error = "Failed to parse connectors response";
+                return;
+            };
+            defer parsed.deinit();
+            const root = parsed.value;
+            model.tools.connector_error = "";
+            const arr = switch (root) {
+                .array => |a| a,
+                else => return,
+            };
+            model.tools.connector_count = 0;
+            for (arr.items) |item| {
+                if (model.tools.connector_count >= max_connector_rows) break;
+                const name = if (item.object.get("name")) |v| switch (v) {
+                    .string => |s| s,
+                    else => "",
+                } else "";
+                if (name.len == 0) continue;
+                const display = if (item.object.get("display")) |v| switch (v) {
+                    .string => |s| s,
+                    else => "",
+                } else "";
+                const description = if (item.object.get("description")) |v| switch (v) {
+                    .string => |s| s,
+                    else => "",
+                } else "";
+                const category = if (item.object.get("category")) |v| switch (v) {
+                    .string => |s| s,
+                    else => "",
+                } else "";
+                const auth_type = if (item.object.get("auth_type")) |v| switch (v) {
+                    .string => |s| s,
+                    else => "",
+                } else "";
+                const connected = if (item.object.get("connected")) |v| switch (v) {
+                    .bool => |b| b,
+                    else => false,
+                } else false;
+                var row = ConnectorRow{
+                    .name = model.allocator.dupe(u8, name) catch continue,
+                    .display = model.allocator.dupe(u8, display) catch continue,
+                    .description = model.allocator.dupe(u8, description) catch continue,
+                    .category = model.allocator.dupe(u8, category) catch continue,
+                    .auth_type = model.allocator.dupe(u8, auth_type) catch continue,
+                    .connected = connected,
+                };
+                if (item.object.get("required_fields")) |rf_val| {
+                    if (rf_val == .array) {
+                        for (rf_val.array.items) |rf| {
+                            if (row.field_count >= max_required_fields) break;
+                            const rf_name = if (rf.object.get("name")) |v| switch (v) {
+                                .string => |s| s,
+                                else => "",
+                            } else "";
+                            const rf_label = if (rf.object.get("label")) |v| switch (v) {
+                                .string => |s| s,
+                                else => "",
+                            } else "";
+                            row.required_fields[row.field_count] = .{
+                                .name = model.allocator.dupe(u8, rf_name) catch break,
+                                .label = model.allocator.dupe(u8, rf_label) catch break,
+                            };
+                            row.field_count += 1;
+                        }
+                    }
+                }
+                model.tools.connectors[model.tools.connector_count] = row;
+                model.tools.connector_count += 1;
+            }
+        },
+        .disconnect_connector => |idx| {
+            if (idx >= model.tools.connector_count) return;
+            const connector = model.tools.connectors[idx];
+            const url = std.fmt.allocPrint(
+                model.allocator,
+                "http://127.0.0.1:8080/connectors/disconnect?service={s}&user_id=native_sdk_chat",
+                .{connector.name},
+            ) catch return;
+            fx.fetch(.{
+                .key = connector_disconnect_key,
+                .url = url,
+                .method = .DELETE,
+                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.connector_disconnected),
+            });
+        },
+        .connector_disconnected => |response| {
+            if (response.outcome != .ok) {
+                model.tools.connector_error = "Failed to disconnect service";
+                return;
+            }
+            // Re-fetch the catalog so the UI reflects server truth.
+            fx.fetch(.{
+                .key = connectors_key,
+                .url = "http://127.0.0.1:8080/connectors/catalog?user_id=native_sdk_chat",
+                .method = .GET,
+                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.connectors_loaded),
             });
         },
         .settings_providers_models => {
@@ -3680,6 +3829,36 @@ fn buildToolsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                 list_nodes[list_node_count] = ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "No tools match");
                 list_node_count += 1;
             }
+        }
+        children[child_count] = ui.scroll(.{ .grow = 1, .padding = 16 }, .{ui.column(.{ .gap = 2 }, list_nodes[0..list_node_count])});
+        child_count += 1;
+    } else if (model.tools.section == .connections) {
+        var list_nodes: [max_connector_rows + 2]AppUi.Node = undefined;
+        var list_node_count: usize = 0;
+        if (model.tools.connector_error.len > 0) {
+            list_nodes[list_node_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .destructive }, .wrap = true }, model.tools.connector_error);
+            list_node_count += 1;
+        } else if (model.tools.connectors_loading) {
+            list_nodes[list_node_count] = ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Loading...");
+            list_node_count += 1;
+        } else if (model.tools.connector_count == 0) {
+            list_nodes[list_node_count] = ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "No connectors");
+            list_node_count += 1;
+        } else for (0..model.tools.connector_count) |connector_index| {
+            const c = model.tools.connectors[connector_index];
+            const status_text = if (c.connected) "Connected" else "Not connected";
+            list_nodes[list_node_count] = ui.row(.{ .gap = 8, .padding = 8, .cross = .center }, .{
+                ui.column(.{ .grow = 1, .gap = 2 }, .{
+                    ui.text(.{ .size = .sm }, c.display),
+                    ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, c.description),
+                }),
+                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = if (c.connected) .success else .text_muted } }, status_text),
+                if (c.connected)
+                    ui.button(.{ .on_press = .{ .disconnect_connector = connector_index }, .variant = .ghost, .size = .sm }, "Disconnect")
+                else
+                    ui.button(.{ .disabled = true, .variant = .primary, .size = .sm }, "Connect"), // wired in Task 5/6
+            });
+            list_node_count += 1;
         }
         children[child_count] = ui.scroll(.{ .grow = 1, .padding = 16 }, .{ui.column(.{ .gap = 2 }, list_nodes[0..list_node_count])});
         child_count += 1;

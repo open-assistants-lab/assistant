@@ -649,6 +649,30 @@ test_tools() {
     fail "tool toggle did not re-enable time_get (backend enabled=$ENABLED)"
   fi
 
+  # Connections tab: catalog renders real rows (not the empty state)
+  # Before implementation the tab shows "Loading..." (no "Not connected" text)
+  # so this assert fails red; after implementation the catalog rows render.
+  SNAPSHOT=$(native automate snapshot)
+  CONN_TAB=$(locate_widget button Connections)
+  if [ -n "$CONN_TAB" ]; then
+    native automate widget-click main-canvas "$CONN_TAB" > /dev/null 2>&1
+    if native automate assert --timeout-ms 5000 'role=text name="No connectors"' > /dev/null 2>&1; then
+      fail "connections tab shows empty state instead of catalog"
+    elif native automate assert --timeout-ms 5000 'role=text name="Not connected"' > /dev/null 2>&1; then
+      pass "connections tab renders catalog rows"
+    else
+      fail "connections tab did not render catalog"
+    fi
+  else
+    fail "Connections tab button not found"
+  fi
+  # Switch back to Built-in for the close-toggle check
+  SNAPSHOT=$(native automate snapshot)
+  BUILTIN=$(locate_widget button Built-in)
+  if [ -n "$BUILTIN" ]; then
+    native automate widget-click main-canvas "$BUILTIN" > /dev/null 2>&1
+  fi
+
   # Toggle close (press the sidebar Tools row again)
   SNAPSHOT=$(native automate snapshot)
   TOOLS=$(find_pressable_by_child_text "Tools")
