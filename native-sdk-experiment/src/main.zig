@@ -3881,10 +3881,11 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     var content_children: [4]AppUi.Node = undefined;
     var content_count: usize = 0;
 
-    // Header
-    children[child_count] = ui.row(.{ .gap = 12, .padding = 16, .cross = .center, .style_tokens = .{ .background = .surface } }, .{
+    // Header — eyebrow + title + hairline rule. The panel reads top-down:
+    // micro-label (tracking-capped uppercase), then the section heading.
+    children[child_count] = ui.column(.{ .gap = 2, .padding = 16, .style_tokens = .{ .background = .surface } }, .{
+        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, upperAscii(ui.arena, "Preferences")),
         ui.text(.{ .size = .heading }, "Settings"),
-        ui.spacer(1),
     });
     child_count += 1;
 
@@ -3893,7 +3894,8 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     var list_nodes: [max_visible_settings_rows + 4]AppUi.Node = undefined;
     var list_node_count: usize = 0;
 
-    // Role toggle: which model role the catalog edits.
+    // Role toggle: which model role the catalog edits — segmented control
+    // (one connected track, active segment accent-filled).
     var role_nodes: [4]AppUi.Node = undefined;
     const roles = [_]struct { role: ModelRole, label: []const u8 }{
         .{ .role = .agent, .label = "Agent" },
@@ -3910,6 +3912,8 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         }, r.label);
     }
     const role_slice: []const AppUi.Node = role_nodes[0..4];
+    list_nodes[list_node_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Model roles");
+    list_node_count += 1;
     list_nodes[list_node_count] = ui.row(.{ .gap = 6, .padding = 4, .cross = .center }, role_slice);
     list_node_count += 1;
 
@@ -4013,7 +4017,7 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
 
     content_children[content_count] = ui.el(.card, .{
         .padding = 12,
-        .style_tokens = .{ .background = .surface, .radius = .md },
+        .style_tokens = .{ .background = .surface, .radius = .md, .border_color = .border },
     }, .{
         ui.column(.{ .gap = 8 }, list_nodes[0..list_node_count]),
     });
@@ -4062,7 +4066,7 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     // Rubric settings
     content_children[content_count] = ui.el(.card, .{
         .padding = 16,
-        .style_tokens = .{ .background = .surface, .radius = .md },
+        .style_tokens = .{ .background = .surface, .radius = .md, .border_color = .border },
     }, .{
         ui.column(.{ .gap = 8 }, .{
             ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Rubric"),
@@ -4100,7 +4104,7 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     // Appearance
     content_children[content_count] = ui.el(.card, .{
         .padding = 16,
-        .style_tokens = .{ .background = .surface, .radius = .md },
+        .style_tokens = .{ .background = .surface, .radius = .md, .border_color = .border },
     }, .{
         ui.column(.{ .gap = 8 }, .{
             ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Appearance"),
@@ -4130,7 +4134,7 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     // About
     content_children[content_count] = ui.el(.card, .{
         .padding = 16,
-        .style_tokens = .{ .background = .surface, .radius = .md },
+        .style_tokens = .{ .background = .surface, .radius = .md, .border_color = .border },
     }, .{
         ui.column(.{ .gap = 4 }, .{
             ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "About"),
@@ -4148,28 +4152,29 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     }
 
     const sidebar = ui.el(.card, .{
-        .width = 120,
-        .padding = 6,
-        .style_tokens = .{ .background = .surface, .radius = .md },
+        .width = 128,
+        .padding = 12,
+        .style_tokens = .{ .background = .surface, .border_color = .border, .radius = .md },
     }, .{
-        ui.column(.{ .gap = 6 }, .{
+        ui.column(.{ .gap = 8 }, .{
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, upperAscii(ui.arena, "Sections")),
             ui.button(.{
                 .on_press = .settings_providers_models,
-                .variant = if (model.settings.section == .providers_models) .primary else .secondary,
+                .variant = if (model.settings.section == .providers_models) .primary else .ghost,
                 .size = .sm,
                 .width = 104,
                 .padding = 12,
             }, "Models"),
             ui.button(.{
                 .on_press = .settings_general,
-                .variant = if (model.settings.section == .general) .primary else .secondary,
+                .variant = if (model.settings.section == .general) .primary else .ghost,
                 .size = .sm,
                 .width = 104,
                 .padding = 12,
             }, "General"),
             ui.button(.{
                 .on_press = .settings_tools,
-                .variant = if (model.settings.section == .tools) .primary else .secondary,
+                .variant = if (model.settings.section == .tools) .primary else .ghost,
                 .size = .sm,
                 .width = 104,
                 .padding = 12,
@@ -4205,6 +4210,9 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
 fn buildToolsSection(ui: *AppUi, model: *const Model) AppUi.Node {
     var children: [3]AppUi.Node = undefined;
     var child_count: usize = 0;
+
+    children[child_count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Tools");
+    child_count += 1;
 
     var tab_nodes: [2]AppUi.Node = undefined;
     const tabs = [_]struct { section: ToolsSection, label: []const u8 }{
@@ -4380,8 +4388,14 @@ fn buildToolsSection(ui: *AppUi, model: *const Model) AppUi.Node {
         child_count += 1;
     }
 
-    return ui.column(.{ .gap = 10 }, children[0..child_count]);
+    return ui.el(.card, .{
+        .padding = 12,
+        .style_tokens = .{ .background = .surface, .radius = .md, .border_color = .border },
+    }, .{
+        ui.column(.{ .gap = 10 }, children[0..child_count]),
+    });
 }
+
 
 fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     const chat = &model.chats[model.active_chat_idx];
