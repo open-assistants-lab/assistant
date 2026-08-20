@@ -2055,3 +2055,20 @@ test "connectorConnectBody escapes quotes and backslashes, skips empty buffers" 
     // Empty second field is skipped; quote and backslash escaped.
     try testing.expectEqualStrings("{\"api_key\":\"a\\\"b\\\\c\"}", body);
 }
+
+test "credential form node budget covers a 4-field connector" {
+    // Regression: the form used [max_required_fields + 6] = [10] but a
+    // 4-field connector writes heading + subtitle + optional error + 8 field
+    // nodes (label + textarea each) + submit/cancel row = 12 nodes — out of
+    // bounds (Debug panic / ReleaseFast stack corruption). The budget
+    // constant must cover every write the render performs at max field count.
+    const heading = 1;
+    const subtitle = 1;
+    const error_line = 1;
+    const nodes_per_field = 2; // label + textarea
+    const buttons_row = 1;
+    const max_writes = heading + subtitle + error_line + nodes_per_field * main.max_required_fields + buttons_row;
+    try testing.expectEqual(12, max_writes);
+    try testing.expect(main.credential_form_nodes >= max_writes);
+    try testing.expectEqual(12, main.credential_form_nodes);
+}

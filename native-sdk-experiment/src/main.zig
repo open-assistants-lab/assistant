@@ -85,7 +85,14 @@ pub const RequiredField = struct {
     optional: bool,
     help_text: []const u8,
 };
-const max_required_fields = 4;
+pub const max_required_fields = 4;
+
+/// Credential-form node budget: heading + "Enter credentials" + optional
+/// error line + field_count × (label + textarea) + submit/cancel row.
+/// Sized for the maximum field count so a 4-field connector can never write
+/// past the end of the form's node array (regression: was [max_required_fields + 6] = [10],
+/// but a 4-field connector writes 12 nodes).
+pub const credential_form_nodes = 2 * max_required_fields + 4;
 
 pub const ConnectorRow = struct {
     name: []const u8,
@@ -855,6 +862,18 @@ fn doSend(model: *Model, fx: *Effects) void {
     });
 }
 
+/// Close the Tools panel and stop its OAuth poll timer. Shared by handlers
+/// that must not leave Tools open over another surface (settings, new chat,
+/// chat switch, model menu) — the panel precedence is one-open-at-a-time.
+fn closeToolsPane(model: *Model, fx: *Effects) void {
+    if (model.tools.polling) {
+        model.tools.polling = false;
+        model.tools.poll_ticks = 0;
+        fx.cancelTimer(auth_poll_key);
+    }
+    model.tools.visible = false;
+}
+
 pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
     switch (msg) {
         .input_changed => |event| {
@@ -889,6 +908,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .new_chat => {
             model.settings.visible = false;
+            closeToolsPane(model, fx);
             if (model.chat_count >= max_chats) return;
             // Append the new chat, then sort by created_at descending so the
             // newest chat naturally appears at the top.
@@ -920,6 +940,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .switch_chat => |chat_id| {
             model.settings.visible = false;
+            closeToolsPane(model, fx);
             var i: usize = 0;
             while (i < model.chat_count) : (i += 1) {
                 if (model.chats[i].id == chat_id) {
@@ -1112,6 +1133,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .model_menu_manage => {
             model.model_menu_open = false;
+            closeToolsPane(model, fx);
             model.settings.visible = true;
             model.settings.section = .providers_models;
         },
@@ -1608,6 +1630,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 return;
             }
             model.settings.visible = true;
+            closeToolsPane(model, fx);
             model.settings.loading = true;
             model.settings.provider_count = 0;
             model.available_model_count = 0;
@@ -1689,12 +1712,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             });
         },
         .close_tools => {
-            if (model.tools.polling) {
-                model.tools.polling = false;
-                model.tools.poll_ticks = 0;
-                fx.cancelTimer(auth_poll_key);
-            }
-            model.tools.visible = false;
+            closeToolsPane(model, fx);
         },
         .tools_tab_builtin => {
             model.tools.section = .builtin;
@@ -2055,6 +2073,20 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
             const cidx = connector_idx orelse return;
             const connector = model.tools.connectors[cidx];
+            // Client-side validation: every non-optional required field must
+            // be filled before the request leaves — the backend only rejects
+            // when ALL fields are empty, which is too late for a form.
+            var missing: ?[]const u8 = null;
+            for (0..connector.field_count) |i| {
+                if (!connector.required_fields[i].optional and model.tools.field_buffers[i].len == 0) {
+                    missing = connector.required_fields[i].label;
+                    break;
+                }
+            }
+            if (missing) |label| {
+                model.tools.connect_error = std.fmt.allocPrint(model.allocator, "Required: {s}", .{label}) catch "Required field missing";
+                return;
+            }
             const body = connectorConnectBody(model.allocator, &connector, &model.tools.field_buffers) catch {
                 model.tools.connect_error = "Failed to prepare request";
                 return;
@@ -2108,9 +2140,18 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 return;
             }
             // api_key connect returns {"status":"connected"}; the catalog
-            // refetch flips the row to Connected (server truth).
+            // refetch flips the row to Connected (server truth). Clear the
+            // credential state the same way close_form does.
             model.tools.form_open = false;
             model.tools.connect_error = "";
+            model.tools.connect_service = "";
+            model.tools.field_buffers = .{ "", "", "", "" };
+            model.tools.field_selections = .{
+                .{ .anchor = 0, .focus = 0 },
+                .{ .anchor = 0, .focus = 0 },
+                .{ .anchor = 0, .focus = 0 },
+                .{ .anchor = 0, .focus = 0 },
+            };
             fx.fetch(.{
                 .key = connectors_key,
                 .url = "http://127.0.0.1:8080/connectors/catalog?user_id=native_sdk_chat",
@@ -2154,7 +2195,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.tools.connecting = false;
             model.tools.connect_error = "";
             model.tools.connect_service = "";
-            // Credentials are sensitive — drop the buffers on close.
+            // Clear the buffers on close for consistency with the success
+            // path. Note: the arena never zeroes reclaimed bytes — the old
+            // strings live until process exit either way; this is a logical
+            // clear, not a memory wipe.
             model.tools.field_buffers = .{ "", "", "", "" };
             model.tools.field_selections = .{
                 .{ .anchor = 0, .focus = 0 },
@@ -4282,7 +4326,7 @@ fn buildToolsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
             }
             if (form_idx) |cidx| {
                 const c = model.tools.connectors[cidx];
-                var form_nodes: [max_required_fields + 6]AppUi.Node = undefined;
+                var form_nodes: [credential_form_nodes]AppUi.Node = undefined;
                 var form_count: usize = 0;
                 form_nodes[form_count] = ui.text(.{ .size = .heading }, c.display);
                 form_count += 1;
@@ -4956,6 +5000,9 @@ fn fetchActiveChatHistory(model: *Model, fx: *Effects) void {
 /// needed here.
 fn keyFallback(keyboard: canvas.WidgetKeyboardEvent) ?Msg {
     if (keyboard.phase != .key_down) return null;
+    // Modifier-gated chords are shortcuts, not panel dismissal — only a
+    // bare Escape closes the panel.
+    if (keyboard.modifiers.shift or keyboard.modifiers.control or keyboard.modifiers.alt or keyboard.modifiers.super) return null;
     if (!std.ascii.eqlIgnoreCase(keyboard.key, "escape") and !std.ascii.eqlIgnoreCase(keyboard.key, "esc")) return null;
     return .close_tools;
 }

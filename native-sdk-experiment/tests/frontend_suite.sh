@@ -709,8 +709,10 @@ test_tools() {
   # needs NO credentials (the direct browser-authorize path — connectors
   # with required fields open the credential form instead, covered by the
   # api_key form test), press its Connect button, assert the waiting state
-  # appears. (No real browser flow in CI — the waiting state is the
-  # automated assertion; full E2E is manual.) Cancel to stop the poll.
+  # appears. (Note: the direct flow calls openSystemBrowser, so this test may
+  # open a system browser on a dev machine; in CI the open either fails
+  # silently or is caught — the assertion is the waiting state, and Cancel
+  # stops the poll. Full E2E is manual.)
   OAUTH_DISPLAY=$(curl -s 'http://127.0.0.1:8080/connectors/catalog?user_id=native_sdk_chat' | python3 -c "import sys,json; d=json.load(sys.stdin); c=next((c for c in d if c['auth_type']=='oauth2' and not c['connected'] and not any(not f.get('optional', False) for f in c.get('required_fields', []))), None); print(c['display'] if c else '')")
   if [ -n "$OAUTH_DISPLAY" ]; then
     SNAPSHOT=$(native automate snapshot)
@@ -822,6 +824,83 @@ test_tools() {
     fail "tools did not close"
   fi
 
+  cleanup
+}
+
+# Regression test for the credential-form node budget (Critical #1): a
+# connector with 4 required fields writes heading + subtitle + 8 field nodes
+# + submit/cancel row = 12 nodes. The form array was [10] — an out-of-bounds
+# write (Debug panic). We serve a 4-field fixture connector via
+# CONNECTKIT_SPEC_DIR (the suite's backend reads it at startup), open its
+# form, and assert all four field labels render — the app crashes before the
+# fix, renders after.
+test_connect_form_4field() {
+  echo ""
+  echo "=== 8b. Connect Form: 4-field fixture renders (node budget) ==="
+
+  FIXTURE_DIR=$(mktemp -d)
+  cat > "$FIXTURE_DIR/fixture-four-field.yaml" << 'YAML'
+name: fixture-four-field
+display: Fixture Four Field
+icon: fixture
+category: test
+description: Four-required-field fixture for the credential form
+auth:
+  type: api_key
+  required_fields:
+  - name: host
+    label: Host
+    placeholder: api.example.com
+    input_type: text
+    optional: false
+  - name: api_key
+    label: API Key
+    placeholder: sk-...
+    input_type: password
+    optional: false
+  - name: client_id
+    label: Client ID
+    placeholder: cid
+    input_type: text
+    optional: false
+  - name: secret
+    label: Secret
+    placeholder: s3cret
+    input_type: password
+    optional: false
+YAML
+  export CONNECTKIT_SPEC_DIR="$FIXTURE_DIR"
+  start_backend
+  start_app
+
+  SNAPSHOT=$(native automate snapshot)
+  TOOLS=$(find_pressable_by_child_text "Tools")
+  native automate widget-click main-canvas "$TOOLS" > /dev/null 2>&1
+  if native automate assert --timeout-ms 5000 'role=button name="Connections"' > /dev/null 2>&1; then
+    SNAPSHOT=$(native automate snapshot)
+    CONN_TAB=$(locate_widget button Connections)
+    native automate widget-click main-canvas "$CONN_TAB" > /dev/null 2>&1
+    SNAPSHOT=$(native automate snapshot)
+    BTN=$(find_sibling_button "Fixture Four Field")
+    if [ -z "$BTN" ]; then
+      fail "connect button for fixture connector not found"
+    else
+      native automate widget-action main-canvas "$BTN" press > /dev/null 2>&1
+      if native automate assert --timeout-ms 3000 'role=text name="Host"' > /dev/null 2>&1 &&
+         native automate assert --timeout-ms 3000 'role=text name="API Key"' > /dev/null 2>&1 &&
+         native automate assert --timeout-ms 3000 'role=text name="Client ID"' > /dev/null 2>&1 &&
+         native automate assert --timeout-ms 3000 'role=text name="Secret"' > /dev/null 2>&1; then
+        pass "4-field credential form renders without crashing"
+      else
+        fail "4-field credential form did not render"
+      fi
+    fi
+  else
+    fail "tools panel did not open for connect-form test"
+  fi
+
+  unset CONNECTKIT_SPEC_DIR
+  rm -rf "$FIXTURE_DIR"
   cleanup
 }
 
@@ -1378,6 +1457,7 @@ case "$MODE" in
     test_suggestions
     test_settings
     test_tools
+    test_connect_form_4field
     test_cancel
     test_search
     test_model
@@ -1410,6 +1490,9 @@ case "$MODE" in
   --tools)
     test_tools
     ;;
+  --connectform)
+    test_connect_form_4field
+    ;;
   --cancel)
     test_cancel
     ;;
@@ -1432,7 +1515,7 @@ case "$MODE" in
     test_model_midstream
     ;;
   *)
-    echo "Usage: $0 [--all|--record|--screenshot|--keyboard|--bridge|--chats|--suggestions|--settings|--tools|--cancel|--search|--model|--sidebar|--unread|--textarea|--midstream]"
+    echo "Usage: $0 [--all|--record|--screenshot|--keyboard|--bridge|--chats|--suggestions|--settings|--tools|--connectform|--cancel|--search|--model|--sidebar|--unread|--textarea|--midstream]"
     exit 1
     ;;
 esac
