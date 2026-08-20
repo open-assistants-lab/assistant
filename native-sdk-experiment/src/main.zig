@@ -1578,6 +1578,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.settings.visible = false; // tools wins precedence
             model.tools.visible = true;
             model.tools.loading = true;
+            model.tools.tool_error = "";
+            model.tools.tool_count = 0;
+            model.tools.search_text = "";
+            model.tools.search_selection = .{ .anchor = 0, .focus = 0 };
             fx.fetch(.{
                 .key = tools_key,
                 .url = "http://127.0.0.1:8080/tools?user_id=native_sdk_chat&workspace_id=personal",
@@ -1607,6 +1611,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             };
             defer parsed.deinit();
             const root = parsed.value;
+            model.tools.tool_error = "";
             if (root.object.get("tools")) |tools_val| {
                 const tools_arr = switch (tools_val) {
                     .array => |a| a,
@@ -1655,7 +1660,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .set_composition => |composition| composition.text.len,
                 else => 0,
             };
-            const output = model.allocator.alloc(u8, model.tools.search_text.len + extra + 8) catch return;
+            const output = model.allocator.alloc(u8, model.tools.search_text.len + extra + 256) catch return;
             const next = (canvas.TextEditState{
                 .text = model.tools.search_text,
                 .selection = model.tools.search_selection,
