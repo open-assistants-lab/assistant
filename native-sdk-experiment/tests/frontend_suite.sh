@@ -742,6 +742,76 @@ test_tools() {
     native automate widget-click main-canvas "$BUILTIN" > /dev/null 2>&1
   fi
 
+  # Escape closes the panel via the app-level key fallback (fires when no
+  # text widget has focus — the Built-in tab click left a button focused).
+  native automate widget-key main-canvas Escape > /dev/null 2>&1
+  if native automate assert --timeout-ms 3000 'role=textbox name="Message"' > /dev/null 2>&1; then
+    pass "escape closes tools panel"
+  else
+    fail "escape did not close tools panel"
+  fi
+
+  # Reduced-motion path: Settings → General → Reduced motion On → close
+  # Settings → Tools opens fine (entrance jumps straight to settled; the
+  # assertion is the panel still renders — same stance as the theme test)
+  # → Escape closes again.
+  SNAPSHOT=$(native automate snapshot)
+  SETTINGS=$(find_pressable_by_child_text "Settings")
+  if [ -n "$SETTINGS" ]; then
+    native automate widget-click main-canvas "$SETTINGS" > /dev/null
+    if native automate assert --timeout-ms 5000 'role=button name="Models"' > /dev/null 2>&1; then
+      SNAPSHOT=$(native automate snapshot)
+      GENERAL=$(locate_widget button General)
+      if [ -n "$GENERAL" ]; then
+        native automate widget-click main-canvas "$GENERAL" > /dev/null
+        if native automate assert --timeout-ms 5000 'role=text name="Reduced motion"' > /dev/null 2>&1; then
+          SNAPSHOT=$(native automate snapshot)
+          RM_TOGGLE=$(find_sibling_button "Reduced motion")
+          if [ -n "$RM_TOGGLE" ]; then
+            native automate widget-action main-canvas "$RM_TOGGLE" press > /dev/null 2>&1
+            sleep 1
+            # Close settings (toggle), open Tools
+            SNAPSHOT=$(native automate snapshot)
+            SETTINGS=$(find_pressable_by_child_text "Settings")
+            native automate widget-click main-canvas "$SETTINGS" > /dev/null
+            SNAPSHOT=$(native automate snapshot)
+            TOOLS=$(find_pressable_by_child_text "Tools")
+            native automate widget-click main-canvas "$TOOLS" > /dev/null
+            if native automate assert --timeout-ms 3000 'role=text name="time_get"' > /dev/null 2>&1; then
+              pass "tools panel opens with reduced motion"
+            else
+              fail "tools panel failed with reduced motion"
+            fi
+            native automate widget-key main-canvas Escape > /dev/null 2>&1
+            if native automate assert --timeout-ms 3000 'role=textbox name="Message"' > /dev/null 2>&1; then
+              pass "escape closes tools panel with reduced motion"
+            else
+              fail "escape did not close tools panel with reduced motion"
+            fi
+          else
+            fail "reduced motion toggle not found"
+          fi
+        else
+          fail "reduced motion row missing in General"
+        fi
+      else
+        fail "General tab not found for reduced-motion path"
+      fi
+    else
+      fail "settings did not open for reduced-motion path"
+    fi
+  fi
+
+  # Re-open Tools for the toggle-close check
+  SNAPSHOT=$(native automate snapshot)
+  TOOLS=$(find_pressable_by_child_text "Tools")
+  native automate widget-click main-canvas "$TOOLS" > /dev/null
+  if native automate assert --timeout-ms 3000 'role=text name="Tools"' > /dev/null 2>&1; then
+    pass "tools reopens after escape close"
+  else
+    fail "tools did not reopen after escape close"
+  fi
+
   # Toggle close (press the sidebar Tools row again)
   SNAPSHOT=$(native automate snapshot)
   TOOLS=$(find_pressable_by_child_text "Tools")

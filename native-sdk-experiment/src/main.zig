@@ -440,6 +440,7 @@ pub const Model = struct {
     // timer; the view maps each to opacity/transform. Reset to 0 when the
     // surface (re)appears so it fades in instead of teleporting.
     settings_entrance: f32 = 1,
+    tools_entrance: f32 = 1,
     hitl_entrance: f32 = 1,
     empty_entrance: f32 = 1,
     composer_entrance: f32 = 0,
@@ -1338,6 +1339,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     model.settings_entrance = @min(1, model.settings_entrance + entrance_step);
                     any_entrance = true;
                 }
+                if (model.tools_entrance < 1) {
+                    model.tools_entrance = @min(1, model.tools_entrance + entrance_step);
+                    any_entrance = true;
+                }
                 if (model.hitl_entrance < 1) {
                     model.hitl_entrance = @min(1, model.hitl_entrance + entrance_step);
                     any_entrance = true;
@@ -1648,6 +1653,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.settings.visible = false; // tools wins precedence
             model.tools.visible = true;
             model.tools.loading = true;
+            // Entrance animation: fade in. Reduced motion jumps straight
+            // to settled (no animation), mirroring the settings panel.
+            if (model.settings.reduced_motion) {
+                model.tools_entrance = 1;
+            } else {
+                model.tools_entrance = 0;
+                fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
+            }
             model.tools.tool_error = "";
             model.tools.tool_count = 0;
             model.tools.search_text = "";
@@ -4366,7 +4379,10 @@ fn buildToolsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         child_count += 1;
     }
 
-    return ui.column(.{ .grow = 1, .style_tokens = .{ .background = .background } }, children[0..child_count]);
+    // Entrance animation: fade-in only, same GPU-cheap treatment as the
+    // settings panel (opacity alone avoids per-frame re-rasterization).
+    const tools_eased = smoothstep(model.tools_entrance);
+    return ui.column(.{ .grow = 1, .opacity = tools_eased, .style_tokens = .{ .background = .background } }, children[0..child_count]);
 }
 
 fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
@@ -4932,6 +4948,18 @@ fn fetchActiveChatHistory(model: *Model, fx: *Effects) void {
     });
 }
 
+/// App-level key fallback (UiApp on_key): consulted on key_down only after
+/// widget routing declines the key. Escape closes the Tools panel when no
+/// text-entry widget consumes it (text widgets eat Escape for their own edit
+/// operations — composition cancel / search clear). Idempotent: `.close_tools`
+/// is a no-op when the panel is already closed, so no visibility guard is
+/// needed here.
+fn keyFallback(keyboard: canvas.WidgetKeyboardEvent) ?Msg {
+    if (keyboard.phase != .key_down) return null;
+    if (!std.ascii.eqlIgnoreCase(keyboard.key, "escape") and !std.ascii.eqlIgnoreCase(keyboard.key, "esc")) return null;
+    return .close_tools;
+}
+
 pub fn main(init: std.process.Init) !void {
     g_process_io = init.io;
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -4947,6 +4975,7 @@ pub fn main(init: std.process.Init) !void {
         .tokens_fn = tokensFn,
         .sync = syncModelFromLayout,
         .view = buildView,
+        .on_key = keyFallback,
         // Geist (SIL OFL 1.1, Vercel) — the house face. Registered before
         // the first view build so layout measures with it. Ids 64+ are
         // the app range (see canvas.min_registered_font_id); the theme
