@@ -106,6 +106,40 @@ print('')
 " "$child_text" <<< "$SNAPSHOT"
 }
 
+# Find the button widget inside the same row as a text widget.
+# Accepts the text content (resolves to its parent row) or a raw widget id.
+find_sibling_button() {
+  local target="$1"
+  python3 -c "
+import re,sys
+s=sys.stdin.read()
+target=sys.argv[1]
+lines = s.splitlines()
+widgets = {}
+for ln in lines:
+    m = re.match(r'\s*widget @w1/main-canvas#(\d+) role=(\S+)(?: name=\"([^\"]*)\")?(.*)', ln)
+    if not m: continue
+    wid, role, name, rest = m.groups()
+    pm = re.search(r'parent=#(\d+)', rest or '')
+    parent = pm.group(1) if pm else None
+    widgets[wid] = (role, name or '', parent)
+if re.fullmatch(r'\d+', target):
+    pid = target
+else:
+    pid = None
+    for wid, (role, name, parent) in widgets.items():
+        if role == 'text' and name == target:
+            pid = parent
+            break
+    if pid is None:
+        print(''); sys.exit(0)
+for wid, (role, name, parent) in widgets.items():
+    if role == 'button' and parent == pid:
+        print(wid); sys.exit(0)
+print('')
+" "$target" <<< "$SNAPSHOT"
+}
+
 # Read a text widget's name (its content) by widget id.
 widget_name() {
   local wid="$1"
@@ -583,6 +617,38 @@ test_tools() {
   else
     fail "built-in tools list missing time_get"
   fi
+
+  # Per-tool enable/disable: time_get's On/Off toggle flips scope via PATCH
+  # (verify against the backend — the real behavior; the button's snapshot
+  # name is its semantics label "Disable"/"Enable", so we don't assert text)
+  SNAPSHOT=$(native automate snapshot)
+  TG_TOGGLE=$(find_sibling_button "time_get")
+  if [ -z "$TG_TOGGLE" ]; then
+    fail "toggle button for time_get not found"
+    cleanup
+    return 1
+  fi
+  native automate widget-action main-canvas "$TG_TOGGLE" press > /dev/null 2>&1
+  # Wait for the PATCH + list refetch, then verify the backend flipped it off
+  sleep 2
+  ENABLED=$(curl -s 'http://127.0.0.1:8080/tools/time_get?user_id=native_sdk_chat&workspace_id=personal' | python3 -c "import sys,json; print(json.load(sys.stdin).get('enabled'))")
+  if [ "$ENABLED" = "False" ]; then
+    pass "tool toggle disables time_get (backend enabled=false)"
+  else
+    fail "tool toggle did not disable time_get (backend enabled=$ENABLED)"
+  fi
+  # Re-enable to leave state clean
+  SNAPSHOT=$(native automate snapshot)
+  TG_TOGGLE=$(find_sibling_button "time_get")
+  native automate widget-action main-canvas "$TG_TOGGLE" press > /dev/null 2>&1
+  sleep 2
+  ENABLED=$(curl -s 'http://127.0.0.1:8080/tools/time_get?user_id=native_sdk_chat&workspace_id=personal' | python3 -c "import json,sys; print(json.load(sys.stdin).get('enabled'))")
+  if [ "$ENABLED" = "True" ]; then
+    pass "tool toggle re-enables time_get (backend enabled=true)"
+  else
+    fail "tool toggle did not re-enable time_get (backend enabled=$ENABLED)"
+  fi
+
   # Toggle close (press the sidebar Tools row again)
   SNAPSHOT=$(native automate snapshot)
   TOOLS=$(find_pressable_by_child_text "Tools")

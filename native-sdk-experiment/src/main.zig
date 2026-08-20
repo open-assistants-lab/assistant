@@ -302,6 +302,8 @@ pub const Msg = union(enum) {
     tools_tab_connections,
     tools_loaded: native_sdk.EffectResponse,
     tools_search: canvas.TextInputEvent,
+    toggle_tool: usize,
+    tool_toggled: native_sdk.EffectResponse,
     settings_providers_models,
     settings_general,
     settings_loaded: native_sdk.EffectResponse,
@@ -1667,6 +1669,42 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }).apply(event, output) catch return;
             model.tools.search_text = next.text;
             model.tools.search_selection = next.selection;
+        },
+        .toggle_tool => |idx| {
+            if (idx >= model.tools.tool_count) return;
+            const tool = &model.tools.tools[idx];
+            const enable = !tool.enabled;
+            const body = toolToggleBody(enable);
+            const url = std.fmt.allocPrint(
+                model.allocator,
+                "http://127.0.0.1:8080/tools/{s}?user_id=native_sdk_chat&workspace_id=personal",
+                .{tool.name},
+            ) catch return;
+            fx.fetch(.{
+                .key = tools_toggle_key,
+                .url = url,
+                .method = .PATCH,
+                .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+                .body = body,
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.tool_toggled),
+            });
+        },
+        .tool_toggled => |response| {
+            if (response.outcome != .ok) {
+                model.tools.tool_error = "Failed to toggle tool";
+                return;
+            }
+            // Re-fetch the list so the UI reflects server truth (the backend
+            // also resets the user's agent loops on toggle).
+            fx.fetch(.{
+                .key = tools_key,
+                .url = "http://127.0.0.1:8080/tools?user_id=native_sdk_chat&workspace_id=personal",
+                .method = .GET,
+                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.tools_loaded),
+            });
         },
         .settings_providers_models => {
             model.settings.section = .providers_models;
@@ -3230,6 +3268,10 @@ fn buildModelMenu(ui: *AppUi, model: *const Model) AppUi.Node {
     });
 }
 
+fn toolToggleBody(enable: bool) []const u8 {
+    return if (enable) "{\"scope\": \"all\"}" else "{\"scope\": \"none\"}";
+}
+
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     if (needle.len == 0) return true;
     if (needle.len > haystack.len) return false;
@@ -3623,7 +3665,12 @@ fn buildToolsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                     !containsIgnoreCase(t.description, model.tools.search_text)) continue;
                 list_nodes[list_node_count] = ui.row(.{ .gap = 8, .padding = 8, .cross = .center }, .{
                     ui.text(.{ .size = .sm, .grow = 1 }, t.name),
-                    ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, t.category),
+                    ui.button(.{
+                        .on_press = .{ .toggle_tool = tool_idx },
+                        .variant = if (t.enabled) .primary else .ghost,
+                        .size = .sm,
+                        .semantics = .{ .label = if (t.enabled) "Disable" else "Enable" },
+                    }, if (t.enabled) "On" else "Off"),
                 });
                 list_node_count += 1;
                 rendered += 1;
