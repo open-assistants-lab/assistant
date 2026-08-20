@@ -65,7 +65,7 @@ const ToolRow = struct {
 };
 const max_visible_tools_rows = 200;
 
-const RequiredField = struct {
+pub const RequiredField = struct {
     name: []const u8,
     label: []const u8,
     placeholder: []const u8,
@@ -75,7 +75,7 @@ const RequiredField = struct {
 };
 const max_required_fields = 4;
 
-const ConnectorRow = struct {
+pub const ConnectorRow = struct {
     name: []const u8,
     display: []const u8,
     description: []const u8,
@@ -1936,12 +1936,18 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
             const cidx = connector_idx orelse return;
             const connector = model.tools.connectors[cidx];
-            const body = connectorConnectBody(model.allocator, &connector, &model.tools.field_buffers) catch return;
+            const body = connectorConnectBody(model.allocator, &connector, &model.tools.field_buffers) catch {
+                model.tools.connect_error = "Failed to prepare request";
+                return;
+            };
             const url = std.fmt.allocPrint(
                 model.allocator,
                 "http://127.0.0.1:8080/connectors/connect?service={s}&user_id=native_sdk_chat",
                 .{connector.name},
-            ) catch return;
+            ) catch {
+                model.tools.connect_error = "Failed to prepare request";
+                return;
+            };
             model.tools.connecting = true;
             model.tools.connect_error = "";
             fx.fetch(.{
@@ -1982,6 +1988,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.tools.connecting = false;
             model.tools.connect_error = "";
             model.tools.connect_service = "";
+            // Credentials are sensitive — drop the buffers on close.
+            model.tools.field_buffers = .{ "", "", "", "" };
+            model.tools.field_selections = .{
+                .{ .anchor = 0, .focus = 0 },
+                .{ .anchor = 0, .focus = 0 },
+                .{ .anchor = 0, .focus = 0 },
+                .{ .anchor = 0, .focus = 0 },
+            };
         },
         .tools_field_0 => |field| applyConnectorField(model, 0, field),
         .tools_field_1 => |field| applyConnectorField(model, 1, field),
@@ -3582,7 +3596,19 @@ fn appendJsonString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), s: []
             '\n' => try out.appendSlice(allocator, "\\n"),
             '\r' => try out.appendSlice(allocator, "\\r"),
             '\t' => try out.appendSlice(allocator, "\\t"),
-            else => try out.append(allocator, ch),
+            0x08 => try out.appendSlice(allocator, "\\u0008"), // \b
+            0x0c => try out.appendSlice(allocator, "\\u000c"), // \f
+            else => {
+                if (ch < 0x20) {
+                    // Escape every other control character as \u00XX — raw
+                    // control bytes (0x00-0x1F) are invalid in JSON strings.
+                    var buf: [6]u8 = undefined;
+                    const hex = std.fmt.bufPrint(&buf, "\\u00{x:0>2}", .{ch}) catch unreachable;
+                    try out.appendSlice(allocator, hex);
+                } else {
+                    try out.append(allocator, ch);
+                }
+            },
         }
     }
     try out.append(allocator, '"');
@@ -3590,7 +3616,7 @@ fn appendJsonString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), s: []
 
 /// Build the POST /connectors/connect JSON body: one field per non-empty
 /// credential buffer, keyed by the connector's required field names.
-fn connectorConnectBody(
+pub fn connectorConnectBody(
     allocator: std.mem.Allocator,
     connector: *const ConnectorRow,
     buffers: *const [max_required_fields][]const u8,

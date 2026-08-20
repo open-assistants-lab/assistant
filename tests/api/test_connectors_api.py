@@ -79,3 +79,20 @@ def test_connect_missing_credentials_400(client, fixture_spec_dir, test_user_id)
         json={},
     )
     assert r.status_code == 400
+
+
+def test_connect_accepts_control_character_values(client, fixture_spec_dir, test_user_id):
+    """The Zig client escapes control chars as \\u00XX; the router must accept
+    the decoded values (regression lock for the Tools page JSON escaping)."""
+    r = client.post(
+        "/connectors/connect",
+        params={"service": "fixture-api", "user_id": test_user_id},
+        json={"api_key": "sk\x01\x08\x0ctest"},
+    )
+    assert r.status_code == 200
+    assert r.json()["status"] == "connected"
+    r = client.delete(
+        "/connectors/disconnect",
+        params={"service": "fixture-api", "user_id": test_user_id},
+    )
+    assert r.status_code == 200

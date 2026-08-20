@@ -1988,3 +1988,70 @@ test "in-place revision keeps one answer bubble and drops the rubric row" {
     try testing.expectEqual(@as(usize, 2), chat.msg_count);
     try testing.expectEqualStrings("revised answer", chat._messages[1].content);
 }
+
+test "connectorConnectBody escapes control characters as \\u00XX" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    var row = main.ConnectorRow{
+        .name = "fixture-api",
+        .display = "Fixture API",
+        .description = "test",
+        .category = "test",
+        .auth_type = "api_key",
+        .connected = false,
+    };
+    row.required_fields[0] = .{
+        .name = "api_key",
+        .label = "API Key",
+        .placeholder = "",
+        .input_type = "password",
+        .optional = false,
+        .help_text = "",
+    };
+    row.field_count = 1;
+
+    // Control chars 0x01, 0x08 (backspace), 0x0c (form feed) must be
+    // escaped — raw control bytes are invalid inside JSON strings.
+    const buffers = [_][]const u8{ "sk\x01\x08\x0ctest", "", "", "" };
+    const body = try main.connectorConnectBody(allocator, &row, &buffers);
+    try testing.expectEqualStrings("{\"api_key\":\"sk\\u0001\\u0008\\u000ctest\"}", body);
+}
+
+test "connectorConnectBody escapes quotes and backslashes, skips empty buffers" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    var row = main.ConnectorRow{
+        .name = "fixture-api",
+        .display = "Fixture API",
+        .description = "test",
+        .category = "test",
+        .auth_type = "api_key",
+        .connected = false,
+    };
+    row.required_fields[0] = .{
+        .name = "api_key",
+        .label = "API Key",
+        .placeholder = "",
+        .input_type = "password",
+        .optional = false,
+        .help_text = "",
+    };
+    row.required_fields[1] = .{
+        .name = "secret",
+        .label = "Secret",
+        .placeholder = "",
+        .input_type = "password",
+        .optional = true,
+        .help_text = "",
+    };
+    row.field_count = 2;
+
+    const buffers = [_][]const u8{ "a\"b\\c", "", "", "" };
+    const body = try main.connectorConnectBody(allocator, &row, &buffers);
+    // Empty second field is skipped; quote and backslash escaped.
+    try testing.expectEqualStrings("{\"api_key\":\"a\\\"b\\\\c\"}", body);
+}
