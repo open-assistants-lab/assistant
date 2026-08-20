@@ -592,30 +592,40 @@ test_settings() {
 # with the "Tools" label on a child text — located like Settings.
 test_tools() {
   echo ""
-  echo "=== 8. Tools Panel: Open, tabs, close ==="
+  echo "=== 8. Tools Section in Settings: open, tabs, close ==="
 
   start_backend
   start_app
 
+  # Navigation: Settings → Tools section (the Tools page now lives inside
+  # Settings; there is no sidebar Tools row anymore).
   SNAPSHOT=$(native automate snapshot)
-  TOOLS=$(find_pressable_by_child_text "Tools")
-  if [ -z "$TOOLS" ]; then
-    fail "Tools pressable row not found"
+  SETTINGS=$(find_pressable_by_child_text "Settings")
+  if [ -z "$SETTINGS" ]; then
+    fail "Settings pressable row not found"
     cleanup
     return 1
   fi
-  native automate widget-click main-canvas "$TOOLS" > /dev/null 2>&1
-  if native automate assert --timeout-ms 3000 'role=text name="Tools"' > /dev/null 2>&1; then
-    pass "tools panel opens with a Tools header"
+  native automate widget-click main-canvas "$SETTINGS" > /dev/null 2>&1
+  if native automate assert --timeout-ms 3000 'role=button name="Tools"' > /dev/null 2>&1; then
+    pass "settings opens with a Tools section button"
   else
-    fail "tools panel did not open"
+    fail "settings did not open (no Tools section button)"
   fi
+  SNAPSHOT=$(native automate snapshot)
+  TOOLS_BTN=$(locate_widget button Tools)
+  if [ -z "$TOOLS_BTN" ]; then
+    fail "Tools section button not found"
+    cleanup
+    return 1
+  fi
+  native automate widget-click main-canvas "$TOOLS_BTN" > /dev/null 2>&1
   # Both tab labels present (tab buttons expose as role=button)
   if native automate assert --timeout-ms 3000 'role=button name="Built-in"' > /dev/null 2>&1 &&
      native automate assert --timeout-ms 3000 'role=button name="Connections"' > /dev/null 2>&1; then
-    pass "tools panel shows Built-in and Connections tabs"
+    pass "tools section shows Built-in and Connections tabs"
   else
-    fail "tools panel tabs missing"
+    fail "tools section tabs missing"
   fi
   # Built-in tools list renders a known native tool
   if native automate assert --timeout-ms 5000 'role=text name="time_get"' > /dev/null 2>&1; then
@@ -754,8 +764,8 @@ test_tools() {
   fi
 
   # Reduced-motion path: Settings → General → Reduced motion On → close
-  # Settings → Tools opens fine (entrance jumps straight to settled; the
-  # assertion is the panel still renders — same stance as the theme test)
+  # Settings → Tools section opens fine (entrance jumps straight to settled;
+  # the assertion is the panel still renders — same stance as the theme test)
   # → Escape closes again.
   SNAPSHOT=$(native automate snapshot)
   SETTINGS=$(find_pressable_by_child_text "Settings")
@@ -772,23 +782,24 @@ test_tools() {
           if [ -n "$RM_TOGGLE" ]; then
             native automate widget-action main-canvas "$RM_TOGGLE" press > /dev/null 2>&1
             sleep 1
-            # Close settings (toggle), open Tools
+            # Switch to the Tools section (settings stays open)
             SNAPSHOT=$(native automate snapshot)
-            SETTINGS=$(find_pressable_by_child_text "Settings")
-            native automate widget-click main-canvas "$SETTINGS" > /dev/null
-            SNAPSHOT=$(native automate snapshot)
-            TOOLS=$(find_pressable_by_child_text "Tools")
-            native automate widget-click main-canvas "$TOOLS" > /dev/null
-            if native automate assert --timeout-ms 3000 'role=text name="time_get"' > /dev/null 2>&1; then
-              pass "tools panel opens with reduced motion"
+            TOOLS_BTN=$(locate_widget button Tools)
+            if [ -n "$TOOLS_BTN" ]; then
+              native automate widget-click main-canvas "$TOOLS_BTN" > /dev/null
+              if native automate assert --timeout-ms 3000 'role=text name="time_get"' > /dev/null 2>&1; then
+                pass "tools section opens with reduced motion"
+              else
+                fail "tools section failed with reduced motion"
+              fi
+              native automate widget-key main-canvas Escape > /dev/null 2>&1
+              if native automate assert --timeout-ms 3000 'role=textbox name="Message"' > /dev/null 2>&1; then
+                pass "escape closes settings with reduced motion"
+              else
+                fail "escape did not close settings with reduced motion"
+              fi
             else
-              fail "tools panel failed with reduced motion"
-            fi
-            native automate widget-key main-canvas Escape > /dev/null 2>&1
-            if native automate assert --timeout-ms 3000 'role=textbox name="Message"' > /dev/null 2>&1; then
-              pass "escape closes tools panel with reduced motion"
-            else
-              fail "escape did not close tools panel with reduced motion"
+              fail "Tools section button not found for reduced-motion path"
             fi
           else
             fail "reduced motion toggle not found"
@@ -804,24 +815,24 @@ test_tools() {
     fi
   fi
 
-  # Re-open Tools for the toggle-close check
+  # Re-open Settings → Tools section for the toggle-close check
   SNAPSHOT=$(native automate snapshot)
-  TOOLS=$(find_pressable_by_child_text "Tools")
-  native automate widget-click main-canvas "$TOOLS" > /dev/null
-  if native automate assert --timeout-ms 3000 'role=text name="Tools"' > /dev/null 2>&1; then
-    pass "tools reopens after escape close"
+  SETTINGS=$(find_pressable_by_child_text "Settings")
+  native automate widget-click main-canvas "$SETTINGS" > /dev/null
+  if native automate assert --timeout-ms 3000 'role=button name="Built-in"' > /dev/null 2>&1; then
+    pass "tools section reopens after escape close"
   else
-    fail "tools did not reopen after escape close"
+    fail "tools section did not reopen after escape close"
   fi
 
-  # Toggle close (press the sidebar Tools row again)
+  # Toggle close (press the sidebar Settings row again)
   SNAPSHOT=$(native automate snapshot)
-  TOOLS=$(find_pressable_by_child_text "Tools")
-  native automate widget-click main-canvas "$TOOLS" > /dev/null 2>&1
+  SETTINGS=$(find_pressable_by_child_text "Settings")
+  native automate widget-click main-canvas "$SETTINGS" > /dev/null 2>&1
   if native automate assert --timeout-ms 3000 'role=textbox name="Message"' > /dev/null 2>&1; then
-    pass "tools closes and shows chat"
+    pass "settings closes and shows chat"
   else
-    fail "tools did not close"
+    fail "settings did not close"
   fi
 
   cleanup
@@ -874,8 +885,17 @@ YAML
   start_app
 
   SNAPSHOT=$(native automate snapshot)
-  TOOLS=$(find_pressable_by_child_text "Tools")
-  native automate widget-click main-canvas "$TOOLS" > /dev/null 2>&1
+  SETTINGS=$(find_pressable_by_child_text "Settings")
+  native automate widget-click main-canvas "$SETTINGS" > /dev/null 2>&1
+  if native automate assert --timeout-ms 3000 'role=button name="Tools"' > /dev/null 2>&1; then
+    SNAPSHOT=$(native automate snapshot)
+    TOOLS_BTN=$(locate_widget button Tools)
+    native automate widget-click main-canvas "$TOOLS_BTN" > /dev/null 2>&1
+  else
+    fail "settings did not open for connect-form test"
+    cleanup
+    return 1
+  fi
   if native automate assert --timeout-ms 5000 'role=button name="Connections"' > /dev/null 2>&1; then
     SNAPSHOT=$(native automate snapshot)
     CONN_TAB=$(locate_widget button Connections)

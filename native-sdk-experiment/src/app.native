@@ -34,20 +34,6 @@
         </else>
       </column>
     </scroll>
-    <column gap="2" padding="8" background="surface">
-      <row gap="8" padding="8" radius="sm" cross="center" on-press="open_tools">
-        <icon name="wrench" foreground="text_muted"/>
-        <text size="sm" foreground="text_muted">Tools</text>
-      </row>
-      <row gap="8" padding="8" radius="sm" cross="center">
-        <icon name="file-text" foreground="text_muted"/>
-        <text size="sm" foreground="text_muted">Skills</text>
-      </row>
-      <row gap="8" padding="8" radius="sm" cross="center">
-        <icon name="git-branch" foreground="text_muted"/>
-        <text size="sm" foreground="text_muted">Subagents</text>
-      </row>
-    </column>
     <row gap="4" padding="8" cross="center" background="surface">
       <row gap="8" padding="8" radius="sm" cross="center" grow="1">
         <icon name="settings" foreground="text_muted"/>

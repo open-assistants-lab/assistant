@@ -64,7 +64,7 @@ const ProviderInfo = struct {
     model_count: usize = 0,
 };
 
-const SettingsSection = enum { providers_models, general };
+const SettingsSection = enum { providers_models, general, tools };
 
 const ToolsSection = enum { builtin, connections };
 
@@ -107,7 +107,6 @@ pub const ConnectorRow = struct {
 const max_connector_rows = 128;
 
 const ToolsState = struct {
-    visible: bool = false,
     section: ToolsSection = .builtin,
     loading: bool = false,
     tools: [max_visible_tools_rows]ToolRow = undefined,
@@ -358,8 +357,7 @@ pub const Msg = union(enum) {
     reached_bottom,
     open_settings,
     close_settings,
-    open_tools,
-    close_tools,
+    settings_tools,
     tools_tab_builtin,
     tools_tab_connections,
     tools_loaded: native_sdk.EffectResponse,
@@ -447,7 +445,6 @@ pub const Model = struct {
     // timer; the view maps each to opacity/transform. Reset to 0 when the
     // surface (re)appears so it fades in instead of teleporting.
     settings_entrance: f32 = 1,
-    tools_entrance: f32 = 1,
     hitl_entrance: f32 = 1,
     empty_entrance: f32 = 1,
     composer_entrance: f32 = 0,
@@ -865,13 +862,12 @@ fn doSend(model: *Model, fx: *Effects) void {
 /// Close the Tools panel and stop its OAuth poll timer. Shared by handlers
 /// that must not leave Tools open over another surface (settings, new chat,
 /// chat switch, model menu) — the panel precedence is one-open-at-a-time.
-fn closeToolsPane(model: *Model, fx: *Effects) void {
+fn cancelOAuthPoll(model: *Model, fx: *Effects) void {
     if (model.tools.polling) {
         model.tools.polling = false;
         model.tools.poll_ticks = 0;
         fx.cancelTimer(auth_poll_key);
     }
-    model.tools.visible = false;
 }
 
 pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
@@ -907,8 +903,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             };
         },
         .new_chat => {
+            cancelOAuthPoll(model, fx);
             model.settings.visible = false;
-            closeToolsPane(model, fx);
             if (model.chat_count >= max_chats) return;
             // Append the new chat, then sort by created_at descending so the
             // newest chat naturally appears at the top.
@@ -939,8 +935,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
         },
         .switch_chat => |chat_id| {
+            cancelOAuthPoll(model, fx);
             model.settings.visible = false;
-            closeToolsPane(model, fx);
             var i: usize = 0;
             while (i < model.chat_count) : (i += 1) {
                 if (model.chats[i].id == chat_id) {
@@ -1133,7 +1129,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .model_menu_manage => {
             model.model_menu_open = false;
-            closeToolsPane(model, fx);
+            cancelOAuthPoll(model, fx);
             model.settings.visible = true;
             model.settings.section = .providers_models;
         },
@@ -1359,10 +1355,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 const entrance_step: f32 = 0.5; // 2 ticks * 60ms ≈ 120ms
                 if (model.settings_entrance < 1) {
                     model.settings_entrance = @min(1, model.settings_entrance + entrance_step);
-                    any_entrance = true;
-                }
-                if (model.tools_entrance < 1) {
-                    model.tools_entrance = @min(1, model.tools_entrance + entrance_step);
                     any_entrance = true;
                 }
                 if (model.hitl_entrance < 1) {
@@ -1627,10 +1619,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (model.settings.visible) {
                 model.settings.visible = false;
                 model.settings.key_modal_visible = false;
+                cancelOAuthPoll(model, fx);
                 return;
             }
             model.settings.visible = true;
-            closeToolsPane(model, fx);
             model.settings.loading = true;
             model.settings.provider_count = 0;
             model.available_model_count = 0;
@@ -1666,24 +1658,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             });
         },
         .close_settings => {
+            cancelOAuthPoll(model, fx);
             model.settings.visible = false;
+            model.settings.key_modal_visible = false;
         },
-        .open_tools => {
-            if (model.tools.visible) {
-                model.tools.visible = false;
-                return;
-            }
-            model.settings.visible = false; // tools wins precedence
-            model.tools.visible = true;
+        .settings_tools => {
+            model.settings.section = .tools;
             model.tools.loading = true;
-            // Entrance animation: fade in. Reduced motion jumps straight
-            // to settled (no animation), mirroring the settings panel.
-            if (model.settings.reduced_motion) {
-                model.tools_entrance = 1;
-            } else {
-                model.tools_entrance = 0;
-                fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
-            }
             model.tools.tool_error = "";
             model.tools.tool_count = 0;
             model.tools.search_text = "";
@@ -1710,9 +1691,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.connectors_loaded),
             });
-        },
-        .close_tools => {
-            closeToolsPane(model, fx);
         },
         .tools_tab_builtin => {
             model.tools.section = .builtin;
@@ -3269,9 +3247,7 @@ const ChatApp = native_sdk.UiApp(Model, Msg);
 // ── View builders (Zig view replacing markup) ──────────────────────────────
 
 pub fn buildView(ui: *AppUi, model: *const Model) AppUi.Node {
-    const right_panel: AppUi.Node = if (model.tools.visible)
-        buildToolsPanel(ui, model)
-    else if (model.settings.visible)
+    const right_panel: AppUi.Node = if (model.settings.visible)
         buildSettingsPanel(ui, model)
     else
         buildChatPanel(ui, model);
@@ -3450,29 +3426,6 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
             ui.text(.{ .size = .sm, .grow = 1, .style_tokens = .{ .foreground = .text_muted } }, "No chats found"),
         }));
     }
-    sidebar_count += 1;
-
-    // Bottom nav: Tools, Skills, Subagents
-    var nav_nodes: [3]AppUi.Node = undefined;
-    nav_nodes[0] = ui.row(.{
-        .gap = 8,
-        .padding = 8,
-        .cross = .center,
-        .on_press = .open_tools,
-    }, .{
-        ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "wrench"),
-        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Tools"),
-    });
-    nav_nodes[1] = ui.row(.{ .gap = 8, .padding = 8, .cross = .center }, .{
-        ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "file-text"),
-        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Skills"),
-    });
-    nav_nodes[2] = ui.row(.{ .gap = 8, .padding = 8, .cross = .center }, .{
-        ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "git-branch"),
-        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Subagents"),
-    });
-    const nav_slice: []const AppUi.Node = nav_nodes[0..3];
-    sidebar_children[sidebar_count] = ui.column(.{ .gap = 2, .padding = 12, .style_tokens = .{ .background = .surface } }, nav_slice);
     sidebar_count += 1;
 
     // Settings + theme toggle
@@ -4189,6 +4142,11 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     content_count += 1;
     }
 
+    if (model.settings.section == .tools) {
+        content_children[content_count] = buildToolsSection(ui, model);
+        content_count += 1;
+    }
+
     const sidebar = ui.el(.card, .{
         .width = 120,
         .padding = 6,
@@ -4209,6 +4167,13 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                 .width = 104,
                 .padding = 12,
             }, "General"),
+            ui.button(.{
+                .on_press = .settings_tools,
+                .variant = if (model.settings.section == .tools) .primary else .secondary,
+                .size = .sm,
+                .width = 104,
+                .padding = 12,
+            }, "Tools"),
         }),
     });
 
@@ -4237,15 +4202,9 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     });
 }
 
-fn buildToolsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
-    var children: [4]AppUi.Node = undefined;
+fn buildToolsSection(ui: *AppUi, model: *const Model) AppUi.Node {
+    var children: [3]AppUi.Node = undefined;
     var child_count: usize = 0;
-
-    children[child_count] = ui.row(.{ .gap = 12, .padding = 16, .cross = .center, .style_tokens = .{ .background = .surface } }, .{
-        ui.text(.{ .size = .heading }, "Tools"),
-        ui.spacer(1),
-    });
-    child_count += 1;
 
     var tab_nodes: [2]AppUi.Node = undefined;
     const tabs = [_]struct { section: ToolsSection, label: []const u8 }{
@@ -4313,7 +4272,7 @@ fn buildToolsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                 list_node_count += 1;
             }
         }
-        children[child_count] = ui.scroll(.{ .grow = 1, .padding = 16 }, .{ui.column(.{ .gap = 2 }, list_nodes[0..list_node_count])});
+        children[child_count] = ui.column(.{ .gap = 2 }, list_nodes[0..list_node_count]);
         child_count += 1;
     } else if (model.tools.section == .connections) {
         if (model.tools.form_open) {
@@ -4364,7 +4323,7 @@ fn buildToolsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                     ui.button(.{ .on_press = .close_form, .variant = .ghost, .size = .sm }, "Cancel"),
                 });
                 form_count += 1;
-                children[child_count] = ui.scroll(.{ .grow = 1, .padding = 16 }, .{ui.column(.{ .gap = 10 }, form_nodes[0..form_count])});
+                children[child_count] = ui.column(.{ .gap = 10 }, form_nodes[0..form_count]);
                 child_count += 1;
             }
         } else if (model.tools.connecting) {
@@ -4383,7 +4342,7 @@ fn buildToolsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                 ui.button(.{ .on_press = .cancel_connect, .variant = .ghost, .size = .sm }, "Cancel"),
             });
             wait_count += 1;
-            children[child_count] = ui.scroll(.{ .grow = 1, .padding = 16 }, .{ui.column(.{ .gap = 10 }, wait_nodes[0..wait_count])});
+            children[child_count] = ui.column(.{ .gap = 10 }, wait_nodes[0..wait_count]);
             child_count += 1;
         } else {
             var list_nodes: [max_connector_rows + 2]AppUi.Node = undefined;
@@ -4413,20 +4372,15 @@ fn buildToolsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                 });
                 list_node_count += 1;
             }
-            children[child_count] = ui.scroll(.{ .grow = 1, .padding = 16 }, .{ui.column(.{ .gap = 2 }, list_nodes[0..list_node_count])});
+            children[child_count] = ui.column(.{ .gap = 2 }, list_nodes[0..list_node_count]);
             child_count += 1;
         }
     } else {
-        children[child_count] = ui.scroll(.{ .grow = 1, .padding = 16 }, .{
-            ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Loading…"),
-        });
+        children[child_count] = ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Loading…");
         child_count += 1;
     }
 
-    // Entrance animation: fade-in only, same GPU-cheap treatment as the
-    // settings panel (opacity alone avoids per-frame re-rasterization).
-    const tools_eased = smoothstep(model.tools_entrance);
-    return ui.column(.{ .grow = 1, .opacity = tools_eased, .style_tokens = .{ .background = .background } }, children[0..child_count]);
+    return ui.column(.{ .gap = 10 }, children[0..child_count]);
 }
 
 fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
@@ -4993,9 +4947,9 @@ fn fetchActiveChatHistory(model: *Model, fx: *Effects) void {
 }
 
 /// App-level key fallback (UiApp on_key): consulted on key_down only after
-/// widget routing declines the key. Escape closes the Tools panel when no
+/// widget routing declines the key. Escape closes the Settings panel when no
 /// text-entry widget consumes it (text widgets eat Escape for their own edit
-/// operations — composition cancel / search clear). Idempotent: `.close_tools`
+/// operations — composition cancel / search clear). Idempotent: `.close_settings`
 /// is a no-op when the panel is already closed, so no visibility guard is
 /// needed here.
 fn keyFallback(keyboard: canvas.WidgetKeyboardEvent) ?Msg {
@@ -5004,7 +4958,7 @@ fn keyFallback(keyboard: canvas.WidgetKeyboardEvent) ?Msg {
     // bare Escape closes the panel.
     if (keyboard.modifiers.shift or keyboard.modifiers.control or keyboard.modifiers.alt or keyboard.modifiers.super) return null;
     if (!std.ascii.eqlIgnoreCase(keyboard.key, "escape") and !std.ascii.eqlIgnoreCase(keyboard.key, "esc")) return null;
-    return .close_tools;
+    return .close_settings;
 }
 
 pub fn main(init: std.process.Init) !void {
