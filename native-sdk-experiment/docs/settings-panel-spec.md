@@ -2,50 +2,40 @@
 
 ## Overview
 
-Replace the current Settings panel (separate Default Model + API Keys sections) with a single unified provider/model picker. Users search, select a model, and manage API keys in one place — similar to opencode's provider|model selection.
+Replace the current Settings panel (separate Default Model + API Keys sections) with a unified provider/model picker. Users search, select a model, and manage API keys in one place — similar to opencode's provider|model selection.
+
+> **Current state (2026-08-21):** the panel has been redesigned into **three sections** with a left sidebar (Models / General / Tools). The old single-pane layout below is superseded; the Models section keeps the search + provider-grouped catalog described here. See the layout at the bottom of this file for the current section structure.
 
 ## Entry / Exit
 
 - **Open**: Click "Settings" in sidebar (same as now)
-- **Close**: Click any sidebar element (New chat, a session, Tools, Skills, Subagents, Settings again). No dedicated back button. Settings is a transient panel — navigating away dismisses it.
+- **Close**: Click "Settings" again, click any chat/sidebar element (New chat, a session), or press **Escape** (app-level `on_key` fallback, bare key only — modifier chords are reserved). No dedicated back button. Settings is a transient panel — navigating away dismisses it (and cancels any in-flight OAuth poll).
 
-## Layout
+## Layout (current)
 
 ```
-┌─────────────────────────────────────────┐
-│ Settings                                │  ← header (title only, no back btn)
-├─────────────────────────────────────────┤
-│ [🔍 Search providers and models...]     │  ← search input, filters list
-├─────────────────────────────────────────┤
-│ ┌─────────────────────────────────────┐ │
-│ │ Agnes                      ✓ Hosted  │ │  ← provider with key, expanded
-│ │   • agnes-2.0-flash  ✓ selected      │ │  ← selected model (checkmark)
-│ │   • agnes-2.0-pro                    │ │
-│ │   • agnes-2.0-mini          Remove Key│ │  ← small text button
-│ └─────────────────────────────────────┘ │
-│ ┌─────────────────────────────────────┐ │
-│ │ OpenAI                    ✓ Your key │ │  ← provider with user key
-│ │   • gpt-5                            │ │
-│ │   • gpt-4o                           │ │
-│ │   • ...                    Remove Key│ │
-│ └─────────────────────────────────────┘ │
-│ ┌─────────────────────────────────────┐ │
-│ │ Anthropic              Not configured│ │  ← provider without key
-│ │   [ Add Key ]                        │ │  ← expand-on-click
-│ └─────────────────────────────────────┘ │
-│ ┌─────────────────────────────────────┐ │
-│ │ Google Gemini           Not configured│ │
-│ │   [ Add Key ]                       │ │
-│ └─────────────────────────────────────┘ │
-├─────────────────────────────────────────┤
-│ Appearance                               │
-│   Theme           [Switch to Light]      │
-├─────────────────────────────────────────┤
-│ About                                    │
-│   Backend: http://127.0.0.1:8080        │
-│   User: native_sdk_chat                  │
-└─────────────────────────────────────────┘
+┌────────────────────────────────────────────────────┐
+│ PREFERENCES (eyebrow)                              │  ← micro-label, muted caps
+│ Settings                                          │  ← header
+├──────────────────────────────┬─────────────────────┤
+│ SECTIONS (eyebrow)           │ Model roles (eyebrow)│  ← nested cards: surface +
+│ [ Models ]  ◀ active         │ [Agent][Grader]...   │    hairline border + radius
+│ [ General ]                  │ ─────────────────────│
+│ [ Tools ]                    │ Search providers...  │
+│                              │ OLLAMA CLOUD        │
+│                              │  • model ✓ selected │
+│                              │ General: Rubric /   │
+│                              │   Appearance / About│
+│                              │ Tools: Built-in /   │
+│                              │   Connections       │
+└──────────────────────────────┴─────────────────────┘
 ```
+
+- **Sidebar** (width 128): eyebrow `SECTIONS` + three full-width buttons — `Models`, `General`, `Tools`. Active section = primary variant; inactive = ghost. Aligned to the content grid (both sides: 12px padding → eyebrow → 8px gap → first row).
+- **Content cards**: nested shells — `surface` + `border_color` hairline + radius, 12px padding, eyebrow micro-labels on each section. Consistent 12px alignment grid.
+- **Models section**: eyebrow `Model roles` + segmented role toggle (Agent/Grader/Title/Summary), then search + provider-grouped catalog (provider rows muted caps, selected model = ✓ + accent).
+- **General section**: `Rubric` (enable toggle, max iterations, grader prompt, Save), `Appearance` (Theme, Reduced motion), `About` (backend URL, user).
+- **Tools section**: `Tools` eyebrow + segmented sub-tabs `Built-in` / `Connections`. Built-in = searchable tool list with On/Off scope toggles. Connections = ConnectKit catalog (status, Disconnect, Connect — api_key credential form or OAuth2 browser flow with 2s polling, 60-tick timeout, cancel).
 
 ## Ordering
 
@@ -162,10 +152,12 @@ fn filteredProviders(model, search) -> []ProviderIndex:
 Settings panel closes when user:
 - Clicks "New chat" button
 - Clicks a session in the chat list
-- Clicks Tools, Skills, or Subagents nav buttons
+- Presses **Escape** (bare key only — app-level `on_key` fallback, modifier chords reserved)
 - Clicks "Settings" again (toggle behavior)
 
-Implementation: add `model.settings.visible = false` to the handlers for `new_chat`, `switch_chat`, and the nav button press actions.
+Implementation: `model.settings.visible = false` in the handlers for `new_chat`, `switch_chat`, and `close_settings`; the `on_key` fallback returns `.close_settings`. Closing also cancels any in-flight OAuth poll (`cancelOAuthPoll` → `fx.cancelTimer(auth_poll_key)`).
+
+> Note: the Tools/Skills/Subagents sidebar nav buttons no longer exist — Tools is a Settings section.
 
 ## Edge Cases
 

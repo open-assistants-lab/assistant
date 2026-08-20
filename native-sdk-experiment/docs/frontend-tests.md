@@ -7,7 +7,7 @@ Automated tests for the Native SDK chat app, run via `native automate`.
 | File | Purpose | Tests |
 |------|---------|-------|
 | `tests/frontend_smoke.sh` | Quick smoke test (4 tests, ~30s) | Basic send/receive, sidebar, new chat, theme toggle |
-| `tests/frontend_suite.sh` | Full suite (14 sections, ~5min) | All smoke tests + advanced scenarios |
+| `tests/frontend_suite.sh` | Full suite (16 sections, 51 tests, ~8min) | All smoke tests + advanced scenarios |
 | `tests/virtuallist_stress.sh` | Virtual list perf stress test (~2min) | 10k-message transcript: widget_nodes bounded while scrolling full extent, frame p90 stages under 60fps budget, no widget budget errors |
 
 ## Running
@@ -95,9 +95,34 @@ bash tests/frontend_suite.sh --chats        # Multi-chat management
 
 | # | Test | Expected Behavior |
 |---|------|-------------------|
-| 7.1 | Settings panel opens | Click Settings row, assert settings panel appears. |
-| 7.2 | Tab navigation works | Navigate between tabs, assert no crash. |
-| 7.3 | Settings panel closes | Close settings, assert panel hidden. |
+| 7.1 | Settings panel opens | Click Settings row, assert `role=button name="Models"` appears. |
+| 7.2 | Tab navigation works | Navigate Models → General, assert `role=text name="Appearance"` renders. |
+| 7.3 | Settings panel closes | Press Settings again, assert Models tab gone. |
+
+### 8. Tools Section in Settings (`test_tools`)
+
+**Scope:** The Tools page now lives inside Settings (Models / General / Tools sidebar). No sidebar Tools row exists anymore.
+
+| # | Test | Expected Behavior |
+|---|------|-------------------|
+| 8.1 | Tools section opens | Settings → click `Tools` section button, assert `Built-in` + `Connections` sub-tabs. |
+| 8.2 | Built-in list renders | Assert `role=text name="time_get"` within 5s. |
+| 8.3 | Tool toggle flips backend scope | Press `time_get`'s On/Off, curl `/tools/time_get` → `enabled=false`; press again → `true` (state left clean). |
+| 8.4 | Connections catalog renders | Assert `Connected`/`Not connected` status text appears (fails only on empty/error states). |
+| 8.5 | api_key credential form opens | First non-connected api_key connector → Connect → assert its first required-field label renders; Cancel. |
+| 8.6 | OAuth authorize state | First no-creds oauth2 connector → Connect → assert `Authorize in your browser`; Cancel (stops poll). |
+| 8.7 | Escape closes settings | `widget-key Escape` → chat textbox visible. |
+| 8.8 | Reduced-motion path | General → Reduced motion On → Tools renders; Escape closes. |
+
+### 8b. Credential Form Node Budget (`test_connect_form_4field`)
+
+**Scope:** Regression for the OOB array write (Critical #1, final review): a 4-required-field connector must render its form without crashing.
+
+| # | Test | Expected Behavior |
+|---|------|-------------------|
+| 8b.1 | 4-field fixture form renders | Backend started with `CONNECTKIT_SPEC_DIR` fixture; Settings → Tools → Connections → fixture row Connect → all four labels (`Host`, `API Key`, `Client ID`, `Secret`) render. |
+
+Run standalone: `bash tests/frontend_suite.sh --connectform`
 
 ### 8. Streaming Cancel (`test_cancel`)
 
@@ -106,6 +131,8 @@ bash tests/frontend_suite.sh --chats        # Multi-chat management
 | # | Test | Expected Behavior |
 |---|------|-------------------|
 | 8.1 | Cancel mid-stream restores Send button | Send a message, press Stop while streaming, assert Send button reappears. |
+
+> Note: `test_cancel`'s echo header says `=== 8.` like `test_tools` — cosmetic duplication, known deferred minor.
 
 ### 9. Chat Search (`test_search`)
 
@@ -116,6 +143,8 @@ bash tests/frontend_suite.sh --chats        # Multi-chat management
 | 9.1 | Search shows matching chat | Type search query, assert matching listitem visible. |
 | 9.2 | Search hides non-matching chat | Assert non-matching listitem not visible. |
 | 9.3 | Clear search restores all chats | Clear search box, assert both chats visible. |
+
+> **Known flake:** 9.1/9.3 occasionally fail on a cold build (first `--all` run after a rebuild). Re-running passes — verified pre-existing at base, unrelated to the tools work.
 
 ### 10. Model Cycling (`test_model`)
 
@@ -172,4 +201,5 @@ bash tests/frontend_suite.sh --chats        # Multi-chat management
 1. **`set_text` automation does not reliably update `draft_text`** — Use `widget-key` to type text (dispatches `input_changed`).
 2. **`widget-action press` does not reliably dispatch `on_press`** — Use `widget-click` for button presses.
 3. **`ui.row` with `on_press` does not dispatch press events** — Use `ui.button` for pressable elements. (SDK limitation)
-4. **Some pre-existing tests fail** — Tests 5.3 (chat listitem lookup), 6.x (suggestion buttons), 7.x (settings panel), 9.1/9.3 (search), 10.1 (model cycle), 12.x (unread dot) fail due to widget ID changes after layout refactors. These need snapshot-based ID lookups instead of hardcoded IDs.
+4. **`test_search` cold-build flake** — 9.1/9.3 fail on the first `--all` run after a rebuild; a re-run passes. Pre-existing and unrelated to the tools/settings work.
+5. **Snapshot `name` is the semantics label** — For buttons with a `.semantics.label` (e.g. tool toggles `Enable`/`Disable`), `role=button name=...` matches the label, not the button text. Assert backend state (curl) for behavior, not the label text.

@@ -54,6 +54,18 @@ uv run pytest --cov=src --cov-report=html
 uv run python tests/evaluation/evaluate.py
 ```
 
+### Native App (Zig) Tests
+```bash
+# Zig unit tests (native-sdk-experiment, 90 tests)
+uv run native test            # run from native-sdk-experiment/
+
+# Frontend automation suite (51 tests, drives the app via native automate)
+bash tests/frontend_suite.sh --all          # full suite
+bash tests/frontend_suite.sh --tools        # Settings → Tools section only
+bash tests/frontend_suite.sh --settings     # Settings panel only
+bash tests/frontend_suite.sh --connectform  # 4-field credential-form regression
+```
+
 ### Docker
 ```bash
 # Start PostgreSQL
@@ -224,6 +236,7 @@ The codebase has a **custom agent SDK** (`src/sdk/`) that replaces LangChain/Lan
 11. **provider_options on RunConfig**: `RunConfig.provider_options` (dict keyed by provider_id) is now wired through `AgentLoop.run()`, `run_stream()`, and `run_single()` to all provider calls. Previously hardcoded `None`.
 12. **MCP Tool Bridge**: `MCPToolBridge` converts MCP `mcp` SDK tool objects → SDK `ToolDefinition` with namespaced names `mcp__{server}__{tool}`. Tool invocations route through `session.call_tool()`. Supports degraded-mode (partial server failures). `mcp_reload` dynamically registers/unregisters tools in the active `AgentLoop` via `register_tool()`/`unregister_tool()`.
 13. **Subagent V1 work_queue coordination**: `WorkQueueDB` (aiosqlite) per-user at `data/private/subagents/work_queue.db`. 11 columns, 2 indexes. Config frozen at invocation into `work_queue.config`. `SubagentContext` provides progress updates, doom loop detection (3x same tool+args), cancel signal, and course-correction injection. `SubagentCoordinator.invoke()` wraps `AgentLoop.run()` in `asyncio.wait_for(timeout)`. All failure modes (cancel, timeout, cost exceeded, provider error) result in terminal work_queue status.
+14. **Soft duplicate-tool-call guard** (Ralph loop, `84ca8c4`): the loop never re-executes a `(tool, args)` pair already answered this run — it injects a system-message nudge with the previous result and continues. Configurable via `RunConfig.max_duplicate_tool_nudges` (default 3); after K nudges one final call requests a brief text-only answer (~200-token cap, tool calls suppressed). Stateless apart from a counter in `state.extra`. `get_messages_with_summary` filters rows with `metadata["include_in_model_context"] == False`, and `_tool_audit_records` persists only current-run tool rows (provenance via `storage_id`/`storage_ts`). No numeric tool-call budgets — identity check only (per FR-7 non-goal).
 
 **Known Provider Behaviors:**
 - OpenAI/Anthropic no longer emit duplicate `tool_end` — fixed by Phase 5 block-structured refactor
@@ -241,20 +254,25 @@ Both SSE and WS routers now handle block-structured events (`text_start/delta/en
 
 ### Database/Storage
 
-All user data isolated per-user under `data/users/{user_id}/`:
-```
-data/users/{user_id}/
-├── email/
-│   └── emails.db
-├── contacts/
-│   └── contacts.db
-├── todos/
-│   └── todos.db
-└── conversation/
-    └── messages.db
-```
+Per-user storage is split across **two trees** (both must be backed up):
+
+1. **`ea_root`** (default `~/Assistant/`, env `DEPLOYMENT_EA_ROOT`) — bulk user data via `DataPaths`: `Conversation/messages.db`, `Memory/` (ChromaDB), `Files/`, `Email/emails.db`, `Contacts/contacts.db`, `Todos/todos.db`, `Skills/`, `Subagents/`. Non-default users under `ea_root/Users/{user_id}/`; `default_user` uses the root.
+2. **`data/users/{user_id}/`** (via `data_path`, env `DEPLOYMENT_DATA_PATH`) — per-user settings/capabilities/vault: `capabilities.yaml`, `item_scopes.db`, `settings.json`, `connectkit/`, seeded prompts (`summarisation_prompt.md`).
+3. **`data/` root** — project-level: `cache/`, `logs/`, `jobs.db`, `templates/`, `traces/`.
 
 Decision: **SQLite + ChromaDB per-user even for team/enterprise** (not shared DB).
+
+### Deployment
+
+Three supported modes (see `DEPLOYMENT.md`): **Local** (localhost, auth off), **Solo WAN** (one user, many devices — one server = sessions *and* files in sync; `EA_API_KEY` + Tailscale or VPS), **Multi-tenant** (container per user + Caddy subdomains).
+
+Key facts:
+- Entry point is `uv run assistant http` (console script `assistant` — `ea` was never valid). Listens on `0.0.0.0:8000` by default (`API_HOST`/`API_PORT`).
+- Auth: `EA_API_KEY` authenticates the *connection* only; `EA_SOLO_BYPASS` (default true) skips auth for localhost. **There is no per-user authentication** — `user_id` is client-supplied (query/body param, default `default_user`). Multi-user deployments are container-per-user and/or trusted-network only.
+- **One process per user store**: in-memory per-user caches (MessageStore, AgentLoop, session registry) + single-writer SQLite/ChromaDB mean replicas serving the same user are unsupported. Multi-tenant = N isolated containers, each one user.
+- Docker (see `docker/`): image must `COPY seeds/ seeds/`; `DEPLOYMENT_EA_ROOT`/`DEPLOYMENT_DATA_PATH` must point into the mounted volume or user data silently lands in `/root/Assistant` and is lost on recreation.
+- Client file caching (partial): `FileCache` in `http/workspace_cache.py` models `cloud_only` / `downloaded` / `pinned` statuses per path.
+- Known gaps: no OIDC/per-user tokens, teams are skeleton (`data/teams/` unused), no offline/bidirectional sync, no horizontal scaling per user.
 
 ---
 
@@ -330,6 +348,15 @@ loop = AgentLoop(
     run_config=RunConfig(max_llm_calls=50, cost_limit_usd=10.0),
 )
 ```
+
+### CRITICAL: user data in containers — DEPLOYMENT_EA_ROOT
+Without `DEPLOYMENT_EA_ROOT` pointing into the mounted volume, all bulk user data (conversation, files, memory, email) goes to `/root/Assistant` inside the container and is **silently lost on recreation**. `DEPLOYMENT_DATA_PATH` alone does NOT cover `ea_root`. Same split matters in tests: `ea_root=tmp_path` for user-data isolation, `data_path=tmp_path` for settings/templates.
+
+### CRITICAL: no per-user auth (trust model)
+`EA_API_KEY` authenticates the connection, not the user. `user_id` comes from the request payload and is trusted as-is. Never claim per-user security boundaries in multi-user deployments; container-per-user (or a trusted network) is the only isolation today. Adding OIDC/per-user tokens is a prerequisite for public multi-user hosting.
+
+### Watch out: one process per user store
+MessageStore/AgentLoop caches and SQLite/ChromaDB writes are per-user and single-writer. Do not run multiple replicas serving the same user_id (sticky sessions do not fix Chroma or in-memory state). Horizontal scaling = a new user's own process, not another replica of an existing user.
 
 ---
 
@@ -440,11 +467,18 @@ assistant/
 │   │   ├── test_workspace_isolation.py
 │   │   ├── test_capabilities.py, test_agent_profile.py
 │   │   └── ...
-│   ├── api/                      # HTTP endpoint tests
+│   ├── api/                      # HTTP endpoint tests (incl. test_connectors_api.py — ConnectKit contract)
 │   ├── storage/                  # Storage tests (paths, messages)
 │   └── evaluation/               # Persona evaluation
 ├── pyproject.toml                # requires-python >=3.11,<3.14
+├── native-sdk-experiment/       # ★ Native chat app (Zig + Native SDK) — see "Native App" section
+│   ├── src/main.zig              # Model/Msg/update + buildView (~5k lines)
+│   ├── src/app.native           # Declarative markup twin (NOT embedded — cosmetic mirror)
+│   ├── src/tests.zig            # Zig unit tests (90)
+│   └── tests/frontend_suite.sh  # Automation suite (51 tests, native automate)
 ├── config.yaml
+├── DEPLOYMENT.md                # Deployment guide (modes, backups, secrets, gaps)
+├── docker/                      # Dockerfile, docker-compose.yaml, Caddyfile, deploy.sh
 └── docs/
     └── superpowers/
         ├── specs/                # Design specs
@@ -462,7 +496,7 @@ assistant/
 ### Environment Variables
 - Use `.env` for local development
 - Use `.env.example` as template
-- All config via `src/config/settings.py`
+- All config via `src/config/settings.py`; env prefixes: `EA_` (auth: `EA_API_KEY`, `EA_SOLO_BYPASS`), `DEPLOYMENT_` (`DEPLOYMENT_MODE`, `DEPLOYMENT_DATA_PATH`, `DEPLOYMENT_EA_ROOT`), `API_` (`API_HOST`, `API_PORT`), `LOGGING_` (`LOGGING_LEVEL`, `LOGGING_JSON_DIR`), `AGENT_`, `SUMMARY_`, `LANGFUSE_`, `TOOLS_` (Firecrawl), `OLLAMA_`, `MESSAGES_`
 
 ### Config Priority
 1. Environment variables (highest)
@@ -496,6 +530,20 @@ assistant/
 | **11** | ✅ Done | +38 | Subagent V1 (work_queue, coordinator, middlewares, 8 tools) |
 | **12** | ✅ Done | — | Unified Capabilities, AgentProfile, OSS repos |
 | **13** | ✅ Done | ~943 SDK+unit | Skills/subagents scoping UI, ScopePicker, API CRUD, workspace isolation |
+| **14** | ✅ Done | +14 frontend | Tools page Phase A — built-in tools + connector catalog, api-key connect, OAuth flow (native app) |
+| **15** | ✅ Done | — | Tools folded into Settings as a section; sidebar drops Tools/Skills/Subagents rows; high-end settings redesign |
+
+### Native App (native-sdk-experiment)
+
+Zig + Native SDK desktop app (macOS, `src/main.zig` ~5k lines + `src/app.native` markup twin). Backend contract: `http://127.0.0.1:8080`, `user_id=native_sdk_chat`, `workspace_id=personal`.
+
+- **Sidebar**: New chat, search, chat list, then Settings + theme toggle only. Tools/Skills/Subagents rows removed — the Tools page lives **inside Settings** as a third section.
+- **Settings sections**: Models (model catalog + role toggle), General (rubric, appearance, about), Tools (built-in tool enable/disable + SaaS connectors).
+- **Tools section**: `GET /tools` list with search + per-tool scope toggle (`PATCH /tools/{name}` `{"scope":"all"|"none"}` — server resets loops), `GET /connectors/catalog` (ConnectKit, includes `connected` flag), api_key credential form (full JSON control-char escaping, `appendJsonString`), OAuth2 flow (stores creds → `open` browser `/auth/login` → 2s catalog polling with 60-tick timeout + vanished-service stop + cancel).
+- **Panel behavior**: Escape closes settings via SDK `on_key` fallback (modifier-gated); OAuth poll cancelled on close; entrance animation is opacity-only smoothstep; reduced-motion honored.
+- **Key SDK APIs (verified)**: `fx.fetch` (NOT `fx.request` — plan-era name, doesn't exist), `fx.startTimer(.mode = .repeating)` + `fx.cancelTimer`, Zig 0.16 `std.process.run(allocator, io, .{.argv})` with `result.term != .exited`.
+- **Settings design language**: nested cards (surface + hairline border + radius), eyebrow labels (`upperAscii` micro-headings), shared 12px alignment grid (sidebar and content rows align), segmented role controls, Geist typography.
+- **Credential form budget**: `credential_form_nodes = 2 * max_required_fields + 4` (=12) — regression-tested via `--connectform` (4-field fixture served through `CONNECTKIT_SPEC_DIR`).
 
 ### Subagent V1 Architecture
 

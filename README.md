@@ -19,6 +19,7 @@ Your personal AI assistant that runs on your machine. Chat, email, tasks, resear
 | **App Builder** | Build simple database apps with structured data and hybrid search. |
 | **Browser Automation** | Control a browser to fill forms, take screenshots, test web apps, or automate logins. |
 | **MCP Integration** | Connect any Model Context Protocol server to add custom tools. |
+| **Native App** | A native macOS desktop client (`native-sdk-experiment/`) with chat, a Tools page (enable/disable built-in tools, connect SaaS services via API key or OAuth), and Settings. |
 
 ## Configuration
 
@@ -56,7 +57,16 @@ uv run mypy src/
 
 ### Build
 
-Not applicable — this is the backend/API repo. Run with `uv run assistant http`.
+The backend is the API server — run with `uv run assistant http`.
+
+The **native desktop app** lives in `native-sdk-experiment/` (Zig + Native SDK):
+
+```bash
+cd native-sdk-experiment
+native dev                        # run the app (hot reload)
+uv run native test                # Zig unit tests (90)
+bash tests/frontend_suite.sh --all  # automation suite (51 tests)
+```
 
 ### Architecture
 

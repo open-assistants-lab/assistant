@@ -27,6 +27,9 @@
 | **10.5** | Architecture Improvements (ToolResult, hooks, usage, provider_options) | ✅ Done |
 | **11** | Subagent V1 (work_queue, coordinator, middlewares, 8 tools) | ✅ Done |
 | **24** | Companion V1 (scheduler, notifications, memory) | ✅ Done |
+| **13** | Skills/Subagents Scoping UI + ScopePicker + API CRUD | ✅ Done |
+| **14** | Native App — Tools Page Phase A (built-in tools, connectors, api-key + OAuth flows) | ✅ Done |
+| **15** | Native App — Tools in Settings, sidebar cleanup, high-end settings redesign | ✅ Done |
 | **12** | API Auth + Connection Modes | 🔲 Next |
 | **8** | Data Architecture + Team Layer + Folder Cleanup | 🔲 Future |
 | **18** | Event-Driven Triggers, Smart Routing & Self-Evolution | 🔲 Future |
