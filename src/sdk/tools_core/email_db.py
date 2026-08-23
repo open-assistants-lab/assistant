@@ -227,10 +227,27 @@ def email_to_dict(msg: Any) -> dict[str, Any]:
         )
         if msg.headers
         else False,
-        "read": not msg.flags.Seen if hasattr(msg.flags, "Seen") else True,
-        "flagged": msg.flags.Flagged if hasattr(msg.flags, "Flagged") else False,
+        **parse_email_flags(msg),
         "has_attachments": bool(attachments),
         "attachments": attachments,
+    }
+
+
+def parse_email_flags(msg: Any) -> dict[str, bool]:
+    """Extract read/flagged state from an imap_tools message.
+
+    imap_tools >=1.x returns ``msg.flags`` as a tuple of flag strings
+    (``('SEEN', '\\Flagged')``). The previous ``hasattr(msg.flags, "Seen")``
+    check was always False on a tuple, hardcoding every email to
+    ``read=True / flagged=False`` (audit B7) — which also zeroed the
+    scheduler's unread/urgent counts.
+    """
+    flags = msg.flags or ()
+    return {
+        "read": "SEEN" in {str(f).upper() for f in flags},
+        "flagged": any(
+            str(f).upper().lstrip("\\") == "FLAGGED" for f in flags
+        ),
     }
 
 

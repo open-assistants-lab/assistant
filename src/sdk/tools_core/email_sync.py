@@ -12,6 +12,7 @@ from src.app_logging import get_logger
 from src.config import get_settings
 from src.sdk.tools import tool
 from src.sdk.tools_core.email_db import get_engine as _get_engine
+from src.sdk.tools_core.email_db import parse_email_flags
 
 logger = get_logger()
 SETTINGS = get_settings()
@@ -124,8 +125,7 @@ def _email_to_dict(msg: Any) -> dict[str, Any]:
         )
         if msg.headers
         else False,
-        "read": not msg.flags.Seen if hasattr(msg.flags, "Seen") else True,
-        "flagged": msg.flags.Flagged if hasattr(msg.flags, "Flagged") else False,
+        **parse_email_flags(msg),
         "has_attachments": bool(attachments),
         "attachments": attachments,
     }
@@ -314,7 +314,16 @@ def _sync_folder(
                 for row in result:
                     existing_ids.add(row[0])
 
-            messages = list(mailbox.fetch(limit=limit, reverse=True))
+            # Incremental watermark (audit B7): the old code ignored
+            # last_timestamp entirely, so >limit new mails between syncs were
+            # permanently missed. IMAP SINCE is day-granular; the UID dedup
+            # above/below absorbs any overlap from the coarse cutoff.
+            fetch_kwargs: dict[str, Any] = {"limit": limit, "reverse": True}
+            if last_timestamp > 0:
+                fetch_kwargs["date__gt"] = datetime.fromtimestamp(
+                    last_timestamp, tz=UTC
+                ).date()
+            messages = list(mailbox.fetch(**fetch_kwargs))
 
             newest_timestamp = last_timestamp
 
