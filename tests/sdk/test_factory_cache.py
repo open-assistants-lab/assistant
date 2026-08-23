@@ -9,6 +9,7 @@ loop), scoped per loop because httpx clients are bound to their creating loop.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,17 +23,31 @@ class FakeProvider:
         self.label = label
         self.closed = False
 
+    async def chat(self, *args: object, **kwargs: object) -> None:
+        return None
+
     async def aclose(self) -> None:
         self.closed = True
+
+
+class FakeSettings:
+    """Minimal settings object for langfuse-enabled resolution tests."""
+
+    langfuse = SimpleNamespace(
+        enabled=True, public_key="pk-test", secret_key="sk-test", host="http://localhost"
+    )
 
 
 @pytest.fixture(autouse=True)
 def _clear_caches():
     """Sync tests share one thread, so the loop-less fallback cache would
-    otherwise leak cached providers across tests."""
+    otherwise leak cached providers across tests. The evicted-providers set
+    is module-scoped and must not leak across tests either."""
     factory._thread_provider_caches.clear()
+    factory._evicted_providers.clear()
     yield
     factory._thread_provider_caches.clear()
+    factory._evicted_providers.clear()
 
 
 @pytest.fixture
@@ -93,19 +108,91 @@ def test_close_all_providers_closes_and_invalidates(counting_factory) -> None:
 
 
 @pytest.mark.asyncio
-async def test_lru_eviction_closes_oldest(counting_factory) -> None:
-    """Past the cap the LRU-oldest provider is evicted and its client closed."""
+async def test_lru_eviction_drops_without_closing(counting_factory) -> None:
+    """Past the cap the LRU-oldest is evicted but its client is NOT closed.
+
+    Evicted providers may still be referenced by live AgentLoops and
+    concurrent streams — closing here would abort their in-flight requests.
+    They are tracked for a deterministic shutdown close instead.
+    """
     for i in range(factory._PROVIDER_CACHE_LIMIT + 5):
         factory.get_cached_provider("openai", model=f"model-{i}", api_key="sk-test")
-    await asyncio.sleep(0)  # let eviction close tasks run
-    # The first five created providers were evicted and closed.
+    await asyncio.sleep(0)
+    # Evicted but NOT closed — reusable by in-flight references.
     for p in counting_factory[:5]:
-        assert p.closed is True
+        assert p.closed is False
+    # ...and tracked for the shutdown close.
+    assert len(factory._evicted_providers) == 5
+    for p in counting_factory[:5]:
+        assert p in factory._evicted_providers
     # A surviving key still resolves to its cached instance without re-creating.
     before = len(counting_factory)
     p = factory.get_cached_provider("openai", model="model-64", api_key="sk-test")
     assert p is counting_factory[64]
     assert len(counting_factory) == before
+
+
+@pytest.mark.asyncio
+async def test_shutdown_closes_evicted_providers(counting_factory) -> None:
+    """Evicted providers are closed exactly once, at shutdown."""
+    for i in range(factory._PROVIDER_CACHE_LIMIT + 5):
+        factory.get_cached_provider("openai", model=f"model-{i}", api_key="sk-test")
+    await asyncio.sleep(0)
+    assert len(factory._evicted_providers) == 5
+
+    await factory.close_all_providers()
+    assert all(p.closed for p in counting_factory[:5])
+    assert len(factory._evicted_providers) == 0
+
+
+@pytest.mark.asyncio
+async def test_langfuse_wrap_is_idempotent_across_cached_calls(monkeypatch) -> None:
+    """A cached provider is langfuse-wrapped exactly once.
+
+    LangfuseTracer.wrap_provider mutates provider.chat in place (no proxy),
+    so wrapping the same cached instance on every call would stack nested
+    traced_chat closures — one generation span per layer per request.
+    """
+    wraps: list[object] = []
+
+    def fake_wrap(provider: object) -> object:
+        # Mirrors the real wrap_provider: in-place mutation, no guard.
+        wraps.append(provider)
+        original_chat = provider.chat
+
+        async def traced(*a: object, **k: object) -> object:
+            return await original_chat(*a, **k)
+
+        provider.chat = traced  # type: ignore[attr-defined]
+        return provider
+
+    def fake_create(*args: object, **kwargs: object) -> FakeProvider:
+        return FakeProvider()
+
+    monkeypatch.setattr("src.config.get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(
+        "src.sdk.langfuse_tracer.LangfuseTracer.is_enabled", classmethod(lambda cls: True)
+    )
+    monkeypatch.setattr(
+        "src.sdk.langfuse_tracer.LangfuseTracer.wrap_provider", staticmethod(fake_wrap)
+    )
+    monkeypatch.setattr(factory, "create_provider", fake_create)
+    monkeypatch.setattr(factory, "_resolve_registry_provider", lambda *a, **k: None)
+    monkeypatch.setattr(
+        factory,
+        "_load_user_settings",
+        lambda user_id: type("S", (), {"default_model": None, "provider_keys": {}})(),
+    )
+
+    p1 = factory.get_cached_model_provider("openai:gpt-4o")
+    chat_after_first_wrap = p1.chat
+    p2 = factory.get_cached_model_provider("openai:gpt-4o")
+
+    assert p1 is p2
+    assert len(wraps) == 1  # wrapped exactly once, not once per call
+    assert p2.chat is chat_after_first_wrap  # no stacking
+    assert p1._langfuse_wrapped is True
+
 
 
 @pytest.mark.asyncio
@@ -135,7 +222,8 @@ async def test_get_cached_model_provider_caches_across_calls(monkeypatch) -> Non
 
 @pytest.mark.asyncio
 async def test_openai_aclose_closes_client() -> None:
-    from unittest.mock import AsyncMock, patch as _patch
+    from unittest.mock import AsyncMock
+    from unittest.mock import patch as _patch
 
     from src.sdk.providers.openai import OpenAIProvider
 

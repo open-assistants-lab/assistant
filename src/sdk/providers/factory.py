@@ -49,9 +49,11 @@ _loop_provider_caches: weakref.WeakKeyDictionary[Any, OrderedDict[tuple[Any, ...
 # {thread id -> OrderedDict[(key tuple) -> LLMProvider]} — sync/no-loop fallback.
 _thread_provider_caches: dict[int, OrderedDict[tuple[Any, ...], LLMProvider]] = {}
 _provider_cache_lock = threading.Lock()
-# Strong references to in-flight eviction close tasks so they are not GC'd
-# mid-close (asyncio keeps only weak references to tasks by default).
-_eviction_close_tasks: set[asyncio.Task[Any]] = set()
+# Providers evicted from the cache but still potentially referenced by live
+# AgentLoops and concurrent streams. They are deliberately NOT closed at
+# eviction (closing would abort in-flight requests on a shared client);
+# close_all_providers() closes them once, at shutdown.
+_evicted_providers: set[LLMProvider] = set()
 
 
 
@@ -108,48 +110,48 @@ def _get_caches() -> tuple[Any, OrderedDict[tuple[Any, ...], LLMProvider]]:
 
 
 def _evict_overflow(owner: Any, cache: OrderedDict[tuple[Any, ...], LLMProvider]) -> None:
-    """Evict LRU entries past the cap, closing their clients async when possible."""
+    """Evict LRU entries past the cap WITHOUT closing them.
+
+    An evicted provider may still be referenced by live AgentLoops (runner's
+    _loop_cache) and concurrent streams; closing its client here would abort
+    their in-flight requests. Eviction only drops the cache entry and moves
+    the provider to _evicted_providers, which close_all_providers() closes
+    exactly once at shutdown.
+    """
     while len(cache) > _PROVIDER_CACHE_LIMIT:
         _, evicted = cache.popitem(last=False)
-        close = getattr(evicted, "aclose", None)
-        if close is None:
-            continue
-        # Close on the running loop when one is live; otherwise the evicted
-        # client is dropped and released by GC (rare loop-less sync path).
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        if loop is not None and not loop.is_closed():
-            task = loop.create_task(close())
-            _eviction_close_tasks.add(task)
-            task.add_done_callback(_eviction_close_tasks.discard)
+        _evicted_providers.add(evicted)
 
 
 async def close_all_providers() -> None:
-    """Close every cached provider's HTTP client and clear all caches.
+    """Close every cached and evicted provider's HTTP client; clear caches.
 
     Called from the HTTP server shutdown (main.py lifespan) so sockets are
-    released deterministically instead of waiting on GC.
+    released deterministically instead of waiting on GC. This is the ONLY
+    place cached/evicted clients are closed — eviction (past the LRU cap)
+    never closes a client that live references may still be using.
     """
     caches = list(_loop_provider_caches.values())
     with _provider_cache_lock:
         caches += list(_thread_provider_caches.values())
         _thread_provider_caches.clear()
     _loop_provider_caches.clear()
+    providers: list[LLMProvider] = [p for cache in caches for p in cache.values()]
+    providers += list(_evicted_providers)
+    _evicted_providers.clear()
+    for provider in providers:
+        close = getattr(provider, "aclose", None)
+        if close is None:
+            continue
+        try:
+            await close()
+        except Exception as exc:  # noqa: BLE001 — shutdown must never raise
+            logger.warning(
+                "provider.close_failed",
+                {"error_type": type(exc).__name__},
+                user_id="system",
+            )
     for cache in caches:
-        for provider in cache.values():
-            close = getattr(provider, "aclose", None)
-            if close is None:
-                continue
-            try:
-                await close()
-            except Exception as exc:  # noqa: BLE001 — shutdown must never raise
-                logger.warning(
-                    "provider.close_failed",
-                    {"error_type": type(exc).__name__},
-                    user_id="system",
-                )
         cache.clear()
 
 
@@ -464,7 +466,16 @@ def _resolve_config_model_inputs(
 
 def _maybe_wrap_langfuse(provider: LLMProvider) -> LLMProvider:
     """Apply the Langfuse tracing wrapper when configured (shared by both
-    constructor paths so cached and uncached providers behave identically)."""
+    constructor paths so cached and uncached providers behave identically).
+
+    Idempotent: LangfuseTracer.wrap_provider MUTATES the provider in place
+    (assigns provider.chat/chat_stream) and has no guard of its own, so the
+    cached path would otherwise stack a new traced_chat closure on every
+    call — one nested generation span per layer per request. The first wrap
+    stamps `_langfuse_wrapped`; later calls return the provider untouched.
+    """
+    if getattr(provider, "_langfuse_wrapped", False):
+        return provider
     from src.config import get_settings
 
     lf_settings = get_settings()
@@ -482,6 +493,7 @@ def _maybe_wrap_langfuse(provider: LLMProvider) -> LLMProvider:
             )
         if LangfuseTracer.is_enabled():
             provider = LangfuseTracer.wrap_provider(provider)
+            provider._langfuse_wrapped = True  # type: ignore[attr-defined]
     return provider
 
 
