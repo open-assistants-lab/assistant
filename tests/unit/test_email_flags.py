@@ -46,3 +46,32 @@ def test_lowercase_flags_are_recognized():
 def test_recent_flag_does_not_trigger_flagged():
     msg = FakeMsg(("SEEN", "RECENT"))
     assert parse_email_flags(msg) == {"read": True, "flagged": False}
+
+
+# --- Fix round 1: NULL watermark guard + future Date-header clamp ---
+
+from src.sdk.tools_core.email_sync import _clamp_watermark, _resolve_watermark
+
+
+def test_resolve_watermark_none_means_never_synced():
+    # accounts.last_timestamp is nullable; SQL NULL surfaces as None.
+    assert _resolve_watermark({"last_timestamp": None}) == 0
+
+
+def test_resolve_watermark_missing_key():
+    assert _resolve_watermark({}) == 0
+
+
+def test_resolve_watermark_passthrough():
+    assert _resolve_watermark({"last_timestamp": 1737000000}) == 1737000000
+
+
+def test_clamp_watermark_caps_future_date_header():
+    now = 1_737_000_000
+    future = now + 86_400 * 30  # mail with a Date header 30 days ahead
+    assert _clamp_watermark(future, now) == now
+
+
+def test_clamp_watermark_keeps_past_values():
+    now = 1_737_000_000
+    assert _clamp_watermark(now - 500, now) == now - 500

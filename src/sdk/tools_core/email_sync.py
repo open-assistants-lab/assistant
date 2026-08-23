@@ -20,6 +20,25 @@ SETTINGS = get_settings()
 RATE_LIMIT_COOLDOWN: dict[str, float] = {}
 
 
+
+
+def _resolve_watermark(account: dict[str, Any]) -> int:
+    """Quick-sync watermark: SQL NULL / missing means "never synced" → 0.
+
+    ``account.get("last_timestamp", 0)`` returns None — not the default —
+    when the nullable accounts.last_timestamp column is NULL, and
+    ``None > 0`` raises TypeError, breaking every quick sync for such
+    accounts.
+    """
+    return account.get("last_timestamp") or 0
+
+
+def _clamp_watermark(newest: int, now_ts: int) -> int:
+    """Never advance the watermark past now: a future Date header would
+    otherwise poison every subsequent sync (date__gt would skip all mail
+    older than the bogus future timestamp)."""
+    return min(newest, now_ts)
+
 def _load_accounts(user_id: str) -> dict[str, Any]:
     """Load accounts from database."""
     engine = _get_engine(user_id)
@@ -300,7 +319,7 @@ def _sync_folder(
 
         else:
             # Quick sync - fetch recent emails
-            last_timestamp = account.get("last_timestamp", 0)
+            last_timestamp = _resolve_watermark(account)
             synced = 0
 
             existing_ids = set()
@@ -371,7 +390,9 @@ def _sync_folder(
 
             if synced > 0:
                 account["last_sync"] = int(datetime.now(UTC).timestamp())
-                account["last_timestamp"] = newest_timestamp
+                account["last_timestamp"] = _clamp_watermark(
+                    newest_timestamp, int(datetime.now(UTC).timestamp())
+                )
                 _save_account(user_id, account_id, account)
 
             logger.info(
