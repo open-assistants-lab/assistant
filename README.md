@@ -1,9 +1,11 @@
 # Assistant
 
-[![Download DMG](https://img.shields.io/badge/download-macOS-brightgreen?logo=apple)](https://github.com/your-org/assistant/releases/latest)
+[![Stars](https://img.shields.io/github/stars/open-assistants-lab/assistant)](https://github.com/open-assistants-lab/assistant)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 Your personal AI assistant that runs on your machine. Chat, email, tasks, research, files — all through an HTTP API, powered by your choice of LLM (OpenAI, Anthropic, Ollama, Gemini).
+
+Learn more at [openassistants.org](https://openassistants.org) — including [why this stack exists](https://openassistants.org/story).
 
 ## Features
 
