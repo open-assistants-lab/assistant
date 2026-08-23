@@ -76,6 +76,18 @@ class CancelMessage(BaseModel):
     type: str = "cancel"
 
 
+class SteerMessage(BaseModel):
+    """Client steers the running agent mid-turn (Pi-style).
+
+    Delivered after the current tool completes; remaining tool calls in the
+    current batch are cancelled. If the agent is generating text, the steer
+    is delivered as the next turn (follow-up semantics).
+    """
+
+    type: str = "steer"
+    content: str
+
+
 class PingMessage(BaseModel):
     """Client sends heartbeat."""
 
@@ -260,6 +272,13 @@ class PongMessage(BaseModel):
     type: str = "pong"
 
 
+class SteerAckMessage(BaseModel):
+    """Server acknowledges a steer was queued for the running agent."""
+
+    type: str = "steer_ack"
+    content: str = ""
+
+
 class SkillsLoadMessage(BaseModel):
     """Agent loaded a skill into context."""
 
@@ -284,6 +303,7 @@ CLIENT_MESSAGE_TYPES = {
     "reject": RejectMessage,
     "edit_and_approve": EditAndApproveMessage,
     "cancel": CancelMessage,
+    "steer": SteerMessage,
     "ping": PingMessage,
 }
 
@@ -311,6 +331,7 @@ SERVER_MESSAGE_TYPES = {
     "done": DoneMessage,
     "error": ErrorMessage,
     "pong": PongMessage,
+    "steer_ack": SteerAckMessage,
     # Canvas
     "canvas_update": CanvasUpdateMessage,
     "skills_load": SkillsLoadMessage,
@@ -325,6 +346,7 @@ def parse_client_message(
     | RejectMessage
     | EditAndApproveMessage
     | CancelMessage
+    | SteerMessage
     | PingMessage
     | None
 ):
@@ -340,6 +362,7 @@ def parse_client_message(
             | RejectMessage
             | EditAndApproveMessage
             | CancelMessage
+            | SteerMessage
             | PingMessage
             | None,
             msg_cls(**data),
@@ -370,6 +393,7 @@ _ServerMessage = (
     | DoneMessage
     | ErrorMessage
     | PongMessage
+    | SteerAckMessage
     | CanvasUpdateMessage
 )
 

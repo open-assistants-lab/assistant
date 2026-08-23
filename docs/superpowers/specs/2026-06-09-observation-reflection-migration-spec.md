@@ -1,7 +1,27 @@
 # Migrate EA Observation/Reflection to OSS CoreMem Pipelines
 
 **Date:** 2026-06-09
-**Status:** Draft
+**Status:** ✅ **Executed 2026-08-21 — superseded by CoreMem 0.10 architecture**
+
+**Update (2026-08-21):** CoreMem **v0.10.0 replaced the observer/reflector
+pipeline entirely** ("Merge AgentMemory POC: replace observer/reflector with
+compiler+dreaming+search") — `ObserverPipeline`/`ReflectorPipeline` were
+removed, not migrated. The app bumped to `coremem>=0.13.1` / `hybriddb>=0.5.6`
+and the migration took the post-0.10 form:
+
+- `MessageStore` drops `enable_observations`/`enable_reflections`/
+  `observation_kwargs` (removed upstream) and the `start_pipelines` worker
+  block; `add_message` resolves the row id from `ingest`'s turn_id return.
+- `memory_profile` reworked onto `MemoryCore.recall()` (episodic digest,
+  session_cap for cross-session diversity); `memory_reflection` removed
+  (insight generation is owned by CoreMem's dream/compile path).
+- `/memories` router reduced to `GET /memories/profile` + `DELETE /memories/clear`.
+- The legacy draft below (pipelines era) is retained for history only.
+
+---
+
+## Original draft (2026-06-09) — pipelines era
+
 **Motivation:** EA vendors three custom files (`src/storage/memory.py`, `src/sdk/middleware_observation.py`, `src/sdk/tools_core/observation.py`) that duplicate CoreMem's `ObserverPipeline` and `ReflectorPipeline` with worse defaults, no alignment gate, no classification, no dedup, and no hybrid reflector trigger. CoreMem `>=0.7.1` is already a dependency — EA just doesn't use its pipelines.
 
 ---

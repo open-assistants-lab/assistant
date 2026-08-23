@@ -862,6 +862,103 @@ test "empty state renders placeholder" {
     _ = try expectByText(tree.root, .text, "How can I help?");
 }
 
+test "live-activity pill appears only while streaming" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    // Idle: no pill.
+    var tree = try buildTree(arena, &model);
+    try testing.expect(findByText(tree.root, .text, "Working…") == null);
+
+    // Streaming: pill floats above the composer with the status text.
+    main.update(&model, .{ .input_changed = .{ .insert_text = "Hello" } }, &fx);
+    main.update(&model, .send_message, &fx);
+    try testing.expect(model.activeChat().streaming);
+    tree = try buildTree(arena, &model);
+    _ = try expectByText(tree.root, .text, "Working…");
+    // The pill resets its entrance on each send.
+    try testing.expectEqual(@as(f32, 0), model.pill_entrance);
+
+    // Stream completes: pill unmounts.
+    const fk = model.activeChat().fetch_key;
+    main.update(&model, .{ .stream_done = .{ .key = fk } }, &fx);
+    tree = try buildTree(arena, &model);
+    try testing.expect(findByText(tree.root, .text, "Working…") == null);
+}
+
+test "quick action sends a preset prompt" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    main.update(&model, .quick_action_browse, &fx);
+    const chat = model.activeChat();
+    try testing.expect(chat.streaming);
+    try testing.expectEqualStrings("", model.inputText());
+    try testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
+    const request = fx.pendingFetchAt(0).?;
+    try testing.expect(std.mem.indexOf(u8, request.body, "Browse the web and find the latest news on AI agents") != null);
+}
+
+test "typing dots render while streaming" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    main.update(&model, .{ .input_changed = .{ .insert_text = "Hello" } }, &fx);
+    main.update(&model, .send_message, &fx);
+    try testing.expect(model.activeChat().streaming);
+
+    const tree = try buildTree(arena, &model);
+    // The only .panel widgets while streaming: the three typing dots, the
+    // pill's pulse dot, and the glass composer bar itself (panel kind).
+    try testing.expectEqual(@as(usize, 5), countKind(tree.root, .panel));
+}
+
+test "empty state renders suggestions and quick-action chips" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+
+    const tree = try buildTree(arena, &model);
+    _ = findButtonContaining(tree.root, "Triage my inbox") orelse return error.WidgetNotFound;
+    // Icon-only chips: buttons with no label text. The empty state has three
+    // (browse / files / research) plus the rail collapse chevron and the
+    // composer's Send + model buttons — assert at least three empty-label
+    // buttons exist.
+    var empty_label_buttons: usize = 0;
+    var stack: [64]canvas.Widget = undefined;
+    var count: usize = 1;
+    stack[0] = tree.root;
+    while (count > 0) {
+        count -= 1;
+        const w = stack[count];
+        if (w.kind == .button and w.text.len == 0) empty_label_buttons += 1;
+        for (w.children) |child| {
+            if (count + 1 >= stack.len) break;
+            stack[count] = child;
+            count += 1;
+        }
+    }
+    try testing.expect(empty_label_buttons >= 3);
+}
+
 test "theme: dark tokens have teal accent" {
     const theme = @import("theme.zig");
     const tokens = theme.darkTokens();
@@ -881,10 +978,11 @@ test "theme: light tokens have darker teal accent" {
 test "theme: radius tokens are comfortable values" {
     const theme = @import("theme.zig");
     const tokens = theme.darkTokens();
-    try testing.expectEqual(@as(f32, 8.0), tokens.radius.sm);
-    try testing.expectEqual(@as(f32, 12.0), tokens.radius.md);
-    try testing.expectEqual(@as(f32, 14.0), tokens.radius.lg);
-    try testing.expectEqual(@as(f32, 18.0), tokens.radius.xl);
+    // Squircle scale from the openassistants.org tokens (10/14/18/24).
+    try testing.expectEqual(@as(f32, 10.0), tokens.radius.sm);
+    try testing.expectEqual(@as(f32, 14.0), tokens.radius.md);
+    try testing.expectEqual(@as(f32, 18.0), tokens.radius.lg);
+    try testing.expectEqual(@as(f32, 24.0), tokens.radius.xl);
 }
 
 test "theme: toggle switches dark to light" {
@@ -1797,8 +1895,9 @@ test "stream watchdog force-finalizes a stuck chat" {
     try testing.expect(chat.streaming);
     const before = chat.msg_count;
 
-    // Age the stream past the watchdog deadline (terminal event was lost).
-    chat.stream_started_at = main.nowMillis() - main.stream_watchdog_ms - 1000;
+    // Age the stream's LAST EVENT past the watchdog deadline (terminal
+    // event lost / connection dead — no keepalive pings arrived).
+    chat.last_stream_event_at = main.nowMillis() - main.stream_watchdog_ms - 1000;
     main.update(&model, .{ .tick = .{ .key = 1 } }, &fx);
 
     try testing.expect(!chat.streaming);
@@ -1807,6 +1906,29 @@ test "stream watchdog force-finalizes a stuck chat" {
     // The watchdog adds a timed-out error message.
     try testing.expectEqual(before + 1, chat.msg_count);
     try testing.expectEqualStrings("Stream error: timed_out", chat._messages[chat.msg_count - 1].content);
+}
+
+test "stream watchdog does not kill a long-but-alive stream" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    _ = sendAndStartStream(&model, &fx, "Hello");
+    const chat = model.activeChat();
+
+    // The stream has been running LONG (start aged past the old total
+    // deadline) but lines are still arriving (keepalive pings) — the
+    // gap-based watchdog must NOT force-finalize it.
+    chat.stream_started_at = main.nowMillis() - main.stream_watchdog_ms - 5000;
+    chat.last_stream_event_at = main.nowMillis() - 1000;
+    main.update(&model, .{ .tick = .{ .key = 1 } }, &fx);
+
+    // Still streaming, still owns the fetch: the gap watchdog left it alone.
+    try testing.expect(chat.streaming);
+    try testing.expect(chat.fetch_key != 0);
 }
 
 test "stream_error finalizes stream state fully" {

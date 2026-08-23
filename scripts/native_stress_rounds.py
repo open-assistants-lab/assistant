@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import re
 import subprocess
-import sys
 import time
 
 APP_DIR = "/Users/eddy/Developer/Python/assistant/native-sdk-experiment"

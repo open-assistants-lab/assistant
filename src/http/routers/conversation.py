@@ -633,6 +633,7 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
                 model=req.model,
                 provider_keys=req.provider_keys,
                 rubric=req.verification.rubric if req.verification else None,
+                mode=req.verification.mode if req.verification else None,
             )
         except SessionBusyError:
             return MessageResponse(response="", error="Session already has an active run")
@@ -650,24 +651,29 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
         verification_verdict = None
         if result.verification.availability.value == "on":
             latest = result.verification.evaluations[-1] if result.verification.evaluations else None
-            if latest:
-                verification_verdict = VerificationVerdict(
-                    status=result.verification.status.value,
-                    iterations=result.verification.attempts,
-                    attempts=result.verification.attempts,
-                    max_attempts=result.verification.max_attempts,
-                    explanation=latest.explanation,
-                    criteria=[{"name": c.name, "passed": c.passed, "gap": c.gap} for c in latest.criteria],
-                    evaluations=[
-                        {
-                            "attempt": e.attempt,
-                            "result": e.result.value,
-                            "explanation": e.explanation,
-                            "criteria": [{"name": c.name, "passed": c.passed, "gap": c.gap} for c in e.criteria],
-                        }
-                        for e in result.verification.evaluations
-                    ],
-                )
+            # A skipped run (C11 auto mode) has no evaluations but still
+            # reports its status so clients can distinguish skip from off.
+            verification_verdict = VerificationVerdict(
+                status=result.verification.status.value,
+                iterations=result.verification.attempts,
+                attempts=result.verification.attempts,
+                max_attempts=result.verification.max_attempts,
+                explanation=latest.explanation if latest else "",
+                criteria=(
+                    [{"name": c.name, "passed": c.passed, "gap": c.gap} for c in latest.criteria]
+                    if latest
+                    else []
+                ),
+                evaluations=[
+                    {
+                        "attempt": e.attempt,
+                        "result": e.result.value,
+                        "explanation": e.explanation,
+                        "criteria": [{"name": c.name, "passed": c.passed, "gap": c.gap} for c in e.criteria],
+                    }
+                    for e in result.verification.evaluations
+                ],
+            )
 
         canvas_blocks = _extract_surfaces(response)
         response = _strip_canvas_fences(response)
@@ -792,6 +798,7 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                         model=req.model,
                         provider_keys=req.provider_keys,
                         rubric=req.verification.rubric if req.verification else None,
+                        mode=req.verification.mode if req.verification else None,
                     )
                 ):
                     if isinstance(event, str):

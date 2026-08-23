@@ -27,15 +27,10 @@ DEFAULT_DISALLOWED_TOOLS = [
 
 DEFAULT_SAFE_DENIED_TOOLS = [
     "shell_execute",
-    "email_send",
-    "email_connect",
-    "email_disconnect",
     "browser_click",
-    "browser_input",
-    "browser_type",
+    "browser_fill",
     "browser_eval",
     "browser_open",
-    "browser_keys",
 ]
 
 SAFE_DISALLOWED_TOOLS = list(DEFAULT_DISALLOWED_TOOLS) + list(DEFAULT_SAFE_DENIED_TOOLS)

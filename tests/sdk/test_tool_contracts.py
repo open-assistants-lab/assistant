@@ -221,13 +221,6 @@ class TestTodosTools:
         )
         assert isinstance(str(add_result), str)
 
-    def test_todos_extract(self):
-        from src.sdk.tools_core.todos import todos_extract
-
-        result = todos_extract.invoke({"user_id": "test_contract_todos", "limit": 1})
-        assert isinstance(str(result), str)
-
-
 # ─── Contacts ───
 
 
@@ -264,23 +257,6 @@ class TestContactsTools:
         )
         assert isinstance(str(result), str)
 
-    def test_contacts_get(self):
-        from src.sdk.tools_core.contacts import contacts_get
-
-        result = contacts_get.invoke({"contact_id": "nonexistent", "user_id": "test_contract_ct"})
-        assert isinstance(str(result), str)
-
-
-# ─── Memory ───
-
-
-class TestMessageTools:
-    def test_message_history(self):
-        from src.sdk.tools_core.message import message_history
-
-        result = message_history.invoke({"user_id": "test_contract_mem", "days": 1})
-        assert isinstance(str(result), str)
-
     def test_message_search(self):
         from src.sdk.tools_core.message import message_search
 
@@ -293,33 +269,6 @@ class TestMemoryTools:
         from src.sdk.tools_core.memory import memory_profile
 
         result = memory_profile.invoke({"user_id": "test_contract_mem"})
-        assert isinstance(str(result), str)
-
-    def test_memory_reflection(self):
-        from src.sdk.tools_core.memory import memory_reflection
-
-        result = memory_reflection.invoke({"query": "test", "user_id": "test_contract_mem"})
-        assert isinstance(str(result), str)
-
-
-# ─── Email ───
-
-
-class TestEmailTools:
-    def test_email_list(self):
-        from src.sdk.tools_core.email import email_list
-
-        result = email_list.invoke(
-            {"account_name": "default", "limit": 5, "user_id": "test_contract_email"}
-        )
-        assert isinstance(str(result), str)
-
-    def test_email_search(self):
-        from src.sdk.tools_core.email import email_search
-
-        result = email_search.invoke(
-            {"query": "test", "account_name": "default", "user_id": "test_contract_email"}
-        )
         assert isinstance(str(result), str)
 
 

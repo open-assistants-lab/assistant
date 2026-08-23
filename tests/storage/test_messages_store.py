@@ -439,7 +439,12 @@ def test_add_summary_rejects_summary_as_preserved_or_invalid_prior_summary() -> 
     valid_summary_id = store.add_summary_message(
         "valid", session_id="a", metadata=_summary_metadata([source_id])
     )
-    malformed_summary_id = store.add_message("summary", "malformed", session_id="a", metadata={})
+    # CoreMem >=0.10 ingest returns no id for summary-role messages, so the
+    # malformed summary is inserted directly with a known id.
+    _insert_raw_messages(
+        store,
+        [("malformed-id", "summary", "malformed", "a", {})],
+    )
 
     with pytest.raises(ValueError, match="provenance"):
         store.add_summary_message(
@@ -451,7 +456,7 @@ def test_add_summary_rejects_summary_as_preserved_or_invalid_prior_summary() -> 
         store.add_summary_message(
             "bad summarized",
             session_id="a",
-            metadata=_summary_metadata([malformed_summary_id]),
+            metadata=_summary_metadata(["malformed-id"]),
         )
 
 
@@ -662,7 +667,7 @@ def test_message_store_uses_stable_user_level_context(monkeypatch, tmp_path) -> 
     store = MessageStore("test_user", base_dir=tmp_path, workspace_id="project-x")
 
     assert store.workspace_id == "user"
-    assert captured["observation_kwargs"] == {"session_id": "user"}
+    assert "path" in captured  # CoreMem >=0.10: no observation kwargs
 
 
 def _create_legacy_workspace_db(

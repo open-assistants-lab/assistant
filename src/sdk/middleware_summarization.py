@@ -1,10 +1,10 @@
-"""Summarization middleware — aligned with LangChain's SummarizationMiddleware.
+"""Summarization middleware.
 
 Monitors message token counts and automatically summarizes older messages when
 a threshold is reached, preserving recent messages and maintaining context
 continuity by ensuring AI/Tool message pairs remain together.
 
-Extensions over LangChain:
+Notable features:
 - typed summary sink (persist lossless compression artifacts)
 - force_summarize() (overflow recovery + manual /summarize)
 - Settings-based config (config.yaml + env vars)
@@ -58,24 +58,37 @@ This context will then overwrite the conversation history presented below. Becau
 The conversation history below will be replaced with the context you extract in this step.
 You want to ensure that you don't repeat any actions you've already completed, so the context you extract from the conversation history should be focused on the most important information to your overall goal.
 
-You should structure your summary using the following sections. Each section acts as a checklist - you must populate it with relevant information or explicitly state "None" if there is nothing to report for that section:
+Create a structured context checkpoint summary that another LLM will use to continue the work.
+Use this EXACT format:
 
-## SESSION INTENT
+## Goal
+[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
 
-What is the user's primary goal or request? What overall task are you trying to accomplish? This should be concise but complete enough to understand the purpose of the entire session.
+## Constraints & Preferences
+- [Any constraints, preferences, or requirements mentioned by user]
+- [Or "(none)" if none were mentioned]
 
-## SUMMARY
+## Progress
+### Done
+- [x] [Completed tasks/changes]
 
-Extract and record all of the most important context from the conversation history. Include important choices, conclusions, or strategies determined during this conversation. Include the reasoning behind key decisions. Document any rejected options and why they were not pursued.
+### In Progress
+- [ ] [Current work]
 
-## ARTIFACTS
+### Blocked
+- [Issues preventing progress, if any]
 
-What artifacts, files, or resources were created, modified, or accessed during this conversation? For file modifications, list specific file paths and briefly describe the changes made to each. This section prevents silent loss of artifact information.
+## Key Decisions
+- **[Decision]**: [Brief rationale]
 
-## NEXT STEPS
+## Next Steps
+1. [Ordered list of what should happen next]
 
-What specific tasks remain to be completed to achieve the session intent? What should you do next?
+## Critical Context
+- [Any data, examples, or references needed to continue]
+- [Or "(none)" if not applicable]
 
+Keep each section concise. Preserve exact file paths, function names, and error messages.
 </instructions>
 
 The user will message you with the full message history from which you'll extract context to create a replacement. Carefully read through it all and think deeply about what information is most important to your overall goal and should be saved:
@@ -87,6 +100,84 @@ Respond ONLY with the extracted context. Do not include any additional informati
 Messages to summarize:
 {messages}
 </messages>"""
+
+UPDATE_SUMMARY_PROMPT = """Update the existing structured summary with new information. RULES:
+- PRESERVE all existing information from the previous summary
+- ADD new progress, decisions, and context from the new messages
+- UPDATE the Progress section: move items from "In Progress" to "Done" when completed
+- UPDATE "Next Steps" based on what was accomplished
+- PRESERVE exact file paths, function names, and error messages
+- If something is no longer relevant, you may remove it
+
+Use this EXACT format:
+
+## Goal
+[Preserve existing goals, add new ones if the task expanded]
+
+## Constraints & Preferences
+- [Preserve existing, add new ones discovered]
+
+## Progress
+### Done
+- [x] [Include previously done items AND newly completed items]
+
+### In Progress
+- [ ] [Current work - update based on progress]
+
+### Blocked
+- [Current blockers - remove if resolved]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale] (preserve all previous, add new)
+
+## Next Steps
+1. [Update based on current state]
+
+## Critical Context
+- [Preserve important context, add new if needed]
+
+Keep each section concise. Preserve exact file paths, function names, and error messages."""
+
+TURN_PREFIX_SUMMARY_PROMPT = """This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
+
+Summarize the prefix to provide context for the retained suffix:
+
+## Original Request
+[What did the user ask for in this turn?]
+
+## Early Progress
+- [Key decisions and work done in the prefix]
+
+## Context for Suffix
+- [Information needed to understand the retained recent work]
+
+Be concise. Focus on what's needed to understand the kept suffix."""
+
+# File tools tracked across compaction so the summary preserves which files
+# were touched even after the tool calls are summarized away.
+FILE_READ_TOOLS = frozenset(
+    {
+        "files_read",
+        "files_list",
+        "files_glob_search",
+        "files_grep_search",
+        "files_versions_list",
+    }
+)
+FILE_WRITE_TOOLS = frozenset(
+    {
+        "files_write",
+        "files_edit",
+        "files_delete",
+        "files_mkdir",
+        "files_rename",
+        "files_versions_restore",
+        "files_versions_delete",
+        "files_versions_clean",
+    }
+)
+
+SUMMARY_MESSAGE_PREFIX = "Here is a summary of the conversation to date:"
 
 _DEFAULT_MESSAGES_TO_KEEP = 20
 _DEFAULT_TRIM_TOKEN_LIMIT = 4000
@@ -463,9 +554,73 @@ class SummarizationMiddleware(Middleware):
     def _build_new_messages(summary: str) -> list[Message]:
         message = Message(
             role="user",
-            content=f"Here is a summary of the conversation to date:\n\n{summary}",
+            content=f"{SUMMARY_MESSAGE_PREFIX}\n\n{summary}",
         )
         return [message.model_copy(update={"source": "summarization_middleware"})]
+
+    # -- Incremental summarization --
+
+    @staticmethod
+    def _find_previous_summary_index(messages: list[Message]) -> int:
+        """Index of the last summary message injected by this middleware, or -1."""
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            if msg.role == "user" and msg.source == "summarization_middleware":
+                return i
+        return -1
+
+    @classmethod
+    def _extract_previous_summary(cls, message: Message) -> str | None:
+        """Extract the summary text from a previously injected summary message.
+
+        Handles both the in-memory framing ("Here is a summary of the
+        conversation to date:") and the storage framing
+        ("[SUMMARY OF PREVIOUS CONVERSATION]") used when the summary is
+        loaded back from the message store.
+        """
+        content = message.content if isinstance(message.content, str) else ""
+        for prefix in (SUMMARY_MESSAGE_PREFIX, "[SUMMARY OF PREVIOUS CONVERSATION]"):
+            if content.startswith(prefix):
+                content = content[len(prefix) :].lstrip("\n")
+        content = content.strip()
+        return content or None
+
+    # -- File operation tracking --
+
+    @staticmethod
+    def _extract_file_ops(messages: Iterable[Message]) -> tuple[list[str], list[str]]:
+        """Extract (read_files, modified_files) from tool calls in messages."""
+        read_files: set[str] = set()
+        modified_files: set[str] = set()
+        for msg in messages:
+            if msg.role != "assistant":
+                continue
+            for tc in msg.tool_calls:
+                if tc.name not in FILE_READ_TOOLS and tc.name not in FILE_WRITE_TOOLS:
+                    continue
+                args = tc.arguments or {}
+                raw = args.get("path") or args.get("paths") or args.get("pattern") or args.get("query")
+                if raw is None:
+                    continue
+                paths = raw if isinstance(raw, list) else [raw]
+                paths = [str(p) for p in paths if isinstance(p, str) and p.strip()]
+                if tc.name in FILE_READ_TOOLS:
+                    read_files.update(paths)
+                else:
+                    modified_files.update(paths)
+        return sorted(read_files), sorted(modified_files)
+
+    @staticmethod
+    def _format_file_operations(read_files: list[str], modified_files: list[str]) -> str:
+        """Format tracked file operations as a summary appendix (empty if none)."""
+        if not read_files and not modified_files:
+            return ""
+        lines = ["\n\n## Files"]
+        if read_files:
+            lines.append(f"- Read: {', '.join(read_files)}")
+        if modified_files:
+            lines.append(f"- Modified: {', '.join(modified_files)}")
+        return "\n".join(lines)
 
     # -- Message trimming --
 
@@ -499,21 +654,38 @@ class SummarizationMiddleware(Middleware):
         return "\n\n".join(lines)
 
     async def _acreate_summary(
-        self, messages_to_summarize: list[Message], instructions: str | None = None
+        self,
+        messages_to_summarize: list[Message],
+        previous_summary: str | None = None,
+        instructions: str | None = None,
     ) -> tuple[str, UsageAggregate]:
         try:
             if not messages_to_summarize:
                 raise _SummaryGenerationError("empty_input", "no messages were selected")
             formatted = self._messages_to_conversation_text(messages_to_summarize)
-            if instructions:
-                formatted = f"[Focus: {instructions}]\n\n{formatted}"
-            prompt = self.summary_prompt.format(messages=formatted)
+            if previous_summary:
+                update_prompt = UPDATE_SUMMARY_PROMPT
+                if instructions:
+                    update_prompt = f"{update_prompt}\n\nAdditional focus: {instructions}"
+                prompt = (
+                    f"<conversation>\n{formatted}\n</conversation>\n\n"
+                    f"<previous-summary>\n{previous_summary}\n</previous-summary>\n\n"
+                    f"{update_prompt}"
+                )
+            else:
+                if instructions:
+                    formatted = f"[Focus: {instructions}]\n\n{formatted}"
+                prompt = self.summary_prompt.format(messages=formatted)
             summary_messages = [
                 Message.system("You are a context extraction assistant."),
                 Message.user(prompt),
             ]
             provider = self._get_summary_provider()
-            response = await self._call_summary_provider(provider, summary_messages)
+            response = await self._call_summary_provider_with_retry(provider, summary_messages)
+            if getattr(response, "tool_calls", None):
+                raise _SummaryGenerationError(
+                    "tool_call", "summary provider attempted to call a tool"
+                )
             content = response.content if isinstance(response.content, str) else ""
             content = content.strip()
             if not content:
@@ -527,6 +699,43 @@ class SummarizationMiddleware(Middleware):
         except Exception as exc:
             logger.warning(
                 "summarization.generation_failed",
+                {"error_type": type(exc).__name__},
+                user_id=self.user_id,
+            )
+            raise _SummaryGenerationError("provider_error", "summary provider failed") from exc
+
+    async def _acreate_turn_prefix_summary(
+        self, messages_to_summarize: list[Message]
+    ) -> tuple[str, UsageAggregate]:
+        """Summarize the prefix of a turn that was cut mid-way."""
+        try:
+            if not messages_to_summarize:
+                raise _SummaryGenerationError("empty_input", "no messages were selected")
+            formatted = self._messages_to_conversation_text(messages_to_summarize)
+            prompt = f"<conversation>\n{formatted}\n</conversation>\n\n{TURN_PREFIX_SUMMARY_PROMPT}"
+            summary_messages = [
+                Message.system("You are a context extraction assistant."),
+                Message.user(prompt),
+            ]
+            provider = self._get_summary_provider()
+            response = await self._call_summary_provider_with_retry(provider, summary_messages)
+            if getattr(response, "tool_calls", None):
+                raise _SummaryGenerationError(
+                    "tool_call", "summary provider attempted to call a tool"
+                )
+            content = response.content if isinstance(response.content, str) else ""
+            content = content.strip()
+            if not content:
+                raise _SummaryGenerationError(
+                    "empty_response", "summary provider returned no content"
+                )
+            usage = self._usage_aggregate(getattr(response, "usage", None))
+            return content, usage
+        except _SummaryGenerationError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "summarization.turn_prefix_generation_failed",
                 {"error_type": type(exc).__name__},
                 user_id=self.user_id,
             )
@@ -584,6 +793,24 @@ class SummarizationMiddleware(Middleware):
                 raise
         return cast(Message, await chat(messages))
 
+    async def _call_summary_provider_with_retry(
+        self, provider: Any, messages: list[Message]
+    ) -> Message:
+        """Call the summary provider with one retry on transient failures.
+
+        Pi-style retry policy: a single retry absorbs transient stream drops
+        and socket closes; deterministic errors propagate immediately.
+        """
+        try:
+            return await self._call_summary_provider(provider, messages)
+        except (ConnectionError, TimeoutError, OSError):
+            logger.warning(
+                "summarization.retry",
+                {"error_type": "transient"},
+                user_id=self.user_id,
+            )
+            return await self._call_summary_provider(provider, messages)
+
     def _usage_aggregate(self, usage: Usage | None) -> UsageAggregate:
         if usage is None:
             return UsageAggregate()
@@ -596,6 +823,20 @@ class SummarizationMiddleware(Middleware):
             reasoning_tokens=usage.reasoning_tokens,
             cache_read_tokens=usage.cache_read_tokens,
             cache_creation_tokens=usage.cache_creation_tokens,
+        )
+
+    @staticmethod
+    def _combine_usage(first: UsageAggregate, second: UsageAggregate) -> UsageAggregate:
+        """Merge usage from two summary LLM calls (history + turn prefix)."""
+        return UsageAggregate(
+            available=first.available or second.available,
+            calls=first.calls + second.calls,
+            models=tuple(dict.fromkeys([*first.models, *second.models])),
+            input_tokens=first.input_tokens + second.input_tokens,
+            output_tokens=first.output_tokens + second.output_tokens,
+            reasoning_tokens=first.reasoning_tokens + second.reasoning_tokens,
+            cache_read_tokens=first.cache_read_tokens + second.cache_read_tokens,
+            cache_creation_tokens=first.cache_creation_tokens + second.cache_creation_tokens,
         )
 
     async def _compress(
@@ -627,9 +868,46 @@ class SummarizationMiddleware(Middleware):
                 error_code="no_cutoff",
             )
 
+        # Incremental: locate the previous summary message injected by this
+        # middleware. Only messages after it are summarized; it is replaced.
+        prev_summary_index = self._find_previous_summary_index(messages)
+        if prev_summary_index >= 0 and cutoff_index <= prev_summary_index:
+            return self._result_without_artifact(
+                context,
+                messages,
+                status=CompressionStatus.SKIPPED,
+                tokens=before_tokens,
+                error_code="no_new_messages",
+            )
+
         try:
-            old_messages, recent_messages = self._partition_messages(messages, cutoff_index)
-            summarized_messages = self._trim_messages_for_summary(old_messages)
+            # Split-turn detection: cutting at an assistant message mid-turn
+            # (e.g. to keep its tool results) means the turn prefix gets its
+            # own summary so the retained suffix stays understandable.
+            is_split_turn = False
+            turn_start_index = -1
+            if cutoff_index < len(messages) and messages[cutoff_index].role == "assistant":
+                for i in range(cutoff_index - 1, prev_summary_index, -1):
+                    if messages[i].role == "user":
+                        turn_start_index = i
+                        break
+                is_split_turn = turn_start_index >= 0
+
+            if is_split_turn:
+                history_range = messages[prev_summary_index + 1 : turn_start_index]
+                turn_prefix = messages[turn_start_index:cutoff_index]
+                recent_messages = messages[cutoff_index:]
+            else:
+                history_range = messages[prev_summary_index + 1 : cutoff_index]
+                turn_prefix = []
+                recent_messages = messages[cutoff_index:]
+
+            previous_summary = None
+            if prev_summary_index >= 0:
+                previous_summary = self._extract_previous_summary(messages[prev_summary_index])
+
+            summarized_messages = self._trim_messages_for_summary(history_range)
+            old_remainder = history_range[len(summarized_messages) :]
         except Exception as exc:
             return self._result_without_artifact(
                 context,
@@ -639,7 +917,7 @@ class SummarizationMiddleware(Middleware):
                 error_code="compression_preparation_error",
                 error_message=type(exc).__name__,
             )
-        if not summarized_messages:
+        if not summarized_messages and not turn_prefix:
             return self._result_without_artifact(
                 context,
                 messages,
@@ -647,12 +925,34 @@ class SummarizationMiddleware(Middleware):
                 tokens=before_tokens,
                 error_code="summary_budget_too_small",
             )
-        old_remainder = old_messages[len(summarized_messages) :]
 
         try:
-            summary, usage = await self._acreate_summary(
-                summarized_messages, instructions=instructions
-            )
+            if is_split_turn:
+                if summarized_messages:
+                    history_summary, history_usage = await self._acreate_summary(
+                        summarized_messages,
+                        previous_summary=previous_summary,
+                        instructions=instructions,
+                    )
+                else:
+                    # Preserve the previous summary — it is replaced by the
+                    # new one, so "No prior history." would lose it.
+                    history_summary = previous_summary or "No prior history."
+                    history_usage = UsageAggregate()
+                prefix_summary, prefix_usage = await self._acreate_turn_prefix_summary(
+                    turn_prefix
+                )
+                summary = (
+                    f"{history_summary}\n\n---\n\n"
+                    f"**Turn Context (split turn):**\n\n{prefix_summary}"
+                )
+                usage = self._combine_usage(history_usage, prefix_usage)
+            else:
+                summary, usage = await self._acreate_summary(
+                    summarized_messages,
+                    previous_summary=previous_summary,
+                    instructions=instructions,
+                )
         except _SummaryGenerationError as exc:
             return self._result_without_artifact(
                 context,
@@ -663,15 +963,22 @@ class SummarizationMiddleware(Middleware):
                 error_message=str(exc),
             )
 
+        # Track file operations so the summary preserves which files were
+        # touched even after the tool calls are summarized away.
+        read_files, modified_files = self._extract_file_ops(
+            [*summarized_messages, *turn_prefix]
+        )
+        summary += self._format_file_operations(read_files, modified_files)
+
         try:
             summary_message = self._build_new_messages(summary)[0]
             replacement_messages = (summary_message, *old_remainder, *recent_messages)
             replacement_snapshots = tuple(
                 CompressionMessage.from_message(message) for message in replacement_messages
             )
-            summarized_ids = self._storage_ids(summarized_messages)
+            summarized_ids = self._storage_ids([*summarized_messages, *turn_prefix])
             preserved_ids = self._storage_ids([*old_remainder, *recent_messages])
-            summarized_count = len(summarized_messages)
+            summarized_count = len(summarized_messages) + len(turn_prefix)
             preserved_count = len(old_remainder) + len(recent_messages)
             persistence_eligible = (
                 summarized_count > 0 and len(summarized_ids) == summarized_count

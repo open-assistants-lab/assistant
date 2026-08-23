@@ -14,6 +14,8 @@ RUN uv sync --frozen --no-dev
 # Copy source
 COPY src/ src/
 COPY config.yaml ./
+# Seed prompts (summarisation, grader) — resolved relative to repo root
+COPY seeds/ seeds/
 
 # Default command
-CMD ["uv", "run", "ea", "http"]
+CMD ["uv", "run", "assistant", "http"]

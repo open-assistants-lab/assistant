@@ -4,7 +4,6 @@ from src.app_logging import get_logger
 from src.sdk.tools import ToolAnnotations, tool
 from src.sdk.tools_core.contacts_storage import add_contact as storage_add_contact
 from src.sdk.tools_core.contacts_storage import delete_contact as storage_delete_contact
-from src.sdk.tools_core.contacts_storage import get_contact as storage_get_contact
 from src.sdk.tools_core.contacts_storage import get_contacts, get_contacts_count, search_contacts
 from src.sdk.tools_core.contacts_storage import update_contact as storage_update_contact
 
@@ -52,57 +51,6 @@ def contacts_list(limit: int = 50, user_id: str = "") -> str:
 
 
 contacts_list.annotations = ToolAnnotations(title="List Contacts", read_only=True, idempotent=True)
-
-
-@tool
-def contacts_get(email: str | None = None, contact_id: str | None = None, user_id: str = "") -> str:
-    """Get a single contact by email or ID.
-
-    Args:
-        email: Contact email address
-        contact_id: Contact ID
-        user_id: User ID (REQUIRED)
-
-    Returns:
-        Contact details
-    """
-    if not user_id:
-        return "Error: user_id is required."
-
-    if not email and not contact_id:
-        return "Error: email or contact_id is required."
-
-    contact = storage_get_contact(user_id, contact_id=contact_id, email=email)
-
-    if not contact:
-        return "Contact not found."
-
-    output = f"""Name: {contact.get("name") or contact.get("email")}
-Email: {contact.get("email")}
-"""
-
-    if contact.get("first_name") or contact.get("last_name"):
-        output += f"Full Name: {contact.get('first_name', '')} {contact.get('last_name', '')}\n"
-
-    if contact.get("company"):
-        output += f"Company: {contact.get('company')}\n"
-
-    if contact.get("phone"):
-        output += f"Phone: {contact.get('phone')}\n"
-
-    if contact.get("emails"):
-        output += "Other Emails: " + ", ".join([e["email"] for e in contact["emails"]]) + "\n"
-
-    if contact.get("tags"):
-        output += "Tags: " + ", ".join(contact["tags"]) + "\n"
-
-    output += f"\nSource: {contact.get('source')}\n"
-    output += f"ID: {contact.get('id')}\n"
-
-    return output.strip()
-
-
-contacts_get.annotations = ToolAnnotations(title="Get Contact", read_only=True, idempotent=True)
 
 
 @tool

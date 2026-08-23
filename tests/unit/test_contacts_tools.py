@@ -47,50 +47,6 @@ class TestContactsList:
                 assert "john@example.com" in result
 
 
-class TestContactsGet:
-    """Tests for contacts_get tool."""
-
-    def test_contacts_get_requires_user_id(self):
-        """Test contacts_get requires user_id."""
-        from src.sdk.tools_core.contacts import contacts_get
-
-        result = contacts_get.invoke({})
-        assert "Error: user_id is required" in result
-
-    def test_contacts_get_requires_email_or_id(self):
-        """Test contacts_get requires email or contact_id."""
-        from src.sdk.tools_core.contacts import contacts_get
-
-        result = contacts_get.invoke({"user_id": TEST_USER_ID})
-        assert "Error: email or contact_id is required" in result
-
-    def test_contacts_get_not_found(self):
-        """Test contacts_get when contact not found."""
-        from src.sdk.tools_core.contacts import contacts_get
-
-        with patch(f"{_MOCK}.storage_get_contact", return_value=None):
-            result = contacts_get.invoke({"email": "notfound@example.com", "user_id": TEST_USER_ID})
-            assert "not found" in result
-
-    def test_contacts_get_found(self):
-        """Test contacts_get returns contact details."""
-        from src.sdk.tools_core.contacts import contacts_get
-
-        mock_contact = {
-            "id": "123",
-            "name": "Jane Doe",
-            "email": "jane@example.com",
-            "company": "Tech Corp",
-            "phone": "555-5678",
-            "source": "email",
-        }
-        with patch(f"{_MOCK}.storage_get_contact", return_value=mock_contact):
-            result = contacts_get.invoke({"email": "jane@example.com", "user_id": TEST_USER_ID})
-            assert "Jane Doe" in result
-            assert "jane@example.com" in result
-            assert "Tech Corp" in result
-
-
 class TestContactsAdd:
     """Tests for contacts_add tool."""
 

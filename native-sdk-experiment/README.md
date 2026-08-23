@@ -1,9 +1,8 @@
 # Native Sdk Experiment
 
-A native-rendered Native SDK app: the view lives in `src/app.native`
-(declarative markup) and the logic in `src/main.zig` (`Model`, `Msg`,
-`update`). No WebView, no npm, no build files — the `native` CLI owns
-the build.
+A native-rendered Native SDK app: the view is built in Zig (`src/main.zig`
+— `Model`, `Msg`, `update`, view builders) with the `native` CLI owning
+the build. No WebView, no npm, no build files.
 
 ## Commands
 
@@ -11,14 +10,14 @@ the build.
 native dev     # build and run the app with hot reload
 native test    # run the app's test suite
 native build   # produce a ReleaseFast binary in zig-out/bin/
-native check   # validate src/*.native markup and app.zon
+native check   # validate app.zon and any src/*.native markup
 ```
 
 ## Hot reload
 
-`src/app.native` is watched while `native dev` runs: edit it and the
-window updates within ~2s without losing model state. Parse failures
-keep the last good view.
+`native dev` rebuilds and relaunches on source changes; the window
+updates without losing model state. Compile failures keep the last
+good build.
 
 ## Owning the build
 

@@ -25,8 +25,7 @@ def _scan_custom_tool_names(tools_dir: Path) -> set[str]:
 
 @tool
 def tool_reload() -> str:
-    """Reload and re-index all tools from current sources. Use after creating, editing, or deleting a TOOL.md file,
-    or after connecting/disconnecting a connector service.
+    """Reload and re-index all tools from current sources. Use after creating, editing, or deleting a TOOL.md file.
 
     MCP servers must be reconnected via `mcp_reload()` first — this only re-indexes
     whatever MCP tools are already registered in the bridge.
@@ -55,8 +54,6 @@ def tool_reload() -> str:
     mcp_config = paths.user_mcp_config()
     index_dir = user_tools_dir / ".index"
     hashes_path = index_dir / ".index_hashes.json"
-
-    connectkit_bridge = getattr(loop, "_connectkit_bridge", None)
 
     try:
         prev_names = set(loop._tool_index.list_all_names())
@@ -95,22 +92,8 @@ def tool_reload() -> str:
                     loop._tool_index.index_tool(td, tool_type="mcp", namespace=f"mcp__{server_name}", reconstruct=reconstruct)
                     mcp_count += 1
 
-        # Index connector tools from the bridge
-        connector_count = 0
-        if connectkit_bridge:
-            from src.sdk.runner import _connector_dicts_to_defs
-            all_tool_dicts = connectkit_bridge.get_tool_definitions()
-            converted = _connector_dicts_to_defs(all_tool_dicts)
-            for td in converted:
-                if not is_core_tool(td.name) and resource_enabled(caps, "tools", td.name):
-                    namespace = td.name.split("__")[0] if "__" in td.name else "connector"
-                    reconstruct = {"namespace": namespace, "tool_name": td.name}
-                    loop._tool_index.index_tool(td, tool_type="connector", namespace=namespace, reconstruct=reconstruct)
-                    connector_count += 1
-
         current_hashes = compute_source_hashes(
             user_tools_dir, workspace_tools_dir, mcp_config,
-            connectkit_bridge=connectkit_bridge,
         )
         save_source_hashes(hashes_path, current_hashes)
 
@@ -127,7 +110,7 @@ def tool_reload() -> str:
                 if hasattr(loop, "_recently_used") and loop._recently_used:
                     loop._recently_used.discard(name)
 
-        lines = [f"Index rebuilt ({custom_count} custom, {mcp_count} MCP, {connector_count} connector)."]
+        lines = [f"Index rebuilt ({custom_count} custom, {mcp_count} MCP)."]
         if added:
             lines.append(f"  Added: {', '.join(sorted(added))}")
         if removed:

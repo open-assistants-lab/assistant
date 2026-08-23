@@ -39,8 +39,9 @@ def loop(fake_provider, _isolated_paths):
         system_prompt=TEST_PROMPT,
         middlewares=[
             SummarizationMiddleware(
-                trigger_tokens=100,
-                keep_tokens=50,
+                model="ollama-cloud:test",
+                trigger=("tokens", 100),
+                keep=("messages", 50),
             ),
         ],
         run_config=RunConfig(max_llm_calls=10),

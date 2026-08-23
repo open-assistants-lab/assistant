@@ -64,7 +64,6 @@ def test_get_system_prompt_does_not_include_workspace_context(monkeypatch):
 
     monkeypatch.setattr(runner, "_get_workspace_context", fail_workspace_context)
     monkeypatch.setattr(runner, "_get_skills_context", lambda user_id: "user skills")
-    monkeypatch.setattr(runner, "_get_connector_context", lambda user_id: "")
 
     prompt = runner._get_system_prompt("u", "ws1")
 

@@ -92,6 +92,7 @@ class TerminalRubricStatus(StrEnum):
     INVALID_RUBRIC = "invalid_rubric"
     GRADER_ERROR = "grader_error"
     CANCELLED = "cancelled"
+    SKIPPED = "skipped"  # C11: verification configured but skipped (auto mode)
 
 
 class UsageCategory(StrEnum):

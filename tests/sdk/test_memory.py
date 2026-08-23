@@ -1,37 +1,46 @@
-"""Tests for memory tools — memory_profile and memory_reflection."""
+"""Tests for memory tools — memory_profile (post-CoreMem-0.10 recall digest)."""
 
 from unittest.mock import MagicMock, patch
 
 TEST_USER = "test_memory_user"
 
 
+class _Result:
+    def __init__(self, content: str, ts: str, score: float = 1.0):
+        self.memory = MagicMock()
+        self.memory.content = content
+        self.memory.ts = ts
+        self.score = score
+
+
 class TestMemoryProfile:
-    def test_memory_profile_no_observations(self):
+    def test_memory_profile_no_context(self):
         from src.sdk.tools_core.memory import memory_profile
 
         with patch("src.storage.messages.get_message_store") as mock_store_fn:
             mock_core = MagicMock()
-            mock_core.get_observations.return_value = []
+            mock_core.recall.return_value = []
             mock_store = MagicMock()
             mock_store.core = mock_core
             mock_store_fn.return_value = mock_store
 
             result = memory_profile.invoke({"user_id": TEST_USER})
 
-        assert "No observations available" in result
-        mock_core.get_observations.assert_called_once()
-        assert "session_id" not in mock_core.get_observations.call_args.kwargs
+        assert "No recent conversation context" in result
+        mock_core.recall.assert_called_once()
+        kwargs = mock_core.recall.call_args.kwargs
+        assert kwargs["strategy"] == "episodic"
+        assert kwargs["session_cap"] == 2
+        assert "ts_after" in kwargs
 
-    def test_memory_profile_with_observations(self):
+    def test_memory_profile_with_context(self):
         from src.sdk.tools_core.memory import memory_profile
 
         with patch("src.storage.messages.get_message_store") as mock_store_fn:
             mock_core = MagicMock()
-            mock_core.get_observations.return_value = [
-                {"id": "obs_1", "content": "Name is Alice",
-                 "importance": 0.8, "observation_ts": "2026-05-27T12:00:00"},
-                {"id": "obs_2", "content": "Works at TechCorp",
-                 "importance": 0.5, "observation_ts": "2026-05-27T13:00:00"},
+            mock_core.recall.return_value = [
+                _Result("Name is Alice and she works at TechCorp", "2026-08-01T10:00:00"),
+                _Result("Prefers concise answers, likes Python", "2026-08-02T09:00:00", 0.8),
             ]
             mock_store = MagicMock()
             mock_store.core = mock_core
@@ -39,46 +48,7 @@ class TestMemoryProfile:
 
             result = memory_profile.invoke({"user_id": TEST_USER})
 
-        assert "Name is Alice" in result
-        assert "Works at TechCorp" in result
         assert "Working Memory" in result
-        mock_core.get_observations.assert_called_once()
-        assert "session_id" not in mock_core.get_observations.call_args.kwargs
-
-
-class TestMemoryReflection:
-    def test_memory_reflection_no_results(self):
-        from src.sdk.tools_core.memory import memory_reflection
-
-        with patch("src.storage.messages.get_message_store") as mock_store_fn:
-            mock_core = MagicMock()
-            mock_core.reflections.return_value = []
-            mock_store = MagicMock()
-            mock_store.core = mock_core
-            mock_store_fn.return_value = mock_store
-
-            result = memory_reflection.invoke(
-                {"query": "career", "user_id": TEST_USER}
-            )
-
-        assert "No reflections found" in result
-
-    def test_memory_reflection_with_results(self):
-        from src.sdk.tools_core.memory import memory_reflection
-
-        with patch("src.storage.messages.get_message_store") as mock_store_fn:
-            mock_core = MagicMock()
-            mock_core.reflections.return_value = [
-                {"id": "refl_1", "content": "Has strong career growth trajectory",
-                 "domain": "career", "score": 0.85},
-            ]
-            mock_store = MagicMock()
-            mock_store.core = mock_core
-            mock_store_fn.return_value = mock_store
-
-            result = memory_reflection.invoke(
-                {"query": "career", "user_id": TEST_USER}
-            )
-
-        assert "career" in result
-        assert "growth trajectory" in result
+        assert "Name is Alice" in result
+        assert "Prefers concise answers" in result
+        mock_core.recall.assert_called_once()

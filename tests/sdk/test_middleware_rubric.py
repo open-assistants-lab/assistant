@@ -285,3 +285,162 @@ def test_revision_prompt_forbids_mentioning_the_grader():
     # reference the grader, the rubric, or the revision process.
     assert "must not mention the grader" in prompt
     assert "must not mention" in prompt
+
+
+# ---------------------------------------------------------------------------
+# C11 — selective verification (auto mode)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_skips_grader_for_trivial_turn(monkeypatch):
+    """mode=auto + no tools + short answer → grader never called."""
+    from src.sdk import middleware_rubric as _mw
+    from src.sdk.loop import AgentLoop
+    from src.sdk.runner import run_with_verification
+    from tests.sdk.test_sdk_loop import MockProvider
+
+    provider = MockProvider(responses=[Message.assistant(content="Hi!")])
+    loop = AgentLoop(provider=provider, tools=[])
+    grader = FakeGraderProvider(json.dumps({"result": "satisfied", "explanation": "", "criteria": []}))
+    fake_mw = RubricMiddleware(grader, "- Be nice")
+
+    async def fake_load(user_id, loop, rubric):
+        return fake_mw
+
+    monkeypatch.setattr(_mw, "load_rubric_middleware", fake_load)
+
+    vresult = await run_with_verification(
+        loop, [Message.user("hi")], "u", "s", rubric="- Be nice", mode="auto"
+    )
+
+    assert vresult.rubric_status == "skipped"
+    assert grader.call_count == 0
+    assert vresult.rubric_available is True
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_verifies_when_tools_used(monkeypatch):
+    """Trivial-looking but tool-using turn → grader runs."""
+    from src.sdk import middleware_rubric as _mw
+    from src.sdk.loop import AgentLoop
+    from src.sdk.messages import ToolCall
+    from src.sdk.runner import run_with_verification
+    from tests.sdk.test_sdk_loop import MockProvider, echo
+
+    provider = MockProvider(
+        responses=[
+            Message.assistant(
+                content="",
+                tool_calls=[ToolCall(id="c1", name="echo", arguments={"text": "hi"})],
+            ),
+            Message.assistant(content="done"),
+        ]
+    )
+    loop = AgentLoop(provider=provider, tools=[echo])
+    grader = FakeGraderProvider(json.dumps({"result": "satisfied", "explanation": "", "criteria": []}))
+    fake_mw = RubricMiddleware(grader, "- Be nice")
+
+    async def fake_load(user_id, loop, rubric):
+        return fake_mw
+
+    monkeypatch.setattr(_mw, "load_rubric_middleware", fake_load)
+
+    vresult = await run_with_verification(
+        loop, [Message.user("hi")], "u", "s", rubric="- Be nice", mode="auto"
+    )
+
+    assert vresult.rubric_status == "satisfied"
+    assert grader.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_verifies_when_response_has_code(monkeypatch):
+    """Short answer but with a code fence → grader runs."""
+    from src.sdk import middleware_rubric as _mw
+    from src.sdk.loop import AgentLoop
+    from src.sdk.runner import run_with_verification
+    from tests.sdk.test_sdk_loop import MockProvider
+
+    provider = MockProvider(responses=[Message.assistant(content="```python\nx=1\n```")])
+    loop = AgentLoop(provider=provider, tools=[])
+    grader = FakeGraderProvider(json.dumps({"result": "satisfied", "explanation": "", "criteria": []}))
+    fake_mw = RubricMiddleware(grader, "- Be nice")
+
+    async def fake_load(user_id, loop, rubric):
+        return fake_mw
+
+    monkeypatch.setattr(_mw, "load_rubric_middleware", fake_load)
+
+    vresult = await run_with_verification(
+        loop, [Message.user("write code")], "u", "s", rubric="- Be nice", mode="auto"
+    )
+
+    assert vresult.rubric_status == "satisfied"
+    assert grader.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_on_mode_always_verifies(monkeypatch):
+    """Explicit mode=on ignores auto-skip conditions."""
+    from src.sdk import middleware_rubric as _mw
+    from src.sdk.loop import AgentLoop
+    from src.sdk.runner import run_with_verification
+    from tests.sdk.test_sdk_loop import MockProvider
+
+    provider = MockProvider(responses=[Message.assistant(content="Hi!")])
+    loop = AgentLoop(provider=provider, tools=[])
+    grader = FakeGraderProvider(json.dumps({"result": "satisfied", "explanation": "", "criteria": []}))
+    fake_mw = RubricMiddleware(grader, "- Be nice")
+
+    async def fake_load(user_id, loop, rubric):
+        return fake_mw
+
+    monkeypatch.setattr(_mw, "load_rubric_middleware", fake_load)
+
+    vresult = await run_with_verification(
+        loop, [Message.user("hi")], "u", "s", rubric="- Be nice", mode="on"
+    )
+
+    assert vresult.rubric_status == "satisfied"
+    assert grader.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# E — verification stage timings accumulate across attempts
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_verification_timings_accumulate_across_attempts():
+    """Multi-attempt runs sum grade durations (verification_count == grades)."""
+    from src.sdk.harness_timings import HarnessTimings
+    from src.sdk.loop import AgentLoop
+
+    agent_loop = AgentLoop(provider=FakeGraderProvider(""), tools=[])
+    agent_loop.timings = HarnessTimings()
+
+    provider = FakeGraderProvider(json.dumps({"result": "satisfied", "explanation": "", "criteria": []}))
+    mw = RubricMiddleware(provider, "- Be nice", agent_loop=agent_loop)
+
+    await mw.grade([Message.user("u")], 0)
+    await mw.grade([Message.user("y")], 1)
+
+    assert agent_loop.timings.count("verification") == 2
+    assert agent_loop.timings.stage_ms("verification") is not None
+    assert agent_loop.timings.stage_ms("verification") > 0
+
+
+@pytest.mark.asyncio
+async def test_verification_timings_absent_without_grades():
+    from src.sdk.harness_timings import HarnessTimings
+    from src.sdk.loop import AgentLoop
+
+    agent_loop = AgentLoop(provider=FakeGraderProvider(""), tools=[])
+    agent_loop.timings = HarnessTimings()
+
+    provider = FakeGraderProvider(json.dumps({"result": "satisfied", "explanation": "", "criteria": []}))
+    mw = RubricMiddleware(provider, "- Be nice", agent_loop=agent_loop)
+
+    assert agent_loop.timings.count("verification") == 0
+    assert agent_loop.timings.stage_ms("verification") is None

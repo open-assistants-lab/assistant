@@ -226,7 +226,10 @@ test_record_replay() {
 
   native automate widget-action main-canvas "$TEXTBOX" set_text 'Reply exactly: ok' > /dev/null
   native automate widget-action main-canvas "$SEND" press > /dev/null
-  if native automate assert --timeout-ms 60000 'role=text name="ok"' > /dev/null 2>&1; then
+  # Deterministic proof: the user bubble echoes the sent text, and the
+  # Assistant group header appears once a response starts. (Asserting the
+  # LLM reply text itself is flaky — "ok" vs "Ok!" varies.)
+  if native automate assert --timeout-ms 30000 'role=text name="Reply exactly: ok"' > /dev/null 2>&1 && native automate assert --timeout-ms 60000 'role=text name="Assistant"' > /dev/null 2>&1; then
     pass "send message + receive response"
   else
     fail "send message + receive response"
@@ -998,19 +1001,25 @@ test_search() {
     native automate assert --timeout-ms 60000 'role=text name="banana"' > /dev/null 2>&1
   }
 
-  # Derive a search term from the ACTUAL listitem titles (LLM-generated,
-  # so not predictable): pick a word (>=4 chars) from the first title that
-  # does not appear in the second, so the filter isolates one chat.
+  # Derive a search term from the ACTUAL listitem titles (the backend
   SNAPSHOT=$(native automate snapshot)
   T1=$(echo "$SNAPSHOT" | grep -oE 'role=listitem name="[^"]*"' | sed -n '1p' | sed 's/role=listitem name="//;s/"$//')
   T2=$(echo "$SNAPSHOT" | grep -oE 'role=listitem name="[^"]*"' | sed -n '2p' | sed 's/role=listitem name="//;s/"$//')
+  # LLM-generated titles drift (the backend renames chats), so a single
+  # word may appear in both titles. Prefer the WHOLE first title as the
+  # query — distinctive unless the titles are identical — and fall back to
+  # a word search.
   TERM=""
-  for w in $T1; do
-    if [ "${#w}" -ge 4 ] && ! echo "$T2" | grep -q "$w"; then
-      TERM="$w"
-      break
-    fi
-  done
+  if ! echo "$T2" | grep -qF "$T1"; then
+    TERM="$T1"
+  else
+    for w in $T1; do
+      if [ "${#w}" -ge 4 ] && ! echo "$T2" | grep -qF "$w"; then
+        TERM="$w"
+        break
+      fi
+    done
+  fi
   if [ -z "$TERM" ]; then
     fail "could not derive a distinctive search term from titles ('$T1' vs '$T2')"
     cleanup
@@ -1271,7 +1280,28 @@ test_textarea() {
   native automate widget-click main-canvas "$NEWCHAT" > /dev/null
   sleep 1
 
-  # --- 13a: Single-line text, textarea height = ~36px ---
+  # --- 13a: real pointer click grants composer focus (regression guard:
+  # an overlay sibling above the textarea swallowed pointer events and the
+  # click never granted focus, so typing went nowhere) ---
+  SNAPSHOT=$(native automate snapshot)
+  TEXTBOX=$(locate_widget textbox Message)
+  native automate widget-click main-canvas "$TEXTBOX" > /dev/null
+  sleep 0.3
+  native automate widget-key main-canvas a "clickfocus" > /dev/null
+  sleep 0.3
+  SNAPSHOT=$(native automate snapshot)
+  if echo "$SNAPSHOT" | grep 'role=textbox name="Message"' | grep -q 'text="clickfocus"'; then
+    pass "click grants focus and typing lands in the composer"
+  else
+    fail "click did not grant composer focus (typing lost)"
+  fi
+  # Leave the composer EMPTY for the next sub-test: clear the draft with
+  # one backspace per character (set_text '' is not parseable).
+  for i in $(seq 1 10); do
+    native automate widget-key main-canvas backspace > /dev/null
+  done
+
+  # --- 13b: Single-line text, textarea height = ~36px ---
   native automate widget-action main-canvas "$TEXTBOX" focus > /dev/null
   native automate widget-key main-canvas a "hello" > /dev/null
   sleep 0.5
@@ -1284,7 +1314,10 @@ test_textarea() {
 
   # --- 13b: Enter sends the message (Enter-to-send) and clears the draft ---
   native automate widget-key main-canvas Return > /dev/null
-  if native automate assert --timeout-ms 60000 'role=text name="hello"' > /dev/null 2>&1; then
+  # Deterministic proof the send fired: the sidebar listitem takes the
+  # user's message as its title (the LLM reply text varies — "Hello!" vs
+  # "hello" — so it is not a stable assert target).
+  if native automate assert --timeout-ms 60000 'role=listitem name="hello"' > /dev/null 2>&1; then
     pass "Enter sends the message"
   else
     fail "Enter did not send the message"

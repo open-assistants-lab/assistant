@@ -1,7 +1,4 @@
-"""Subagent manager — SDK-native implementation.
-
-Replaces LangChain agent creation with SDK AgentLoop.
-"""
+"""Subagent manager — SDK-native implementation built on the AgentLoop."""
 
 import asyncio
 import json
@@ -263,7 +260,7 @@ You have access to tools and skills as configured.
 
     def get_progress(self, task_name: str) -> dict[str, Any]:
         """Get subagent progress from planning files."""
-        base = get_paths(self.user_id).workspace_dir() / "planning" / task_name
+        base = get_paths(self.user_id).workspace_files_dir() / "planning" / task_name
 
         result: dict[str, Any] = {
             "task_plan": None,

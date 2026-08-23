@@ -1,12 +1,10 @@
 """SDK-native tools registry.
 
-This module serves as the single source of truth for all SDK-native tools.
-Tools are registered here as they are migrated to the SDK @tool decorator
-(from src.sdk.tools).
+This module serves as the single source of truth for all SDK-native tools,
+registered with the SDK @tool decorator.
 
 The runner's _build_tool_list() calls get_native_tools() which returns all
-registered ToolDefinitions. Native tools take priority over adapted LangChain
-tools of the same name.
+registered ToolDefinitions.
 """
 
 from src.sdk.tools import ToolDefinition, ToolRegistry
@@ -22,31 +20,15 @@ from src.sdk.tools_core.apps import (
     app_query,
     app_schema,
     app_search_fts,
-    app_search_hybrid,
-    app_search_semantic,
     app_update,
 )
 from src.sdk.tools_core.browser import (
-    browser_back,
     browser_click,
     browser_eval,
     browser_fill,
-    browser_forward,
-    browser_get_html,
-    browser_get_text,
-    browser_get_title,
-    browser_get_url,
-    browser_hover,
     browser_open,
-    browser_press,
     browser_screenshot,
-    browser_scroll,
-    browser_sessions,
     browser_snapshot,
-    browser_tab_close,
-    browser_tab_new,
-    browser_type,
-    browser_wait_text,
 )
 from src.sdk.tools_core.file_search import (
     files_glob_search,
@@ -72,7 +54,7 @@ from src.sdk.tools_core.mcp import (
     mcp_reload,
     mcp_tools,
 )
-from src.sdk.tools_core.memory import memory_profile, memory_reflection
+from src.sdk.tools_core.memory import memory_profile
 from src.sdk.tools_core.message import (
     message_count,
     message_history,
@@ -135,7 +117,6 @@ def _register_all() -> None:
     registry.register(message_history)
     registry.register(message_timeline)
     registry.register(memory_profile)
-    registry.register(memory_reflection)
 
     registry.register(web_fetch)
     registry.register(web_search)
@@ -144,22 +125,8 @@ def _register_all() -> None:
     registry.register(browser_snapshot)
     registry.register(browser_click)
     registry.register(browser_fill)
-    registry.register(browser_type)
-    registry.register(browser_press)
-    registry.register(browser_scroll)
-    registry.register(browser_hover)
     registry.register(browser_screenshot)
     registry.register(browser_eval)
-    registry.register(browser_get_title)
-    registry.register(browser_get_text)
-    registry.register(browser_get_html)
-    registry.register(browser_get_url)
-    registry.register(browser_tab_new)
-    registry.register(browser_tab_close)
-    registry.register(browser_back)
-    registry.register(browser_forward)
-    registry.register(browser_wait_text)
-    registry.register(browser_sessions)
 
     registry.register(app_create)
     registry.register(app_list)
@@ -173,8 +140,6 @@ def _register_all() -> None:
     registry.register(app_column_rename)
     registry.register(app_query)
     registry.register(app_search_fts)
-    registry.register(app_search_semantic)
-    registry.register(app_search_hybrid)
 
     registry.register(subagent_create)
     registry.register(subagent_delegate)
@@ -197,15 +162,6 @@ def _register_all() -> None:
 
     registry.register(research_start)
     registry.register(research_list)
-
-    # ConnectKit meta-tools
-    try:
-        from src.sdk.tools_core.connector_adapter import get_connector_tools
-
-        for td in get_connector_tools():
-            registry.register(td)
-    except ImportError:
-        pass
 
 
 _register_all()
