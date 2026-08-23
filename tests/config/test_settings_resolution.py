@@ -54,3 +54,29 @@ def test_run_binds_settings_host_port(monkeypatch, fresh_settings):
     cfg = settings_module.get_settings()
     assert captured["host"] == cfg.api.host
     assert captured["port"] == cfg.api.port
+
+
+def test_oauth_fallback_uses_configured_port(monkeypatch):
+    """The OAuth redirect base must follow the configured bind port (audit
+    E22 fix-round: the old literal 'http://localhost:8080' went stale the
+    moment API_PORT became authoritative under env-beats-yaml)."""
+    import importlib
+
+    import src.http.main as http_main
+    from src.config.settings import reload_settings
+
+    monkeypatch.setenv("API_PORT", "9466")
+    monkeypatch.delenv("API_PUBLIC_URL", raising=False)
+    reload_settings()
+    try:
+        importlib.reload(http_main)
+        assert http_main._oauth_base_url == "http://localhost:9466"
+    finally:
+        reload_settings()
+        importlib.reload(http_main)
+
+
+def test_api_config_default_port_matches_native_contract():
+    """With no config.yaml at all, the default port must be the native-app
+    contract (8080), not the docker bind (8000)."""
+    assert settings_module.ApiConfig().port == 8080

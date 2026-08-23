@@ -240,13 +240,12 @@ try:
 
     from src.config import get_settings as _get_settings
 
-    # The uvicorn bind below is 8080 (native app contract), and config.yaml's
-    # api.port is not necessarily the bind port (config.yaml init-kwargs beat
-    # env in pydantic-settings). So default the OAuth redirect base to the
-    # actual bind port; deployments behind a public URL must set
-    # API_PUBLIC_URL explicitly.
+    # Default the OAuth redirect base to the configured bind port —
+    # get_settings() applies API_HOST/API_PORT env over yaml (audit E22), so
+    # this tracks whichever source is authoritative. Deployments behind a
+    # public URL must set API_PUBLIC_URL explicitly.
     _api_settings = _get_settings().api
-    _oauth_base_url = _api_settings.public_url or "http://localhost:8080"
+    _oauth_base_url = _api_settings.public_url or f"http://localhost:{_api_settings.port}"
 
     @app.middleware("http")
     async def _guard_oauth_login(request: Request, call_next: Any) -> Any:

@@ -215,7 +215,9 @@ class ApiConfig(_BaseSettings):
     """API configuration."""
 
     host: str = "0.0.0.0"
-    port: int = 8000
+    # 8080 = the native-app (Zig) client contract when no config.yaml exists;
+    # docker overrides via API_PORT env (env beats yaml for api.*).
+    port: int = 8080
     # Public URL used for OAuth redirect_uri callbacks (e.g. the browser must
     # be able to reach this). Defaults to localhost:port for local dev.
     public_url: str = ""
