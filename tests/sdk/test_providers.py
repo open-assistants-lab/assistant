@@ -582,6 +582,204 @@ class TestOpenAIProvider:
 # ─── Anthropic Provider Tests ───
 
 
+class TestProviderCallIdPairingB17:
+    """audit B15/B17: repaired args, paired fallback call_ids, in-stream errors."""
+
+    def test_openai_repairs_malformed_tool_args(self):
+        from types import SimpleNamespace
+        p = OpenAIProvider(api_key="sk-test")
+        tc = SimpleNamespace(
+            id="call_x",
+            function=SimpleNamespace(name="files_read", arguments="{'path': 'a.txt'}"),
+        )
+        msg = SimpleNamespace(content="", tool_calls=[tc], reasoning_content=None)
+        choice = SimpleNamespace(message=msg, finish_reason="stop")
+        resp = SimpleNamespace(choices=[choice], usage=None)
+        msg = p._parse_response(resp)
+        assert msg.tool_calls and msg.tool_calls[0].arguments == {"path": "a.txt"}
+
+    def test_openai_fallback_call_ids_paired(self):
+        from types import SimpleNamespace
+        p = OpenAIProvider(api_key="sk-test")
+        chunk = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(index=0, id="", function=SimpleNamespace(name="f", arguments='{"a"'))
+                        ]
+                    ),
+                    finish_reason=None,
+                )
+            ],
+            usage=None,
+        )
+        chunk2 = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(index=0, id="", function=SimpleNamespace(name=None, arguments='": 1}'))
+                        ]
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            usage=None,
+        )
+        acc = {}
+        evs = p._parse_stream_chunk(chunk, acc) + p._parse_stream_chunk(chunk2, acc)
+        starts = [e for e in evs if e.canonical_type == "tool_input_start"]
+        deltas = [e for e in evs if e.canonical_type == "tool_input_delta"]
+        ends = [e for e in evs if e.canonical_type == "tool_input_end"]
+        assert len(starts) >= 1 and len(ends) == 1
+        ids = {e.call_id for e in starts + deltas + ends}
+        # start + its alias share one id; delta/end reuse the SAME fallback id
+        assert len({e.call_id for e in ends}) == 1
+        assert ends[0].call_id == deltas[0].call_id
+        assert len(ids - {starts[0].call_id}) <= 1  # at most: alias shares start's id
+
+    def test_anthropic_fallback_call_ids_paired(self):
+        p = AnthropicProvider(api_key="test", model="claude-sonnet-4")
+        acc = {}
+        evs = []
+        evs += p._parse_sse_event(
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "tool_use", "id": "", "name": "f"}}, acc)
+        evs += p._parse_sse_event(
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "input_json_delta", "partial_json": '{"x"}'}}, acc)
+        evs += p._parse_sse_event({"type": "content_block_stop", "index": 0}, acc)
+        starts = [e for e in evs if e.canonical_type == "tool_input_start"]
+        deltas = [e for e in evs if e.canonical_type == "tool_input_delta"]
+        ends = [e for e in evs if e.canonical_type == "tool_input_end"]
+        assert starts and ends and deltas
+        assert ends[0].call_id != ""
+        assert ends[0].call_id == deltas[0].call_id
+
+    @pytest.mark.asyncio
+    async def test_openai_retry_guard_counts_tool_input_start(self, monkeypatch):
+        """audit B17: a timeout AFTER a tool_input_start must not retry —
+        the retry would re-emit a duplicate start for the same call."""
+        import httpx
+
+        p = OpenAIProvider(api_key="sk-test")
+        attempts = {"n": 0}
+
+        def mk_chunk(finish=None):
+            from types import SimpleNamespace
+
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content=None,
+                            tool_calls=(
+                                [
+                                    SimpleNamespace(
+                                        index=0,
+                                        id="",
+                                        function=SimpleNamespace(name="f", arguments=None),
+                                    )
+                                ]
+                                if finish is None
+                                else None
+                            ),
+                        ),
+                        finish_reason=finish,
+                    )
+                ],
+                usage=None,
+            )
+
+        class FakeStream:
+            def __init__(self):
+                attempts["n"] += 1
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not hasattr(self, "_n"):
+                    self._n = 0
+                self._n += 1
+                if self._n == 1:
+                    return mk_chunk()
+                raise httpx.ReadTimeout("stall")
+
+        class FakeCompletions:
+            async def _create(self, **kwargs):
+                return FakeStream()
+
+        monkeypatch.setattr(
+            p._client.chat, "completions", SimpleNamespace(create=FakeCompletions().__dict__["create"] if False else (lambda **kw: FakeCompletions()._create(**kw)))
+        )
+
+        got = []
+
+        async def collect():
+            async for c in p.chat_stream([Message.user("hi")]):
+                got.append(c)
+
+        with pytest.raises(httpx.ReadTimeout):
+            await collect()
+        # count raw types (canonical_type maps the 'tool_start' alias too)
+        starts = [c for c in got if c.type == "tool_input_start"]
+        assert len(starts) == 1  # emitted exactly once — no duplicate on retry
+        assert attempts["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_anthropic_in_stream_error_surfaces_through_chat_stream(self, monkeypatch):
+        """audit B17: an in-stream Anthropic error event reaches the consumer."""
+        import json as _json
+
+        p = AnthropicProvider(api_key="test", model="claude-sonnet-4")
+
+        class FakeResp:
+            def raise_for_status(self):
+                pass
+
+            async def aiter_lines(self):
+                yield "data: " + _json.dumps(
+                    {"type": "error", "error": {"message": "overloaded"}}
+                )
+
+        monkeypatch.setattr(
+            p, "_get_client", lambda: SimpleNamespace(
+                stream=lambda *a, **k: _Ctx(FakeResp())
+            )
+        )
+
+        got = []
+        async for c in p.chat_stream([Message.user("hi")]):
+            got.append(c)
+        assert any(c.canonical_type == "error" and "overloaded" in c.content for c in got)
+
+
+    def test_anthropic_in_stream_error_yields_error_chunk(self):
+        p = AnthropicProvider(api_key="test", model="claude-sonnet-4")
+        events = p._parse_sse_event(
+            {"type": "error", "error": {"type": "overloaded_error", "message": "overloaded"}}, {}
+        )
+        assert any(e.canonical_type == "error" for e in events)
+
+
+from types import SimpleNamespace
+
+
+class _Ctx:
+    def __init__(self, resp):
+        self.resp = resp
+
+    async def __aenter__(self):
+        return self.resp
+
+    async def __aexit__(self, *a):
+        return False
+
+
 class TestAnthropicProvider:
     def test_default_config(self):
         p = AnthropicProvider(api_key="sk-ant-test")

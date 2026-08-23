@@ -266,13 +266,17 @@ class GeminiProvider(LLMProvider):
                         while "\n" in buffer:
                             line, buffer = buffer.split("\n", 1)
                             for event in self._parse_sse_line(line, current_tool_calls):
-                                if event.canonical_type in ("text_delta", "reasoning_delta", "tool_input_delta"):
+                                if event.canonical_type in (
+                                    "text_delta", "reasoning_delta", "tool_input_delta", "tool_input_start",
+                                ):
                                     emitted = True
                                 yield event
                     # Flush the final decoder state and any trailing line.
                     buffer += decoder.decode(b"", final=True)
                     for event in self._parse_sse_line(buffer, current_tool_calls):
-                        if event.canonical_type in ("text_delta", "reasoning_delta", "tool_input_delta"):
+                        if event.canonical_type in (
+                                    "text_delta", "reasoning_delta", "tool_input_delta", "tool_input_start",
+                                ):
                             emitted = True
                         yield event
                 return

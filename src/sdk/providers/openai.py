@@ -150,7 +150,9 @@ class OpenAIProvider(LLMProvider):
             try:
                 async for chunk in stream:
                     for event in self._parse_stream_chunk(chunk, current_tool_calls):
-                        if event.canonical_type in ("text_delta", "reasoning_delta", "tool_input_delta"):
+                        if event.canonical_type in (
+                            "text_delta", "reasoning_delta", "tool_input_delta", "tool_input_start",
+                        ):
                             emitted = True
                         yield event
                 return
@@ -177,7 +179,13 @@ class OpenAIProvider(LLMProvider):
                     try:
                         args = json.loads(tc.function.arguments)
                     except json.JSONDecodeError:
-                        pass
+                        # audit B15: malformed JSON is repaired, not silently
+                        # emptied — {} would execute the tool without args.
+                        from src.sdk.validation import repair_tool_call
+
+                        repaired = repair_tool_call(tc.function.arguments)
+                        args = repaired if isinstance(repaired, dict) else {}
+
                 tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
 
         reasoning = None
@@ -252,21 +260,26 @@ class OpenAIProvider(LLMProvider):
             for tc_delta in delta.tool_calls:
                 idx = tc_delta.index
                 if idx not in current_tool_calls:
+                    # audit B17: mint ONE fallback id per tool call and reuse
+                    # it for start/delta/end — independent uuid4 per event
+                    # site produced unpaired blocks for id-less providers.
+                    resolved_id = tc_delta.id or f"call_{uuid4().hex[:8]}"
                     current_tool_calls[idx] = {
-                        "id": tc_delta.id or "",
+                        "id": resolved_id,
+                        "fallback": resolved_id,
                         "name": "",
                         "arguments": "",
                     }
                     events.append(
                         StreamChunk.tool_input_start(
                             tool="",
-                            call_id=tc_delta.id or f"call_{uuid4().hex[:8]}",
+                            call_id=resolved_id,
                         )
                     )
                     events.append(
                         StreamChunk.tool_start(
                             tool="",
-                            call_id=tc_delta.id or f"call_{uuid4().hex[:8]}",
+                            call_id=resolved_id,
                         )
                     )
                 entry = current_tool_calls[idx]
@@ -279,7 +292,7 @@ class OpenAIProvider(LLMProvider):
                         entry["arguments"] += tc_delta.function.arguments
                         events.append(
                             StreamChunk.tool_input_delta(
-                                call_id=entry["id"] or f"call_{uuid4().hex[:8]}",
+                                call_id=entry["id"] or entry["fallback"],
                                 content=tc_delta.function.arguments,
                             )
                         )
@@ -288,7 +301,7 @@ class OpenAIProvider(LLMProvider):
             for idx, tc in current_tool_calls.items():
                 events.append(
                     StreamChunk.tool_input_end(
-                        call_id=tc["id"] or f"call_{uuid4().hex[:8]}",
+                        call_id=tc["id"] or tc.get("fallback", ""),
                         tool=tc["name"],
                     )
                 )

@@ -243,7 +243,9 @@ class AnthropicProvider(LLMProvider):
                         except json.JSONDecodeError:
                             continue
                         for event in self._parse_sse_event(data, current_tool_calls):
-                            if event.canonical_type in ("text_delta", "reasoning_delta", "tool_input_delta"):
+                            if event.canonical_type in (
+                                "text_delta", "reasoning_delta", "tool_input_delta", "tool_input_start",
+                            ):
                                 emitted = True
                             yield event
                 return
@@ -258,6 +260,14 @@ class AnthropicProvider(LLMProvider):
     ) -> list[StreamChunk]:
         events: list[StreamChunk] = []
         event_type = data.get("type", "")
+
+        # audit B17: Anthropic emits in-stream {"type":"error"} events
+        # (e.g. overloaded_error). Previously these fell through silently and
+        # the stream ended looking like an empty success.
+        if event_type == "error":
+            err = data.get("error", {})
+            msg = err.get("message") if isinstance(err, dict) else str(err)
+            return [StreamChunk.error(message=str(msg or "unknown provider error"))]
 
         if event_type == "content_block_delta":
             delta = data.get("delta", {})
@@ -283,8 +293,10 @@ class AnthropicProvider(LLMProvider):
             block = data.get("content_block", {})
             idx = data.get("index", 0)
             if block.get("type") == "tool_use":
+                # audit B17: resolve the id once; delta/end reuse it.
+                resolved_id = block.get("id") or f"call_{uuid4().hex[:8]}"
                 current_tool_calls[idx] = {
-                    "id": block.get("id", ""),
+                    "id": resolved_id,
                     "name": block.get("name", ""),
                     "arguments": "",
                     "_type": "tool_use",
@@ -292,13 +304,13 @@ class AnthropicProvider(LLMProvider):
                 events.append(
                     StreamChunk.tool_input_start(
                         tool=block.get("name", ""),
-                        call_id=block.get("id", f"call_{uuid4().hex[:8]}"),
+                        call_id=resolved_id,
                     )
                 )
                 events.append(
                     StreamChunk.tool_start(
                         tool=block.get("name", ""),
-                        call_id=block.get("id", f"call_{uuid4().hex[:8]}"),
+                        call_id=resolved_id,
                     )
                 )
             elif block.get("type") == "thinking":

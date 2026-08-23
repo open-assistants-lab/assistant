@@ -358,7 +358,9 @@ class OllamaCloud(LLMProvider):
                                 # Ollama's native API doesn't report reasoning tokens
                                 # separately; estimate from the streamed thinking.
                                 chunk.usage.reasoning_tokens = len(total_thinking) // 4
-                            if chunk.canonical_type in ("text_delta", "reasoning_delta", "tool_input_delta"):
+                            if chunk.canonical_type in (
+                                "text_delta", "reasoning_delta", "tool_input_delta", "tool_input_start",
+                            ):
                                 emitted = True
                             yield chunk
                 return
