@@ -453,13 +453,9 @@ def message_count(
             final[key] = display
 
     # Build output
-    searched = [workspace_id]
-    ws_list = _list_workspace_ids(user_id)
-    for ws in ws_list:
-        if ws != workspace_id and ws not in searched:
-            searched.append(ws)
-
-    output = f"Searched {len(searched)} workspace(s): {', '.join(searched)}\n"
+    # Honest reporting (audit B17): only the current workspace's store is
+    # queried, so the output must not claim cross-workspace coverage.
+    output = f"Searched 1 workspace: {workspace_id}\n"
     output += f"Analyzed {len(session_groups)} sessions ({len(all_results)} raw matches)\n\n"
 
     if final:

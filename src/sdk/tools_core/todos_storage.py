@@ -65,7 +65,7 @@ def add_todo(
 ) -> dict[str, Any]:
     """Add a new todo."""
     engine = get_engine(user_id)
-    todo_id = str(uuid.uuid4())[:8]
+    todo_id = str(uuid.uuid4())
     ts = int(datetime.now(UTC).timestamp())
 
     with engine.connect() as conn:
