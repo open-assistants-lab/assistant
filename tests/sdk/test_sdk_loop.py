@@ -1292,6 +1292,42 @@ class TestUsageTracking:
         assert chunk.usage.input_tokens == 100
         assert chunk.usage.output_tokens == 50
 
+    async def test_cost_tracker_prices_cache_tokens(self):
+        """Cache read/write tokens are priced and counted toward budgets.
+
+        Anthropic bills cache reads at 0.1x and cache writes at 1.25x of the
+        input price; ignoring them under-reported cost and let long-context
+        runs blow past token budgets unnoticed (audit S2.4).
+        """
+        from src.sdk.loop import CostTracker
+        from src.sdk.providers.base import ModelCost
+
+        tracker = CostTracker()
+        cost = ModelCost(input=3.0, output=15.0, cache_read=0.3, cache_write=3.75)
+        tracker.add_usage(
+            input_tokens=1000,
+            output_tokens=100,
+            cache_read_tokens=50_000,
+            cache_creation_tokens=10_000,
+            cost=cost,
+        )
+        # 1k*3.0 + 100*15 + 50k*0.3 + 10k*3.75 (per million)
+        assert abs(tracker.total_cost_usd - (0.003 + 0.0015 + 0.015 + 0.0375)) < 1e-9
+        assert tracker.total_input_tokens == 61_000  # budget accounting includes cache
+        assert tracker.total_cache_read_tokens == 50_000
+        assert tracker.total_cache_creation_tokens == 10_000
+
+    async def test_cost_tracker_cache_tokens_count_toward_max_tokens_total(self):
+        """Cache tokens count toward max_tokens_total so long cached contexts trip the budget."""
+        from src.sdk.loop import CostTracker
+
+        tracker = CostTracker()
+        tracker.add_usage(input_tokens=900_000, cache_read_tokens=200_000)
+        assert (
+            tracker.exceeds_limits(RunConfig(max_tokens_total=1_000_000))
+            == "max_tokens_total (1000000) exceeded"
+        )
+
     async def test_streaming_usage_accumulation(self):
         """Usage chunks from streaming accumulate in CostTracker via CostTracker.add_usage()."""
         from src.sdk.loop import CostTracker
@@ -1316,14 +1352,17 @@ class TestUsageTracking:
         captured: dict[str, int] = {}
         orig = CostTracker.add_usage
 
-        def spy(self, input_tokens=0, output_tokens=0, reasoning_tokens=0, cost=None):
+        def spy(self, input_tokens=0, output_tokens=0, reasoning_tokens=0, cache_read_tokens=0, cache_creation_tokens=0, cost=None):
             captured["input"] = input_tokens
             captured["output"] = output_tokens
+            captured["cache_read"] = cache_read_tokens
             return orig(
                 self,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 reasoning_tokens=reasoning_tokens,
+                cache_read_tokens=cache_read_tokens,
+                cache_creation_tokens=cache_creation_tokens,
                 cost=cost,
             )
 

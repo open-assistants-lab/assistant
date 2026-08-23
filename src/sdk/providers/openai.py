@@ -184,16 +184,7 @@ class OpenAIProvider(LLMProvider):
         usage = None
         if hasattr(response, "usage") and response.usage:
             u = response.usage
-            usage = Usage(
-                input_tokens=getattr(u, "prompt_tokens", 0) or 0,
-                output_tokens=getattr(u, "completion_tokens", 0) or 0,
-                reasoning_tokens=getattr(u, "completion_tokens_details", None)
-                and getattr(u.completion_tokens_details, "reasoning_tokens", 0)
-                or 0,
-                cache_read_tokens=getattr(u, "prompt_tokens_details", None)
-                and getattr(u.prompt_tokens_details, "cached_tokens", 0)
-                or 0,
-            )
+            usage = Usage(**self._usage_from_openai(u))
 
         return Message.assistant(content=content, tool_calls=tool_calls, usage=usage, reasoning=reasoning)
 
@@ -206,6 +197,29 @@ class OpenAIProvider(LLMProvider):
         if extra_body:
             params["extra_body"] = extra_body
 
+    @staticmethod
+    def _usage_from_openai(u: Any) -> dict[str, int]:
+        """Map an OpenAI usage object to Usage fields with cache normalization.
+
+        OpenAI's ``prompt_tokens`` INCLUDES ``prompt_tokens_details.cached_tokens``;
+        ``Usage.input_tokens`` must exclude cached tokens so CostTracker prices
+        cache reads/writes separately without double counting (audit S2.4).
+        """
+        prompt = getattr(u, "prompt_tokens", 0) or 0
+        cached = (
+            getattr(u, "prompt_tokens_details", None)
+            and getattr(u.prompt_tokens_details, "cached_tokens", 0)
+            or 0
+        )
+        return {
+            "input_tokens": max(0, prompt - cached),
+            "output_tokens": getattr(u, "completion_tokens", 0) or 0,
+            "reasoning_tokens": getattr(u, "completion_tokens_details", None)
+            and getattr(u.completion_tokens_details, "reasoning_tokens", 0)
+            or 0,
+            "cache_read_tokens": cached,
+        }
+
     def _parse_stream_chunk(
         self, chunk: Any, current_tool_calls: dict[int, dict[str, Any]]
     ) -> list[StreamChunk]:
@@ -213,21 +227,7 @@ class OpenAIProvider(LLMProvider):
 
         if not chunk.choices:
             if hasattr(chunk, "usage") and chunk.usage:
-                u = chunk.usage
-                events.append(
-                    StreamChunk.usage_event(
-                        Usage(
-                            input_tokens=getattr(u, "prompt_tokens", 0) or 0,
-                            output_tokens=getattr(u, "completion_tokens", 0) or 0,
-                            reasoning_tokens=getattr(u, "completion_tokens_details", None)
-                            and getattr(u.completion_tokens_details, "reasoning_tokens", 0)
-                            or 0,
-                            cache_read_tokens=getattr(u, "prompt_tokens_details", None)
-                            and getattr(u.prompt_tokens_details, "cached_tokens", 0)
-                            or 0,
-                        )
-                    )
-                )
+                events.append(StreamChunk.usage_event(Usage(**self._usage_from_openai(chunk.usage))))
             return events
 
         choice = chunk.choices[0]
@@ -290,21 +290,7 @@ class OpenAIProvider(LLMProvider):
                 )
             current_tool_calls.clear()
             if hasattr(chunk, "usage") and chunk.usage:
-                u = chunk.usage
-                events.append(
-                    StreamChunk.usage_event(
-                        Usage(
-                            input_tokens=getattr(u, "prompt_tokens", 0) or 0,
-                            output_tokens=getattr(u, "completion_tokens", 0) or 0,
-                            reasoning_tokens=getattr(u, "completion_tokens_details", None)
-                            and getattr(u.completion_tokens_details, "reasoning_tokens", 0)
-                            or 0,
-                            cache_read_tokens=getattr(u, "prompt_tokens_details", None)
-                            and getattr(u.prompt_tokens_details, "cached_tokens", 0)
-                            or 0,
-                        )
-                    )
-                )
+                events.append(StreamChunk.usage_event(Usage(**self._usage_from_openai(chunk.usage))))
             events.append(StreamChunk.done())
 
         return events

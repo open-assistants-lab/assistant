@@ -171,6 +171,8 @@ class CostTracker:
         self.total_input_tokens: int = 0
         self.total_output_tokens: int = 0
         self.total_reasoning_tokens: int = 0
+        self.total_cache_read_tokens: int = 0
+        self.total_cache_creation_tokens: int = 0
         self.total_cost_usd: float = 0.0
         self.llm_calls: int = 0
 
@@ -179,11 +181,19 @@ class CostTracker:
         input_tokens: int = 0,
         output_tokens: int = 0,
         reasoning_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        cache_creation_tokens: int = 0,
         cost: ModelCost | None = None,
     ) -> None:
-        self.total_input_tokens += input_tokens
+        # Cache tokens count toward the context budget: they are input
+        # tokens the run paid for (audit S2.4). Providers normalize
+        # input_tokens to EXCLUDE cached tokens (OpenAI/Gemini report them
+        # as a subset of prompt tokens), so summing here never double-counts.
+        self.total_input_tokens += input_tokens + cache_read_tokens + cache_creation_tokens
         self.total_output_tokens += output_tokens
         self.total_reasoning_tokens += reasoning_tokens
+        self.total_cache_read_tokens += cache_read_tokens
+        self.total_cache_creation_tokens += cache_creation_tokens
         self.llm_calls += 1
         if cost:
             self.total_cost_usd += (input_tokens / 1_000_000) * cost.input + (
@@ -191,6 +201,12 @@ class CostTracker:
             ) * cost.output
             if cost.reasoning and reasoning_tokens:
                 self.total_cost_usd += (reasoning_tokens / 1_000_000) * cost.reasoning
+            if cost.cache_read and cache_read_tokens:
+                # Anthropic bills cache reads at 0.1x the input price.
+                self.total_cost_usd += (cache_read_tokens / 1_000_000) * cost.cache_read
+            if cost.cache_write and cache_creation_tokens:
+                # Anthropic bills cache writes at 1.25x the input price.
+                self.total_cost_usd += (cache_creation_tokens / 1_000_000) * cost.cache_write
 
     def exceeds_limits(self, config: RunConfig) -> str | None:
         if self.llm_calls >= config.max_llm_calls:
@@ -1226,6 +1242,12 @@ class AgentLoop:
                                 reasoning_tokens=response.usage.reasoning_tokens
                                 if response.usage
                                 else 0,
+                                cache_read_tokens=response.usage.cache_read_tokens
+                                if response.usage
+                                else 0,
+                                cache_creation_tokens=response.usage.cache_creation_tokens
+                                if response.usage
+                                else 0,
                             )
                     else:
                         response = await self.provider.chat(
@@ -1238,6 +1260,8 @@ class AgentLoop:
                             input_tokens=response.usage.input_tokens if response.usage else 0,
                             output_tokens=response.usage.output_tokens if response.usage else 0,
                             reasoning_tokens=response.usage.reasoning_tokens if response.usage else 0,
+                            cache_read_tokens=response.usage.cache_read_tokens if response.usage else 0,
+                            cache_creation_tokens=response.usage.cache_creation_tokens if response.usage else 0,
                         )
                     llm_success = True
                 except ProviderContextOverflowError:
@@ -1539,6 +1563,8 @@ class AgentLoop:
                                 input_tokens=stream_usage.input_tokens,
                                 output_tokens=stream_usage.output_tokens,
                                 reasoning_tokens=stream_usage.reasoning_tokens,
+                                cache_read_tokens=stream_usage.cache_read_tokens,
+                                cache_creation_tokens=stream_usage.cache_creation_tokens,
                             )
                             llm_span.set_meta("tool_calls_count", len(stream_tool_calls_map))
                             llm_span.set_meta("input_tokens", stream_usage.input_tokens)
@@ -1607,6 +1633,8 @@ class AgentLoop:
                             input_tokens=stream_usage.input_tokens,
                             output_tokens=stream_usage.output_tokens,
                             reasoning_tokens=stream_usage.reasoning_tokens,
+                            cache_read_tokens=stream_usage.cache_read_tokens,
+                            cache_creation_tokens=stream_usage.cache_creation_tokens,
                         )
 
                 except ProviderContextOverflowError:

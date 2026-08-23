@@ -190,11 +190,16 @@ class GeminiProvider(LLMProvider):
         usage = None
         usage_meta = data.get("usageMetadata")
         if usage_meta:
+            prompt = usage_meta.get("promptTokenCount", 0)
+            cached = usage_meta.get("cachedContentTokenCount", 0)
+            # Gemini's promptTokenCount includes cachedContentTokenCount; input
+            # must exclude cached tokens so CostTracker prices cache reads
+            # separately without double counting (audit S2.4).
             usage = Usage(
-                input_tokens=usage_meta.get("promptTokenCount", 0),
+                input_tokens=max(0, prompt - cached),
                 output_tokens=usage_meta.get("candidatesTokenCount", 0),
                 reasoning_tokens=usage_meta.get("thoughtsTokenCount", 0),
-                cache_read_tokens=usage_meta.get("cachedContentTokenCount", 0),
+                cache_read_tokens=cached,
             )
 
         result = Message.assistant(content=text, tool_calls=tool_calls, usage=usage)
@@ -322,13 +327,17 @@ class GeminiProvider(LLMProvider):
         # one would be summed by the loop into a ~50x overcount (audit S2.3).
         # Report usage only on the terminal chunk (finishReason present).
         if finish_reason and usage_meta:
+            prompt = usage_meta.get("promptTokenCount", 0)
+            cached = usage_meta.get("cachedContentTokenCount", 0)
             events.append(
                 StreamChunk.usage_event(
                     Usage(
-                        input_tokens=usage_meta.get("promptTokenCount", 0),
+                        # promptTokenCount includes cachedContentTokenCount —
+                        # subtract so CostTracker prices cache separately (audit S2.4).
+                        input_tokens=max(0, prompt - cached),
                         output_tokens=usage_meta.get("candidatesTokenCount", 0),
                         reasoning_tokens=usage_meta.get("thoughtsTokenCount", 0),
-                        cache_read_tokens=usage_meta.get("cachedContentTokenCount", 0),
+                        cache_read_tokens=cached,
                     )
                 )
             )

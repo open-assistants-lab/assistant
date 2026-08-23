@@ -1460,6 +1460,23 @@ class TestOpenAIUsageExtraction:
         assert msg.usage.input_tokens == 100
         assert msg.usage.output_tokens == 50
 
+    def test_parse_response_normalizes_cached_input_tokens(self):
+        """OpenAI's prompt_tokens INCLUDES cached_tokens; input_tokens must
+        exclude them so CostTracker doesn't double-count (audit S2.4)."""
+        p = OpenAIProvider(api_key="test")
+        data = MagicMock()
+        data.choices = [MagicMock()]
+        data.choices[0].message.content = "Hello"
+        data.choices[0].message.tool_calls = None
+        data.usage.prompt_tokens = 100
+        data.usage.completion_tokens = 50
+        data.usage.completion_tokens_details = None
+        data.usage.prompt_tokens_details = MagicMock(cached_tokens=30)
+        msg = p._parse_response(data)
+        assert msg.usage is not None
+        assert msg.usage.input_tokens == 70  # 100 - 30 cached
+        assert msg.usage.cache_read_tokens == 30
+
     def test_parse_response_no_usage(self):
         p = OpenAIProvider(api_key="test")
         data = MagicMock()
@@ -1483,6 +1500,37 @@ class TestOpenAIUsageExtraction:
         assert len(usage_events) == 1
         assert usage_events[0].usage.input_tokens == 200
         assert usage_events[0].usage.output_tokens == 80
+
+    def test_stream_chunk_normalizes_cached_input_tokens(self):
+        p = OpenAIProvider(api_key="test")
+        chunk = MagicMock()
+        chunk.choices = []
+        chunk.usage.prompt_tokens = 200
+        chunk.usage.completion_tokens = 80
+        chunk.usage.completion_tokens_details = None
+        chunk.usage.prompt_tokens_details = MagicMock(cached_tokens=40)
+        events = p._parse_stream_chunk(chunk, {})
+        usage_events = [e for e in events if e.type == "usage"]
+        assert len(usage_events) == 1
+        assert usage_events[0].usage.input_tokens == 160  # 200 - 40 cached
+        assert usage_events[0].usage.cache_read_tokens == 40
+
+    def test_stream_finish_reason_chunk_normalizes_cached_input_tokens(self):
+        p = OpenAIProvider(api_key="test")
+        delta = MagicMock()
+        delta.content = "Hi"
+        choice = MagicMock()
+        choice.delta = delta
+        choice.finish_reason = "stop"
+        chunk = MagicMock()
+        chunk.choices = [choice]
+        chunk.usage = MagicMock(prompt_tokens=80, completion_tokens=30)
+        chunk.usage.prompt_tokens_details = MagicMock(cached_tokens=20)
+        events = p._parse_stream_chunk(chunk, {})
+        usage_events = [e for e in events if e.type == "usage"]
+        assert len(usage_events) == 1
+        assert usage_events[0].usage.input_tokens == 60  # 80 - 20 cached
+        assert usage_events[0].usage.cache_read_tokens == 20
 
 
 class TestAnthropicUsageExtraction:
@@ -1592,6 +1640,23 @@ class TestGeminiUsageExtraction:
         assert msg.usage.output_tokens == 70
         assert msg.usage.reasoning_tokens == 20
 
+    def test_parse_response_normalizes_cached_input_tokens(self):
+        """Gemini's promptTokenCount includes cachedContentTokenCount; input
+        must exclude cached tokens to avoid double counting (audit S2.4)."""
+        p = GeminiProvider(api_key="test")
+        data = {
+            "candidates": [{"content": {"parts": [{"text": "Hello"}]}}],
+            "usageMetadata": {
+                "promptTokenCount": 300,
+                "candidatesTokenCount": 70,
+                "cachedContentTokenCount": 40,
+            },
+        }
+        msg = p._parse_response(data)
+        assert msg.usage is not None
+        assert msg.usage.input_tokens == 260  # 300 - 40 cached
+        assert msg.usage.cache_read_tokens == 40
+
     def test_stream_chunk_extracts_usage(self):
         p = GeminiProvider(api_key="test")
         data = {
@@ -1606,6 +1671,22 @@ class TestGeminiUsageExtraction:
         assert len(usage_events) == 1
         assert usage_events[0].usage.input_tokens == 100
         assert usage_events[0].usage.output_tokens == 40
+
+    def test_stream_chunk_normalizes_cached_input_tokens(self):
+        p = GeminiProvider(api_key="test")
+        data = {
+            "candidates": [{"content": {"parts": [{"text": "Hi"}]}, "finishReason": "STOP"}],
+            "usageMetadata": {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 40,
+                "cachedContentTokenCount": 25,
+            },
+        }
+        events = p._parse_stream_chunk(data, {})
+        usage_events = [e for e in events if e.type == "usage"]
+        assert len(usage_events) == 1
+        assert usage_events[0].usage.input_tokens == 75  # 100 - 25 cached
+        assert usage_events[0].usage.cache_read_tokens == 25
     def test_stream_chunk_usage_gated_on_finish_reason(self):
         """Gemini's usageMetadata is cumulative per request — emitting it on
         every chunk would overcount when the loop sums usage (audit S2.3).
@@ -1639,6 +1720,8 @@ class TestOpenAIProviderUsageExtraction:
         response = MagicMock()
         response.choices = [choice]
         response.usage = MagicMock(prompt_tokens=80, completion_tokens=30)
+        # No cache info reported -> input_tokens reported as-is (nothing to subtract).
+        response.usage.prompt_tokens_details = None
         msg = p._parse_response(response)
         assert msg.usage is not None
         assert msg.usage.input_tokens == 80
@@ -1666,6 +1749,7 @@ class TestOpenAIProviderUsageExtraction:
         chunk = MagicMock()
         chunk.choices = [choice]
         chunk.usage = MagicMock(prompt_tokens=80, completion_tokens=30)
+        chunk.usage.prompt_tokens_details = None
         events = p._parse_stream_chunk(chunk, {})
         usage_events = [e for e in events if e.type == "usage"]
         assert len(usage_events) == 1
