@@ -762,6 +762,158 @@ class TestGeminiProvider:
         info = p.get_model_info("gemini-unknown")
         assert info.provider_id == "gemini"
 
+    def test_stream_url_includes_alt_sse(self):
+        """Streaming uses the SSE endpoint (?alt=sse); non-streaming is unchanged."""
+        p = GeminiProvider(api_key="test-key")
+        stream_url = p._url("gemini-2.5-flash", stream=True)
+        assert "streamGenerateContent" in stream_url
+        assert "alt=sse" in stream_url
+        assert "key=test-key" in stream_url
+        plain_url = p._url("gemini-2.5-flash", stream=False)
+        assert "generateContent" in plain_url
+        assert "alt=sse" not in plain_url
+
+    def test_parse_stream_chunk_routes_thought_text_to_reasoning(self):
+        """Gemini 2.5 thought parts carry both 'text' and 'thought': the text must
+        go to reasoning deltas, never to the visible answer, and reasoning must
+        never be set to the bare boolean flag."""
+        p = GeminiProvider(api_key="test-key")
+        data = {
+            "candidates": [{"content": {"parts": [
+                {"text": "thinking...", "thought": True},
+                {"text": "answer"},
+            ]}}]
+        }
+        events = p._parse_stream_chunk(data, {})
+        reasoning = "".join(e.content for e in events if e.type == "reasoning_delta")
+        content = "".join(e.content for e in events if e.type == "text_delta")
+        assert reasoning == "thinking..."
+        assert content == "answer"
+        # canonical reasoning_delta AND backward-compat alias, both strings.
+        aliases = [e for e in events if e.type == "reasoning"]
+        assert len(aliases) == 1
+        assert aliases[0].content == "thinking..."
+        # No event carries a boolean as content.
+        assert all(not isinstance(e.content, bool) for e in events)
+
+    def test_parse_stream_chunk_skips_pure_flag_thought_parts(self):
+        """A part carrying only the thought flag (no text) emits nothing."""
+        p = GeminiProvider(api_key="test-key")
+        data = {"candidates": [{"content": {"parts": [{"thought": True}]}}]}
+        events = p._parse_stream_chunk(data, {})
+        assert events == []
+
+    def test_parse_response_routes_thought_to_reasoning(self):
+        """Non-streaming responses route thought text to Message.reasoning."""
+        p = GeminiProvider(api_key="test-key")
+        data = {
+            "candidates": [{"content": {"parts": [
+                {"text": "thinking...", "thought": True},
+                {"text": "answer"},
+            ]}}]
+        }
+        msg = p._parse_response(data)
+        assert msg.content == "answer"
+        assert msg.reasoning == "thinking..."
+        assert not isinstance(msg.reasoning, bool)
+
+    def test_parse_stream_chunk_maps_in_stream_error(self):
+        """A mid-stream {'error': {...}} object becomes an error chunk."""
+        p = GeminiProvider(api_key="test-key")
+        data = {"error": {"code": 429, "message": "Quota exceeded", "status": "RESOURCE_EXHAUSTED"}}
+        events = p._parse_stream_chunk(data, {})
+        assert len(events) == 1
+        assert events[0].canonical_type == "error"
+        assert "Quota exceeded" in events[0].content
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_parses_sse_data_lines(self, monkeypatch):
+        """alt=sse streams deliver `data: {json}` lines; each parses into
+        block events, and usage stays gated on the terminal chunk."""
+        import json as _json
+
+        p = GeminiProvider(api_key="test-key")
+        lines = [
+            'data: ' + _json.dumps({"candidates": [{"content": {"parts": [{"text": "Hel"}]}}]}),
+            'data: ' + _json.dumps({"candidates": [{"content": {"parts": [{"text": "lo"}]}}]}),
+            'data: ' + _json.dumps({"candidates": [{"content": {"parts": [{"text": "!"}]}, "finishReason": "STOP"}],
+                                       "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 3}}),
+        ]
+
+        class FakeStream:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            def raise_for_status(self):
+                pass
+
+            async def aiter_bytes(self):
+                for line in lines:
+                    yield (line + "\n\n").encode("utf-8")
+
+        class FakeClient:
+            def stream(self, method, url, json=None):
+                captured["url"] = url
+                return FakeStream()
+
+        captured: dict[str, str] = {}
+        monkeypatch.setattr(p, "_get_client", lambda: FakeClient())
+
+        chunks = []
+        async for c in p.chat_stream([Message.user("hi")]):
+            chunks.append(c)
+
+        assert "alt=sse" in captured["url"]
+        text = "".join(c.content for c in chunks if c.type == "text_delta")
+        assert text == "Hello!"
+        # usage emitted exactly once, on the terminal chunk
+        usage = [c for c in chunks if c.type == "usage"]
+        assert len(usage) == 1
+        assert usage[0].usage.input_tokens == 10
+        assert usage[0].usage.output_tokens == 3
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_handles_split_utf8_bytes(self, monkeypatch):
+        """A multi-byte UTF-8 sequence split across network chunks must not
+        corrupt the character (incremental decoder, not per-chunk decode)."""
+        p = GeminiProvider(api_key="test-key")
+        line = 'data: ' + '{"candidates": [{"content": {"parts": [{"text": "caf\u00e9"}]}}]}'
+        b = (line + "\n\n").encode("utf-8")  # é = 2 bytes
+        mid = len(b) // 2
+        while mid < len(b) and (b[mid] & 0xC0) == 0x80:
+            mid += 1  # keep the split OUTSIDE a multi-byte char when possible
+        if mid >= len(b):
+            mid = 1
+
+        class FakeStream:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            def raise_for_status(self):
+                pass
+
+            async def aiter_bytes(self):
+                yield b[:mid]
+                yield b[mid:]
+
+        class FakeClient:
+            def stream(self, method, url, json=None):
+                return FakeStream()
+
+        monkeypatch.setattr(p, "_get_client", lambda: FakeClient())
+
+        chunks = []
+        async for c in p.chat_stream([Message.user("hi")]):
+            chunks.append(c)
+        text = "".join(c.content for c in chunks if c.type == "text_delta")
+        assert text == "café"
+
 
 # ─── Factory Tests ───
 
