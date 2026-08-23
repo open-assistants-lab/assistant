@@ -170,6 +170,45 @@ def _get_imap_connection(account_id: str, user_id: str) -> Any:
     return MailBox(imap_host, imap_port).login(email, password)
 
 
+def _email_row_params(email_data: dict[str, Any]) -> dict[str, Any]:
+    """Flatten an _email_to_dict payload into bound INSERT parameters."""
+    return {
+        **email_data,
+        "to_addrs": ",".join(email_data["to_addrs"]),
+        "cc_addrs": ",".join(email_data["cc_addrs"]),
+        "attachments": str(email_data["attachments"]),
+        "read": 1 if email_data["read"] else 0,
+        "flagged": 1 if email_data["flagged"] else 0,
+        "has_attachments": 1 if email_data["has_attachments"] else 0,
+        "is_forwarded": 1 if email_data.get("is_forwarded") else 0,
+        "tags": "",
+    }
+
+
+_INSERT_EMAIL_SQL = text("""
+    INSERT OR REPLACE INTO emails
+    (account_id, folder, message_id, from_addr, from_name,
+     to_addrs, cc_addrs, subject, body_text, timestamp,
+     in_reply_to, thread_references, is_forwarded,
+     read, flagged, has_attachments, attachments, tags, created_at)
+    VALUES
+    (:account_id, :folder, :message_id, :from_addr, :from_name,
+     :to_addrs, :cc_addrs, :subject, :body_text, :timestamp,
+     :in_reply_to, :thread_references, :is_forwarded,
+     :read, :flagged, :has_attachments, :attachments, :tags, :created_at)
+""")
+
+
+def _insert_email_rows(engine: Any, rows: list[dict[str, Any]]) -> None:
+    """Insert email rows in ONE transaction (audit P1): the old code opened a
+    connection + fsync commit PER EMAIL, so a 500-message backfill paid 500
+    connects + 500 commits."""
+    if not rows:
+        return
+    with engine.begin() as conn:
+        conn.execute(_INSERT_EMAIL_SQL, rows)
+
+
 def _sync_folder(
     account_id: str,
     folder: str,
@@ -236,6 +275,7 @@ def _sync_folder(
                 if not messages:
                     break
 
+                batch_rows: list[dict[str, Any]] = []
                 for msg in messages:
                     msg_uid = str(msg.uid)
                     if msg_uid in existing_ids:
@@ -246,36 +286,13 @@ def _sync_folder(
                     email_data["folder"] = folder
                     email_data["created_at"] = int(datetime.now(UTC).timestamp())
 
-                    with engine.connect() as conn:
-                        conn.execute(
-                            text("""
-                                INSERT OR REPLACE INTO emails
-                                (account_id, folder, message_id, from_addr, from_name,
-                                 to_addrs, cc_addrs, subject, body_text, timestamp,
-                                 in_reply_to, thread_references, is_forwarded,
-                                 read, flagged, has_attachments, attachments, tags, created_at)
-                                VALUES
-                                (:account_id, :folder, :message_id, :from_addr, :from_name,
-                                 :to_addrs, :cc_addrs, :subject, :body_text, :timestamp,
-                                 :in_reply_to, :thread_references, :is_forwarded,
-                                 :read, :flagged, :has_attachments, :attachments, :tags, :created_at)
-                            """),
-                            {
-                                **email_data,
-                                "to_addrs": ",".join(email_data["to_addrs"]),
-                                "cc_addrs": ",".join(email_data["cc_addrs"]),
-                                "attachments": str(email_data["attachments"]),
-                                "read": 1 if email_data["read"] else 0,
-                                "flagged": 1 if email_data["flagged"] else 0,
-                                "has_attachments": 1 if email_data["has_attachments"] else 0,
-                                "is_forwarded": 1 if email_data.get("is_forwarded") else 0,
-                                "tags": "",
-                            },
-                        )
-                        conn.commit()
+                    batch_rows.append(_email_row_params(email_data))
 
                     existing_ids.add(msg_uid)
                     synced += 1
+
+                # One transaction per IMAP batch instead of one commit per row.
+                _insert_email_rows(engine, batch_rows)
 
                 # Track lowest UID for pagination
                 batch_uids = [msg.uid for msg in messages if msg.uid is not None]
@@ -345,6 +362,7 @@ def _sync_folder(
             messages = list(mailbox.fetch(**fetch_kwargs))
 
             newest_timestamp = last_timestamp
+            new_rows: list[dict[str, Any]] = []
 
             for msg in messages:
                 msg_uid = str(msg.uid)
@@ -356,37 +374,14 @@ def _sync_folder(
                 email_data["folder"] = folder
                 email_data["created_at"] = int(datetime.now(UTC).timestamp())
 
-                with engine.connect() as conn:
-                    conn.execute(
-                        text("""
-                            INSERT OR REPLACE INTO emails
-                            (account_id, folder, message_id, from_addr, from_name,
-                             to_addrs, cc_addrs, subject, body_text, timestamp,
-                             in_reply_to, thread_references, is_forwarded,
-                             read, flagged, has_attachments, attachments, tags, created_at)
-                            VALUES
-                            (:account_id, :folder, :message_id, :from_addr, :from_name,
-                             :to_addrs, :cc_addrs, :subject, :body_text, :timestamp,
-                             :in_reply_to, :thread_references, :is_forwarded,
-                             :read, :flagged, :has_attachments, :attachments, :tags, :created_at)
-                        """),
-                        {
-                            **email_data,
-                            "to_addrs": ",".join(email_data["to_addrs"]),
-                            "cc_addrs": ",".join(email_data["cc_addrs"]),
-                            "attachments": str(email_data["attachments"]),
-                            "read": 1 if email_data["read"] else 0,
-                            "flagged": 1 if email_data["flagged"] else 0,
-                            "has_attachments": 1 if email_data["has_attachments"] else 0,
-                            "is_forwarded": 1 if email_data.get("is_forwarded") else 0,
-                            "tags": "",
-                        },
-                    )
-                    conn.commit()
+                new_rows.append(_email_row_params(email_data))
 
                 if email_data["timestamp"] > newest_timestamp:
                     newest_timestamp = email_data["timestamp"]
                 synced += 1
+
+            # One transaction for the whole quick sync (audit P1).
+            _insert_email_rows(engine, new_rows)
 
             if synced > 0:
                 account["last_sync"] = int(datetime.now(UTC).timestamp())

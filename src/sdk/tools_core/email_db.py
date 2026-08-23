@@ -10,6 +10,11 @@ from src.app_logging import get_logger
 
 logger = get_logger()
 
+# Cached SQLAlchemy engines per user (audit P1): get_engine previously built
+# a fresh engine + re-ran the full DDL on every invocation and never disposed
+# it — pooled SQLite connections piled up until GC.
+_engines: dict[str, Any] = {}
+
 
 def get_db_path(user_id: str) -> str:
     """Get SQLite database path for user."""
@@ -20,10 +25,14 @@ def get_db_path(user_id: str) -> str:
 
 
 def get_engine(user_id: str) -> Any:
-    """Get SQLAlchemy engine with schema initialized."""
+    """Get SQLAlchemy engine with schema initialized (cached per user)."""
+    cached = _engines.get(user_id)
+    if cached is not None:
+        return cached
     db_path = get_db_path(user_id)
     engine = create_engine(f"sqlite:///{db_path}")
     init_db(engine)
+    _engines[user_id] = engine
     return engine
 
 
