@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -33,7 +34,10 @@ from src.storage.paths import get_paths
 logger = logging.getLogger(__name__)
 
 _DEFAULT_API_URL = "https://models.dev/api.json"
-_DEFAULT_CACHE_TTL = 300
+# In-process registry TTL: after this many seconds the cached model/provider
+# data is re-fetched on the next access. The disk cache shares the same TTL
+# (env MODELS_DEV_CACHE_TTL overrides both).
+REGISTRY_TTL_SECONDS = 300
 
 _PROVIDER_TYPE_MAP: dict[str, str] = {
     "@ai-sdk/openai": "openai",
@@ -46,6 +50,12 @@ _PROVIDER_TYPE_MAP: dict[str, str] = {
 _models_cache: dict[str, ModelInfo] | None = None
 _providers_cache: dict[str, dict[str, Any]] | None = None
 _last_fetch_time: float = 0.0
+
+# Serializes the load ladder in _ensure_loaded. Registry loads may happen
+# from worker threads (asyncio.to_thread) and request handlers concurrently;
+# the lock makes the first caller do the fetch while later callers see the
+# populated cache (single-flight).
+_load_lock = threading.Lock()
 
 
 def _resolve_provider_type(npm: str, api: str | None) -> str:
@@ -161,17 +171,19 @@ def _get_api_url() -> str:
 
 def _get_cache_ttl() -> int:
     try:
-        return int(os.environ.get("MODELS_DEV_CACHE_TTL", str(_DEFAULT_CACHE_TTL)))
+        return int(os.environ.get("MODELS_DEV_CACHE_TTL", str(REGISTRY_TTL_SECONDS)))
     except (ValueError, TypeError):
-        return _DEFAULT_CACHE_TTL
+        return REGISTRY_TTL_SECONDS
 
 
-def _load_from_cache() -> dict[str, Any] | None:
+def _load_from_cache(ignore_ttl: bool = False) -> dict[str, Any] | None:
     cache_path = _get_cache_path()
     if not cache_path.exists():
         return None
     try:
         data: dict[str, Any] = cast(dict[str, Any], json.loads(cache_path.read_text()))
+        if ignore_ttl:
+            return data
         if time.time() - data.get("_fetched_at", 0) < _get_cache_ttl():
             return data
         return None
@@ -326,20 +338,44 @@ def _load_builtin() -> dict[str, Any]:
 
 
 def _ensure_loaded(force: bool = False) -> None:
+    """Load registry data, re-fetching once the in-process TTL has elapsed.
+
+    Resolution ladder on a cold/expired cache:
+      1. fresh disk cache (within TTL)   — no network
+      2. live fetch (also refreshes the disk cache)
+      3. stale disk cache (fetch failed) — better than nothing
+      4. existing in-memory data (refresh failed, no disk cache)
+      5. built-in fallback subset
+    """
     global _models_cache, _providers_cache, _last_fetch_time
 
-    if _models_cache is not None and not force:
-        return
+    with _load_lock:
+        if (
+            not force
+            and _models_cache is not None
+            and (time.time() - _last_fetch_time) < _get_cache_ttl()
+        ):
+            return
 
-    data = _load_from_cache()
-    if data is None:
-        data = _fetch_api()
-    if data is None:
-        data = _load_builtin()
-        logger.info("registry: using built-in fallback data")
+        data = _load_from_cache()
+        if data is None:
+            data = _fetch_api()
+            if data is None:
+                data = _load_from_cache(ignore_ttl=True)
+                if data is not None:
+                    logger.info("registry: fetch failed; using stale disk cache")
+                elif _models_cache is not None:
+                    # Never downgrade a working in-memory registry to the
+                    # tiny built-in subset on a transient failure.
+                    logger.info("registry: refresh failed; keeping in-memory cache")
+                    _last_fetch_time = time.time()
+                    return
+                else:
+                    data = _load_builtin()
+                    logger.info("registry: using built-in fallback data")
 
-    _models_cache, _providers_cache = _transform_api_data(data)
-    _last_fetch_time = time.time()
+        _models_cache, _providers_cache = _transform_api_data(data)
+        _last_fetch_time = time.time()
 
 
 def refresh() -> None:
