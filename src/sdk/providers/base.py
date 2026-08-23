@@ -19,6 +19,8 @@ from src.sdk.tools import ToolDefinition
 _TIMEOUT_ERRORS: tuple[type[BaseException], ...] = (
     httpx.ReadTimeout,
     httpx.ConnectTimeout,
+    httpx.WriteTimeout,
+    httpx.PoolTimeout,
     httpx.ConnectError,
 )
 
