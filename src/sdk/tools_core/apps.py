@@ -501,10 +501,28 @@ def _convert_date_in_query(query: str) -> str:
                 pass
         return segment
 
-    parts = query.split("'")
-    for i in range(0, len(parts), 2):  # even indexes sit outside literals
-        parts[i] = _rewrite(parts[i])
-    return "'".join(parts)
+    # Sequential walk with an in-literal flag (audit B17 fix round 1):
+    # robust against SQL doubled quotes ('') — an escaped pair never flips
+    # the literal state, unlike positional even/odd parity.
+    out_parts: list[str] = []
+    buf: list[str] = []
+    i = 0
+    n = len(query)
+    in_literal = False
+    while i < n:
+        ch = query[i]
+        if ch == "'" and in_literal and i + 1 < n and query[i + 1] == "'":
+            buf.append("''")
+            i += 2
+            continue
+        buf.append(ch)
+        if ch == "'":
+            out_parts.append(_rewrite("".join(buf)) if not in_literal else "".join(buf))
+            buf = []
+            in_literal = not in_literal
+        i += 1
+    out_parts.append(_rewrite("".join(buf)) if not in_literal else "".join(buf))
+    return "".join(out_parts)
 
 
 @tool

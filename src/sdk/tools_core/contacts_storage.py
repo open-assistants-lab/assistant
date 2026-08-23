@@ -166,25 +166,37 @@ def save_contacts(user_id: str, account_id: str, contacts: list[dict[str, Any]])
             if not email:
                 continue
 
+            # Pre-check spans ALL sources: the unique index does too. A
+            # manual row must never be silently overwritten by sync nor gain
+            # a dangling contact_emails side-row (audit B17 fix round 1).
             existing = conn.execute(
-                text("SELECT id, name FROM contacts WHERE email = :email AND source = 'email'"),
+                text("SELECT id FROM contacts WHERE email = :email"),
                 {"email": email},
             ).fetchone()
 
-            # Atomic upsert (audit B17): SELECT-then-INSERT raced under
-            # concurrency because email had no UNIQUE constraint.
+            if existing:
+                if contact.get("name"):
+                    conn.execute(
+                        text("""
+                            UPDATE contacts SET name = :name, updated_at = :updated_at
+                            WHERE id = :id AND (name IS NULL OR name = '')
+                        """),
+                        {
+                            "name": contact["name"],
+                            "updated_at": int(datetime.now(UTC).timestamp()),
+                            "id": existing[0],
+                        },
+                    )
+                continue
+
+            # Missing → atomic insert; rowcount distinguishes the race-lost case.
             contact_id = str(uuid.uuid4())
-            conn.execute(
+            cur = conn.execute(
                 text("""
                     INSERT INTO contacts
                     (id, email, name, first_name, last_name, source, email_account, created_at)
                     VALUES (:id, :email, :name, :first_name, :last_name, :source, :email_account, :created_at)
-                    ON CONFLICT(email) DO UPDATE SET
-                        name = CASE
-                            WHEN contacts.name IS NULL OR contacts.name = '' THEN excluded.name
-                            ELSE contacts.name
-                        END,
-                        updated_at = excluded.created_at
+                    ON CONFLICT(email) DO NOTHING
                 """),
                 {
                     "id": contact_id,
@@ -197,8 +209,7 @@ def save_contacts(user_id: str, account_id: str, contacts: list[dict[str, Any]])
                     "created_at": int(datetime.now(UTC).timestamp()),
                 },
             )
-
-            if existing:
+            if cur.rowcount != 1:
                 continue
 
             conn.execute(

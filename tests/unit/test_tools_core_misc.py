@@ -177,6 +177,50 @@ def test_init_db_migrates_legacy_db_dedupe_and_unique_index(tmp_path):
             )
 
 
+def test_save_contacts_cross_source_no_dangling_side_insert(contacts_iso):
+    """Manual contact + later email-sync of the same address must not create
+    a dangling contact_emails row nor count a phantom new contact (audit B17
+    fix round: unique index spans ALL sources, the old pre-check did not)."""
+    cs.add_contact("cx1", "shared@x.com", name="Manual Person")
+    n = cs.save_contacts("cx1", "acct", [{"email": "shared@x.com", "name": "Sync Name"}])
+    assert n == 0
+    engine = cs.get_engine("cx1")
+    rows = engine.connect().exec_driver_sql(
+        "SELECT COUNT(*) FROM contacts WHERE email='shared@x.com'"
+    ).scalar()
+    assert rows == 1
+    orphans = engine.connect().exec_driver_sql(
+        "SELECT COUNT(*) FROM contact_emails ce "
+        "LEFT JOIN contacts c ON c.id = ce.contact_id WHERE c.id IS NULL"
+    ).scalar()
+    assert orphans == 0
+
+
+def test_convert_date_escaped_quote_hardening_pin():
+    """Hardening pin (fix round 1 / F2): escaped quotes ('') inside literals
+    survive date rewriting. On WELL-FORMED SQL the old parity split behaved
+    identically (provably — each literal contributes an even number of quote
+    chars); this pins the sequential-walker replacement against regressions.
+    Known limitation (both approaches): a lone apostrophe inside a literal
+    makes the remainder conservative (unrewritten)."""
+    q = "SELECT * WHERE msg LIKE '%'' today%' AND d > today AND m = 'last month'"
+    out = apps_mod._convert_date_in_query(q)
+    assert "'%'' today%'" in out
+    assert "'last month'" in out
+    assert out.count(str(int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000))) == 1
+
+
+def test_convert_date_handles_escaped_quotes_in_literals():
+    """SQL doubled quotes ('') must not flip the in-literal parity."""
+    q = "SELECT * WHERE msg LIKE '%'' today%' AND d > today"
+    out = apps_mod._convert_date_in_query(q)
+    today_epoch = str(
+        int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+    )
+    assert out.count(today_epoch) == 1
+    assert "'%'' today%'" in out
+
+
 # ---------------------------------------------------------------- 5. shell spill TTL
 
 
