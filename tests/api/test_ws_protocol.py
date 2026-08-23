@@ -666,9 +666,20 @@ class TestWebSocketPersistence:
         class FakeLoop:
             def __init__(self):
                 self.approved = []
+                self.executed = None
 
             def approve_tool_call(self, tool_call):
                 self.approved.append(tool_call)
+
+            async def _execute_tool(self, tool_call):
+                # The approved tool is executed directly (audit B4): record it
+                # so the test can assert args + call id of the plain-approve.
+                self.executed = tool_call
+                return _FakeResult("deleted")
+
+        class _FakeResult:
+            def __init__(self, content):
+                self.content = content
 
         class FakeConversation:
             def add_message(self, *args, **kwargs):
@@ -710,6 +721,8 @@ class TestWebSocketPersistence:
             async def send_json(self, payload):
                 self.sent.append(payload)
 
+        loop = FakeLoop()
+
         async def fake_run_agent_stream(*args, **kwargs):
             nonlocal stream_calls
             stream_calls += 1
@@ -719,7 +732,7 @@ class TestWebSocketPersistence:
 
         async def fake_get_sdk_loop(*args, **kwargs):
             captured_calls.append((args, kwargs))
-            return FakeLoop()
+            return loop
 
         monkeypatch.setattr(
             ws_router,
@@ -735,6 +748,12 @@ class TestWebSocketPersistence:
         assert captured_calls
         assert captured_calls[0][1]["session_id"] == "chat-1"
         assert history_calls == [("chat-1", 50), ("chat-1", 50)]
+        # B4: the plain-approve path executes the pending call directly.
+        assert loop.approved[0].arguments == {}
+        assert loop.executed is not None
+        assert loop.executed.name == "files_delete"
+        assert loop.executed.arguments == {}
+        assert loop.executed.id == "call-1"
 
     @pytest.mark.asyncio
     async def test_ws_cancel_sets_running_stream_cancel_event(self, monkeypatch):
