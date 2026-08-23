@@ -295,3 +295,53 @@ class TestStreamingFR9IdClear:
         assert all(m.tool_calls == [] for m in assistants), (
             f"dangling ids: {[m.tool_calls for m in assistants]}"
         )
+
+
+class TestStreamingArgParity:
+    @pytest.mark.asyncio
+    async def test_streaming_single_tool_does_not_mutate_history_args(self):
+        """Fix-round 1 (Task 19 review F1): the STREAMING single-tool path must
+        also copy-then-transform — the ToolCall persisted via
+        assistant_msg.tool_calls keeps model-original arguments while
+        execution receives the middleware-wrapped ones."""
+        received: list[dict] = []
+
+        class InjectingMW(Middleware):
+            name = "injector"
+
+            def wrap_tool_call(self, name, arguments):
+                return {"injected": True}
+
+        @tool
+        def spy(**kwargs) -> str:
+            """Record kwargs."""
+            received.append(kwargs)
+            return "ok"
+
+        # Destructive => sequential => _execute_single_tool_streaming.
+        spy.annotations = ToolAnnotations(title="spy", destructive=True)
+
+        provider = MockProvider()
+        provider.set_stream_events(
+            [
+                [
+                    StreamChunk.tool_input_start(tool="spy", call_id="s1", args={}),
+                    StreamChunk.tool_input_delta(call_id="s1", content='{"orig": 1}'),
+                    StreamChunk.tool_input_end(tool="spy", call_id="s1"),
+                    StreamChunk.done(content=""),
+                    StreamChunk.text_delta(content="finished"),
+                ]
+            ]
+        )
+        loop = AgentLoop(provider=provider, tools=[spy], middlewares=[InjectingMW()])
+        async for _ in loop.run_stream([Message.user("go")]):
+            pass
+
+        assert received and received[0] == {"injected": True}, (
+            f"execution must see wrapped args, got {received}"
+        )
+        assistants = [m for m in loop.state.messages if m.role == "assistant" and m.tool_calls]
+        assert assistants, "no assistant tool_call message persisted"
+        assert assistants[-1].tool_calls[0].arguments == {"orig": 1}, (
+            f"history mutated: {assistants[-1].tool_calls[0].arguments}"
+        )

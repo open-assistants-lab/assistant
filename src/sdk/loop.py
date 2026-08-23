@@ -796,9 +796,13 @@ class AgentLoop:
             )
             return
 
+        # Copy-then-transform (audit B17, Task-19 review F1): the ToolCall is
+        # persisted via assistant_msg.tool_calls — middleware must transform a
+        # copy so history keeps the model's original arguments.
+        tc_exec = ToolCall(id=tc.id, name=tc.name, arguments=dict(tc.arguments))
         for mw in self.middlewares:
             try:
-                tc.arguments = mw.wrap_tool_call(tc.name, tc.arguments)
+                tc_exec.arguments = mw.wrap_tool_call(tc_exec.name, tc_exec.arguments)
             except Exception:
                 mw_name = getattr(mw, "name", type(mw).__name__)
                 logger.warning(f"wrap_tool_call error in {mw_name} for {tc.name}", exc_info=True)
@@ -807,11 +811,11 @@ class AgentLoop:
             async with self.trace_provider.start_span(
                 SpanType.TOOL_EXECUTION, tc.name
             ) as tool_span:
-                result = await self._execute_tool(tc)
+                result = await self._execute_tool(tc_exec)
                 tool_span.set_meta("result_length", len(result.content))
                 tool_span.set_meta("is_error", result.is_error)
         else:
-            result = await self._execute_tool(tc)
+            result = await self._execute_tool(tc_exec)
 
         self._record_subagent_tool(tc)
         if (ctx := self.subagent_ctx) and ctx.on_progress:
