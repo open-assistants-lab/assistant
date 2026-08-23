@@ -1348,6 +1348,36 @@ class TestUsageTracking:
         assert captured.get("output") == 50, captured
         assert "done" in [c.type for c in chunks]
 
+    async def test_streaming_emits_single_merged_usage_per_round(self):
+        """Multiple usage chunks in one round yield EXACTLY ONE merged chunk.
+
+        RunService aggregates streaming usage per chunk with `calls + 1` —
+        that is only correct when each LLM round produces one cumulative
+        usage chunk (audit S2 fix round 1: openai's parser can emit usage on
+        both an empty-choices chunk and the finish_reason chunk, which would
+        double-count tokens AND calls). The loop owns the round boundary, so
+        it coalesces per-round usage into a single emission.
+        """
+        provider = MockProvider()
+        provider.set_stream_events(
+            [
+                [
+                    # openai-style double emission: empty-choices usage +
+                    # finish_reason chunk usage, both cumulative.
+                    StreamChunk.usage_event(Usage(input_tokens=100)),
+                    StreamChunk.usage_event(Usage(input_tokens=100, output_tokens=50)),
+                    StreamChunk.done(content="Hi"),
+                ]
+            ]
+        )
+        loop = AgentLoop(provider=provider, tools=[])
+        chunks = [c async for c in loop.run_stream([Message.user("Hi")])]
+
+        usage_chunks = [c for c in chunks if c.type == "usage"]
+        assert len(usage_chunks) == 1, [c.type for c in chunks]
+        assert usage_chunks[0].usage.input_tokens == 100
+        assert usage_chunks[0].usage.output_tokens == 50
+
     async def test_cost_tracker_add_usage_with_cost(self):
         """CostTracker correctly computes cost from ModelCost."""
         tracker = CostTracker()

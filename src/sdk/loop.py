@@ -1492,7 +1492,10 @@ class AgentLoop:
                                         stream_usage.cache_read_tokens = u.cache_read_tokens
                                     if u.cache_creation_tokens:
                                         stream_usage.cache_creation_tokens = u.cache_creation_tokens
-                                    yield chunk
+                                    # NOTE: raw usage chunks are NOT re-yielded
+                                    # here — one merged cumulative chunk is
+                                    # emitted at round end (below) so
+                                    # consumers count one call per round.
                                     continue
                                 async for event in self._process_stream_chunk(
                                     chunk,
@@ -1511,6 +1514,26 @@ class AgentLoop:
                                         in_reasoning_block = True
                                     elif event.type == "reasoning_end":
                                         in_reasoning_block = False
+
+                            # Emit ONE merged, cumulative usage chunk per LLM
+                            # round (audit S2 fix round 1). Providers can
+                            # report usage on several chunks per round (e.g.
+                            # openai: an empty-choices usage chunk AND the
+                            # finish_reason chunk); downstream consumers
+                            # (RunService, wire) count one call per usage
+                            # chunk, so a raw passthrough would double-count
+                            # tokens and calls. The round counter lives in
+                            # this loop — this is the aggregation seam.
+                            if any(
+                                (
+                                    stream_usage.input_tokens,
+                                    stream_usage.output_tokens,
+                                    stream_usage.reasoning_tokens,
+                                    stream_usage.cache_read_tokens,
+                                    stream_usage.cache_creation_tokens,
+                                )
+                            ):
+                                yield StreamChunk.usage_event(stream_usage.model_copy())
 
                             cost_tracker.add_usage(
                                 input_tokens=stream_usage.input_tokens,
@@ -1545,7 +1568,9 @@ class AgentLoop:
                                     stream_usage.cache_read_tokens = u.cache_read_tokens
                                 if u.cache_creation_tokens:
                                     stream_usage.cache_creation_tokens = u.cache_creation_tokens
-                                yield chunk
+                                # NOTE: raw usage chunks are NOT re-yielded
+                                # here — see the trace-span branch comment:
+                                # one merged cumulative chunk per round.
                                 continue
                             async for event in self._process_stream_chunk(
                                 chunk,
@@ -1564,6 +1589,19 @@ class AgentLoop:
                                     in_reasoning_block = True
                                 elif event.type == "reasoning_end":
                                     in_reasoning_block = False
+
+                        # Same merged per-round emission as the trace-span
+                        # branch (audit S2 fix round 1).
+                        if any(
+                            (
+                                stream_usage.input_tokens,
+                                stream_usage.output_tokens,
+                                stream_usage.reasoning_tokens,
+                                stream_usage.cache_read_tokens,
+                                stream_usage.cache_creation_tokens,
+                            )
+                        ):
+                            yield StreamChunk.usage_event(stream_usage.model_copy())
 
                         cost_tracker.add_usage(
                             input_tokens=stream_usage.input_tokens,

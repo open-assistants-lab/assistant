@@ -250,9 +250,28 @@ class LangfuseTracer:
                         elif chunk.type == "reasoning_delta" and chunk.content:
                             reasoning_parts.append(chunk.content)
                         elif chunk.type == "usage" and chunk.usage:
-                            accumulated_usage["input"] += chunk.usage.input_tokens
-                            accumulated_usage["output"] += chunk.usage.output_tokens
-                            accumulated_usage["reasoning"] += chunk.usage.reasoning_tokens
+                            # Providers report CUMULATIVE totals; within one
+                            # round (one chat_stream call) multiple chunks
+                            # can carry usage (e.g. openai empty-choices +
+                            # finish_reason). Summing cumulative values would
+                            # double count — field-wise last-nonzero, same
+                            # policy as AgentLoop.run_stream (audit S2 fix
+                            # round 1).
+                            accumulated_usage["input"] = (
+                                chunk.usage.input_tokens
+                                if chunk.usage.input_tokens
+                                else accumulated_usage["input"]
+                            )
+                            accumulated_usage["output"] = (
+                                chunk.usage.output_tokens
+                                if chunk.usage.output_tokens
+                                else accumulated_usage["output"]
+                            )
+                            accumulated_usage["reasoning"] = (
+                                chunk.usage.reasoning_tokens
+                                if chunk.usage.reasoning_tokens
+                                else accumulated_usage["reasoning"]
+                            )
                         if first_token_at is None and chunk.canonical_type in (
                             "text_delta",
                             "reasoning_delta",

@@ -516,12 +516,14 @@ class RunService:
                             final_response = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
                             final_attempt = item.attempt
                         elif chunk.canonical_type == "usage" and chunk.usage:
-                            # Aggregate from canonical usage chunks: the loop
-                            # emits one cumulative chunk per LLM call (audit
-                            # S2.1). The done chunk never carries usage
-                            # (StreamChunk.done has no usage field), so the
-                            # old done-branch accumulation always stayed
-                            # unavailable with zero tokens.
+                            # Aggregate from canonical usage chunks. The loop
+                            # coalesces per-LLM-round usage into ONE merged
+                            # cumulative chunk (audit S2.1 + fix round 1), so
+                            # each chunk == one LLM round: `calls + 1` and the
+                            # token sums are exact. The done chunk never
+                            # carries usage (StreamChunk.done has no usage
+                            # field), so the old done-branch accumulation
+                            # always stayed unavailable with zero tokens.
                             agent_usage = UsageAggregate(
                                 available=True,
                                 calls=agent_usage.calls + 1,
