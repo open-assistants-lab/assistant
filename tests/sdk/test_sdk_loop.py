@@ -1304,6 +1304,50 @@ class TestUsageTracking:
         assert tracker.total_reasoning_tokens == 10
         assert tracker.llm_calls == 2
 
+    async def test_streaming_usage_fieldwise_last_nonzero(self, monkeypatch):
+        """Cumulative usage chunks REPLACE (not sum) per field per LLM call.
+
+        Providers emit cumulative values (Anthropic message_start input +
+        final message_delta output, Gemini finishReason chunk). Summing them
+        inflated totals ~50x on long streams (audit S2.3).
+        """
+        from src.sdk.loop import CostTracker
+
+        captured: dict[str, int] = {}
+        orig = CostTracker.add_usage
+
+        def spy(self, input_tokens=0, output_tokens=0, reasoning_tokens=0, cost=None):
+            captured["input"] = input_tokens
+            captured["output"] = output_tokens
+            return orig(
+                self,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                reasoning_tokens=reasoning_tokens,
+                cost=cost,
+            )
+
+        monkeypatch.setattr(CostTracker, "add_usage", spy)
+
+        provider = MockProvider()
+        provider.set_stream_events(
+            [
+                [
+                    StreamChunk.usage_event(Usage(input_tokens=100, output_tokens=0)),
+                    StreamChunk.usage_event(Usage(input_tokens=100, output_tokens=50)),
+                    StreamChunk.done(content="Hi"),
+                ]
+            ]
+        )
+        loop = AgentLoop(provider=provider, tools=[])
+        chunks = [c async for c in loop.run_stream([Message.user("Hi")])]
+
+        # Field-wise last-nonzero: the second chunk's cumulative input (100)
+        # does NOT double it to 200; output comes from the final chunk.
+        assert captured.get("input") == 100, captured
+        assert captured.get("output") == 50, captured
+        assert "done" in [c.type for c in chunks]
+
     async def test_cost_tracker_add_usage_with_cost(self):
         """CostTracker correctly computes cost from ModelCost."""
         tracker = CostTracker()

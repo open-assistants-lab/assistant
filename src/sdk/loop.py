@@ -1475,13 +1475,23 @@ class AgentLoop:
                                     yield StreamChunk.done(content="", tool_calls=all_tool_calls)
                                     return
                                 if chunk.type == "usage" and chunk.usage:
-                                    stream_usage.input_tokens += chunk.usage.input_tokens
-                                    stream_usage.output_tokens += chunk.usage.output_tokens
-                                    stream_usage.reasoning_tokens += chunk.usage.reasoning_tokens
-                                    stream_usage.cache_read_tokens += chunk.usage.cache_read_tokens
-                                    stream_usage.cache_creation_tokens += (
-                                        chunk.usage.cache_creation_tokens
-                                    )
+                                    # Field-wise last-nonzero replace (audit
+                                    # S2.3): providers emit CUMULATIVE usage
+                                    # (Anthropic message_start input + final
+                                    # message_delta output; Gemini only on the
+                                    # finishReason chunk). Summing cumulative
+                                    # chunks inflated totals up to ~50x.
+                                    u = chunk.usage
+                                    if u.input_tokens:
+                                        stream_usage.input_tokens = u.input_tokens
+                                    if u.output_tokens:
+                                        stream_usage.output_tokens = u.output_tokens
+                                    if u.reasoning_tokens:
+                                        stream_usage.reasoning_tokens = u.reasoning_tokens
+                                    if u.cache_read_tokens:
+                                        stream_usage.cache_read_tokens = u.cache_read_tokens
+                                    if u.cache_creation_tokens:
+                                        stream_usage.cache_creation_tokens = u.cache_creation_tokens
                                     yield chunk
                                     continue
                                 async for event in self._process_stream_chunk(
@@ -1522,11 +1532,19 @@ class AgentLoop:
                                 yield StreamChunk.done(content="", tool_calls=all_tool_calls)
                                 return
                             if chunk.type == "usage" and chunk.usage:
-                                stream_usage.input_tokens += chunk.usage.input_tokens
-                                stream_usage.output_tokens += chunk.usage.output_tokens
-                                stream_usage.reasoning_tokens += chunk.usage.reasoning_tokens
-                                stream_usage.cache_read_tokens += chunk.usage.cache_read_tokens
-                                stream_usage.cache_creation_tokens += chunk.usage.cache_creation_tokens
+                                # Same field-wise last-wins replace as the
+                                # trace-span branch above (audit S2.3).
+                                u = chunk.usage
+                                if u.input_tokens:
+                                    stream_usage.input_tokens = u.input_tokens
+                                if u.output_tokens:
+                                    stream_usage.output_tokens = u.output_tokens
+                                if u.reasoning_tokens:
+                                    stream_usage.reasoning_tokens = u.reasoning_tokens
+                                if u.cache_read_tokens:
+                                    stream_usage.cache_read_tokens = u.cache_read_tokens
+                                if u.cache_creation_tokens:
+                                    stream_usage.cache_creation_tokens = u.cache_creation_tokens
                                 yield chunk
                                 continue
                             async for event in self._process_stream_chunk(

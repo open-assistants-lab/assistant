@@ -515,15 +515,23 @@ class RunService:
                         if chunk.type == "done":
                             final_response = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
                             final_attempt = item.attempt
-                            if chunk.usage:
-                                agent_usage = UsageAggregate(
-                                    available=True,
-                                    calls=agent_usage.calls + 1,
-                                    models=(loop.model_id,),
-                                    input_tokens=agent_usage.input_tokens + (chunk.usage.input_tokens or 0),
-                                    output_tokens=agent_usage.output_tokens + (chunk.usage.output_tokens or 0),
-                                    reasoning_tokens=agent_usage.reasoning_tokens + (chunk.usage.reasoning_tokens or 0),
-                                )
+                        elif chunk.canonical_type == "usage" and chunk.usage:
+                            # Aggregate from canonical usage chunks: the loop
+                            # emits one cumulative chunk per LLM call (audit
+                            # S2.1). The done chunk never carries usage
+                            # (StreamChunk.done has no usage field), so the
+                            # old done-branch accumulation always stayed
+                            # unavailable with zero tokens.
+                            agent_usage = UsageAggregate(
+                                available=True,
+                                calls=agent_usage.calls + 1,
+                                models=(loop.model_id,),
+                                input_tokens=agent_usage.input_tokens + (chunk.usage.input_tokens or 0),
+                                output_tokens=agent_usage.output_tokens + (chunk.usage.output_tokens or 0),
+                                reasoning_tokens=agent_usage.reasoning_tokens + (chunk.usage.reasoning_tokens or 0),
+                                cache_read_tokens=agent_usage.cache_read_tokens + (chunk.usage.cache_read_tokens or 0),
+                                cache_creation_tokens=agent_usage.cache_creation_tokens + (chunk.usage.cache_creation_tokens or 0),
+                            )
                         elif chunk.type == "error":
                             run_status = RunStatus.FAILED
                             break
@@ -793,22 +801,31 @@ class RunService:
                 if tool_call_records:
                     result_tool_calls = tool_call_records
 
-                # Agent usage summed across attempts.
+                # Agent usage summed across attempts. Every assistant message
+                # carrying usage counts — a ReAct iteration calls the LLM many
+                # times per attempt, and only counting the last message
+                # under-reported multi-step runs (audit S2.2). Reruns replay
+                # history, so dedupe by message identity to avoid charging
+                # shared messages twice across attempts.
+                counted: set[int] = set()
                 for at in attempts:
-                    la = None
-                    for msg in reversed(at.messages):
-                        if msg.role == "assistant":
-                            la = msg
-                            break
-                    if la is not None and la.usage:
-                        agent_usage = UsageAggregate(
-                            available=True,
-                            calls=agent_usage.calls + 1,
-                            models=(loop.model_id,),
-                            input_tokens=agent_usage.input_tokens + (la.usage.input_tokens or 0),
-                            output_tokens=agent_usage.output_tokens + (la.usage.output_tokens or 0),
-                            reasoning_tokens=agent_usage.reasoning_tokens + (la.usage.reasoning_tokens or 0),
-                        )
+                    for msg in at.messages:
+                        if (
+                            msg.role == "assistant"
+                            and msg.usage
+                            and id(msg) not in counted
+                        ):
+                            counted.add(id(msg))
+                            agent_usage = UsageAggregate(
+                                available=True,
+                                calls=agent_usage.calls + 1,
+                                models=(loop.model_id,),
+                                input_tokens=agent_usage.input_tokens + (msg.usage.input_tokens or 0),
+                                output_tokens=agent_usage.output_tokens + (msg.usage.output_tokens or 0),
+                                reasoning_tokens=agent_usage.reasoning_tokens + (msg.usage.reasoning_tokens or 0),
+                                cache_read_tokens=agent_usage.cache_read_tokens + (msg.usage.cache_read_tokens or 0),
+                                cache_creation_tokens=agent_usage.cache_creation_tokens + (msg.usage.cache_creation_tokens or 0),
+                            )
 
         if rubric_status == TerminalRubricStatus.NOT_RUN and rubric_availability == RubricAvailability.ON:
             # Only claim satisfaction when the agent run completed (see the

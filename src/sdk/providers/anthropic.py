@@ -216,7 +216,7 @@ class AnthropicProvider(LLMProvider):
         # text the loop already appended (duplication).
         attempts = 0
         while True:
-            current_tool_calls: dict[int, dict[str, Any]] = {}
+            current_tool_calls: dict[int | str, dict[str, Any]] = {}
             emitted = False
             try:
                 async with client.stream("POST", f"{self.base_url}/v1/messages", json=payload) as response:
@@ -247,7 +247,7 @@ class AnthropicProvider(LLMProvider):
                 raise
 
     def _parse_sse_event(
-        self, data: dict[str, Any], current_tool_calls: dict[int, dict[str, Any]]
+        self, data: dict[str, Any], current_tool_calls: dict[int | str, dict[str, Any]]
     ) -> list[StreamChunk]:
         events: list[StreamChunk] = []
         event_type = data.get("type", "")
@@ -321,30 +321,39 @@ class AnthropicProvider(LLMProvider):
             msg_data = data.get("message", {})
             raw_usage = msg_data.get("usage")
             if raw_usage:
-                events.append(
-                    StreamChunk.usage_event(
-                        Usage(
-                            input_tokens=raw_usage.get("input_tokens", 0),
-                            output_tokens=raw_usage.get("output_tokens", 0),
-                            cache_read_tokens=raw_usage.get("cache_read_input_tokens", 0),
-                            cache_creation_tokens=raw_usage.get("cache_creation_input_tokens", 0),
-                        )
-                    )
-                )
+                # Stash input/cache usage; emitted once at message_stop so
+                # each stream yields a single cumulative usage chunk (the
+                # loop uses last-seen semantics per LLM call — audit S2.3).
+                current_tool_calls["_stream_usage"] = {
+                    "input_tokens": raw_usage.get("input_tokens", 0),
+                    "output_tokens": 0,
+                    "cache_read_tokens": raw_usage.get("cache_read_input_tokens", 0),
+                    "cache_creation_tokens": raw_usage.get("cache_creation_input_tokens", 0),
+                }
 
         elif event_type == "message_delta":
             delta_usage = data.get("usage", {})
-            if delta_usage:
+            if delta_usage and "_stream_usage" in current_tool_calls:
+                # Anthropic's message_delta.usage.output_tokens is CUMULATIVE
+                # for the whole request — record it as-is; emitted once at
+                # message_stop (audit S2.3).
+                current_tool_calls["_stream_usage"]["output_tokens"] = delta_usage.get("output_tokens", 0)
+
+        elif event_type == "message_stop":
+            pending = current_tool_calls.get("_stream_usage")
+            if pending:
+                # One merged, cumulative usage chunk per stream: input from
+                # message_start, output from the final message_delta.
                 events.append(
                     StreamChunk.usage_event(
                         Usage(
-                            input_tokens=0,
-                            output_tokens=delta_usage.get("output_tokens", 0),
+                            input_tokens=pending.get("input_tokens", 0),
+                            output_tokens=pending.get("output_tokens", 0),
+                            cache_read_tokens=pending.get("cache_read_tokens", 0),
+                            cache_creation_tokens=pending.get("cache_creation_tokens", 0),
                         )
                     )
                 )
-
-        elif event_type == "message_stop":
             events.append(StreamChunk.done())
 
         return events

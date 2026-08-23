@@ -318,7 +318,10 @@ class GeminiProvider(LLMProvider):
             events.append(StreamChunk.done())
 
         usage_meta = data.get("usageMetadata")
-        if usage_meta:
+        # Gemini reports cumulative totals on every chunk — emitting on each
+        # one would be summed by the loop into a ~50x overcount (audit S2.3).
+        # Report usage only on the terminal chunk (finishReason present).
+        if finish_reason and usage_meta:
             events.append(
                 StreamChunk.usage_event(
                     Usage(

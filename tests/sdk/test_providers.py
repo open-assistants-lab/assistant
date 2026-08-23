@@ -1515,7 +1515,7 @@ class TestAnthropicUsageExtraction:
         assert msg.usage.cache_read_tokens == 30
         assert msg.usage.cache_creation_tokens == 10
 
-    def test_sse_message_start_extracts_usage(self):
+    def test_sse_message_start_stashes_usage_for_terminal_emission(self):
         p = AnthropicProvider(api_key="test")
         data = {
             "type": "message_start",
@@ -1524,20 +1524,46 @@ class TestAnthropicUsageExtraction:
             },
         }
         events = p._parse_sse_event(data, {})
-        usage_events = [e for e in events if e.type == "usage"]
-        assert len(usage_events) == 1
-        assert usage_events[0].usage.input_tokens == 500
+        # Input usage is stashed at message_start and emitted only at
+        # message_stop — emitting per-chunk usage caused the loop to sum
+        # cumulative values and inflate totals (audit S2.3).
+        assert [e for e in events if e.type == "usage"] == []
 
-    def test_sse_message_delta_extracts_usage(self):
+    def test_sse_message_delta_alone_emits_no_usage(self):
         p = AnthropicProvider(api_key="test")
         data = {
             "type": "message_delta",
             "usage": {"output_tokens": 120},
         }
         events = p._parse_sse_event(data, {})
-        usage_events = [e for e in events if e.type == "usage"]
+        # No message_start preceded this delta, so there is no stream usage
+        # state and nothing to emit (output is cumulative, emitted at stop).
+        assert [e for e in events if e.type == "usage"] == []
+
+    def test_sse_usage_emitted_once_at_message_stop(self):
+        """One cumulative usage chunk per stream, merged at message_stop."""
+        p = AnthropicProvider(api_key="test")
+        calls: dict = {}
+        start = {
+            "type": "message_start",
+            "message": {"usage": {"input_tokens": 500, "output_tokens": 0}},
+        }
+        delta = {"type": "message_delta", "usage": {"output_tokens": 120}}
+        stop = {"type": "message_stop"}
+
+        events_start = p._parse_sse_event(start, calls)
+        events_delta = p._parse_sse_event(delta, calls)
+        events_stop = p._parse_sse_event(stop, calls)
+
+        assert [e for e in events_start if e.type == "usage"] == []
+        assert [e for e in events_delta if e.type == "usage"] == []
+        usage_events = [e for e in events_stop if e.type == "usage"]
         assert len(usage_events) == 1
+        # Input from message_start, cumulative output from message_delta —
+        # merged into a single terminal chunk (not summed across deltas).
+        assert usage_events[0].usage.input_tokens == 500
         assert usage_events[0].usage.output_tokens == 120
+        assert [e.type for e in events_stop] == ["usage", "done"]
 
     def test_parse_response_no_usage(self):
         p = AnthropicProvider(api_key="test")
@@ -1575,6 +1601,28 @@ class TestGeminiUsageExtraction:
                 "candidatesTokenCount": 40,
             },
         }
+        events = p._parse_stream_chunk(data, {})
+        usage_events = [e for e in events if e.type == "usage"]
+        assert len(usage_events) == 1
+        assert usage_events[0].usage.input_tokens == 100
+        assert usage_events[0].usage.output_tokens == 40
+    def test_stream_chunk_usage_gated_on_finish_reason(self):
+        """Gemini's usageMetadata is cumulative per request — emitting it on
+        every chunk would overcount when the loop sums usage (audit S2.3).
+        It is reported only on the terminal chunk (finishReason present)."""
+        p = GeminiProvider(api_key="test")
+        data = {
+            "candidates": [{"content": {"parts": [{"text": "Hi"}]}}],
+            "usageMetadata": {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 40,
+            },
+        }
+        # No finishReason yet → no usage event.
+        events = p._parse_stream_chunk(data, {})
+        assert [e for e in events if e.type == "usage"] == []
+        # Terminal chunk carries the cumulative usage exactly once.
+        data["candidates"][0]["finishReason"] = "STOP"
         events = p._parse_stream_chunk(data, {})
         usage_events = [e for e in events if e.type == "usage"]
         assert len(usage_events) == 1
