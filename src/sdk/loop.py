@@ -461,10 +461,9 @@ class AgentLoop:
         tc = self._with_runtime_context(tc)
 
         try:
-            if tool_def._coroutine:
-                result = await tool_def.ainvoke(tc.arguments)
-            else:
-                result = tool_def.invoke(tc.arguments)
+            # Always route through ainvoke: sync tool bodies are offloaded to
+            # a worker thread there (audit S1) instead of blocking the loop.
+            result = await tool_def.ainvoke(tc.arguments)
             logger.info(
                 f"sdk.tool_executed tool={tc.name} source={tool_def.function.__module__ if tool_def.function else 'unknown'}"
             )
@@ -536,10 +535,9 @@ class AgentLoop:
         tc = self._with_runtime_context(tc)
 
         try:
-            if td._coroutine:
-                result = await td.ainvoke(tc.arguments)
-            else:
-                result = td.invoke(tc.arguments)
+            # Same as _execute_tool: route through ainvoke so sync bodies
+            # (lazy-loaded custom/native tools) run off the event loop.
+            result = await td.ainvoke(tc.arguments)
             return ToolResult.from_raw(result)
         except Exception as e:
             return ToolResult(content=str(e), is_error=True)
