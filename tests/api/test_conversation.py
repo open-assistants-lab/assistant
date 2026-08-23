@@ -1436,3 +1436,64 @@ class TestSseHeartbeat:
         collected = [item async for item in _sse_with_heartbeat(fast_run(), interval=60.0)]
         assert collected == ["a", "b"]
         assert _HEARTBEAT_PING not in collected
+
+
+@pytest.mark.asyncio
+async def test_failed_stream_not_double_persisted(monkeypatch):
+    """B11: a failed run is persisted exactly once — by RunService.persist_run
+    (with run_id). The SSE failed-branch must NOT also run the fallback
+    collector, which wrote a second, run_id-less copy of the same rows."""
+    from src.http.models import MessageRequest
+    from src.http.routers import conversation as conversation_router
+    from src.sdk.messages import Message  # noqa: F401
+    from src.sdk.run_events import (
+        DoneData,
+        DoneEvent,
+        ToolResultData,
+        ToolResultEvent,
+    )
+    from src.sdk.run_models import (
+        RunResult,
+        RunStatus,
+        RunUsage,
+        VerificationOutcome,
+    )
+    from src.http.routers import conversation as conversation_router
+
+    store = FakeConversation()
+    collect_calls: list[dict] = []
+
+    async def fake_collect(*args, **kwargs):
+        collect_calls.append(kwargs)
+
+    common = dict(
+        event_id="e1", sequence=1, timestamp="2026-01-01T00:00:00Z",
+        session_id="default", run_id="r1", attempt=1,
+    )
+    run_result = RunResult(
+        run_id="r1", session_id="default", status=RunStatus.FAILED,
+        attempt=1, model="ollama:minimax-m2", response="",
+        usage=RunUsage(), verification=VerificationOutcome(),
+        persisted_at="2026-01-01T00:00:00Z",
+        final_message_id="m-1",
+    )
+
+    async def fake_execute_stream(self, **kwargs):
+        yield ToolResultEvent(
+            data=ToolResultData(block_id="b1", tool_call_id="c1", name="t1", status="failed", content="boom"),
+            **common,
+        )
+        yield DoneEvent(data=DoneData(result=run_result), **common)
+
+    monkeypatch.setattr(conversation_router, "_persist_collected_stream_state", fake_collect)
+    monkeypatch.setattr(conversation_router, "get_message_store", lambda *a, **kw: store)
+    monkeypatch.setattr(conversation_router.RunService, "execute_stream", fake_execute_stream)
+
+    response = await conversation_router.message_stream(
+        MessageRequest(message="go", user_id="u")
+    )
+    output = "".join([c async for c in response.body_iterator])
+
+    assert '"status": "failed"' in output
+    # Exactly one persistence authority: NOT the router fallback.
+    assert collect_calls == [], "failed-run fallback collector fired (duplicate rows)"

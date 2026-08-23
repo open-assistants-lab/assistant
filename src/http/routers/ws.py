@@ -228,17 +228,9 @@ async def _run_agent_stream(
             elif event_type == "done":
                 result = event_data.get("result", {})
                 if result.get("status") == "failed":
-                    # A failed run must not be persisted as a success; keep
-                    # whatever partial state streamed before the failure.
-                    _persist_collected_stream_state(
-                        conversation,
-                        session_id=session_id,
-                        ai_content_parts=ai_content_parts,
-                        reasoning_parts=reasoning_parts,
-                        tool_metadata_list=tool_metadata_list,
-                        tool_results=tool_results,
-                    )
-                    persisted = True
+                    # B11: RunService.persist_run already persisted this run's
+                    # partial state WITH run_id — the fallback collector here
+                    # wrote a duplicate, run_id-less copy. Do nothing.
                     await websocket.send_json(
                         ErrorMessage(message="Agent run failed", code="AGENT_ERROR").model_dump()
                         | {"workspace_id": workspace_id}

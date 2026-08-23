@@ -911,16 +911,11 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                     return
 
                 if run_failed:
-                    # A failed run must not persist the success fallback; keep
-                    # whatever partial state streamed before the failure.
-                    _persist_collected_stream_state(
-                        conversation,
-                        session_id=session_id,
-                        ai_content_parts=ai_content_parts,
-                        reasoning_parts=reasoning_parts,
-                        tool_metadata_list=tool_metadata_list,
-                        tool_results=tool_results,
-                    )
+                    # B11: RunService.persist_run already persisted this run's
+                    # partial state WITH run_id. The legacy fallback collector
+                    # here wrote a second, run_id-less copy of the same rows
+                    # (duplicate tool/reasoning/assistant rows in turns). Do
+                    # nothing — the done event above already reached the client.
                     return
 
                 response = "".join(ai_content_parts) if ai_content_parts else ""

@@ -715,6 +715,9 @@ class RunService:
                 }
 
             _t_persist = time.monotonic()
+            # Audit B11: persist runs unconditionally here (WITH run_id) —
+            # including failures — so partial state keeps its run grouping.
+            # The routers' failure branches must NOT write a second copy.
             persisted_id = self._message_store.persist_run(
                 run_id=run_id,
                 session_id=session_id,
