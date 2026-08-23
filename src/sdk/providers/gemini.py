@@ -58,6 +58,13 @@ class GeminiProvider(LLMProvider):
             )
         return self._http_client
 
+    async def aclose(self) -> None:
+        """Close the lazily-created httpx client, if any."""
+        client = self._http_client
+        if client is not None and not client.is_closed:
+            await client.aclose()
+        self._http_client = None
+
     def _messages_to_contents(self, messages: list[Message]) -> list[dict[str, Any]]:
         contents = []
         for m in messages:

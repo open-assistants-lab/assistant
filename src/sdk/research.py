@@ -81,9 +81,9 @@ class PromptTarget(ResearchTarget):
         try:
             from src.sdk.loop import AgentLoop, RunConfig
             from src.sdk.messages import Message
-            from src.sdk.providers.factory import create_model_from_config
+            from src.sdk.providers.factory import get_cached_model_provider
 
-            provider = create_model_from_config()
+            provider = get_cached_model_provider()
             loop = AgentLoop(
                 provider=provider,
                 tools=self._tools,

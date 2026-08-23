@@ -6,7 +6,12 @@ dynamically. Falls back to hardcoded defaults for well-known providers.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import os
+import threading
+import weakref
+from collections import OrderedDict
 from collections.abc import Mapping
 from typing import Any
 
@@ -20,6 +25,164 @@ from src.sdk.providers.ollama import OllamaCloud
 from src.sdk.providers.openai import OpenAIProvider
 
 logger = get_logger()
+
+# ---------------------------------------------------------------------------
+# Keyed provider cache (audit S3)
+#
+# Providers used to be rebuilt on nearly every request — each construction
+# creates a fresh httpx/AsyncOpenAI client with a cold TLS pool, defeating
+# connection reuse. The cache below reuses one provider per (effective
+# constructor inputs) so repeated calls share the underlying client.
+#
+# Scoping: httpx clients are bound to the event loop that created them, so
+# the cache is keyed per running loop (WeakKeyDictionary — entries vanish
+# with their loop). A thread-id fallback covers sync callers that run with
+# no running loop (unit tests, rare sync paths).
+# ---------------------------------------------------------------------------
+
+_PROVIDER_CACHE_LIMIT = 64
+
+# {event loop -> OrderedDict[(key tuple) -> LLMProvider]}
+_loop_provider_caches: weakref.WeakKeyDictionary[Any, OrderedDict[tuple[Any, ...], LLMProvider]] = (
+    weakref.WeakKeyDictionary()
+)
+# {thread id -> OrderedDict[(key tuple) -> LLMProvider]} — sync/no-loop fallback.
+_thread_provider_caches: dict[int, OrderedDict[tuple[Any, ...], LLMProvider]] = {}
+_provider_cache_lock = threading.Lock()
+# Strong references to in-flight eviction close tasks so they are not GC'd
+# mid-close (asyncio keeps only weak references to tasks by default).
+_eviction_close_tasks: set[asyncio.Task[Any]] = set()
+
+
+
+def _freeze(value: Any) -> Any:
+    """Normalize kwargs into a deterministic, hashable structure."""
+    if isinstance(value, dict):
+        return tuple(sorted((str(k), _freeze(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(v) for v in value)
+    return value
+
+
+def _provider_cache_key(
+    provider_type: str,
+    model: str | None,
+    api_key: str | None,
+    base_url: str | None,
+    kwargs: dict[str, Any],
+) -> tuple[Any, ...]:
+    """Hash every constructor-affecting input into one stable key.
+
+    Distinct effective inputs (provider type, model, API key, base URL,
+    extra kwargs such as timeouts/options) must never collide; identical
+    inputs must hash identically. The API key is hashed so plaintext keys
+    never live in the cache key.
+    """
+    api_key_hash = hashlib.sha256((api_key or "").encode("utf-8")).hexdigest()[:12]
+    return (
+        provider_type.lower().strip(),
+        model,
+        api_key_hash,
+        base_url,
+        _freeze(kwargs),
+    )
+
+
+def _get_caches() -> tuple[Any, OrderedDict[tuple[Any, ...], LLMProvider]]:
+    """Return (owner, cache) for the current loop or (loop-less) thread."""
+    try:
+        owner: Any = asyncio.get_running_loop()
+    except RuntimeError:
+        owner = threading.current_thread().ident
+        with _provider_cache_lock:
+            cache = _thread_provider_caches.get(owner)
+            if cache is None:
+                cache = OrderedDict()
+                _thread_provider_caches[owner] = cache
+        return owner, cache
+    cache = _loop_provider_caches.get(owner)
+    if cache is None:
+        cache = OrderedDict()
+        _loop_provider_caches[owner] = cache
+    return owner, cache
+
+
+def _evict_overflow(owner: Any, cache: OrderedDict[tuple[Any, ...], LLMProvider]) -> None:
+    """Evict LRU entries past the cap, closing their clients async when possible."""
+    while len(cache) > _PROVIDER_CACHE_LIMIT:
+        _, evicted = cache.popitem(last=False)
+        close = getattr(evicted, "aclose", None)
+        if close is None:
+            continue
+        # Close on the running loop when one is live; otherwise the evicted
+        # client is dropped and released by GC (rare loop-less sync path).
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and not loop.is_closed():
+            task = loop.create_task(close())
+            _eviction_close_tasks.add(task)
+            task.add_done_callback(_eviction_close_tasks.discard)
+
+
+async def close_all_providers() -> None:
+    """Close every cached provider's HTTP client and clear all caches.
+
+    Called from the HTTP server shutdown (main.py lifespan) so sockets are
+    released deterministically instead of waiting on GC.
+    """
+    caches = list(_loop_provider_caches.values())
+    with _provider_cache_lock:
+        caches += list(_thread_provider_caches.values())
+        _thread_provider_caches.clear()
+    _loop_provider_caches.clear()
+    for cache in caches:
+        for provider in cache.values():
+            close = getattr(provider, "aclose", None)
+            if close is None:
+                continue
+            try:
+                await close()
+            except Exception as exc:  # noqa: BLE001 — shutdown must never raise
+                logger.warning(
+                    "provider.close_failed",
+                    {"error_type": type(exc).__name__},
+                    user_id="system",
+                )
+        cache.clear()
+
+
+def get_cached_provider(
+    provider_type: str,
+    model: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    **kwargs: Any,
+) -> LLMProvider:
+    """Return a provider for the effective constructor inputs, reusing a
+    cached instance per event loop when the inputs match (audit S3).
+
+    The cache key covers every constructor-affecting input (provider type,
+    model, hashed API key, base URL, extra kwargs) so distinct effective
+    inputs never collide and identical ones share one HTTP client. The
+    cache is per event loop because httpx/AsyncOpenAI clients are bound to
+    their creating loop. Works in sync callers too (loop-less fallback).
+    """
+    owner, cache = _get_caches()
+    key = _provider_cache_key(provider_type, model, api_key, base_url, kwargs)
+    provider = cache.get(key)
+    if provider is not None:
+        cache.move_to_end(key)
+        return provider
+    provider = create_provider(
+        provider_type, model=model, api_key=api_key, base_url=base_url, **kwargs
+    )
+    cache[key] = provider
+    cache.move_to_end(key)
+    _evict_overflow(owner, cache)
+    return provider
+
 
 _PROVIDER_CLASSES: dict[str, type[LLMProvider]] = {
     "openai": OpenAIProvider,
@@ -146,10 +309,16 @@ def _registry_ref_parts(model_ref: str) -> tuple[str, str, str] | None:
     return None
 
 
-def create_provider_from_registry_model(
+def _resolve_registry_provider(
     model_ref: str, api_key: str | None = None
-) -> LLMProvider | None:
-    """Create a provider from an exact models.dev provider/model reference."""
+) -> tuple[str, str, str | None, str | None] | None:
+    """Resolve a models.dev ref to effective constructor inputs.
+
+    Returns (provider_id, model_name, base_url, resolved_key) when the ref
+    resolves to a known registry provider, else None. Shared by the uncached
+    constructor and the keyed cache so the cache key sees the same effective
+    base_url/key the constructor would use.
+    """
     parts = _registry_ref_parts(model_ref)
     if parts is None:
         return None
@@ -173,6 +342,18 @@ def create_provider_from_registry_model(
     if provider_id == "ollama-cloud" and base_url and base_url.rstrip("/").endswith("/v1"):
         base_url = base_url.rstrip("/")[:-3]
 
+    return provider_id, model_name, base_url, resolved_key
+
+
+def create_provider_from_registry_model(
+    model_ref: str, api_key: str | None = None
+) -> LLMProvider | None:
+    """Create a provider from an exact models.dev provider/model reference."""
+    resolved = _resolve_registry_provider(model_ref, api_key)
+    if resolved is None:
+        return None
+
+    provider_id, model_name, base_url, resolved_key = resolved
     return create_provider(provider_id, model=model_name, api_key=resolved_key, base_url=base_url)
 
 
@@ -244,11 +425,19 @@ def _load_stored_default_model(user_id: str = "default_user") -> str | None:
     return saved.default_model if saved is not None else None
 
 
-def create_model_from_config(
-    config_model: str | None = None,
-    provider_keys: dict[str, str] | None = None,
-    user_id: str = "default_user",
-) -> LLMProvider:
+def _resolve_config_model_inputs(
+    config_model: str | None,
+    provider_keys: dict[str, str] | None,
+    user_id: str,
+) -> tuple[str, str, str, str | None]:
+    """Resolve the effective (provider_type, model_name, normalized_model_ref, resolved_key).
+
+    Shared by the uncached create_model_from_config and the cached
+    get_cached_model_provider so their resolution can never drift. Each
+    caller then performs its own registry step: the uncached path calls
+    create_provider_from_registry_model (patchable), the cached path calls
+    _resolve_registry_provider to key the cache.
+    """
     from src.config import get_settings
 
     settings = get_settings()
@@ -270,15 +459,14 @@ def create_model_from_config(
             settings_loaded = True
         resolved_key = _provider_key(saved.provider_keys, provider_type) if saved else None
 
-    registry_provider = create_provider_from_registry_model(
-        normalized_model_ref, api_key=resolved_key
-    )
-    if registry_provider is not None:
-        provider = registry_provider
-    else:
-        provider = create_provider(provider_type, model=model_name, api_key=resolved_key)
+    return provider_type, model_name, normalized_model_ref, resolved_key
 
-    # Wrap with Langfuse if enabled
+
+def _maybe_wrap_langfuse(provider: LLMProvider) -> LLMProvider:
+    """Apply the Langfuse tracing wrapper when configured (shared by both
+    constructor paths so cached and uncached providers behave identically)."""
+    from src.config import get_settings
+
     lf_settings = get_settings()
     if (
         lf_settings.langfuse.enabled
@@ -294,8 +482,66 @@ def create_model_from_config(
             )
         if LangfuseTracer.is_enabled():
             provider = LangfuseTracer.wrap_provider(provider)
-
     return provider
+
+
+def create_model_from_config(
+    config_model: str | None = None,
+    provider_keys: dict[str, str] | None = None,
+    user_id: str = "default_user",
+) -> LLMProvider:
+    """Create a provider from model config — uncached.
+
+    Request paths should prefer get_cached_model_provider() so identical
+    effective inputs reuse one HTTP client (audit S3). This uncached form
+    is retained for short-lived consumers (rubric graders) that close their
+    provider explicitly.
+    """
+    provider_type, model_name, normalized_model_ref, resolved_key = _resolve_config_model_inputs(
+        config_model, provider_keys, user_id
+    )
+
+    registry_provider = create_provider_from_registry_model(
+        normalized_model_ref, api_key=resolved_key
+    )
+    if registry_provider is not None:
+        provider = registry_provider
+    else:
+        provider = create_provider(provider_type, model=model_name, api_key=resolved_key)
+
+    return _maybe_wrap_langfuse(provider)
+
+
+def get_cached_model_provider(
+    config_model: str | None = None,
+    provider_keys: dict[str, str] | None = None,
+    user_id: str = "default_user",
+) -> LLMProvider:
+    """Model-config resolver backed by the keyed provider cache (audit S3).
+
+    Resolves the same effective inputs create_model_from_config would and
+    routes construction through get_cached_provider, so repeated calls with
+    the same model/key/base_url share one underlying HTTP client. The
+    Langfuse wrapper (when enabled) is applied AFTER the cache lookup: the
+    wrapper is thin and stateless, and keeping the raw provider cached
+    preserves client reuse.
+    """
+    provider_type, model_name, normalized_model_ref, resolved_key = _resolve_config_model_inputs(
+        config_model, provider_keys, user_id
+    )
+    registry = _resolve_registry_provider(normalized_model_ref, api_key=resolved_key)
+    if registry is not None:
+        registry_provider_type, registry_model_name, base_url, registry_key = registry
+        provider = get_cached_provider(
+            registry_provider_type,
+            model=registry_model_name,
+            api_key=registry_key,
+            base_url=base_url,
+        )
+    else:
+        provider = get_cached_provider(provider_type, model=model_name, api_key=resolved_key)
+    return _maybe_wrap_langfuse(provider)
+
 
 
 def _parse_model_string(model_str: str) -> tuple[str, str]:

@@ -39,7 +39,7 @@ from src.sdk.loop import AgentLoop
 from src.sdk.messages import Message, StreamChunk
 from src.sdk.middleware_summarization import SummarizationMiddleware
 from src.sdk.native_tools import get_native_tools
-from src.sdk.providers.factory import create_model_from_config
+from src.sdk.providers.factory import get_cached_model_provider
 from src.sdk.tools import ToolAnnotations, ToolDefinition
 from src.sdk.user_prompt import load_user_prompt
 from src.storage.paths import DataPaths
@@ -331,7 +331,7 @@ async def create_sdk_loop(
     t0 = time.monotonic()
     settings = get_settings()
 
-    provider = create_model_from_config(model, provider_keys=provider_keys, user_id=user_id)
+    provider = get_cached_model_provider(model, provider_keys=provider_keys, user_id=user_id)
     provider_model: str = cast(
         str,
         getattr(provider, "model", None)
@@ -1045,122 +1045,131 @@ async def _verification_engine(
     # of leaving verification "not_run". Reset per engine run.
     loop._rubric_started = False  # type: ignore[attr-defined]
 
-    while True:
-        if is_cancelled is not None and is_cancelled():
-            terminal_status = "cancelled"
-            yield AttemptItem(
-                attempt, input_messages, None, None, terminal_status,
-                rubric_available, max_attempts, grader_model_id,
+    try:
+        while True:
+            if is_cancelled is not None and is_cancelled():
+                terminal_status = "cancelled"
+                yield AttemptItem(
+                    attempt, input_messages, None, None, terminal_status,
+                    rubric_available, max_attempts, grader_model_id,
+                )
+                break
+
+            # 1. Run one attempt.
+            result_messages: list[Message] = []
+            if stream:
+                async for chunk in loop.run_stream(input_messages):
+                    yield ChunkItem(attempt, chunk)
+                result_messages = list(loop.state.messages) if loop.state else []
+            else:
+                result_messages = await loop.run(input_messages)
+
+            # 2. Drain middleware-queued rerun events from this run.
+            fired = await _fire_pending_reruns(loop, user_id, session_id, model)
+            if fired:
+                input_messages = fired[-1]
+                attempt += 1
+                continue
+
+            # 3. Grade when verification is active.
+            if rubric_mw is None:
+                terminal_status = "off"
+                yield AttemptItem(
+                    attempt, result_messages, None, None, terminal_status,
+                    rubric_available, max_attempts, grader_model_id,
+                )
+                break
+
+            # No assistant output means the attempt failed — verification never
+            # ran, so no grading phase starts (no dangling rubric_start event).
+            last_assistant = _last_assistant_message(result_messages)
+            if last_assistant is None:
+                terminal_status = "failed"
+                yield AttemptItem(
+                    attempt, result_messages, None, None, terminal_status,
+                    rubric_available, max_attempts, grader_model_id,
+                )
+                break
+
+            if is_cancelled is not None and is_cancelled():
+                terminal_status = "cancelled"
+                yield AttemptItem(
+                    attempt, result_messages, None, None, terminal_status,
+                    rubric_available, max_attempts, grader_model_id,
+                )
+                break
+
+            yield GradeStartItem(attempt, max_attempts)
+            loop._rubric_started = True  # type: ignore[attr-defined]
+
+            evaluation = await rubric_mw.grade(
+                list(input_messages) + [last_assistant], attempt - 1
             )
-            break
+            evaluations.append(evaluation)
+            raw_result = evaluation["result"]
+            eval_result = (
+                _EvalResult.INVALID_RUBRIC
+                if raw_result == "failed"
+                else _EvalResult(raw_result)
+            )
 
-        # 1. Run one attempt.
-        result_messages: list[Message] = []
-        if stream:
-            async for chunk in loop.run_stream(input_messages):
-                yield ChunkItem(attempt, chunk)
-            result_messages = list(loop.state.messages) if loop.state else []
-        else:
-            result_messages = await loop.run(input_messages)
+            if eval_result in (
+                _EvalResult.SATISFIED,
+                _EvalResult.INVALID_RUBRIC,
+                _EvalResult.GRADER_ERROR,
+            ) or attempt >= max_attempts:
+                terminal_status = {
+                    _EvalResult.SATISFIED: "satisfied",
+                    _EvalResult.INVALID_RUBRIC: "invalid_rubric",
+                    _EvalResult.GRADER_ERROR: "grader_error",
+                }.get(eval_result, "max_attempts_reached")
+                yield GradeEndItem(attempt, evaluation, None, True, max_attempts)
+                yield AttemptItem(
+                    attempt, result_messages, evaluation, None, terminal_status,
+                    rubric_available, max_attempts, grader_model_id,
+                )
+                break
 
-        # 2. Drain middleware-queued rerun events from this run.
-        fired = await _fire_pending_reruns(loop, user_id, session_id, model)
-        if fired:
+            feedback = _mw._revision_prompt(evaluation)
+            yield GradeEndItem(attempt, evaluation, feedback, False, max_attempts)
+
+            # 4. Producer: queue the rerun event for the registry.
+            _mw.queue_rerun_event(
+                loop,
+                feedback,
+                user_id,
+                session_id,
+                model,
+                attempt,
+                max_attempts,
+                input_messages,
+                stream=stream,
+            )
+
+            # 5. Consumer: fire queued events; the handler appends the feedback.
+            fired = await _fire_pending_reruns(loop, user_id, session_id, model)
+            if not fired:
+                terminal_status = "max_attempts_reached"
+                yield AttemptItem(
+                    attempt, result_messages, evaluation, None, terminal_status,
+                    rubric_available, max_attempts, grader_model_id,
+                )
+                break
             input_messages = fired[-1]
+            yield AttemptItem(
+                attempt, result_messages, evaluation, feedback, "needs_revision",
+                rubric_available, max_attempts, grader_model_id,
+            )
             attempt += 1
-            continue
 
-        # 3. Grade when verification is active.
-        if rubric_mw is None:
-            terminal_status = "off"
-            yield AttemptItem(
-                attempt, result_messages, None, None, terminal_status,
-                rubric_available, max_attempts, grader_model_id,
-            )
-            break
-
-        # No assistant output means the attempt failed — verification never
-        # ran, so no grading phase starts (no dangling rubric_start event).
-        last_assistant = _last_assistant_message(result_messages)
-        if last_assistant is None:
-            terminal_status = "failed"
-            yield AttemptItem(
-                attempt, result_messages, None, None, terminal_status,
-                rubric_available, max_attempts, grader_model_id,
-            )
-            break
-
-        if is_cancelled is not None and is_cancelled():
-            terminal_status = "cancelled"
-            yield AttemptItem(
-                attempt, result_messages, None, None, terminal_status,
-                rubric_available, max_attempts, grader_model_id,
-            )
-            break
-
-        yield GradeStartItem(attempt, max_attempts)
-        loop._rubric_started = True  # type: ignore[attr-defined]
-
-        evaluation = await rubric_mw.grade(
-            list(input_messages) + [last_assistant], attempt - 1
-        )
-        evaluations.append(evaluation)
-        raw_result = evaluation["result"]
-        eval_result = (
-            _EvalResult.INVALID_RUBRIC
-            if raw_result == "failed"
-            else _EvalResult(raw_result)
-        )
-
-        if eval_result in (
-            _EvalResult.SATISFIED,
-            _EvalResult.INVALID_RUBRIC,
-            _EvalResult.GRADER_ERROR,
-        ) or attempt >= max_attempts:
-            terminal_status = {
-                _EvalResult.SATISFIED: "satisfied",
-                _EvalResult.INVALID_RUBRIC: "invalid_rubric",
-                _EvalResult.GRADER_ERROR: "grader_error",
-            }.get(eval_result, "max_attempts_reached")
-            yield GradeEndItem(attempt, evaluation, None, True, max_attempts)
-            yield AttemptItem(
-                attempt, result_messages, evaluation, None, terminal_status,
-                rubric_available, max_attempts, grader_model_id,
-            )
-            break
-
-        feedback = _mw._revision_prompt(evaluation)
-        yield GradeEndItem(attempt, evaluation, feedback, False, max_attempts)
-
-        # 4. Producer: queue the rerun event for the registry.
-        _mw.queue_rerun_event(
-            loop,
-            feedback,
-            user_id,
-            session_id,
-            model,
-            attempt,
-            max_attempts,
-            input_messages,
-            stream=stream,
-        )
-
-        # 5. Consumer: fire queued events; the handler appends the feedback.
-        fired = await _fire_pending_reruns(loop, user_id, session_id, model)
-        if not fired:
-            terminal_status = "max_attempts_reached"
-            yield AttemptItem(
-                attempt, result_messages, evaluation, None, terminal_status,
-                rubric_available, max_attempts, grader_model_id,
-            )
-            break
-        input_messages = fired[-1]
-        yield AttemptItem(
-            attempt, result_messages, evaluation, feedback, "needs_revision",
-            rubric_available, max_attempts, grader_model_id,
-        )
-        attempt += 1
-
+    finally:
+        # Grader providers are created fresh per run (audit S3 keeps them
+        # out of the keyed cache) — close them deterministically.
+        if rubric_mw is not None:
+            try:
+                await rubric_mw.aclose()
+            except Exception:
+                pass
     # Store the verdict for the runner's finally block (loop._verification_verdict).
     if loop.state is not None and hasattr(loop.state, "extra"):
         loop.state.extra["_rubric_status"] = terminal_status

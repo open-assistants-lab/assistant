@@ -97,6 +97,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         pass
 
+    # Close cached provider HTTP clients (audit S3) so sockets are released
+    # deterministically instead of waiting on GC.
+    try:
+        from src.sdk.providers.factory import close_all_providers
+
+        await close_all_providers()
+    except Exception:
+        pass
+
 
 app = FastAPI(
     title="Assistant",

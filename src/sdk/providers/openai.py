@@ -65,6 +65,10 @@ class OpenAIProvider(LLMProvider):
             options.update(provider_options.get(self.provider_id, {}))
         return options
 
+    async def aclose(self) -> None:
+        """Close the underlying AsyncOpenAI client (releases its httpx pool)."""
+        await self._client.close()
+
     async def chat(
         self,
         messages: list[Message],

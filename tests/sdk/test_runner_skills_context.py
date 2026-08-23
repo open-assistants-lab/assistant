@@ -247,7 +247,7 @@ async def test_create_sdk_loop_uses_user_level_runtime_context(monkeypatch, tmp_
 
     with (
         patch("src.sdk.runner.get_settings") as mock_settings,
-        patch("src.sdk.runner.create_model_from_config") as mock_create_provider,
+        patch("src.sdk.runner.get_cached_model_provider") as mock_create_provider,
         patch(
             "src.sdk.runner.get_native_tools",
             return_value=[ToolDefinition(name="demo_lookup", description="Lookup", parameters={}, function=lambda: "ok")],

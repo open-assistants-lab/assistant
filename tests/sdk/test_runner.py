@@ -56,7 +56,7 @@ def loop_factory(monkeypatch):
         provider = AsyncMock()
         provider.provider_id = provider_id
         provider.model = provider_model
-        monkeypatch.setattr(runner, "create_model_from_config", lambda *args, **kwargs: provider)
+        monkeypatch.setattr(runner, "get_cached_model_provider", lambda *args, **kwargs: provider)
         return await runner.create_sdk_loop(user_id=user_id, session_id=session_id)
 
     return create
@@ -287,10 +287,10 @@ async def test_create_sdk_loop_uses_canonical_provider_model_id(
 @pytest.mark.asyncio
 async def test_create_sdk_loop_uses_actual_local_ollama_identity(loop_factory, monkeypatch):
     from src.sdk import runner
-    from src.sdk.providers.factory import create_model_from_config
+    from src.sdk.providers.factory import get_cached_model_provider
     from src.sdk.providers.openai import OpenAIProvider
 
-    monkeypatch.setattr(runner, "create_model_from_config", create_model_from_config)
+    monkeypatch.setattr(runner, "get_cached_model_provider", get_cached_model_provider)
     monkeypatch.setattr(
         "src.sdk.providers.factory.create_provider_from_registry_model",
         lambda *args, **kwargs: None,
@@ -547,7 +547,7 @@ async def test_create_sdk_loop_has_no_summary_middleware_when_disabled():
 
     with (
         patch("src.sdk.runner.get_settings") as mock_settings,
-        patch("src.sdk.runner.create_model_from_config") as mock_create_provider,
+        patch("src.sdk.runner.get_cached_model_provider") as mock_create_provider,
         patch("src.sdk.runner.get_native_tools", return_value=[]),
         patch("src.sdk.runner._seed_default_workspace"),
         patch("src.sdk.runner._get_system_prompt", return_value="You are a test assistant."),
@@ -579,7 +579,7 @@ async def test_create_sdk_loop_passes_user_id_to_provider_factory():
 
     with (
         patch("src.sdk.runner.get_settings") as mock_settings,
-        patch("src.sdk.runner.create_model_from_config") as mock_create_provider,
+        patch("src.sdk.runner.get_cached_model_provider") as mock_create_provider,
         patch("src.sdk.runner.get_native_tools", return_value=[]),
         patch("src.sdk.runner._seed_default_workspace"),
         patch("src.sdk.runner._get_system_prompt", return_value="You are a test assistant."),
@@ -603,7 +603,7 @@ async def test_create_sdk_loop_passes_explicit_model_to_provider_factory():
 
     with (
         patch("src.sdk.runner.get_settings") as mock_settings,
-        patch("src.sdk.runner.create_model_from_config") as mock_create_provider,
+        patch("src.sdk.runner.get_cached_model_provider") as mock_create_provider,
         patch("src.sdk.runner.get_native_tools", return_value=[]),
         patch("src.sdk.runner._seed_default_workspace"),
         patch("src.sdk.runner._get_system_prompt", return_value="You are a test assistant."),
@@ -639,7 +639,7 @@ async def test_run_sdk_agent_stream_triggers_summarization():
 
     with (
         patch("src.sdk.runner.get_settings") as mock_settings,
-        patch("src.sdk.runner.create_model_from_config") as mock_create_provider,
+        patch("src.sdk.runner.get_cached_model_provider") as mock_create_provider,
         patch("src.sdk.runner.get_native_tools", return_value=[]),
         patch("src.sdk.runner._seed_default_workspace"),
         patch("src.sdk.runner._get_system_prompt", return_value="You are test assistant."),
@@ -741,7 +741,7 @@ async def test_create_sdk_loop_does_not_import_item_scopes(monkeypatch):
 
     with (
         patch("src.sdk.runner.get_settings") as mock_settings,
-        patch("src.sdk.runner.create_model_from_config") as mock_create_provider,
+        patch("src.sdk.runner.get_cached_model_provider") as mock_create_provider,
         patch(
             "src.sdk.runner.get_native_tools",
             return_value=[
@@ -1027,7 +1027,7 @@ async def test_create_sdk_loop_excludes_disabled_tools_from_core_and_index(monke
 
     with (
         patch("src.sdk.runner.get_settings") as mock_settings,
-        patch("src.sdk.runner.create_model_from_config") as mock_create_provider,
+        patch("src.sdk.runner.get_cached_model_provider") as mock_create_provider,
         patch(
             "src.sdk.runner.get_native_tools",
             return_value=[
@@ -1102,7 +1102,7 @@ async def test_create_sdk_loop_rebuilds_tool_index_when_capabilities_change(monk
 
     with (
         patch("src.sdk.runner.get_settings") as mock_settings,
-        patch("src.sdk.runner.create_model_from_config") as mock_create_provider,
+        patch("src.sdk.runner.get_cached_model_provider") as mock_create_provider,
         patch(
             "src.sdk.runner.get_native_tools",
             return_value=[
@@ -1274,7 +1274,7 @@ async def test_create_sdk_loop_uses_saved_summarization_model(monkeypatch):
     provider = AsyncMock()
     provider.provider_id = "openai"
     provider.model = "gpt-4.1"
-    monkeypatch.setattr(runner, "create_model_from_config", lambda *args, **kwargs: provider)
+    monkeypatch.setattr(runner, "get_cached_model_provider", lambda *args, **kwargs: provider)
 
     captured = {}
 

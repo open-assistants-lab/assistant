@@ -483,7 +483,7 @@ async def _summarize_title(
     When existing_titles is provided, the prompt asks the model to avoid
     reusing any of them so the sidebar never shows duplicate chat titles.
     """
-    from src.sdk.providers.factory import create_model_from_config
+    from src.sdk.providers.factory import get_cached_model_provider
 
     settings = get_settings()
     # User-configured title model wins over the host config; falls back to
@@ -496,7 +496,7 @@ async def _summarize_title(
         if saved is not None and saved.title_model
         else (settings.agent.title_model or settings.agent.model)
     )
-    provider = create_model_from_config(model, user_id=user_id)
+    provider = get_cached_model_provider(model, user_id=user_id)
 
     prompt = (
         "Summarize the following conversation in 3-5 words. "
