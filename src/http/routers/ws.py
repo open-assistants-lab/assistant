@@ -23,6 +23,7 @@ from src.app_logging import get_logger
 from src.config.settings import get_settings
 from src.http.auth import verify_key
 from src.http.routers.conversation import (
+    _execute_approved_tool,
     _extract_surfaces,
     _persist_collected_stream_state,
     _strip_canvas_fences,
@@ -523,8 +524,6 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     # conversation._execute_approved_tool (re-proposals never
                     # match the approved call, so the old instruction-only
                     # flow looped on HITL interrupts).
-                    from src.http.routers.conversation import _execute_approved_tool
-
                     retry_msgs.extend(
                         await _execute_approved_tool(
                             loop,
@@ -594,9 +593,10 @@ async def ws_conversation(websocket: WebSocket) -> None:
                         provider_keys=run_provider_keys,
                     )
                     edited_args = msg.edited_args or {}
+                    approved_call_id = pending_container[0].get("call_id") or msg.call_id
                     loop.approve_tool_call(
                         ToolCall(
-                            id=pending_container[0].get("call_id") or msg.call_id,
+                            id=approved_call_id,
                             name=tool_name,
                             arguments=edited_args,
                         )
@@ -608,7 +608,18 @@ async def ws_conversation(websocket: WebSocket) -> None:
                             session_id=run_session_id, limit=50
                         )
                     )
-                    retry_msgs.append(Message.user(f"approved: proceed with {tool_name} with edited args: {msg.edited_args}"))
+                    # Execute the approved tool directly — the instruction-only
+                    # retry (the old approved-nudge message) looped forever because
+                    # re-proposals never match the approved call (see
+                    # conversation._execute_approved_tool).
+                    retry_msgs.extend(
+                        await _execute_approved_tool(
+                            loop,
+                            tool_name,
+                            edited_args,
+                            approved_call_id or f"call_{secrets.token_hex(4)}",
+                        )
+                    )
                     await _run_agent_stream(
                         websocket, user_id, retry_msgs, conversation, run_session_id,
                         pending_ref=pending_container, workspace_id=workspace_id,
@@ -817,21 +828,31 @@ async def ws_conversation(websocket: WebSocket) -> None:
                         model=run_model,
                         provider_keys=run_provider_keys,
                     )
+                    approved_args = pending_container[0].get("args") or {}
+                    approved_call_id = pending_container[0].get("call_id") or call_id
                     loop.approve_tool_call(
                         ToolCall(
-                            id=pending_container[0].get("call_id") or call_id,
+                            id=approved_call_id,
                             name=tool_name,
-                            arguments=pending_container[0].get("args") or {},
+                            arguments=approved_args,
                         )
                     )
                     pending_container[0] = None
-                    # Retry with approval context
+                    # Execute the approved tool directly instead of the
+                    # instruction-only retry that looped forever (B4).
                     retry_msgs = _messages_from_conversation(
                         conversation.get_messages_with_summary(
                             session_id=run_session_id, limit=50
                         )
                     )
-                    retry_msgs.append(Message.user(f"approve: please proceed with {tool_name}"))
+                    retry_msgs.extend(
+                        await _execute_approved_tool(
+                            loop,
+                            tool_name,
+                            approved_args,
+                            approved_call_id or f"call_{secrets.token_hex(4)}",
+                        )
+                    )
                     await _run_agent_stream(
                         websocket, user_id, retry_msgs, conversation, run_session_id,
                         pending_ref=pending_container, workspace_id=workspace_id,
@@ -848,6 +869,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                         )
                         continue
                     edited_args = data.get("edited_args") or {}
+                    approved_call_id = pending_container[0].get("call_id") or call_id
                     run_session_id, run_model, run_provider_keys = _pending_runtime_context(
                         pending_container[0], session_id, msg_model, msg_provider_keys
                     )
@@ -860,7 +882,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     )
                     loop.approve_tool_call(
                         ToolCall(
-                            id=pending_container[0].get("call_id") or call_id,
+                            id=approved_call_id,
                             name=tool_name,
                             arguments=edited_args,
                         )
@@ -871,9 +893,14 @@ async def ws_conversation(websocket: WebSocket) -> None:
                             session_id=run_session_id, limit=50
                         )
                     )
-                    retry_msgs.append(
-                        Message.user(
-                            f"approved: proceed with {tool_name} with edited args: {edited_args}"
+                    # Execute the approved tool with the edited args directly
+                    # (B4) — instruction-only retries looped forever.
+                    retry_msgs.extend(
+                        await _execute_approved_tool(
+                            loop,
+                            tool_name,
+                            edited_args,
+                            approved_call_id or f"call_{secrets.token_hex(4)}",
                         )
                     )
                     await _run_agent_stream(

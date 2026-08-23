@@ -963,9 +963,20 @@ class TestWebSocketPersistence:
         class FakeLoop:
             def __init__(self):
                 self.approved = []
+                self.executed = None
 
             def approve_tool_call(self, tool_call):
                 self.approved.append(tool_call)
+
+            async def _execute_tool(self, tool_call):
+                # The approved tool is now executed directly (audit B4):
+                # record it so the test can assert edited args + call id.
+                self.executed = tool_call
+                return _FakeResult("deleted")
+
+        class _FakeResult:
+            def __init__(self, content):
+                self.content = content
 
         class FakeConversation:
             def add_message(self, *args, **kwargs):
@@ -1040,6 +1051,12 @@ class TestWebSocketPersistence:
 
         assert stream_calls == 2
         assert loop.approved[0].arguments == {"path": "/edited"}
+        # B4: the edited args are executed directly under the original
+        # call_id instead of being re-proposed to the model.
+        assert loop.executed is not None
+        assert loop.executed.name == "files_delete"
+        assert loop.executed.arguments == {"path": "/edited"}
+        assert loop.executed.id == "call-1"
         assert history_calls == [("session-a", 50), ("session-a", 50)]
 
     @pytest.mark.asyncio
