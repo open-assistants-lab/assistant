@@ -654,20 +654,24 @@ class AgentLoop:
         # and the shell-subprocess model is wrong for streaming.
         # Use middleware (_add_middleware) for tool interception instead.
 
+        # Copy-then-transform (batch-path parity, audit B17): middleware sees
+        # and mutates a copy; the ToolCall embedded in persisted history keeps
+        # the model's original arguments.
+        tc_exec = ToolCall(id=tc.id, name=tc.name, arguments=dict(tc.arguments))
         for mw in self.middlewares:
             try:
-                tc.arguments = mw.wrap_tool_call(tc.name, tc.arguments)
+                tc_exec.arguments = mw.wrap_tool_call(tc_exec.name, tc_exec.arguments)
             except Exception:
                 mw_name = getattr(mw, "name", type(mw).__name__)
                 logger.warning(f"wrap_tool_call error in {mw_name} for {tc.name}", exc_info=True)
 
         if self.trace_provider:
             async with self.trace_provider.start_span(SpanType.TOOL_EXECUTION, tc.name) as span:
-                result = await self._execute_tool(tc)
+                result = await self._execute_tool(tc_exec)
                 span.set_meta("result_length", len(result.content))
                 span.set_meta("is_error", result.is_error)
         else:
-            result = await self._execute_tool(tc)
+            result = await self._execute_tool(tc_exec)
 
         self._record_subagent_tool(tc)
         if (ctx := self.subagent_ctx) and ctx.on_progress:
@@ -893,8 +897,13 @@ class AgentLoop:
             if isinstance(result, Exception):
                 logger.error(f"parallel_tool_error tool={tc.name}: {result}")
                 result_content = json.dumps({"error": f"Tool execution failed: {result}"})
+            elif isinstance(result, BaseException):
+                # CancelledError etc. from gather(return_exceptions=True):
+                # answer the id instead of crashing on tuple-unpack.
+                logger.error(f"parallel_base_exception tool={tc.name}: {result!r}")
+                result_content = json.dumps({"error": f"Tool execution failed: {result}"})
             else:
-                tc_r, result_content = result  # type: ignore[misc]
+                tc_r, result_content = result
 
             state.add_message(
                 Message.tool_result(
@@ -1241,7 +1250,6 @@ class AgentLoop:
         except SubagentCancelledError:
             await self._run_hooks("aafter_agent", state)
             raise
-
         await self._run_hooks("aafter_agent", state)
         self._project_next_context(state)
         return state.messages
@@ -1818,8 +1826,12 @@ class AgentLoop:
                 # and use the text as the answer (checked before the FR-4
                 # hold so the final text is not stripped).
                 if state.extra.get("_final_answer_requested"):
-                    if stream_tool_calls:
+                    if stream_tool_calls or assistant_msg.tool_calls:
+                        # FR-9 id fix (audit B17 / Task-7 F3): the assistant
+                        # message is already persisted in state — rebinding the
+                        # local variable alone leaves dangling tool_call ids.
                         stream_tool_calls = []
+                        assistant_msg.tool_calls = []
                     output_text = assistant_content
                     try:
                         await self._check_output_guardrails(output_text, state)
@@ -2018,6 +2030,11 @@ class AgentLoop:
         except SubagentCancelledError:
             await self._run_hooks("aafter_agent", state)
             raise
+        finally:
+            # Guardrail task hygiene (audit B17): early returns/breaks before
+            # the first await of the input-guardrail check must not strand it.
+            if guardrail_task is not None and not guardrail_task.done():
+                guardrail_task.cancel()
 
         await self._run_hooks("aafter_agent", state)
         self._project_next_context(state)

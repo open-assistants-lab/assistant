@@ -25,7 +25,10 @@ def normalize_tool_schema(schema: dict[Any, Any]) -> dict[Any, Any]:
     if not isinstance(schema, dict):
         return schema
 
-    defs = {}
+    # Copy first (audit B17): the caller may reuse its schema dict after
+    # normalization; popping $defs/definitions from it is a side effect.
+    schema = dict(schema)
+    defs: dict[Any, Any] = {}
     for key in ("$defs", "definitions"):
         if key in schema:
             defs.update(schema.pop(key))
