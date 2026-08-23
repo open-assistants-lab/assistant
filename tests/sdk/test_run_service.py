@@ -716,7 +716,7 @@ async def test_execute_stream_emits_waterfall_on_failed_persist(monkeypatch):
 async def test_failed_streaming_run_skips_persist_run(monkeypatch):
     """Audit B11: a FAILED streaming run must not be persisted by RunService —
     the routers persist the partial state exactly once (single write)."""
-    from src.sdk.messages import Message, StreamChunk
+    from src.sdk.messages import StreamChunk
 
     class ErrorAfterToolLoop(FakeLoop):
         async def run_stream(self, messages):

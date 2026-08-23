@@ -1308,3 +1308,115 @@ class TestWebSocketPersistence:
 
         assert captured["cancel_event"].is_set()
         assert captured["cleaned_up"] is True
+
+
+class TestFailedRunSinglePersistWS:
+    """Audit B11 (WS transport): a failed run's done event must not trigger
+    the router fallback collector — RunService already persisted with run_id."""
+
+    @pytest.mark.asyncio
+    async def test_ws_failed_done_does_not_double_persist(self, monkeypatch):
+        import json as _json
+        from datetime import UTC, datetime
+
+        from src.http.routers import ws as ws_router
+        from src.sdk.run_events import (
+            DoneData,
+            DoneEvent,
+            ToolInputStartEvent,
+            ToolResultData,
+            ToolResultEvent,
+            ToolStartData,
+        )
+        from src.sdk.run_models import (
+            RunResult,
+            RunStatus,
+            RunUsage,
+            VerificationOutcome,
+        )
+
+        common = dict(
+            event_id="e1", sequence=1, timestamp="2026-01-01T00:00:00Z",
+            session_id="chat-1", run_id="r-b11", attempt=1,
+        )
+        result = RunResult(
+            run_id="r-b11",
+            session_id="chat-1",
+            status=RunStatus.FAILED,
+            attempt=1,
+            model="test:model",
+            response="",
+            final_message_id="msg-persisted",
+            usage=RunUsage(),
+            verification=VerificationOutcome(),
+            persisted_at=datetime.now(UTC),
+        )
+
+        async def fake_execute_stream(self, **kwargs):
+            yield ToolInputStartEvent(
+                data=ToolStartData(block_id="b1", tool_call_id="c1", name="files_delete"),
+                **common,
+            )
+            yield ToolResultEvent(
+                data=ToolResultData(
+                    block_id="b1", tool_call_id="c1", name="files_delete",
+                    status="completed", content="rows",
+                ),
+                **common,
+            )
+            yield DoneEvent(data=DoneData(result=result), **common)
+
+        calls: list[dict] = []
+
+        async def spy_persist(*args, **kwargs):
+            calls.append(kwargs)
+
+        class FakeConversation:
+            def add_message(self, *args, **kwargs):
+                return "msg-1"
+
+            def get_messages_with_summary(self, *, session_id, limit):
+                return []
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.messages = [
+                    _json.dumps(
+                        {
+                            "type": "user_message",
+                            "content": "go",
+                            "user_id": "test_user",
+                            "workspace_id": "personal",
+                            "session_id": "chat-1",
+                        }
+                    ),
+                ]
+                self.sent = []
+
+            async def accept(self):
+                pass
+
+            async def receive_text(self):
+                if not self.messages:
+                    raise WebSocketDisconnect()
+                return self.messages.pop(0)
+
+            async def send_json(self, payload):
+                self.sent.append(payload)
+
+        async def fake_run_agent_stream(*args, **kwargs):
+            async for ev in fake_execute_stream(None):
+                yield ev
+
+        monkeypatch.setattr(ws_router, "get_message_store", lambda *a, **kw: FakeConversation())
+        monkeypatch.setattr(
+            ws_router.RunService, "execute_stream", lambda self, **kwargs: fake_run_agent_stream()
+        )
+        monkeypatch.setattr(ws_router, "_persist_collected_stream_state", spy_persist)
+
+        ws = FakeWebSocket()
+        await ws_router.ws_conversation(ws)
+
+        assert calls == [], "failed done must NOT re-persist already-persisted state"
+        # The failure surfaces to the client even without the fallback write.
+        assert any(p.get("code") == "AGENT_ERROR" for p in ws.sent)

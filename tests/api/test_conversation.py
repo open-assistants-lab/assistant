@@ -1458,7 +1458,6 @@ async def test_failed_stream_not_double_persisted(monkeypatch):
         RunUsage,
         VerificationOutcome,
     )
-    from src.http.routers import conversation as conversation_router
 
     store = FakeConversation()
     collect_calls: list[dict] = []
@@ -1497,3 +1496,81 @@ async def test_failed_stream_not_double_persisted(monkeypatch):
     assert '"status": "failed"' in output
     # Exactly one persistence authority: NOT the router fallback.
     assert collect_calls == [], "failed-run fallback collector fired (duplicate rows)"
+
+
+class TestFailedRunSinglePersist:
+    """Audit B11: failed runs are persisted exactly once — RunService owns the
+    write (with run_id); the router's failed branch must not add a second,
+    run_id-less copy via _persist_collected_stream_state."""
+
+    @pytest.mark.asyncio
+    async def test_failed_done_does_not_double_persist(self, monkeypatch):
+        from datetime import UTC, datetime
+
+        from src.http.models import MessageRequest
+        from src.http.routers import conversation as conversation_router
+        from src.sdk.run_events import (
+            BlockDeltaData,
+            DoneData,
+            DoneEvent,
+            TextDeltaEvent,
+            ToolInputStartEvent,
+            ToolResultData,
+            ToolResultEvent,
+            ToolStartData,
+        )
+        from src.sdk.run_models import (
+            RunResult,
+            RunStatus,
+            RunUsage,
+            VerificationOutcome,
+        )
+
+        store = FakeConversation()
+        common = dict(
+            event_id="e1", sequence=1, timestamp="2026-01-01T00:00:00Z",
+            session_id="default", run_id="r-b11", attempt=1,
+        )
+        result = RunResult(
+            run_id="r-b11",
+            session_id="default",
+            status=RunStatus.FAILED,
+            attempt=1,
+            model="test:model",
+            response="",
+            final_message_id="msg-persisted",
+            usage=RunUsage(),
+            verification=VerificationOutcome(),
+            persisted_at=datetime.now(UTC),
+        )
+
+        async def fake_execute_stream(self, **kwargs):
+            yield TextDeltaEvent(data=BlockDeltaData(block_id="b1", delta="partial"), **common)
+            yield ToolInputStartEvent(
+                data=ToolStartData(block_id="b2", tool_call_id="c1", name="email_list"),
+                **common,
+            )
+            yield ToolResultEvent(
+                data=ToolResultData(
+                    block_id="b2", tool_call_id="c1", name="email_list",
+                    status="completed", content="rows",
+                ),
+                **common,
+            )
+            yield DoneEvent(data=DoneData(result=result), **common)
+
+        calls: list[dict] = []
+
+        async def spy_persist(*args, **kwargs):
+            calls.append(kwargs)
+
+        monkeypatch.setattr(conversation_router, "get_message_store", lambda *a, **kw: store)
+        monkeypatch.setattr(conversation_router.RunService, "execute_stream", fake_execute_stream)
+        monkeypatch.setattr(conversation_router, "_persist_collected_stream_state", spy_persist)
+
+        response = await conversation_router.message_stream(
+            MessageRequest(message="go", user_id="u")
+        )
+        output = "".join([c async for c in response.body_iterator])
+        assert '"type": "done"' in output
+        assert calls == [], "failed done must NOT re-persist already-persisted state"
