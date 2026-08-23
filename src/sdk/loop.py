@@ -1301,10 +1301,9 @@ class AgentLoop:
                 effective_tool_calls, state
             )
             if duplicate_calls:
-                # Answer the dangling tool_calls BEFORE either nudge branch:
-                # both branches `continue` with only a system message, which
-                # would leave the previous assistant turn's tool_calls
-                # unanswered (hard 400 on strict provider APIs).
+                # Answer the dangling duplicate ids BEFORE either branch:
+                # unanswered assistant tool_calls are a hard 400 on strict
+                # provider APIs.
                 tool_result = self._last_tool_result(state, duplicate_calls[0].name)
                 for synthetic in self._synthetic_duplicate_results(duplicate_calls, tool_result):
                     state.add_message(synthetic)
@@ -1312,21 +1311,23 @@ class AgentLoop:
                 max_nudges = self.run_config.max_duplicate_tool_nudges
                 if nudges < max_nudges:
                     state.extra["_duplicate_tool_nudges"] = nudges + 1
-                    state.add_message(
-                        Message.system(
-                            f"The tool '{duplicate_calls[0].name}' was already called with the "
-                            f"same arguments and returned: {tool_result}. Do not call it again — "
-                            "answer the user directly."
-                        )
+                    guard_msg = Message.system(
+                        f"The tool '{duplicate_calls[0].name}' was already called with the "
+                        f"same arguments and returned: {tool_result}. Do not call it again — "
+                        "answer the user directly."
                     )
-                    continue
-                state.extra["_final_answer_requested"] = True
-                state.add_message(
-                    Message.system(
+                else:
+                    state.extra["_final_answer_requested"] = True
+                    guard_msg = Message.system(
                         "Respond now with a brief final answer. Do not call any tools."
                     )
-                )
-                continue
+                state.add_message(guard_msg)
+                if not fresh_calls:
+                    # Every proposed call was a duplicate: hand the turn back
+                    # to the model with the guidance above.
+                    continue
+                # Mixed batch: fall through and EXECUTE the fresh calls —
+                # skipping them would leave their ids unanswered too.
             effective_tool_calls = fresh_calls
 
             # Classify tool calls: parallel-safe, sequential, interrupts
@@ -1687,21 +1688,23 @@ class AgentLoop:
                     max_nudges = self.run_config.max_duplicate_tool_nudges
                     if nudges < max_nudges:
                         state.extra["_duplicate_tool_nudges"] = nudges + 1
-                        state.add_message(
-                            Message.system(
-                                f"The tool '{duplicate_calls[0].name}' was already called with the "
-                                f"same arguments and returned: {tool_result}. Do not call it again — "
-                                "answer the user directly."
-                            )
+                        guard_msg = Message.system(
+                            f"The tool '{duplicate_calls[0].name}' was already called with the "
+                            f"same arguments and returned: {tool_result}. Do not call it again — "
+                            "answer the user directly."
                         )
-                        continue
-                    state.extra["_final_answer_requested"] = True
-                    state.add_message(
-                        Message.system(
+                    else:
+                        state.extra["_final_answer_requested"] = True
+                        guard_msg = Message.system(
                             "Respond now with a brief final answer. Do not call any tools."
                         )
-                    )
-                    continue
+                    state.add_message(guard_msg)
+                    if not fresh_calls:
+                        # Every proposed call was a duplicate: hand the turn
+                        # back to the model with the guidance above.
+                        continue
+                    # Mixed batch: fall through and EXECUTE the fresh calls —
+                    # skipping them would leave their ids unanswered too.
                 stream_tool_calls = fresh_calls
 
                 # Record tool calls AFTER dedup so only unique names are reported

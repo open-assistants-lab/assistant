@@ -2041,3 +2041,73 @@ class TestDuplicateToolCallGuard:
                 assert tc.id in answered, f"dangling tool_call {tc.id} without tool result"
         tr_events = [c for c in chunks if c.type == "tool_result" and c.call_id == "c2"]
         assert tr_events, "the duplicate call must be answered on the wire too"
+
+    async def test_mixed_batch_executes_fresh_and_answers_duplicates(self):
+        """B1 fix round 1: a mixed batch (fresh + duplicate calls) must still
+        EXECUTE the fresh call — dropping it leaves its id unanswered, the
+        same hard-400 this guard exists to prevent."""
+        provider = MockProvider(
+            responses=[
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="c1", name="echo", arguments={"text": "x"})],
+                ),
+                Message.assistant(
+                    content="",
+                    tool_calls=[
+                        ToolCall(id="c2", name="echo", arguments={"text": "x"}),
+                        ToolCall(id="c3", name="echo", arguments={"text": "fresh-args"}),
+                    ],
+                ),
+                Message.assistant(content="done"),
+            ]
+        )
+        loop = AgentLoop(provider=provider, tools=[echo])
+        result = await loop.run([Message.user("say")])
+
+        real = [
+            m for m in result
+            if m.role == "tool" and not str(m.content).startswith("Duplicate call skipped")
+        ]
+        assert len(real) == 2, "both the original AND the fresh call must execute"
+        assert any("fresh-args" in str(m.content) for m in real), "the fresh call must run with its own args"
+        answered = {m.tool_call_id for m in result if m.role == "tool"}
+        assert {"c1", "c2", "c3"} <= answered, "every id must be answered"
+        nudge = [m for m in result if m.role == "system" and "already called" in str(m.content)]
+        assert nudge, "the model should still be nudged off the duplicate"
+
+    async def test_streaming_mixed_batch_executes_fresh_and_answers_duplicates(self):
+        """B1 fix round 1 (streaming twin): fresh call executes on the wire,
+        duplicate gets its tool_result event, no id left unanswered."""
+        provider = MockProvider()
+        # Realistic stream events: args arrive via tool_input_delta (the loop
+        # accumulates deltas; tool_input_start args alone don't populate).
+        provider.set_stream_events([
+            [
+                StreamChunk.tool_input_start(tool="echo", call_id="c1"),
+                StreamChunk.tool_input_delta(call_id="c1", content='{"text": "x"}'),
+                StreamChunk.tool_input_end(call_id="c1", tool="echo"),
+                StreamChunk.done(content=""),
+            ],
+            [
+                StreamChunk.tool_input_start(tool="echo", call_id="c2"),
+                StreamChunk.tool_input_delta(call_id="c2", content='{"text": "x"}'),
+                StreamChunk.tool_input_end(call_id="c2", tool="echo"),
+                StreamChunk.tool_input_start(tool="echo", call_id="c3"),
+                StreamChunk.tool_input_delta(call_id="c3", content='{"text": "fresh-args"}'),
+                StreamChunk.tool_input_end(call_id="c3", tool="echo"),
+                StreamChunk.done(content=""),
+            ],
+            [StreamChunk.done(content="done")],
+        ])
+        loop = AgentLoop(provider=provider, tools=[echo])
+        chunks = [c async for c in loop.run_stream([Message.user("say")])]
+
+        answered = {m.tool_call_id for m in loop.state.messages if m.role == "tool"}
+        for msg in loop.state.messages:
+            for tc in msg.tool_calls or []:
+                assert tc.id in answered, f"dangling tool_call {tc.id} without tool result"
+        starts = [c.call_id for c in chunks if c.type == "tool_input_start"]
+        assert "c3" in starts, "the fresh call must be executed on the wire"
+        assert any(c.type == "tool_result" and c.call_id == "c2" for c in chunks), \
+            "the duplicate must be answered on the wire"
