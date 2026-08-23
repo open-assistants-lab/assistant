@@ -17,7 +17,7 @@ import pytest
 
 from src.config.user_settings import SavedUserSettings
 from src.config.user_settings_store import UserSettingsStore
-from src.sdk.messages import Message
+from src.sdk.messages import Message, ToolCall
 from src.sdk.providers.anthropic import AnthropicProvider
 from src.sdk.providers.factory import (
     _ENV_KEY_MAP,
@@ -595,6 +595,23 @@ class TestAnthropicProvider:
         assert "system" in payload
         assert payload["system"] == "Be helpful"
         assert len(payload["messages"]) == 1
+
+    def test_anthropic_system_concatenates_all_system_messages(self):
+        """Audit B2: a mid-conversation system nudge must JOIN the system
+        prompt, not replace it (last-one-wins dropped the real prompt)."""
+        p = AnthropicProvider(api_key="sk-ant-test")
+        msgs = [
+            Message.system("You are a helpful agent."),
+            Message.user("hi"),
+            Message.assistant(tool_calls=[ToolCall(id="t1", name="time_get", arguments={})]),
+            Message.system("The tool was already called. Answer directly."),
+        ]
+        payload = p._build_payload(msgs, None, "claude-sonnet-4-20250514")
+        assert payload["system"] == (
+            "You are a helpful agent.\n\nThe tool was already called. Answer directly."
+        )
+        # Non-system messages are unaffected (user + assistant-with-tool_calls).
+        assert len(payload["messages"]) == 2
 
     def test_build_payload_extracts_system(self):
         p = AnthropicProvider(api_key="sk-ant-test")

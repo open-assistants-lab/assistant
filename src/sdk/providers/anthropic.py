@@ -77,11 +77,14 @@ class AnthropicProvider(LLMProvider):
         provider_options: dict[str, dict[str, Any]] | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        system_content = None
+        system_parts: list[str] = []
         anthropic_msgs = []
         for m in messages:
             if m.role == "system":
-                system_content = str(m.content)
+                # Audit B2: JOIN all system messages. The duplicate-tool-call
+                # guard appends mid-conversation system nudges; last-one-wins
+                # here silently replaced the agent's real system prompt.
+                system_parts.append(str(m.content))
                 continue
             am = m.to_anthropic()
             if m.role == "tool":
@@ -96,6 +99,8 @@ class AnthropicProvider(LLMProvider):
                     ],
                 }
             anthropic_msgs.append(am)
+
+        system_content: str | None = "\n\n".join(system_parts) if system_parts else None
 
         payload: dict[str, Any] = {
             "model": model,
