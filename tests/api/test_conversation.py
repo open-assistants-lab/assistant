@@ -183,14 +183,14 @@ class TestTitleGeneration:
             async def chat(self, **kwargs):
                 return Message.assistant("Project Planning")
 
-        def fake_create_model_from_config(model, **kwargs):
+        def fake_get_cached_model_provider(model, **kwargs):
             captured["model"] = model
             captured.update(kwargs)
             return FakeProvider()
 
         monkeypatch.setattr(
-            "src.sdk.providers.factory.create_model_from_config",
-            fake_create_model_from_config,
+            "src.sdk.providers.factory.get_cached_model_provider",
+            fake_get_cached_model_provider,
         )
 
         title = await conversation_router._summarize_title(
@@ -323,12 +323,12 @@ class TestTitleGeneration:
                 captured["prompt"] = kwargs["messages"][0].content
                 return Message.assistant("Roadmap review")
 
-        def fake_create_model_from_config(model, **kwargs):
+        def fake_get_cached_model_provider(model, **kwargs):
             return FakeProvider()
 
         monkeypatch.setattr(
-            "src.sdk.providers.factory.create_model_from_config",
-            fake_create_model_from_config,
+            "src.sdk.providers.factory.get_cached_model_provider",
+            fake_get_cached_model_provider,
         )
 
         title = await conversation_router._summarize_title(
@@ -1344,13 +1344,13 @@ class TestTitleModelFromSettings:
             async def chat(self, **kwargs):
                 return Message.assistant("Project Planning")
 
-        def fake_create_model_from_config(model, **kwargs):
+        def fake_get_cached_model_provider(model, **kwargs):
             captured["model"] = model
             return FakeProvider()
 
         monkeypatch.setattr(
-            "src.sdk.providers.factory.create_model_from_config",
-            fake_create_model_from_config,
+            "src.sdk.providers.factory.get_cached_model_provider",
+            fake_get_cached_model_provider,
         )
         monkeypatch.setattr(
             "src.config.user_settings_service.load_saved_user_settings",
@@ -1376,13 +1376,13 @@ class TestTitleModelFromSettings:
             async def chat(self, **kwargs):
                 return Message.assistant("Project Planning")
 
-        def fake_create_model_from_config(model, **kwargs):
+        def fake_get_cached_model_provider(model, **kwargs):
             captured["model"] = model
             return FakeProvider()
 
         monkeypatch.setattr(
-            "src.sdk.providers.factory.create_model_from_config",
-            fake_create_model_from_config,
+            "src.sdk.providers.factory.get_cached_model_provider",
+            fake_get_cached_model_provider,
         )
         monkeypatch.setattr(
             "src.config.user_settings_service.load_saved_user_settings",

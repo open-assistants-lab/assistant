@@ -122,7 +122,15 @@ class TestSteer:
                     StreamChunk.tool_input_start(tool="second_tool", call_id="c2", args={}),
                     StreamChunk.tool_input_end(tool="second_tool", call_id="c2"),
                     StreamChunk.done(content=""),
-                ]
+                ],
+                # Second LLM round: after the steer the model answers in text
+                # (a realistic post-steer response — the old single-round
+                # mock replayed the tool batch forever, which the pre-B1
+                # guard masked by swallowing fresh calls in mixed batches).
+                [
+                    StreamChunk.text_delta(content="Stopping."),
+                    StreamChunk.done(content="Stopping."),
+                ],
             ]
         )
         loop = AgentLoop(provider=provider, tools=[first, second])
@@ -174,7 +182,15 @@ class TestSteer:
                     StreamChunk.tool_input_start(tool="second_tool", call_id="c2", args={}),
                     StreamChunk.tool_input_end(tool="second_tool", call_id="c2"),
                     StreamChunk.done(content=""),
-                ]
+                ],
+                # Second LLM round: after the steer the model answers in text
+                # (a realistic post-steer response — the old single-round
+                # mock replayed the tool batch forever, which the pre-B1
+                # guard masked by swallowing fresh calls in mixed batches).
+                [
+                    StreamChunk.text_delta(content="Stopping."),
+                    StreamChunk.done(content="Stopping."),
+                ],
             ]
         )
         loop = AgentLoop(provider=provider, tools=[first_tool, second_tool])
