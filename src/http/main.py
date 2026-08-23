@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from src.config import get_settings
 from src.http.routers import (
     capabilities,
     contacts_router,
@@ -73,8 +74,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     from connectkit.bridge import ConnectKitBridge
                     bridge = ConnectKitBridge("system")
                     await bridge.refresh_all()
-                except Exception:
-                    pass
+                except Exception as e:
+                    from src.app_logging import get_logger as _gl
+
+                    _gl().warning(
+                        "connectkit.refresh_failed",
+                        {"error": str(e), "error_type": type(e).__name__},
+                    )
 
         try:
             loop = asyncio.get_event_loop()
@@ -134,13 +140,30 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-    allow_credentials=True,
-)
+# CORS (audit B17): wildcard origins combined with allow_credentials lets any
+# site ride authenticated sessions. Trust only explicitly configured origins;
+# with none configured, stay permissive but credential-free.
+_trusted_origins = [
+    o.strip()
+    for o in get_settings().auth.cors_origins.split(",")
+    if o.strip()
+]
+if _trusted_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_trusted_origins,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        allow_credentials=True,
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+        allow_credentials=False,
+    )
 
 
 _PUBLIC_PATHS = {"/health", "/health/ready", "/docs", "/redoc", "/openapi.json"}

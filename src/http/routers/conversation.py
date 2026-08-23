@@ -42,7 +42,6 @@ from src.sdk.runner import (
 from src.sdk.session_worker import SessionBusyError, SessionWorkerRegistry
 from src.storage.messages import get_message_store
 
-_pending_approvals: dict[str, dict[str, Any]] = {}
 _pending_interrupts: dict[str, dict[str, Any]] = {}
 _cancel_flags: dict[str, bool] = {}
 _active_streams: dict[str, asyncio.Event] = {}
@@ -608,19 +607,6 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
     try:
         user_id = req.user_id or "default_user"
         msg_content = req.message.strip()
-
-        if user_id in _pending_approvals and msg_content.lower() in ("approve", "reject", "edit"):
-            pending = _pending_approvals.pop(user_id)
-            tool_name = pending["tool_name"]
-
-            if msg_content.lower() == "reject":
-                return MessageResponse(response=f"{tool_name} rejected.")
-
-            tool_args = pending.get("tool_args", {})
-            if "user_id" not in tool_args:
-                tool_args["user_id"] = user_id
-
-            return MessageResponse(response=f"{tool_name} approved (execution pending).")
 
         conversation = get_message_store(user_id)
         session_id = _normalized_session_id(req.session_id)

@@ -197,6 +197,11 @@ class AuthConfig(_BaseSettings):
 
     api_key: str = Field(default="")
     solo_bypass: bool = Field(default=True)
+    # Trusted CORS origins, comma-separated (audit B17). Empty -> wildcard
+    # origins WITHOUT credentials (safe default for local dev).
+    cors_origins: str = Field(
+        default="", description="Comma-separated trusted CORS origins"
+    )
 
     model_config = SettingsConfigDict(env_prefix="EA_")
 

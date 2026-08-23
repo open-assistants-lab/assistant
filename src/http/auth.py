@@ -31,7 +31,10 @@ def is_localhost(request: Request) -> bool:
     client = request.client
     if client is None:
         return False
-    return client.host in ("127.0.0.1", "::1", "localhost")
+    # Exact-match set (audit B17): includes the IPv4-mapped IPv6 form that
+    # dual-stack binds report. Deliberately NO prefix matching — a broad
+    # match would let LAN/proxied clients spoof the solo bypass.
+    return client.host in ("127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1")
 
 
 async def require_auth(request: Request) -> None:

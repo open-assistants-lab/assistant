@@ -25,25 +25,53 @@ class FileCache:
                 self._cache = {}
 
     def _save(self) -> None:
+        # Atomic write (audit B17): a crash mid-write must not leave a
+        # truncated cache file that silently resets all sync state.
+        import os
+
         self.cache_file.parent.mkdir(parents=True, exist_ok=True)
-        self.cache_file.write_text(json.dumps(self._cache, indent=2))
+        tmp = self.cache_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self._cache, indent=2))
+        os.replace(tmp, self.cache_file)
 
     def get_status(self, path: str) -> str:
         """Get sync status: 'cloud_only', 'downloaded', 'pinned'"""
         return str(self._cache.get(path, {}).get("status", "cloud_only"))
 
+    def _workspace_file(self, path: str) -> Any | None:
+        """Resolve a cached path against the workspace files dir; None if absent."""
+        try:
+            fp = (
+                get_paths(self.user_id, workspace_id=self.workspace_id).workspace_files_dir()
+                / path
+            )
+        except Exception:
+            return None
+        return fp if fp.exists() else None
+
     def mark_downloaded(self, path: str) -> None:
-        self._cache[path] = {
+        entry: dict[str, Any] = {
             "status": "downloaded",
             "downloaded_at": datetime.now(UTC).isoformat(),
         }
+        # Stamp the current file version so get_all() can compute has_update
+        # against a real baseline (audit B17: missing baseline read as
+        # "permanently outdated").
+        file_path = self._workspace_file(path)
+        if file_path is not None:
+            entry["server_modified"] = str(file_path.stat().st_mtime)
+        self._cache[path] = entry
         self._save()
 
     def mark_pinned(self, path: str) -> None:
-        self._cache[path] = {
+        entry: dict[str, Any] = {
             "status": "pinned",
             "pinned_at": datetime.now(UTC).isoformat(),
         }
+        file_path = self._workspace_file(path)
+        if file_path is not None:
+            entry["server_modified"] = str(file_path.stat().st_mtime)
+        self._cache[path] = entry
         self._save()
 
     def mark_cloud_only(self, path: str) -> None:
@@ -63,7 +91,11 @@ class FileCache:
 
             result[path] = {
                 **data,
-                "has_update": server_modified != current_version if server_modified else False,
+                # Both sides must exist (audit B17): entries without a
+                # baseline are not "outdated", they are "never compared".
+                "has_update": bool(server_modified)
+                and bool(current_version)
+                and server_modified != current_version,
             }
 
         return result

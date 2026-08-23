@@ -695,18 +695,33 @@ class MessageStore:
             return None
 
     def update_session_title(self, session_id: str, title: str) -> None:
-        """Update the title for a chat session (stored on first user message metadata)."""
+        """Update the title for a chat session (stored on first user message metadata).
+
+        Targets the OLDEST user row explicitly (audit B17): coremem fetch
+        ordering is not guaranteed, and get_session_title reads the first
+        user row by ts ASC — writing to any other row loses the title.
+        """
         try:
-            memories = self._core.fetch(limit=1, session_id=session_id, role="user")
-            if not memories:
-                return
-            first = memories[0]
-            meta = first.metadata or {}
-            meta["session_title"] = title
             with self._core.db._connect() as cur:
+                row = cur.execute(
+                    "SELECT id, metadata FROM messages "
+                    "WHERE session_id = ? AND role = 'user' "
+                    "ORDER BY ts ASC LIMIT 1",
+                    [session_id],
+                ).fetchone()
+                if not row:
+                    return
+                msg_id, raw_meta = row[0], row[1]
+                try:
+                    meta = json.loads(raw_meta) if raw_meta else {}
+                except (TypeError, ValueError):
+                    meta = {}
+                if not isinstance(meta, dict):
+                    meta = {}
+                meta["session_title"] = title
                 cur.execute(
                     "UPDATE messages SET metadata = ? WHERE id = ?",
-                    [json.dumps(meta), first.id],
+                    [json.dumps(meta), msg_id],
                 )
         except Exception:
             pass
