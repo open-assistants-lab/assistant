@@ -770,15 +770,25 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
         user_id = req.user_id or "default_user"
         session_id = _normalized_session_id(req.session_id)
         skey = _stream_key(user_id, session_id)
+        cancel_event: asyncio.Event | None = None
 
         conversation = get_message_store(user_id)
+
+        # Audit B12: probe BEFORE mutating cancel/slot dicts. A request that
+        # is about to fail session-busy must not clobber the live stream's
+        # registration (old code wiped the flag, failed busy in the lazy
+        # acquire, then popped A's slot in its finally). The lazy acquire
+        # inside execute_stream remains as the authoritative backstop.
+        run_service = RunService(user_id, _session_registry, conversation)
+        if run_service.probe_session_busy(session_id):
+            async def busy_stream() -> AsyncGenerator[str, None]:
+                yield sse("error", {"code": "session_busy", "message": "Session already has an active run"})
+            return StreamingResponse(busy_stream(), media_type="text/event-stream")
 
         # Set up cancellation for this session's stream
         _cancel_flags[skey] = False
         cancel_event = asyncio.Event()
         _active_streams[skey] = cancel_event
-
-        run_service = RunService(user_id, _session_registry, conversation)
 
         async def generate() -> AsyncGenerator[str, None]:
             ai_content_parts: list[str] = []
@@ -978,15 +988,19 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                     )
                 raise
             finally:
-                _active_streams.pop(skey, None)
-                _cancel_flags.pop(skey, None)
+                # Identity-checked pop (audit B12): only clean up if the slot
+                # still holds THIS request's event — never a concurrent owner's.
+                if _active_streams.get(skey) is cancel_event:
+                    _active_streams.pop(skey, None)
+                    _cancel_flags.pop(skey, None)
 
         return StreamingResponse(generate(), media_type="text/event-stream")
 
     except Exception as e:
         skey = _stream_key(req.user_id or "default_user", req.session_id)
-        _active_streams.pop(skey, None)
-        _cancel_flags.pop(skey, None)
+        if cancel_event is not None and _active_streams.get(skey) is cancel_event:
+            _active_streams.pop(skey, None)
+            _cancel_flags.pop(skey, None)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1087,6 +1101,15 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
     )
 
     conversation = get_message_store(req.user_id)
+
+    # Audit B12: same probe-before-mutate contract as /message/stream — the
+    # approve path had the identical clobber pattern (mutate dicts, fail busy,
+    # pop A's slot in its own finally).
+    if _session_registry.holds(f"{req.user_id}::{session_id}"):
+        async def busy_stream() -> AsyncGenerator[str, None]:
+            yield sse("error", {"code": "session_busy", "message": "Session already has an active run"})
+        return StreamingResponse(busy_stream(), media_type="text/event-stream")
+
     cancel_event = asyncio.Event()
     _cancel_flags[skey] = False
     _active_streams[skey] = cancel_event
@@ -1274,8 +1297,10 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
             logger.error("approve_stream_error", {"error": str(e)}, user_id=req.user_id, channel="http")
             yield sse("error", {"content": str(e)})
         finally:
-            _cancel_flags.pop(skey, None)
-            _active_streams.pop(skey, None)
+            # Identity-checked pop (audit B12): never evict a concurrent owner.
+            if _active_streams.get(skey) is cancel_event:
+                _cancel_flags.pop(skey, None)
+                _active_streams.pop(skey, None)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 

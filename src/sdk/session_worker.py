@@ -42,6 +42,16 @@ class SessionWorkerRegistry:
             self._locks[session_id] = lock
             return lock
 
+    def holds(self, session_id: str) -> bool:
+        """Synchronous advisory check: is a lock currently held for this key?
+
+        Atomic within the event loop (no await inside). Advisory only — the
+        authoritative check remains ``acquire`` (audit B12 lets HTTP endpoints
+        probe BEFORE mutating cancel/slot dicts so a doomed request cannot
+        clobber the live stream's registration).
+        """
+        return session_id in self._locks
+
     async def release(self, session_id: str) -> None:
         """Release session lock."""
         async with self._mutex:

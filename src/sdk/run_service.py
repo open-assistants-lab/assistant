@@ -390,6 +390,17 @@ class RunService:
         except Exception:
             pass
 
+    def probe_session_busy(self, session_id: str) -> bool:
+        """Cheap synchronous busy-check WITHOUT starting a run or mutating any
+        state (audit B12).
+
+        Advisory only — the authoritative check remains the registry acquire
+        inside ``execute``/``execute_stream``. Exists so HTTP endpoints can
+        fail fast BEFORE touching cancel-flag/slot dicts, so a request that is
+        about to be rejected cannot clobber the live stream's registration.
+        """
+        return self._registry.holds(f"{self._user_id}::{session_id}")
+
     async def execute(
         self,
         session_id: str,
