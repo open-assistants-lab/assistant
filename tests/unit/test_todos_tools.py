@@ -151,17 +151,6 @@ class TestTodosDelete:
             assert "Error" in result
 
 
-class TestTodosExtract:
-    """Tests for todos_extract tool - requires email integration so basic validation only."""
-
-    def test_todos_extract_requires_user_id(self):
-        """Test todos_extract requires user_id."""
-        from src.sdk.tools_core.todos import todos_extract
-
-        result = todos_extract.invoke({})
-        assert "Error" in result or "user_id" in result.lower()
-
-
 class TestTodosStorageFunctions:
     """Tests for todos storage functions (AgentsDB-based)."""
 

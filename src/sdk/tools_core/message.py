@@ -278,7 +278,7 @@ def message_search(
     is_counting = query.lower().startswith("how many") or "total" in query.lower()
     effective_limit = max(limit, 30 if is_counting else 10)
 
-    all_results = core.search_enhanced(query, limit=effective_limit)
+    all_results = core.recall(query, strategy="episodic", limit=effective_limit)
 
     # Deduplicate by session
     query_words = set(query.lower().split())

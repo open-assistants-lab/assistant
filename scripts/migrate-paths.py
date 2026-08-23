@@ -11,10 +11,7 @@ Guardrails:
 """
 
 import argparse
-import json
-import os
 import shutil
-import sys
 import warnings
 from pathlib import Path
 
@@ -117,11 +114,11 @@ def migrate_research(is_dry_run):
         do_move(RESEARCH_SOURCE, RESEARCH_DEST, is_dry_run)
         return
     if is_dry_run:
-        dry_run(f"MERGE research → Research/default_user/personal")
+        dry_run("MERGE research → Research/default_user/personal")
         return
     _merge_into(RESEARCH_SOURCE, RESEARCH_DEST, "      research")
     _remove_tree(RESEARCH_SOURCE)
-    print(f"  ✓ merged research → Research/default_user/personal")
+    print("  ✓ merged research → Research/default_user/personal")
 
 
 def migrate_workspace_subdirs(is_dry_run):
@@ -187,7 +184,7 @@ def main():
         MIGRATED_MARKER.write_text("", encoding="utf-8")
         print(f"\n✅ Migration complete. Marker: {MIGRATED_MARKER}")
     else:
-        print(f"\n[DRY-RUN] Complete. No files moved.")
+        print("\n[DRY-RUN] Complete. No files moved.")
 
 
 if __name__ == "__main__":

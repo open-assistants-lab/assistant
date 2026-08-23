@@ -214,37 +214,6 @@ class TestToolReloadMCP:
             _current_agent_loop.reset(token)
         idx.close()
 
-    def test_reload_with_connector_bridge(self):
-        from unittest.mock import MagicMock
-
-        from src.sdk.loop import AgentLoop, _current_agent_loop
-        from src.sdk.tool_index import ToolIndex
-
-        d = Path(tempfile.mkdtemp()) / "idx"
-        idx = ToolIndex(d)
-
-        mock_bridge = MagicMock()
-        mock_bridge.get_tool_definitions.return_value = [{
-            "name": "test__tool",
-            "description": "Connector tool",
-            "annotations": {"read_only": True, "destructive": False},
-            "function": lambda **kw: "ok",
-        }]
-
-        loop = AgentLoop(provider=MagicMockProvider(), tools=[])
-        loop._tool_index = idx
-        loop._connectkit_bridge = mock_bridge
-        token = _current_agent_loop.set(loop)
-        try:
-            from src.sdk.tools_core.tool_reload import tool_reload
-
-            result = tool_reload.invoke({})
-            assert "connector" in result
-        finally:
-            _current_agent_loop.reset(token)
-        idx.close()
-
-
 class TestToolSearchIntegration:
     async def test_search_and_lazy_load_flow(self):
         """Full integration: index→search→lazy-load→execute."""

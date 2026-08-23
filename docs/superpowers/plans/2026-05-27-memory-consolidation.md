@@ -2,6 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- []`) syntax for tracking.
 
+# Memory Consolidation — SUPERSEDED
+
+**Status:** ❌ **Superseded 2026-08-21** — this plan built the
+Observer → Reflector two-table memory system, which CoreMem **v0.10.0
+removed upstream** (replaced by compiler + dreaming + search). The app
+migrated to `coremem>=0.13.1`; `memory_profile` now reads a `recall()`
+digest and `memory_reflection` is gone. Retained for history only.
+
+---
+
 **Goal:** Consolidate the 3-layer memory system (MessageStore, ObservationStore, MemoryStore) into a single 2-tier pipeline (Observer → Reflector) with two tables (observations + reflections), rename message-read tools, and retire ~4,100 lines of dead code.
 
 **Architecture:** Two background agents (Observer at ~8K tokens, Reflector at 24h intervals) write to a unified `MemoryStore` at `~/Assistant/Memory/global/`. Tools split into `message_*` (reads `MessageStore`) and `memory_*` (reads `MemoryStore`). No auto-injection — agent calls tools explicitly. No compression — HybridDB FTS5 relevance ranking replaces summarization.

@@ -8,6 +8,7 @@ Routers do not write conversation records directly.
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
@@ -352,6 +353,43 @@ class RunService:
         self._registry = registry
         self._message_store = message_store
 
+    def _emit_waterfall(
+        self,
+        loop: Any,
+        run_id: str,
+        session_id: str,
+        run_status: str,
+        verification_status: str,
+        usage: UsageAggregate | None,
+    ) -> None:
+        """Emit the per-run harness latency waterfall (E spec).
+
+        Best-effort: any failure degrades to a no-op.
+        """
+        try:
+            timings = getattr(loop, "timings", None)
+            if timings is None:
+                return
+            data = timings.to_log_data()
+            data.update(
+                {
+                    "run_id": run_id,
+                    "session_id": session_id,
+                    "model": getattr(loop, "model_id", None),
+                    "verification": verification_status,
+                    "run_status": run_status,
+                }
+            )
+            if usage is not None:
+                data["usage"] = {
+                    "input": usage.input_tokens,
+                    "output": usage.output_tokens,
+                    "reasoning": usage.reasoning_tokens,
+                }
+            logger.info("harness.waterfall", data, user_id=self._user_id)
+        except Exception:
+            pass
+
     async def execute(
         self,
         session_id: str,
@@ -359,18 +397,22 @@ class RunService:
         model: str | None = None,
         provider_keys: dict[str, str] | None = None,
         rubric: str | None = None,
+        mode: str | None = None,
     ) -> RunResult:
         """Non-streaming execution. Returns immutable RunResult."""
-        lock = await self._registry.acquire(session_id)
+        # Lock key is user-scoped: the registry is process-global, and two
+        # users sharing a session id (e.g. both using "chat-1") must not
+        # block each other.
+        lock = await self._registry.acquire(f"{self._user_id}::{session_id}")
         try:
             # Run-level trace root: the loop's agent_run span and the rubric
             # grader both nest under it (no-op when Langfuse is disabled).
             with LangfuseTracer.trace_run(self._user_id, session_id):
-                return await self._run(session_id, prompt, model, provider_keys, lock, rubric)
+                return await self._run(session_id, prompt, model, provider_keys, lock, rubric, mode)
         except SessionBusyError:
             raise
         finally:
-            await self._registry.release(session_id)
+            await self._registry.release(f"{self._user_id}::{session_id}")
 
     async def execute_stream(
         self,
@@ -379,16 +421,20 @@ class RunService:
         model: str | None = None,
         provider_keys: dict[str, str] | None = None,
         rubric: str | None = None,
+        mode: str | None = None,
     ) -> AsyncIterator[RunEvent]:
         """Streaming execution. Yields RunEvent envelopes."""
-        lock = await self._registry.acquire(session_id)
+        # Lock key is user-scoped: the registry is process-global, and two
+        # users sharing a session id (e.g. both using "chat-1") must not
+        # block each other.
+        lock = await self._registry.acquire(f"{self._user_id}::{session_id}")
         try:
             # Run-level trace root covering the whole stream (agent + grader).
             with LangfuseTracer.trace_run(self._user_id, session_id):
-                async for event in self._run_stream(session_id, prompt, model, provider_keys, lock, rubric):
+                async for event in self._run_stream(session_id, prompt, model, provider_keys, lock, rubric, mode):
                     yield event
         finally:
-            await self._registry.release(session_id)
+            await self._registry.release(f"{self._user_id}::{session_id}")
 
     async def _run(
         self,
@@ -398,8 +444,14 @@ class RunService:
         provider_keys: dict[str, str] | None,
         lock: SessionLock,
         rubric: str | None = None,
+        mode: str | None = None,
     ) -> RunResult:
         run_id = str(uuid.uuid4())
+        # Load history BEFORE storing the user message: the store's history
+        # would otherwise include the just-added prompt, and appending it
+        # again below would duplicate the current request in the model's
+        # context (and in the grader's transcript).
+        history = self._message_store.get_messages_with_summary(session_id, limit=50)
         user_msg_id = self._message_store.add_message(
             "user", prompt, metadata={"run_id": run_id}, session_id=session_id
         )
@@ -409,11 +461,13 @@ class RunService:
         )
         register_user_loop(self._user_id, loop, session_id=session_id)
         try:
-            history = self._message_store.get_messages_with_summary(session_id, limit=50)
             messages = _storage_messages_to_sdk(list(history)) + [Message.user(prompt)]
 
-            result = await self._run_bounded_orchestration(loop, messages, run_id, session_id, lock, rubric)
+            result = await self._run_bounded_orchestration(
+                loop, messages, run_id, session_id, lock, rubric, mode
+            )
 
+            _t_persist = time.monotonic()
             persisted_id = self._message_store.persist_run(
                 run_id=run_id,
                 session_id=session_id,
@@ -421,6 +475,20 @@ class RunService:
                 final_answer=_sdk_message_to_storage(Message.assistant(content=result.response), session_id),
                 audit_records=_tool_audit_records(loop, session_id),
                 metadata={"model": result.model, "verification": _verification_metadata(result.verification)},
+            )
+            try:
+                loop.timings.record("persistence", (time.monotonic() - _t_persist) * 1000.0)
+            except Exception:
+                pass
+            self._emit_waterfall(
+                loop,
+                run_id,
+                session_id,
+                run_status=result.status.value,
+                verification_status=(
+                    result.verification.status.value if result.verification else "off"
+                ),
+                usage=result.usage.agent if result.usage else None,
             )
 
             return RunResult(
@@ -447,6 +515,7 @@ class RunService:
         provider_keys: dict[str, str] | None,
         lock: SessionLock,
         rubric: str | None = None,
+        mode: str | None = None,
     ) -> AsyncIterator[RunEvent]:
         run_id = str(uuid.uuid4())
         sequence = 0
@@ -469,6 +538,11 @@ class RunService:
         def _emit(event_cls: type[RunEvent], data: Any, attempt: int = 1) -> RunEvent:
             return parse_run_event(_envelope(event_cls, data, attempt))
 
+        # Load history BEFORE storing the user message: the store's history
+        # would otherwise include the just-added prompt, and appending it
+        # again below would duplicate the current request in the model's
+        # context (and in the grader's transcript).
+        history = self._message_store.get_messages_with_summary(session_id, limit=50)
         user_msg_id = self._message_store.add_message(
             "user", prompt, metadata={"run_id": run_id}, session_id=session_id
         )
@@ -478,7 +552,6 @@ class RunService:
         )
         register_user_loop(self._user_id, loop, session_id=session_id)
         try:
-            history = self._message_store.get_messages_with_summary(session_id, limit=50)
             messages = _storage_messages_to_sdk(list(history)) + [Message.user(prompt)]
 
             from src.sdk.runner import (
@@ -509,6 +582,7 @@ class RunService:
                     rubric=rubric,
                     model=loop.model_id,
                     is_cancelled=lambda: lock.cancelled,
+                    mode=mode,
                 ):
                     if isinstance(item, ChunkItem):
                         chunk = item.chunk
@@ -630,6 +704,7 @@ class RunService:
                     ],
                 }
 
+            _t_persist = time.monotonic()
             persisted_id = self._message_store.persist_run(
                 run_id=run_id,
                 session_id=session_id,
@@ -638,6 +713,18 @@ class RunService:
                 audit_records=_tool_audit_records(loop, session_id),
                 pre_messages=pre_messages,
                 metadata={"model": loop.model_id, "verification": verification_meta},
+            )
+            try:
+                loop.timings.record("persistence", (time.monotonic() - _t_persist) * 1000.0)
+            except Exception:
+                pass
+            self._emit_waterfall(
+                loop,
+                run_id,
+                session_id,
+                run_status=run_status.value,
+                verification_status=rubric_status.value,
+                usage=agent_usage,
             )
 
             run_result = RunResult(
@@ -663,12 +750,18 @@ class RunService:
             # rejects a mismatch.
             yield _emit(DoneEvent, DoneData(result=run_result).model_dump(), final_attempt)
         except SessionBusyError:
+            self._emit_waterfall(
+                loop, run_id, session_id, "failed", rubric_status.value, agent_usage
+            )
             yield _emit(ErrorEvent, ErrorData(
                 code="session_busy",
                 message="Session already has an active run",
                 retryable=True,
             ).model_dump())
         except asyncio.CancelledError:
+            self._emit_waterfall(
+                loop, run_id, session_id, "cancelled", rubric_status.value, agent_usage
+            )
             yield _emit(ErrorEvent, ErrorData(
                 code="cancelled",
                 message="Run was cancelled",
@@ -676,6 +769,9 @@ class RunService:
             ).model_dump())
         except Exception as exc:
             logger.error("run_service.error", {"error": str(exc)}, user_id=self._user_id)
+            self._emit_waterfall(
+                loop, run_id, session_id, "failed", rubric_status.value, agent_usage
+            )
             yield _emit(ErrorEvent, ErrorData(
                 code="internal_error",
                 message=str(exc),
@@ -692,6 +788,7 @@ class RunService:
         session_id: str,
         lock: SessionLock,
         rubric: str | None = None,
+        mode: str | None = None,
     ) -> RunResult:
         from src.sdk.runner import run_with_verification
 
@@ -716,6 +813,7 @@ class RunService:
                 rubric=rubric,
                 model=loop.model_id,
                 is_cancelled=lambda: lock.cancelled,
+                mode=mode,
             )
         except Exception as exc:
             logger.error("run_service.agent_error", {"error": str(exc)}, user_id=self._user_id)

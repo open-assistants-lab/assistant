@@ -183,9 +183,9 @@ except Exception as e:
 
 ## 3. Current Architecture & Discoveries
 
-### SDK Architecture (Custom, Replacing LangChain/LangGraph)
+### SDK Architecture (Custom)
 
-The codebase has a **custom agent SDK** (`src/sdk/`) that replaces LangChain/LangGraph. All LangChain code and dependencies have been removed.
+The codebase has a **custom agent SDK** (`src/sdk/`) as its core runtime.
 
 **SDK Core (~17,200 lines, 66 files, 832+ tests):**
 
@@ -214,7 +214,7 @@ The codebase has a **custom agent SDK** (`src/sdk/`) that replaces LangChain/Lan
 | `agent_scheduler.py` | 308 | Background agent scheduling (proactive check-ins) |
 | `research.py` | 293 | Deep research orchestration |
 | `state.py` | 78 | `AgentState` — simplified agent state |
-| `tools_core/` (32 files) | 8,562 | ★ SDK-native tool implementations (~100 tools) |
+| `tools_core/` (32 files) | ~11,000 | ★ SDK-native tool implementations (60 registered tools) |
 
 **Key Design Decisions:**
 1. **models.dev integration**: Registry fetches from `https://models.dev/api.json`, caches locally at `data/cache/models.json` with 5-min TTL, falls back to built-in subset. 4172+ models vs. old 20 hardcoded.
@@ -237,6 +237,11 @@ The codebase has a **custom agent SDK** (`src/sdk/`) that replaces LangChain/Lan
 12. **MCP Tool Bridge**: `MCPToolBridge` converts MCP `mcp` SDK tool objects → SDK `ToolDefinition` with namespaced names `mcp__{server}__{tool}`. Tool invocations route through `session.call_tool()`. Supports degraded-mode (partial server failures). `mcp_reload` dynamically registers/unregisters tools in the active `AgentLoop` via `register_tool()`/`unregister_tool()`.
 13. **Subagent V1 work_queue coordination**: `WorkQueueDB` (aiosqlite) per-user at `data/private/subagents/work_queue.db`. 11 columns, 2 indexes. Config frozen at invocation into `work_queue.config`. `SubagentContext` provides progress updates, doom loop detection (3x same tool+args), cancel signal, and course-correction injection. `SubagentCoordinator.invoke()` wraps `AgentLoop.run()` in `asyncio.wait_for(timeout)`. All failure modes (cancel, timeout, cost exceeded, provider error) result in terminal work_queue status.
 14. **Soft duplicate-tool-call guard** (Ralph loop, `84ca8c4`): the loop never re-executes a `(tool, args)` pair already answered this run — it injects a system-message nudge with the previous result and continues. Configurable via `RunConfig.max_duplicate_tool_nudges` (default 3); after K nudges one final call requests a brief text-only answer (~200-token cap, tool calls suppressed). Stateless apart from a counter in `state.extra`. `get_messages_with_summary` filters rows with `metadata["include_in_model_context"] == False`, and `_tool_audit_records` persists only current-run tool rows (provenance via `storage_id`/`storage_ts`). No numeric tool-call budgets — identity check only (per FR-7 non-goal).
+15. **Incremental structured summarization** (Pi-style, `2026-08-20`): `SummarizationMiddleware` writes structured checkpoints (`## Goal / Constraints & Preferences / Progress (Done/In Progress/Blocked) / Key Decisions / Next Steps / Critical Context`). On subsequent compressions it finds its own previous summary message (`source="summarization_middleware"`, both in-memory and `[SUMMARY OF PREVIOUS CONVERSATION]` storage framings) and issues an UPDATE prompt over only the new messages (`<conversation>`/`<previous-summary>` tags) — never a full re-summarize. Cut-points never split AI/Tool pairs; cutting mid-turn generates a separate turn-prefix summary (`## Original Request / ## Context for Suffix`). File ops (`files_*` tool calls) are extracted programmatically and appended as `## Files` (Read/Modified). Summary calls reject tool-call responses and retry once on transient errors (`ConnectionError`/`TimeoutError`/`OSError`); deterministic errors propagate.
+16. **Steering** (Pi-style, `2026-08-20`): `AgentLoop.steer(message)` queues a mid-turn nudge delivered after the current tool completes; remaining tool calls in the batch get `{"cancelled": true, "reason": "steer"}` results. Drained at tool boundaries in both `run()` and `run_stream()` (streaming loop advances its `iteration` counter explicitly). Steers arriving during text generation stay queued and are delivered as the next turn (follow-up). WS protocol: client `steer` message, server `steer_ack`; the WS layer persists steers at injection time via `loop.set_steer_sink()` (correct transcript position, no double-persist). `RunService` unregisters loops per session.
+17. **Browser CLI pattern** (`2026-08-20`): browser tool family reduced 20 → 6 core tools (`browser_open/snapshot/click/fill/screenshot/eval`, ~302 tokens vs ~934) — the long-tail (get text/HTML/URL, tabs, back/forward, scroll, type, press, hover, wait) lives in the `web-automation` seed skill as a stub pointing at the `agent-browser` CLI (`agent-browser skills get core`, version-matched). `agent-browser` added to `shell_tool.allowed_commands` (the shell sandbox: allowlist + metacharacter ban, no chaining). Schema budget guarded by `tests/sdk/test_tool_schema_budget.py`. Seed skills now refresh via hash sidecars (`.seed-hash`) when the seed changes and the user's copy is untouched — user-modified skills are never overwritten.
+18. **Skills validation** (Pi-style, `2026-08-20`): skill loading is warnings-not-errors — invalid frontmatter names fall back to the directory name (with a diagnostic), over-long descriptions still load, only a missing description skips. Discovery respects `.gitignore`/`.ignore`/`.fdignore` (with `!` negation), dedupes symlinks via resolved paths, and reports name collisions (`registry.get_diagnostics()`). `disable_model_invocation: true` excludes a skill from the catalog. `load_skill()` is name-aware (finds skills whose frontmatter name differs from their dir).
+19. **Conditional system-prompt guidelines** (`2026-08-20`): the memory-recall strategy section lists only tools actually enabled via capabilities (section vanishes if all memory tools are disabled); a shell-based file-ops guideline appears only when `shell_execute` is enabled and `files_glob_search`/`files_grep_search` are not. Shell output spill: truncated output is saved to `.shell_output/output-*.txt` under the workspace files dir with a `Full output: <path>` hint so the agent can `files_read` it back.
 
 **Known Provider Behaviors:**
 - OpenAI/Anthropic no longer emit duplicate `tool_end` — fixed by Phase 5 block-structured refactor
@@ -248,7 +253,7 @@ The codebase has a **custom agent SDK** (`src/sdk/`) that replaces LangChain/Lan
 Three endpoints, all SDK-powered:
 - **REST**: `POST /message` — returns `MessageResponse`
 - **SSE**: `POST /message/stream` — Server-Sent Events
-- **WebSocket**: `/ws/conversation` — bidirectional with HITL interrupt/approve/reject
+- **WebSocket**: `/ws/conversation` — bidirectional with HITL interrupt/approve/reject, cancel, ping, and mid-turn steering (`steer` message → delivered after the current tool, remaining tools cancelled; follow-up steers run as the next turn)
 
 Both SSE and WS routers now handle block-structured events (`text_start/delta/end`, `tool_input_start/delta/end`, `reasoning_start/delta/end`, `tool_result`) alongside backward-compat types (`ai_token`, `tool_start`, `tool_end`, `reasoning`).
 
@@ -402,7 +407,7 @@ assistant/
 │   ├── http/
 │   │   ├── main.py              # FastAPI app
 │   │   ├── models.py             # Request/response models
-│   │   ├── ws_protocol.py        # WS message types (16+ types)
+│   │   ├── ws_protocol.py        # WS message types (17+ types, incl. steer/steer_ack)
 │   │   └── routers/
 │   │       ├── conversation.py   # REST + SSE endpoints
 │   │       ├── ws.py             # WebSocket endpoint
@@ -412,7 +417,7 @@ assistant/
 │   ├── storage/
 │   │   ├── conversation.py      # Message storage
 │   │   ├── user.py             # User management
-│   │   ├── memory.py           # Observations + reflections (MemoryStore)
+│   │   ├── memory.py           # memory_profile tool (recall-based digest)
 │   │   ├── messages.py         # MessageStore (CoreMem wrapper)
 │   │   └── paths.py            # DataPaths (ea_root, workspace scoping)
 │   ├── sdk/                     # ★ Custom Agent SDK (THE CORE)
@@ -437,12 +442,12 @@ assistant/
 │   │   ├── subagent_models.py   # AgentDef, SubagentResult, TaskCancelledError, TaskStatus
 │   │   ├── work_queue.py        # WorkQueueDB (aiosqlite, per-user SQLite)
 │   │   ├── coordinator.py       # SubagentCoordinator (PROFILE.md, capabilities filtering)
-│   │   ├── tools_core/          # ★ SDK-native tool implementations (~100 tools)
+│   │   ├── tools_core/          # ★ SDK-native tool implementations (60 registered tools)
 │   │   │   ├── time.py, shell.py, filesystem.py, file_search.py
-│   │   │   ├── file_versioning.py, todos.py, contacts.py
-│   │   │   ├── memory.py, email.py, browser.py, message.py
-│   │   │   ├── subagent.py, workspace.py, apps.py
-│   │   │   ├── web.py, summarize.py, user_prompt.py, observation.py
+│   │   │   ├── file_versioning.py, todos.py, contacts.py, message.py
+│   │   │   ├── memory.py, browser.py, browser_agent.py
+│   │   │   ├── subagent.py, apps.py, research.py, summarize.py
+│   │   │   ├── web.py, user_prompt.py, skills.py
 │   │   │   ├── mcp.py, mcp_bridge.py, mcp_manager.py, mcp_config.py
 │   │   │   ├── skills.py, research.py, shell.py, cli_adapter.py
 │   │   │   ├── todos_storage.py, contacts_storage.py, agent_scheduler_db.py
@@ -482,8 +487,8 @@ assistant/
 └── docs/
     └── superpowers/
         ├── specs/                # Design specs
-        │   ├── 2026-05-31-coremem-fetch-store-rename.md
-        │   ├── 2026-05-31-coremem-observer-reflector-design.md
+        │   ├── 2026-05-31-messagestore-on-coremem-design.md
+        │   ├── 2026-05-31-ollama-routing-design.md
         │   └── 2026-06-01-unified-capabilities-agent-profile-design.md
         └── plans/                # Implementation plans
             ├── 2026-06-01-unified-capabilities-agent-profile-backend.md
@@ -556,7 +561,7 @@ SQLite work_queue-backed coordination with supervisor pattern. Full design in `d
 - `src/sdk/coordinator.py` — `SubagentCoordinator` (create, update, invoke, cancel, instruct, delete)
 - `tests/sdk/test_subagent_v1.py` — 38 tests
 
-**8 V1 tools** (in `src/sdk/tools_core/subagent.py`):
+**10 V1 tools** (in `src/sdk/tools_core/subagent.py`):
 - `subagent_create` — create AgentDef, persist to disk
 - `subagent_update` — amend existing AgentDef (partial update)
 - `subagent_start` — insert task into work_queue + run AgentLoop with middlewares
@@ -566,6 +571,7 @@ SQLite work_queue-backed coordination with supervisor pattern. Full design in `d
 - `subagent_instruct` — inject course-correction into running subagent
 - `subagent_cancel` — set cancel_requested flag
 - `subagent_delete` — remove AgentDef + cancel running tasks
+- `subagent_delegate` — run a subagent synchronously and return its output (blocks, parallel-capable)
 
 **Key design decisions:**
 - Config frozen at invocation into `work_queue.config` (amendments don't affect running tasks)
@@ -603,16 +609,19 @@ SQLite work_queue-backed coordination with supervisor pattern. Full design in `d
 | `filesystem.py` | `files_list`, `files_read`, `files_write`, `files_edit`, `files_delete`, `files_mkdir`, `files_rename` | 7 |
 | `file_search.py` | `files_glob_search`, `files_grep_search` | 2 |
 | `file_versioning.py` | `files_versions_list`, `files_versions_restore`, `files_versions_delete`, `files_versions_clean` | 4 |
-| `todos.py` | `todos_list`, `todos_add`, `todos_update`, `todos_delete`, `todos_extract` | 5 |
-| `contacts.py` | `contacts_list`, `contacts_get`, `contacts_add`, `contacts_update`, `contacts_delete`, `contacts_search` | 6 |
-| `memory.py` | `memory_get_history`, `memory_search`, `memory_search_all`, `memory_search_insights`, `memory_connect` | 5 |
-| `email.py` | `email_connect`, `email_disconnect`, `email_accounts`, `email_list`, `email_get`, `email_search`, `email_send`, `email_sync` | 8 |
-| `browser.py` | `browser_open`, `browser_state`, `browser_click`, `browser_input`, `browser_type`, `browser_keys`, `browser_scroll`, `browser_screenshot`, `browser_eval`, `browser_get_title`, `browser_get_text`, `browser_get_html`, `browser_get_url`, `browser_tab_new`, `browser_tab_switch`, `browser_tab_close`, `browser_wait_text`, `browser_sessions`, `browser_close_all`, `browser_status` | 20 |
-| `subagent.py` | `subagent_create`, `subagent_update`, `subagent_start`, `subagent_check`, `subagent_tasks`, `subagent_list`, `subagent_instruct`, `subagent_cancel`, `subagent_delete` | 9 |
-| `apps.py` | `app_create`, `app_list`, `app_schema`, `app_delete`, `app_insert`, `app_update`, `app_delete_row`, `app_column_add`, `app_column_delete`, `app_column_rename` | 10 |
+| `todos.py` | `todos_list`, `todos_add`, `todos_update`, `todos_delete` | 4 |
+| `contacts.py` | `contacts_list`, `contacts_add`, `contacts_update`, `contacts_delete`, `contacts_search` | 5 |
+| `memory.py` | `memory_profile` | 1 |
+| `browser.py` | `browser_open`, `browser_snapshot`, `browser_click`, `browser_fill`, `browser_screenshot`, `browser_eval` | 6 |
+| `subagent.py` | `subagent_create`, `subagent_update`, `subagent_start`, `subagent_check`, `subagent_tasks`, `subagent_list`, `subagent_instruct`, `subagent_cancel`, `subagent_delete`, `subagent_delegate` | 10 |
+| `apps.py` | `app_create`, `app_list`, `app_schema`, `app_delete`, `app_insert`, `app_update`, `app_delete_row`, `app_column_add`, `app_column_delete`, `app_column_rename`, `app_query`, `app_search_fts` | 12 |
 | `skills.py` | `skills_load`, `skills_reload` | 2 |
-| `web.py` | `web_search`, `web_scrape` | 2 |
-| `workspace.py` | `workspace_create`, `workspace_list`, `workspace_info`, `workspace_delete`, `workspace_switch` | 5 |
+| `web.py` | `web_fetch`, `web_search` | 2 |
+| `message.py` | `message_search`, `message_count`, `message_history`, `message_timeline` | 4 |
+| `summarize.py` | `summarize_session` | 1 |
+| `user_prompt.py` | `user_prompt_get`, `user_prompt_set` | 2 |
+| `research.py` | `research_start`, `research_list` | 2 |
+| `tool_search.py` / `tool_reload.py` | `tool_search`, `tool_reload` (added by the runner) | 2 |
 | `mcp.py` | `mcp_list`, `mcp_reload`, `mcp_tools` | 3 |
 
 Skills tools were refactored significantly: `skill_create` removed (use `files_write`), `skills_list` removed (catalog injected in system prompt), `sql_write_query` removed.
@@ -642,8 +651,8 @@ uv add --dev package_name    # Development dependency
 ### Key OSS Dependencies
 | Package | Source | Purpose |
 |---------|--------|---------|
-| `coremem>=0.3.0` | PyPI | Zero-LLM conversation memory (semantic search, hybrid backend) |
-| `hybriddb>=0.4.2` | PyPI | SQLite + FTS5 + ChromaDB hybrid storage |
+| `coremem>=0.13.1` | PyPI | Zero-LLM conversation memory (compiler + dreaming + search; observer/reflector removed in 0.10) |
+| `hybriddb>=0.5.6` | PyPI | SQLite + FTS5 + ChromaDB hybrid storage |
 | `agentprofile` | local editable | Portable agent definition (PROFILE.md schema + parser) |
 
 ### LangChain Dependencies — REMOVED in Phase 8

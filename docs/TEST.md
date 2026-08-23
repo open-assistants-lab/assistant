@@ -78,24 +78,13 @@
 | `browser_snapshot` | `tools_core/browser.py` | readOnly, idempotent |
 | `browser_click` | `tools_core/browser.py` | openWorld |
 | `browser_fill` | `tools_core/browser.py` | openWorld |
-| `browser_type` | `tools_core/browser.py` | openWorld |
-| `browser_press` | `tools_core/browser.py` | openWorld |
-| `browser_scroll` | `tools_core/browser.py` | idempotent |
-| `browser_hover` | `tools_core/browser.py` | openWorld |
 | `browser_screenshot` | `tools_core/browser.py` | readOnly, idempotent |
 | `browser_eval` | `tools_core/browser.py` | destructive, openWorld |
-| `browser_get_title` | `tools_core/browser.py` | readOnly, idempotent |
-| `browser_get_text` | `tools_core/browser.py` | readOnly, idempotent |
-| `browser_get_html` | `tools_core/browser.py` | readOnly, idempotent |
-| `browser_get_url` | `tools_core/browser.py` | readOnly, idempotent |
-| `browser_tab_new` | `tools_core/browser.py` | openWorld |
-| `browser_tab_close` | `tools_core/browser.py` | destructive |
-| `browser_back` | `tools_core/browser.py` | idempotent |
-| `browser_forward` | `tools_core/browser.py` | idempotent |
-| `browser_wait_text` | `tools_core/browser.py` | readOnly, idempotent |
-| `browser_sessions` | `tools_core/browser.py` | readOnly, idempotent |
-| `browser_close_all` | `tools_core/browser.py` | destructive |
-| `browser_status` | `tools_core/browser.py` | readOnly, idempotent |
+
+> Browser long-tail (get text/HTML/URL, tabs, back/forward, scroll, type,
+> press, hover, wait) was moved to the `web-automation` seed skill via the
+> `agent-browser` CLI (`shell_execute`) — see the 2026-08-20 browser-tools
+> migration. Only the 6 core tools above remain native.
 
 ### Apps (14)
 
@@ -314,11 +303,11 @@ Each persona tests different interaction styles, edge cases, and feature domains
 | 4.3 | `browser_click` | "click the login button" | Element clicked |
 | 4.4 | `browser_fill` | "fill the email field with test@test.com" | Field filled |
 | 4.5 | `browser_screenshot` | "take a screenshot" | Screenshot returned |
-| 4.6 | `browser_get_title` | "what's the page title?" | Title returned |
-| 4.7 | `browser_get_text` | "get all text on page" | Text content |
-| 4.8 | `browser_scroll` | "scroll down" | Scrolled |
-| 4.9 | `browser_tab_new` | "open new tab" | New tab opened |
-| 4.10 | `browser_close_all` | "close all browser sessions" | All closed |
+| 4.6 | `browser_eval` | "run document.title" | JS result |
+
+> Long-tail browser actions (title/text/HTML/URL reads, tabs, scroll, type,
+> press, wait) are covered by the `web-automation` skill via `shell_execute`
+> + `agent-browser` CLI — test through the skill path.
 
 ### 5. Apps
 

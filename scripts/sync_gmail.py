@@ -20,6 +20,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from datetime import UTC
+
 from src.storage.gmail_cache import get_gmail_cache, sync_emails
 
 
@@ -105,10 +107,10 @@ def _print_emails(emails):
 
 
 def _fmt_ts(ts: int) -> str:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     try:
-        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        return datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d %H:%M")
     except Exception:
         return "?"
 

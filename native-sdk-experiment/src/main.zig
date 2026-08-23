@@ -189,9 +189,18 @@ const max_visible_settings_rows = 120;
 const first_stream_key: u64 = 100;
 pub const message_list_outer_padding: u32 = 0;
 
+/// Height reserved below the last message so it can scroll fully above the
+/// glass composer bar (the bar overlays the list's bottom edge). Matches
+/// the bar's estimated height + float gap + breathing room.
+pub const composer_bar_clearance: f32 = 140;
+
 /// Stream watchdog deadline: the fetch timeout is 120s; if a chat is still
 /// streaming this long after it started, the terminal event was lost and the
 /// UI force-finalizes (see the .tick handler).
+/// Stream watchdog deadline (ms): force-finalize after this much SILENCE
+/// (no received line at all). The backend emits keepalive pings every
+/// ~15s while a run is in flight, so 130s of silence means the terminal
+/// event was genuinely lost — never a legitimate long run.
 pub const stream_watchdog_ms: i64 = 130_000;
 
 const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
@@ -262,6 +271,16 @@ pub const Chat = struct {
     session_id_len: usize = 0,
     title: []const u8 = "New chat",
     draft_text: []const u8 = "",
+    /// A send submitted while the composer was streaming: the draft is kept
+    /// and this flag queues it to fire when the current stream ends (the
+    /// old behavior silently dropped Enter during streaming).
+    pending_send: bool = false,
+    /// Millis of the LAST received stream line (any line, including
+    /// keepalive pings and blank separators). The watchdog compares against
+    /// this gap, not the total stream duration, so long legitimate runs
+    /// (rubric loops, slow providers) are never force-finalized while the
+    /// connection is alive.
+    last_stream_event_at: i64 = 0,
     _messages: []ChatMessage = &.{},
     _message_capacity: usize = 0,
     messages: []ChatMessage = &.{},
@@ -350,6 +369,9 @@ pub const Msg = union(enum) {
     suggestion_inbox,
     suggestion_summary,
     suggestion_contacts,
+    quick_action_browse,
+    quick_action_files,
+    quick_action_research,
     sidebar_resized: f32,
     history_loaded: native_sdk.EffectResponse,
     chat_history_loaded: native_sdk.EffectResponse,
@@ -448,6 +470,9 @@ pub const Model = struct {
     hitl_entrance: f32 = 1,
     empty_entrance: f32 = 1,
     composer_entrance: f32 = 0,
+    /// Live-activity pill entrance (0→1 while streaming; advanced by the
+    /// 60ms stream tick so the pill fades up off the composer).
+    pill_entrance: f32 = 0,
     search_query: []const u8 = "",
     sidebar_split: f32 = 0.2,
     available_models: [max_models]ModelOption = undefined,
@@ -647,6 +672,11 @@ fn processSSEEvent(model: *Model, chat: *Chat, sse_body: []const u8, fx: *Effect
             const args_str = if (args_val) |v| toolArgsString(model, v) else "";
             const summary = std.fmt.allocPrint(model.allocator, "{s}({s})", .{ tb.tool_name, args_str }) catch return;
             tb.content = summary;
+            // The bubble's rendered size shrank dramatically (long streamed
+            // args → one-line summary). Bump the scroll generation so the
+            // virtual list's offset table is rebuilt from the new extents
+            // instead of the stale measured height (off-screen transcript).
+            chat.transcript_scroll_generation += 1;
         }
     } else if (std.mem.eql(u8, event_type, "tool_result")) {
         const content = jsonString(data.get("content") orelse return) orelse return;
@@ -655,6 +685,9 @@ fn processSSEEvent(model: *Model, chat: *Chat, sse_body: []const u8, fx: *Effect
             tb.tool_status = model.allocator.dupe(u8, "done") catch return;
             tb.tool_result = model.allocator.dupe(u8, content) catch return;
             tb.collapsed = true;
+            // Same stale-extent hazard as tool_input_end: the bubble now
+            // renders as a one-line collapsed row.
+            chat.transcript_scroll_generation += 1;
         }
         chat.status_text = std.fmt.allocPrint(model.allocator, "{s}: done", .{name}) catch name;
     } else if (std.mem.eql(u8, event_type, "interrupt")) {
@@ -814,7 +847,16 @@ fn recalcTextareaHeight(chat: *Chat) void {
 fn doSend(model: *Model, fx: *Effects) void {
     const chat = model.activeChat();
     const text = std.mem.trim(u8, chat.draft_text, " \n\r\t");
-    if (text.len == 0 or chat.streaming) return;
+    if (text.len == 0) return;
+    if (chat.streaming or chat.history_loading) {
+        // Composer busy (streaming) OR a history reload is in flight: keep
+        // the draft and queue the send so it fires when the composer is
+        // free again. Without the history_loading guard, a send landing in
+        // the reload window gets wiped when the reload replaces the
+        // transcript (the new message is not in the fetched snapshot).
+        chat.pending_send = true;
+        return;
+    }
     chat.transcript_scroll_generation += 1;
     addMessage(chat, model.allocator, "user", text);
     if (chat.msg_count == 1) {
@@ -825,9 +867,11 @@ fn doSend(model: *Model, fx: *Effects) void {
     chat.last_textarea_height = 36;
     chat.streaming = true;
     chat.stream_started_at = nowMillis();
+    chat.last_stream_event_at = chat.stream_started_at;
     chat.fetch_key = model.allocFetchKey();
     chat.open_bubble_type = "";
     chat.status_text = "Thinking...";
+    model.pill_entrance = 0; // replay the pill's fade-up on each stream
     addMessage(chat, model.allocator, "assistant", "");
     chat.open_bubble_type = "assistant";
 
@@ -854,7 +898,10 @@ fn doSend(model: *Model, fx: *Effects) void {
         .body = body,
         .response = .stream,
         .on_line = Effects.lineMsg(.stream_line),
-        .timeout_ms = 120_000,
+        // Whole-exchange cap: long legitimate runs (rubric loops, slow
+        // provider calls) need minutes. Liveness is the backend's keepalive
+        // pings + the gap watchdog — this is only the absolute backstop.
+        .timeout_ms = 600_000,
         .on_response = Effects.responseMsg(.stream_done),
     });
 }
@@ -1167,6 +1214,18 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .suggestion_contacts => {
             model.activeChat().draft_text = "Find contacts in marketing";
         },
+        .quick_action_browse => {
+            model.activeChat().draft_text = "Browse the web and find the latest news on AI agents";
+            doSend(model, fx);
+        },
+        .quick_action_files => {
+            model.activeChat().draft_text = "Search my files for anything related to the current project";
+            doSend(model, fx);
+        },
+        .quick_action_research => {
+            model.activeChat().draft_text = "Run a research job on the topic of local-first AI infrastructure";
+            doSend(model, fx);
+        },
         .sidebar_resized => |frac| {
             model.sidebar_split = frac;
         },
@@ -1218,6 +1277,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.cancel_done),
             });
+            // A message queued while streaming fires once the composer is
+            // free again (the user pressed Stop after typing).
+            firePendingSend(model, chat, fx);
         },
         .approve => {
             const chat = model.activeChat();
@@ -1268,9 +1330,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             });
         },
         .stream_line => |line| {
-            if (line.line.len == 0) return;
             // Route to the chat that owns this fetch key
             const chat = model.findChatByFetchKey(line.key) orelse return;
+            // ANY received line (keepalive pings, blank separators, data
+            // events) proves the connection is alive — update the liveness
+            // clock the watchdog consults before parsing anything.
+            chat.last_stream_event_at = nowMillis();
+            if (line.line.len == 0) return;
             const prefix = "data: ";
             if (!std.mem.startsWith(u8, line.line, prefix)) return;
             const sse_body = line.line[prefix.len..];
@@ -1286,6 +1352,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 const err_msg = std.fmt.allocPrint(model.allocator, "Stream error: {s}", .{@tagName(response.outcome)}) catch "Stream error";
                 addMessage(chat, model.allocator, "system", err_msg);
                 finalizeStream(chat);
+                firePendingSend(model, chat, fx);
                 return;
             }
             finalizeStream(chat);
@@ -1323,10 +1390,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             // open_bubble_type are cleared consistently with the other
             // terminal paths (not just the streaming flag).
             finalizeStream(chat);
+            firePendingSend(model, chat, fx);
         },
         .approve_done => |response| {
             const chat = model.findChatByFetchKey(response.key) orelse return;
             finalizeStream(chat);
+            firePendingSend(model, chat, fx);
         },
         .reject_done, .cancel_done => {},
         .reached_bottom => {},
@@ -1369,6 +1438,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     model.composer_entrance = @min(1, model.composer_entrance + entrance_step);
                     any_entrance = true;
                 }
+                if (model.pill_entrance < 1) {
+                    model.pill_entrance = @min(1, model.pill_entrance + entrance_step);
+                    any_entrance = true;
+                }
             }
             // Decrement compression animation ticks for all chats
             for (0..model.chat_count) |i| {
@@ -1376,20 +1449,23 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     model.chats[i].compression_animation_ticks -= 1;
                 }
             }
-            // Stream watchdog: if a chat has been streaming past the fetch
-            // timeout (120s) plus slack, the terminal event was lost (timeout
-            // teardown race). Force-finalize so the UI never sticks on
-            // "Stop" with a dead composer. finalizeStream clears fetch_key,
-            // so a late terminal event finds no chat and is ignored — no
-            // double error messages.
+            // Stream watchdog: force-finalize when the stream has been
+            // SILENT past the deadline. The backend emits keepalive pings
+            // every ~15s while a run is in flight, so silence means the
+            // terminal event was genuinely lost (connection death / timeout
+            // teardown) — long legitimate runs (rubric loops, slow provider
+            // calls) are never killed while the connection is alive.
+            // finalizeStream clears fetch_key, so a late terminal event
+            // finds no chat and is ignored — no double error messages.
             const now_ms = nowMillis();
             for (0..model.chat_count) |i| {
                 const chat = &model.chats[i];
-                if (chat.streaming and chat.stream_started_at > 0 and
-                    now_ms - chat.stream_started_at > stream_watchdog_ms)
+                if (chat.streaming and chat.last_stream_event_at > 0 and
+                    now_ms - chat.last_stream_event_at > stream_watchdog_ms)
                 {
                     addMessage(chat, model.allocator, "system", "Stream error: timed_out");
                     finalizeStream(chat);
+                    firePendingSend(model, chat, fx);
                 }
             }
             // Elapsed-time indicator: show how long the current response has
@@ -1488,6 +1564,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 const chat = model.findChatByHistoryKey(response.key) orelse return;
                 chat.history_loading = false;
                 addMessage(chat, model.allocator, "system", "Failed to load chat history.");
+                // A send queued behind the failed reload must still fire.
+                firePendingSend(model, chat, fx);
                 return;
             }
             const body = response.body;
@@ -1540,6 +1618,16 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 }
             }
             chat.fetch_key = 0;
+            // The transcript was fully replaced by server truth: bump the
+            // scroll generation so the virtual list rebuilds its offset
+            // table from the new extents (a stale table renders the whole
+            // transcript off-screen after tool-heavy turns).
+            chat.transcript_scroll_generation += 1;
+            // A send queued while the previous stream was running fires now:
+            // the transcript has been reconciled with server truth, so the
+            // new stream's events append to a clean base (firing earlier
+            // would race the history reload and could wipe the new message).
+            firePendingSend(model, chat, fx);
         },
         .sessions_loaded => |response| blk: {
             // Chain the models fetch (and from it, history) so startup never
@@ -1568,6 +1656,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             // derived from hashing the session_id string (avoids collisions between
             // sessions like "chat-1" and "sse-1" that would share numeric id 1).
             const initial_session_id = "chat-1";
+            // Track the highest "chat-{n}" session number seen so new chats get
+            // session ids that never collide with existing backend sessions
+            // (the old chat_count + 100 heuristic jumped to chat-101 and split
+            // conversation continuity).
+            var max_chat_n: u64 = 1;
             for (arr.items) |item| {
                 const sid_val = item.object.get("session_id") orelse continue;
                 const title_val = item.object.get("title") orelse continue;
@@ -1589,6 +1682,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     model.chats[0].title = model.allocator.dupe(u8, title) catch "New chat";
                     model.chats[0].created_at = model.allocator.dupe(u8, created) catch "";
                     continue;
+                }
+                // Track chat-{n} session numbers for collision-free new ids.
+                if (std.mem.startsWith(u8, sid, "chat-")) {
+                    const n_str = sid["chat-".len..];
+                    if (std.fmt.parseUnsigned(u64, n_str, 10)) |n| {
+                        if (n > max_chat_n) max_chat_n = n;
+                    } else |_| {}
                 }
                 if (model.chat_count >= max_chats) break;
 
@@ -1612,8 +1712,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 if (model.chats[new_idx].id == old_active_id) break;
             }
             model.active_chat_idx = new_idx;
-            // Ensure next_chat_id won't collide with any existing chat-N session
-            model.next_chat_id = model.chat_count + 100;
+            // Ensure next_chat_id never collides with an existing chat-N session
+            // (the initial chat is chat-1; loaded sessions may include chat-2..N
+            // from older app versions).
+            model.next_chat_id = @max(model.chat_count + 1, max_chat_n + 1);
         },
         .open_settings => {
             if (model.settings.visible) {
@@ -3177,6 +3279,16 @@ fn findChatBySessionId(model: *Model, sid: []const u8) ?*Chat {
     return null;
 }
 
+/// Fire a send queued while the composer was streaming (see doSend).
+/// Called at every terminal point of a stream so a queued message is
+/// never lost.
+fn firePendingSend(model: *Model, chat: *Chat, fx: *Effects) void {
+    if (!chat.pending_send) return;
+    chat.pending_send = false;
+    if (std.mem.trim(u8, chat.draft_text, " \n\r\t").len == 0) return;
+    doSend(model, fx);
+}
+
 fn finalizeStream(chat: *Chat) void {
     chat.streaming = false;
     chat.fetch_key = 0;
@@ -3252,21 +3364,24 @@ pub fn buildView(ui: *AppUi, model: *const Model) AppUi.Node {
     else
         buildChatPanel(ui, model);
 
-    // Reading-width cap: the chat panel (messages + composer) and the
-    // settings form both read better below ~full-width. Cap at 768px and
-    // center the column in the space right of the sidebar. The cap is a
-    // maximum only — on narrow windows the panel shrinks naturally.
+    // Site layering (openassistants.org mock): the window canvas is the
+    // pure OLED black; the sidebar is a darker plane (mock rail:
+    // rgba(0,0,0,0.18)); the chat area sits on the bare canvas and the
+    // glass lives on cards, bubbles, and the composer.
     const panel_container = ui.row(.{
         .grow = 1,
         .main = .center,
         .cross = .stretch,
-        .style_tokens = .{ .background = .surface },
+        .style_tokens = .{ .background = .background },
     }, .{right_panel});
 
     const split = ui.split(.{
         .value = model.sidebar_split,
         .on_resize = AppUi.valueMsg(.sidebar_resized),
-        .style_tokens = .{ .background = .surface, .border_color = .border },
+        // No container border: the built-in divider hairline separates the
+        // sidebar from the chat area (a full border reads as a thick frame
+        // around the session list in light mode).
+        .style_tokens = .{ .background = .background },
         .grow = 1,
     }, .{
         buildSidebar(ui, model),
@@ -3276,7 +3391,7 @@ pub fn buildView(ui: *AppUi, model: *const Model) AppUi.Node {
     var root = ui.el(.card, .{
         .grow = 1,
         .style = .{ .radius = 0 },
-        .style_tokens = .{ .background = .surface },
+        .style_tokens = .{ .background = .background },
     }, .{split});
     root.widget.layout.padding = .{ .top = 0, .right = 0, .bottom = 0, .left = 0 };
     return root;
@@ -3370,7 +3485,8 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
                 }),
             });
             pill.widget.layout.padding = .{ .top = 0, .right = 0, .bottom = 0, .left = 0 };
-            // Wrap in a row with on_press + context_menu
+            // Wrap in a row with on_press + context_menu. Radius on the
+            // row so its hover wash is rounded (default 0 = sharp corners).
             chat_nodes[chat_count] = ui.row(.{
                 .on_press = .{ .switch_chat = chat.id },
                 .context_menu = if (model.chat_count > 1)
@@ -3378,9 +3494,11 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
                 else
                     &.{},
                 .semantics = .{ .role = .listitem, .label = chat.title },
+                .style_tokens = .{ .radius = .sm },
             }, .{pill});
         } else {
-            // Inactive row: plain row, no background
+            // Inactive row: plain row, no background. Radius on the row so
+            // its hover wash is rounded (never 0 = sharp corners).
             var chat_row = ui.row(.{
                 .gap = 8,
                 .cross = .center,
@@ -3390,6 +3508,7 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
                 else
                     &.{},
                 .semantics = .{ .role = .listitem, .label = chat.title },
+                .style_tokens = .{ .radius = .sm },
             }, .{row_content});
             chat_row.widget.layout.padding = .{ .top = 8, .bottom = 8, .left = 12, .right = 12 };
             chat_nodes[chat_count] = chat_row;
@@ -3400,27 +3519,26 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
     var sidebar_children: [5]AppUi.Node = undefined;
     var sidebar_count: usize = 0;
 
-    // Top section
+    // Top section (transparent — no container blocks; only the search
+    // field and button carry their own fills)
     const top_slice: []const AppUi.Node = top_nodes[0..2];
-    sidebar_children[sidebar_count] = ui.column(.{ .padding = 12, .gap = 8, .style_tokens = .{ .background = .surface } }, top_slice);
+    sidebar_children[sidebar_count] = ui.column(.{ .padding = 12, .gap = 8 }, top_slice);
     sidebar_count += 1;
 
     // Chat list scroll
     if (chat_count > 0) {
         const chat_slice: []const AppUi.Node = chat_nodes[0..chat_count];
-        const inner_col = ui.column(.{ .gap = 2, .style_tokens = .{ .background = .surface } }, chat_slice);
+        const inner_col = ui.column(.{ .gap = 2 }, chat_slice);
         sidebar_children[sidebar_count] = ui.scroll(.{
             .grow = 1,
             .padding = 12,
             .gap = 2,
-            .style_tokens = .{ .background = .surface },
         }, inner_col);
     } else {
         sidebar_children[sidebar_count] = ui.scroll(.{
             .grow = 1,
             .padding = 12,
             .gap = 2,
-            .style_tokens = .{ .background = .surface },
         }, ui.row(.{ .gap = 8, .padding = 12, .cross = .center }, .{
             ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "circle-dot"),
             ui.text(.{ .size = .sm, .grow = 1, .style_tokens = .{ .foreground = .text_muted } }, "No chats found"),
@@ -3429,13 +3547,15 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
     sidebar_count += 1;
 
     // Settings + theme toggle
-    sidebar_children[sidebar_count] = ui.row(.{ .gap = 4, .padding = 12, .cross = .center, .style_tokens = .{ .background = .surface } }, .{
+    sidebar_children[sidebar_count] = ui.row(.{ .gap = 4, .padding = 12, .cross = .center }, .{
         ui.row(.{
             .gap = 8,
             .padding = 8,
             .cross = .center,
             .grow = 1,
             .on_press = .open_settings,
+            // Radius so the hover wash is rounded, not sharp.
+            .style_tokens = .{ .radius = .md },
         }, .{
             ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "settings"),
             ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Settings"),
@@ -3454,8 +3574,9 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
     sidebar_count += 1;
 
     const sidebar_slice: []const AppUi.Node = sidebar_children[0..sidebar_count];
+    // No background: the sidebar sits directly on the canvas (the divider
+    // hairline from the split separates it from the chat area).
     return ui.column(.{
-        .style_tokens = .{ .background = .surface },
         .gap = 0,
         .min_width = 160,
     }, sidebar_slice);
@@ -3499,6 +3620,11 @@ pub fn groupExtentEstimate(context: ?*const anyopaque, index: u64) f32 {
     }
     if (index < chat._group_extents_count) {
         return chat._group_extents[index];
+    }
+    // The synthetic end-of-list clearance row (scrolls under the glass
+    // composer bar; keeps the last message fully visible above it).
+    if (index == chat._group_extents_count) {
+        return composer_bar_clearance;
     }
     return 80;
 }
@@ -4397,176 +4523,19 @@ fn buildToolsSection(ui: *AppUi, model: *const Model) AppUi.Node {
 }
 
 
-fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
+/// The glass composer bar (site nav treatment): dark translucent fill +
+/// backdrop blur + hairline + lift shadow, floating above the panel's
+/// bottom edge. All controls — textarea, model picker, tokens, send — sit
+/// on ONE inner surface so the bar reads as a single machined piece. The
+/// textarea keeps its exact behavior: Enter submits via `on_submit`,
+/// Shift+Enter newlines are the widget's own, height growth rides
+/// `last_textarea_height`.
+fn buildComposerBar(ui: *AppUi, model: *const Model) AppUi.Node {
     const chat = &model.chats[model.active_chat_idx];
-    const count = chat.msg_count;
 
-    // Invalidate the group extents cache if messages or scroll generation changed.
-    // The virtual list calls groupExtentEstimate for every visible item on each
-    // scroll frame. Without caching, that's O(n) per item × O(n) items = O(n²).
-    // With caching, it's O(n) once + O(1) per item = O(n) total.
-
-    var children: [4]AppUi.Node = undefined;
-    var child_count: usize = 0;
-
-    // Message list or empty state
-    if (count == 0) {
-        if (chat.history_loading) {
-            // A2: Loading indicator
-            children[child_count] = ui.column(.{
-                .grow = 1,
-                .padding = 32,
-                .gap = 16,
-                .cross = .center,
-                .main = .center,
-                .style_tokens = .{ .background = .surface },
-            }, .{
-                ui.text(.{ .size = .heading, .style_tokens = .{ .foreground = .text_muted } }, "Loading..."),
-            });
-        } else {
-            // Empty state: heading, subtitle, and suggestions stagger in
-            // (fade + 8px rise, ~90ms between nodes, ~270ms total). This is
-            // the first-time tier — delight is allowed. Reduced motion:
-            // fade only, no rise.
-            const e0 = smoothstep(model.empty_entrance);
-            const e1 = smoothstep(model.empty_entrance - 0.15);
-            const e2 = smoothstep(model.empty_entrance - 0.3);
-            const rise: f32 = if (model.settings.reduced_motion) 0.0 else 8.0;
-            const fade_node = struct {
-                fn build(_: *AppUi, progress: f32, dy: f32, node_in: AppUi.Node) AppUi.Node {
-                    if (progress >= 1) return node_in;
-                    var node = node_in;
-                    node.widget.opacity = std.math.clamp(progress, 0, 1);
-                    node.widget.transform = canvas.Affine.translate(0, dy * (1 - std.math.clamp(progress, 0, 1)));
-                    return node;
-                }
-            }.build;
-            const heading = ui.text(.{ .size = .heading }, "How can I help?");
-            const eyebrow = ui.text(.{
-                .size = .sm,
-                .padding = 8,
-                .style_tokens = .{ .foreground = .accent, .background = .surface_subtle, .radius = .md },
-            }, "YOUR ASSISTANT");
-            const subtitle = ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Ask me anything, or try one of these:");
-            const suggestions = ui.row(.{ .gap = 8 }, .{
-                ui.button(.{ .on_press = .suggestion_inbox, .variant = .ghost, .style = .{ .radius = 999 } }, "Triage my inbox"),
-                ui.button(.{ .on_press = .suggestion_summary, .variant = .ghost, .style = .{ .radius = 999 } }, "Draft a weekly summary"),
-                ui.button(.{ .on_press = .suggestion_contacts, .variant = .ghost, .style = .{ .radius = 999 } }, "Find contacts in marketing"),
-            });
-            children[child_count] = ui.column(.{
-                .grow = 1,
-                .padding = 32,
-                .gap = 16,
-                .cross = .center,
-                .main = .center,
-                .style_tokens = .{ .background = .surface },
-            }, .{
-                fade_node(ui, e0, rise, eyebrow),
-                fade_node(ui, e1, rise, heading),
-                fade_node(ui, e2, rise, subtitle),
-                fade_node(ui, e2, rise, suggestions),
-            });
-        }
-    } else {
-        // Group messages: user bubbles are standalone; consecutive assistant/tool/reasoning
-        // messages are grouped under a single "Assistant" label.
-        var group_count: usize = 0;
-        var i: usize = 0;
-        while (i < count) {
-            const msg = &chat._messages[i];
-            if (msg.isUser() or std.mem.eql(u8, msg.role, "system")) {
-                group_count += 1;
-                i += 1;
-            } else {
-                group_count += 1;
-                while (i < count and !chat._messages[i].isUser() and !std.mem.eql(u8, chat._messages[i].role, "system")) {
-                    i += 1;
-                }
-            }
-        }
-
-        const list_id = std.fmt.allocPrint(
-            ui.arena,
-            "chat-messages-{d}-{d}",
-            .{ chat.id, chat.transcript_scroll_generation },
-        ) catch "chat-messages";
-        const options = AppUi.VirtualListOptions{
-            .id = list_id,
-            .item_count = group_count,
-            .item_extent = 0,
-            .extent_estimate = groupExtentEstimate,
-            .extent_context = chat,
-            .gap = 8,
-            .anchor = .trailing,
-            .overscan = 3,
-            .grow = 1,
-            .padding = message_list_outer_padding,
-            .style_tokens = .{ .background = .surface },
-        };
-        const window = ui.virtualWindow(options);
-
-        // Build group nodes for visible range only.
-        const max_visible = 64;
-        var msg_nodes: [max_visible]AppUi.Node = undefined;
-        var node_count: usize = 0;
-
-        var group_idx: usize = 0;
-        var msg_start: usize = 0;
-        i = 0;
-        while (i < count and node_count < max_visible) {
-            const msg = &chat._messages[i];
-            if (msg.isUser() or std.mem.eql(u8, msg.role, "system")) {
-                if (group_idx >= window.start_index and group_idx < window.end_index) {
-                    msg_nodes[node_count] = buildMessageBubble(ui, msg);
-                    node_count += 1;
-                }
-                group_idx += 1;
-                msg_start = i + 1;
-                i += 1;
-            } else {
-                msg_start = i;
-                while (i < count and !chat._messages[i].isUser() and !std.mem.eql(u8, chat._messages[i].role, "system")) {
-                    i += 1;
-                }
-                const msg_end = i;
-                if (group_idx >= window.start_index and group_idx < window.end_index) {
-                    msg_nodes[node_count] = buildAssistantGroup(ui, chat, msg_start, msg_end);
-                    node_count += 1;
-                }
-                group_idx += 1;
-            }
-        }
-
-        children[child_count] = ui.virtualList(options, window, msg_nodes[0..node_count]);
-    }
-    child_count += 1;
-
-    // HITL bar — DISABLED FOR SHIP: the backend never emits interrupts
-    // (loop._should_interrupt returns false), so has_pending is always
-    // false and this block never renders. Kept dormant for re-enable.
-    if (chat.has_pending) {
-        const approve_text = std.fmt.allocPrint(ui.arena, "Approve: {s}?", .{chat.pending_tool}) catch "Approve?";
-        const hitl_eased = smoothstep(model.hitl_entrance);
-        const hitl_dy = if (model.settings.reduced_motion) 0.0 else 8.0 * (1 - hitl_eased);
-        children[child_count] = ui.row(.{
-            .gap = 12,
-            .padding = 12,
-            .cross = .center,
-            .opacity = hitl_eased,
-            .transform = canvas.Affine.translate(0, hitl_dy),
-            .style_tokens = .{ .background = .surface, .radius = .md },
-        }, .{
-            ui.text(.{ .grow = 1 }, approve_text),
-            ui.button(.{ .on_press = .approve, .style_tokens = .{ .foreground = .success } }, "Approve"),
-            ui.button(.{ .on_press = .reject, .variant = .ghost, .style_tokens = .{ .foreground = .destructive } }, "Reject"),
-        });
-        child_count += 1;
-    }
-
-    // Composer: bordered container with textarea + model button + Send/Stop button
     // Composer model label: model name only (the "Provider · Name" form is
-    // for the settings panel). Bounded width keeps the bottom row from
-    // overflowing on narrow windows.
+    // for the settings panel). Bounded width keeps the row from overflowing
+    // on narrow windows.
     const model_label = if (model.available_model_count > 0)
         model.available_models[model.selected_model_idx].name
     else
@@ -4601,12 +4570,15 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
             .on_submit = .send_message,
             .semantics = .{ .label = "Message" },
             .height = textarea_height,
-            .style_tokens = .{ .background = .surface_subtle, .border_color = .surface_subtle, .radius = .md },
+            .style_tokens = .{ .radius = .md },
         }, .{});
         if (chat.draft_selection_programmatic) {
             field.widget.text_selection = chat.draft_selection;
         }
-        field.widget.style.radius = 12;
+        // Transparent fill: the unified inner surface shows through, so the
+        // textarea and the control row share ONE color (single piece).
+        field.widget.style.background = canvas.Color.rgba8(0, 0, 0, 0);
+        field.widget.style.radius = 14; // md token (squircle scale)
         field.widget.style.focus_ring = canvas.Color.rgba8(0, 0, 0, 0);
         break :blk field;
     };
@@ -4616,38 +4588,347 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     else
         ui.button(.{ .on_press = .send_message, .variant = .primary, .icon = "send", .min_width = 76 }, "Send");
 
-    // Textarea in its own nested card — an outer shell (hairline border +
-    // padding + large radius) with the textarea as the inner core (its own
-    // surface + concentric radius). The two-tone nesting reads as machined
-    // hardware instead of a flat box.
     const ci = &chat.context_info;
     const tokens_text = std.fmt.allocPrint(ui.arena, "{d} in / {d} out", .{ ci.input_tokens, ci.output_tokens }) catch "";
     const freshness_style: canvas.ColorTokenName = if (std.mem.eql(u8, ci.freshness, "live")) .success else .text_muted;
 
-    children[child_count] = ui.column(.{
-        .grow = 0,
-        .padding = 6,
-        .gap = 0,
-        .style_tokens = .{ .background = .surface, .border_color = .border, .radius = .lg },
+    // ONE unified inner surface for every control — textarea + model +
+    // tokens + send share the same fill, so the bar reads as one piece.
+    const unified_surface = ui.column(.{
+        .gap = 6,
+        .padding = 8,
+        .style_tokens = .{ .background = .surface_subtle, .radius = .md },
     }, .{
         composer_textarea,
+        ui.row(.{
+            .gap = 6,
+            .cross = .center,
+            .grow = 0,
+            .padding = 4,
+        }, .{
+            model_selector,
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "•"),
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, tokens_text),
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "•"),
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = freshness_style } }, ci.freshness),
+            ui.spacer(1),
+            send_button,
+        }),
     });
+
+    // The bar itself: a panel (gets the lift shadow) with the site nav's
+    // glass — rgba(5,5,6,0.62) + blur(20px) + hairline + rounded 24. It is
+    // a FLOATING surface anchored above the 1px strip, so it overlays the
+    // message list's tail without consuming layout space; content scrolling
+    // beneath it is blurred by the backdrop pass.
+    // The bar itself: a panel (gets the lift shadow) with the site nav's
+    // glass — dark: rgba(5,5,6,0.62), light: white glass — + backdrop blur,
+    // NO border (a hairline reads as a frame around the bar in light mode;
+    // the glass edge + shadow + blur separate it). It is a FLOATING surface
+    // anchored above the 1px strip, so it overlays the message list's tail
+    // without consuming layout space; content scrolling beneath it is
+    // blurred by the backdrop pass.
+    const bar_bg = if (model.theme_mode == .dark)
+        canvas.Color.rgba(5.0 / 255.0, 5.0 / 255.0, 6.0 / 255.0, 0.62)
+    else
+        canvas.Color.rgba(255.0 / 255.0, 255.0 / 255.0, 255.0 / 255.0, 0.62);
+    var bar_children: [2]AppUi.Node = undefined;
+    bar_children[0] = unified_surface;
+    var bar_count: usize = 1;
+    if (chat.streaming) {
+        bar_children[bar_count] = buildActivePill(ui, model);
+        bar_count += 1;
+    }
+    var bar = ui.panel(.{
+        .padding = 8,
+        .anchor = .above,
+        .anchor_alignment = .stretch,
+        .anchor_offset = 12,
+        .style = .{
+            .background = bar_bg,
+            .radius = 24,
+        },
+    }, bar_children[0..bar_count]);
+    bar.widget.backdrop_blur = 20; // site nav: blur(20px)
+    return bar;
+}
+
+/// Floating live-activity pill: anchored above the composer bar's trailing
+/// edge, rendered ONLY while streaming (zero idle cost). Glass accent-muted
+/// fill + accent hairline + pulsing dot — the site mock's ACTIVE panel,
+/// moved out of the rail into the chat surface. The floating anchor makes
+/// it consume no layout space and paint above the transcript.
+fn buildActivePill(ui: *AppUi, model: *const Model) AppUi.Node {
+    const chat = &model.chats[model.active_chat_idx];
+
+    // Derive live activity from the transcript: the last running tool and
+    // the count of running subagent tools.
+    var active_tool: []const u8 = "";
+    var subagent_count: usize = 0;
+    if (chat.streaming) {
+        for (chat._messages[0..chat.msg_count]) |*m| {
+            if (m.isTool() and std.mem.eql(u8, m.tool_status, "running")) {
+                active_tool = m.tool_name;
+                if (std.mem.startsWith(u8, m.tool_name, "subagent_")) subagent_count += 1;
+            }
+        }
+    }
+    if (!chat.streaming) return ui.text(.{}, "");
+
+    const pulse = 0.15 + 0.85 * (0.5 + 0.5 * @cos(model.pulse_phase));
+    const tool_text = if (active_tool.len > 0) active_tool else "Working…";
+    const sub_text = if (subagent_count > 0)
+        std.fmt.allocPrint(ui.arena, "{d} subagent{s} running", .{ subagent_count, if (subagent_count == 1) "" else "s" }) catch ""
+    else
+        "";
+
+    // Entrance: fade + 4px rise off the stream start; reduced motion fades
+    // only. Driven by model.pill_entrance (advanced by the stream tick).
+    const e = smoothstep(model.pill_entrance);
+    const rise: f32 = if (model.settings.reduced_motion) 0.0 else 4.0;
+    var pill = ui.column(.{
+        .gap = 2,
+        .padding = 10,
+        // Floating surface: anchored above the composer bar (its parent),
+        // right-aligned; consumes no layout space, paints above the
+        // transcript in a late window-level pass.
+        .anchor = .above,
+        .anchor_alignment = .end,
+        .anchor_offset = 8,
+        .style = .{
+            // Glass panel: teal-muted fill + backdrop blur + accent hairline
+            // (site nav glass treatment, tinted with the accent).
+            .background = canvas.Color.rgba(20.0 / 255.0, 184.0 / 255.0, 166.0 / 255.0, 0.12),
+            .border = canvas.Color.rgba8(20, 184, 166, 255),
+            .radius = 14,
+        },
+    }, .{
+        ui.row(.{ .gap = 8, .cross = .center }, .{
+            ui.el(.panel, .{ .width = 7, .height = 7, .style = .{ .radius = 4, .background = canvas.Color.rgba(20.0 / 255.0, 184.0 / 255.0, 166.0 / 255.0, pulse) } }, .{}),
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text } }, tool_text),
+        }),
+        if (sub_text.len > 0)
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, sub_text)
+        else
+            ui.text(.{}, ""),
+    });
+    if (e < 1) {
+        pill.widget.opacity = std.math.clamp(e, 0, 1);
+        pill.widget.transform = canvas.Affine.translate(0, rise * (1 - std.math.clamp(e, 0, 1)));
+    }
+    pill.widget.backdrop_blur = 12; // frosted glass over the transcript
+    return pill;
+}
+
+fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
+    const chat = &model.chats[model.active_chat_idx];
+    const count = chat.msg_count;
+
+    // Invalidate the group extents cache if messages or scroll generation changed.
+    // The virtual list calls groupExtentEstimate for every visible item on each
+    // scroll frame. Without caching, that's O(n) per item × O(n) items = O(n²).
+    // With caching, it's O(n) once + O(1) per item = O(n) total.
+
+    var children: [4]AppUi.Node = undefined;
+    var child_count: usize = 0;
+
+    // Message list or empty state
+    if (count == 0) {
+        if (chat.history_loading) {
+            // A2: Loading indicator
+            children[child_count] = ui.column(.{
+                .grow = 1,
+                .padding = 32,
+                .gap = 16,
+                .cross = .center,
+                .main = .center,
+                .style_tokens = .{ .background = .background },
+            }, .{
+                ui.text(.{ .size = .heading, .style_tokens = .{ .foreground = .text_muted } }, "Loading..."),
+            });
+        } else {
+            // Empty state: heading, subtitle, and suggestions stagger in
+            // (fade + 8px rise, ~90ms between nodes, ~270ms total). This is
+            // the first-time tier — delight is allowed. Reduced motion:
+            // fade only, no rise.
+            const e0 = smoothstep(model.empty_entrance);
+            const e1 = smoothstep(model.empty_entrance - 0.15);
+            const e2 = smoothstep(model.empty_entrance - 0.3);
+            const rise: f32 = if (model.settings.reduced_motion) 0.0 else 8.0;
+            const fade_node = struct {
+                fn build(_: *AppUi, progress: f32, dy: f32, scale_from: f32, node_in: AppUi.Node) AppUi.Node {
+                    if (progress >= 1) return node_in;
+                    var node = node_in;
+                    node.widget.opacity = std.math.clamp(progress, 0, 1);
+                    // Rise + settle: translate up while scaling from
+                    // scale_from → 1.0 with an ease-out curve (spring-like
+                    // overshoot feel on the heading; reduced motion keeps
+                    // scale_from = 1 so it degrades to fade-only).
+                    const eased = 1 - (1 - std.math.clamp(progress, 0, 1)) * (1 - std.math.clamp(progress, 0, 1));
+                    const s = 1 + (scale_from - 1) * (1 - eased);
+                    node.widget.transform = canvas.Affine.multiply(
+                        canvas.Affine.scale(s, s),
+                        canvas.Affine.translate(0, dy * (1 - std.math.clamp(progress, 0, 1))),
+                    );
+                    return node;
+                }
+            }.build;
+            const heading = ui.text(.{ .size = .heading }, "How can I help?");
+            const eyebrow = ui.text(.{
+                .size = .sm,
+                .padding = 8,
+                .style_tokens = .{ .foreground = .accent, .background = .surface_subtle, .radius = .md },
+            }, "YOUR ASSISTANT");
+            const subtitle = ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Ask me anything, or try one of these:");
+            const suggestions = ui.row(.{ .gap = 8 }, .{
+                ui.button(.{ .on_press = .suggestion_inbox, .variant = .ghost, .style = .{ .radius = 999 } }, "Triage my inbox"),
+                ui.button(.{ .on_press = .suggestion_summary, .variant = .ghost, .style = .{ .radius = 999 } }, "Draft a weekly summary"),
+                ui.button(.{ .on_press = .suggestion_contacts, .variant = .ghost, .style = .{ .radius = 999 } }, "Find contacts in marketing"),
+            });
+            // Quick-action chips: icon-only buttons mirroring the activity
+            // rail's actions (site hero mock: globe/search/flask). Same
+            // preset-prompt path as the rail rows.
+            const chips = ui.row(.{ .gap = 8 }, .{
+                ui.button(.{ .on_press = .quick_action_browse, .variant = .ghost, .icon = "external-link", .style = .{ .radius = 999 } }, ""),
+                ui.button(.{ .on_press = .quick_action_files, .variant = .ghost, .icon = "file-text", .style = .{ .radius = 999 } }, ""),
+                ui.button(.{ .on_press = .quick_action_research, .variant = .ghost, .icon = "git-branch", .style = .{ .radius = 999 } }, ""),
+            });
+            children[child_count] = ui.column(.{
+                .grow = 1,
+                .padding = 32,
+                .gap = 16,
+                .cross = .center,
+                .main = .center,
+                .style_tokens = .{ .background = .background },
+            }, .{
+                fade_node(ui, e0, rise, 1.0, eyebrow),
+                fade_node(ui, e1, rise, if (model.settings.reduced_motion) 1.0 else 0.96, heading),
+                fade_node(ui, e2, rise, 1.0, subtitle),
+                fade_node(ui, e2, rise, 1.0, suggestions),
+                fade_node(ui, e2, rise, 1.0, chips),
+            });
+        }
+    } else {
+        // Group messages: user bubbles are standalone; consecutive assistant/tool/reasoning
+        // messages are grouped under a single "Assistant" label.
+        var group_count: usize = 0;
+        var i: usize = 0;
+        while (i < count) {
+            const msg = &chat._messages[i];
+            if (msg.isUser() or std.mem.eql(u8, msg.role, "system")) {
+                group_count += 1;
+                i += 1;
+            } else {
+                group_count += 1;
+                while (i < count and !chat._messages[i].isUser() and !std.mem.eql(u8, chat._messages[i].role, "system")) {
+                    i += 1;
+                }
+            }
+        }
+
+        const list_id = std.fmt.allocPrint(
+            ui.arena,
+            "chat-messages-{d}-{d}",
+            .{ chat.id, chat.transcript_scroll_generation },
+        ) catch "chat-messages";
+        const options = AppUi.VirtualListOptions{
+            .id = list_id,
+            // +1: the synthetic end-of-list clearance row (keeps the last
+            // message visible above the glass composer bar).
+            .item_count = group_count + 1,
+            .item_extent = 0,
+            .extent_estimate = groupExtentEstimate,
+            .extent_context = chat,
+            .gap = 8,
+            .anchor = .trailing,
+            .overscan = 3,
+            .grow = 1,
+            // Bare-build fallback (tests): the app loop resolves the real
+            // viewport, so this only sizes the window when none is known.
+            .viewport_fallback = 600,
+            .padding = message_list_outer_padding,
+            // Bare canvas — the glass composer bar blurs content scrolling
+            // beneath it, and bubbles sit directly on the canvas.
+            .style_tokens = .{ .background = .background },
+        };
+        const window = ui.virtualWindow(options);
+
+        // Build group nodes for visible range only.
+        const max_visible = 64;
+        var msg_nodes: [max_visible]AppUi.Node = undefined;
+        var node_count: usize = 0;
+
+        var group_idx: usize = 0;
+        var msg_start: usize = 0;
+        i = 0;
+        while (i < count and node_count < max_visible) {
+            const msg = &chat._messages[i];
+            if (msg.isUser() or std.mem.eql(u8, msg.role, "system")) {
+                if (group_idx >= window.start_index and group_idx < window.end_index) {
+                    msg_nodes[node_count] = buildMessageBubble(ui, msg);
+                    node_count += 1;
+                }
+                group_idx += 1;
+                msg_start = i + 1;
+                i += 1;
+            } else {
+                msg_start = i;
+                while (i < count and !chat._messages[i].isUser() and !std.mem.eql(u8, chat._messages[i].role, "system")) {
+                    i += 1;
+                }
+                const msg_end = i;
+                if (group_idx >= window.start_index and group_idx < window.end_index) {
+                    msg_nodes[node_count] = buildAssistantGroup(ui, chat, msg_start, msg_end, model.pulse_phase);
+                    node_count += 1;
+                }
+                group_idx += 1;
+            }
+        }
+
+        // End-of-list clearance: a transparent spacer row at the list's
+        // tail. The trailing anchor parks the LAST message above it, so
+        // the final bubble scrolls fully above the glass bar while earlier
+        // messages pass underneath and blur.
+        if (group_idx == group_count and group_idx >= window.start_index and group_idx < window.end_index) {
+            msg_nodes[node_count] = ui.el(.stack, .{ .height = composer_bar_clearance, .grow = 1 }, .{});
+            node_count += 1;
+        }
+
+        children[child_count] = ui.virtualList(options, window, msg_nodes[0..node_count]);
+    }
     child_count += 1;
 
-    // Bottom row: separate, static, sits below the textarea card.
-    children[child_count] = ui.row(.{
-        .gap = 6,
-        .cross = .center,
-        .grow = 0,
-        .padding = 12,
-    }, .{
-        model_selector,
-        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "•"),
-        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, tokens_text),
-        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "•"),
-        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = freshness_style } }, ci.freshness),
-        ui.spacer(1),
-        send_button,
+    // HITL bar — DISABLED FOR SHIP: the backend never emits interrupts
+    // (loop._should_interrupt returns false), so has_pending is always
+    // false and this block never renders. Kept dormant for re-enable.
+    if (chat.has_pending) {
+        const approve_text = std.fmt.allocPrint(ui.arena, "Approve: {s}?", .{chat.pending_tool}) catch "Approve?";
+        const hitl_eased = smoothstep(model.hitl_entrance);
+        const hitl_dy = if (model.settings.reduced_motion) 0.0 else 8.0 * (1 - hitl_eased);
+        children[child_count] = ui.row(.{
+            .gap = 12,
+            .padding = 12,
+            .cross = .center,
+            .opacity = hitl_eased,
+            .transform = canvas.Affine.translate(0, hitl_dy),
+            .style_tokens = .{ .background = .surface, .radius = .md },
+        }, .{
+            ui.text(.{ .grow = 1 }, approve_text),
+            ui.button(.{ .on_press = .approve, .style_tokens = .{ .foreground = .success } }, "Approve"),
+            ui.button(.{ .on_press = .reject, .variant = .ghost, .style_tokens = .{ .foreground = .destructive } }, "Reject"),
+        });
+        child_count += 1;
+    }
+
+    // Glass composer bar: floats above a 1px anchor strip at the panel's
+    // bottom edge (site nav treatment: dark translucent + backdrop blur +
+    // hairline + lift shadow). The bar overlays the message list's tail so
+    // content scrolling beneath it blurs. All composer controls share one
+    // inner surface (one piece). The textarea keeps its exact behavior —
+    // Enter submits via on_submit, Shift+Enter newlines are handled by the
+    // widget, height growth rides last_textarea_height.
+    children[child_count] = ui.el(.stack, .{ .height = 1, .grow = 0 }, .{
+        buildComposerBar(ui, model),
     });
     child_count += 1;
 
@@ -4658,7 +4939,7 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
     const composer_eased = smoothstep(model.composer_entrance);
     const composer_rise: f32 = if (model.settings.reduced_motion) 0.0 else 6.0;
     var composer_node = ui.column(.{
-        .style_tokens = .{ .background = .surface },
+        .style_tokens = .{ .background = .background },
         .gap = 2,
         .min_width = 320,
         .max_width = 768,
@@ -4683,19 +4964,34 @@ fn toolIconName(tool_name: []const u8) []const u8 {
     return "wrench";
 }
 
-fn buildAssistantGroup(ui: *AppUi, chat: *const Chat, start: usize, end: usize) AppUi.Node {
+fn buildAssistantGroup(ui: *AppUi, chat: *const Chat, start: usize, end: usize, pulse_phase: f32) AppUi.Node {
     const len = end - start;
     const child_nodes = ui.arena.alloc(AppUi.Node, len) catch return ui.text(.{}, "");
     for (0..len) |j| {
-        child_nodes[j] = buildChildBubble(ui, &chat._messages[start + j], chat.status_text);
+        child_nodes[j] = buildChildBubble(ui, &chat._messages[start + j], chat.status_text, pulse_phase);
     }
+    // Meta line: the last tool the group ran, mirroring the site's
+    // "Subagent: research_hybriddb / Browser · scraped CHANGELOG.md" pattern.
+    var last_tool: []const u8 = "";
+    for (0..len) |j| {
+        const m = &chat._messages[start + j];
+        if (m.isTool() and m.tool_name.len > 0) last_tool = m.tool_name;
+    }
+    const meta: AppUi.Node = if (last_tool.len > 0)
+        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, last_tool)
+    else
+        ui.text(.{}, "");
     return ui.column(.{ .gap = 6, .cross = .start }, .{
-        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .accent } }, "Assistant"),
+        ui.row(.{ .gap = 8, .cross = .center }, .{
+            ui.iconGlyph(.{ .style_tokens = .{ .foreground = .accent } }, "circle-dot"),
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .accent } }, "Assistant"),
+        }),
+        meta,
         ui.column(.{ .gap = 8 }, child_nodes),
     });
 }
 
-fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage, status_text: []const u8) AppUi.Node {
+fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage, status_text: []const u8, pulse_phase: f32) AppUi.Node {
     if (msg.isReasoning()) {
         if (msg.content.len == 0) return ui.text(.{}, "");
         const expand_label: []const u8 = if (msg.collapsed) "Expand" else "Collapse";
@@ -4810,8 +5106,26 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage, status_text: []const u8
     } else {
         // Assistant text bubble — nested card (outer shell + inner core).
         if (msg.isEmpty()) {
-            const typing_text: []const u8 = if (status_text.len > 0) status_text else "typing...";
-            return ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, typing_text);
+            // Typing indicator: three staggered dots driven by the stream
+            // pulse phase (advances every 60ms tick while streaming; frozen
+            // when reduced motion is on, which reads as a static indicator).
+            const dot_a = struct {
+                fn at(phase: f32, i: usize) f32 {
+                    const s = 0.5 + 0.5 * @sin(phase - @as(f32, @floatFromInt(i)) * 0.7);
+                    return 0.25 + 0.75 * s;
+                }
+            }.at;
+            return ui.row(.{ .gap = 8, .cross = .center, .padding = 4 }, .{
+                ui.row(.{ .gap = 5, .cross = .center }, .{
+                    ui.el(.panel, .{ .width = 6, .height = 6, .style = .{ .radius = 3, .background = canvas.Color.rgba(139.0 / 255.0, 141.0 / 255.0, 152.0 / 255.0, dot_a(pulse_phase, 0)) } }, .{}),
+                    ui.el(.panel, .{ .width = 6, .height = 6, .style = .{ .radius = 3, .background = canvas.Color.rgba(139.0 / 255.0, 141.0 / 255.0, 152.0 / 255.0, dot_a(pulse_phase, 1)) } }, .{}),
+                    ui.el(.panel, .{ .width = 6, .height = 6, .style = .{ .radius = 3, .background = canvas.Color.rgba(139.0 / 255.0, 141.0 / 255.0, 152.0 / 255.0, dot_a(pulse_phase, 2)) } }, .{}),
+                }),
+                if (status_text.len > 0)
+                    ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, status_text)
+                else
+                    ui.text(.{}, ""),
+            });
         } else {
             return ui.column(.{
                 .gap = 0,
@@ -4836,11 +5150,12 @@ fn buildChildBubble(ui: *AppUi, msg: *const ChatMessage, status_text: []const u8
 
 fn buildMessageBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
     if (msg.isUser()) {
-        // User message: right-aligned, no role label. Nested card: an outer
-        // shell (hairline border + padding + large radius) with the content
-        // as the inner core (its own surface + concentric radius).
+        // User message: right-aligned, no role label. Solid accent bubble
+        // with inverse ink (site mock: teal fill, dark-teal text, machined
+        // nested core). Nested card: outer shell (accent + large radius)
+        // with the content as the inner core (accent + concentric radius).
         const ts_node: AppUi.Node = if (msg.timestamp.len > 0)
-            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, msg.timestamp)
+            ui.text(.{ .size = .sm, .style = .{ .foreground = canvas.Color.rgba8(4, 47, 46, 170) } }, msg.timestamp)
         else
             ui.text(.{}, "");
         return ui.row(.{
@@ -4850,14 +5165,14 @@ fn buildMessageBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
             ui.column(.{
                 .gap = 0,
                 .padding = 4,
-                .style_tokens = .{ .background = .surface, .border_color = .border, .radius = .lg },
+                .style_tokens = .{ .background = .accent, .radius = .lg },
             }, .{
                 ui.column(.{
                     .gap = 0,
                     .padding = 10,
-                    .style_tokens = .{ .background = .surface_subtle, .radius = .md },
+                    .style_tokens = .{ .background = .accent, .radius = .md },
                 }, .{
-                    ui.text(.{ .wrap = true }, msg.content),
+                    ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .accent_text } }, msg.content),
                     ts_node,
                 }),
             }),
@@ -4880,7 +5195,7 @@ fn buildMessageBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
         });
     } else {
         // Fallback for any standalone assistant/tool/reasoning (shouldn't normally happen)
-        return buildChildBubble(ui, msg, "");
+        return buildChildBubble(ui, msg, "", 0);
     }
 }
 

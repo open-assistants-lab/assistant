@@ -13,8 +13,8 @@ class RecordingCore:
     def __init__(self):
         self.calls: list[dict[str, object]] = []
 
-    def search_enhanced(self, query: str, limit: int, **kwargs):
-        self.calls.append({"query": query, "limit": limit, **kwargs})
+    def recall(self, query: str, strategy: str = "episodic", limit: int = 10, **kwargs):
+        self.calls.append({"query": query, "strategy": strategy, "limit": limit, **kwargs})
         return []
 
 
@@ -68,7 +68,7 @@ def test_message_search_ignores_workspace_id_for_search_metadata(monkeypatch):
     )
 
     assert "No messages found" in result
-    assert core.calls == [{"query": "alpha", "limit": 10}]
+    assert core.calls == [{"query": "alpha", "strategy": "episodic", "limit": 10}]
 
 
 def test_message_history_empty_store_does_not_mention_workspace(monkeypatch):

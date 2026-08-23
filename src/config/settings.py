@@ -105,6 +105,36 @@ class VerificationConfig(_BaseSettings):
     grader_system_prompt: str = ""
     grader_tools: list[str] = Field(default_factory=list, description="Tool names the grader may call")
     max_iterations: int = 3
+    # Selective verification (C11): "off" (never verify unless requested),
+    # "on" (always verify when configured), "auto" (skip the grader for
+    # trivial turns via a deterministic post-run decision).
+    mode: str = "off"
+    # auto-skip thresholds: skip only if response shorter than this AND
+    # history smaller than verify_min_history_tokens AND response under
+    # verify_min_response_chars; verify when any threshold is exceeded.
+    skip_max_response_chars: int = 200
+    verify_min_history_tokens: int = 4000
+    verify_min_response_chars: int = 800
+    # Always verify when any keyword appears in the prompt or response.
+    risk_keywords: list[str] = Field(
+        default_factory=lambda: [
+            "password",
+            "api key",
+            "secret",
+            "credential",
+            "token",
+            "financial",
+            "payment",
+            "bank",
+            "medical",
+            "health",
+            "delete",
+            "remove file",
+            "drop table",
+            "sudo",
+            "rm -rf",
+        ]
+    )
 
     model_config = SettingsConfigDict(env_prefix="VERIFICATION_")
 
@@ -176,6 +206,9 @@ class ApiConfig(_BaseSettings):
 
     host: str = "0.0.0.0"
     port: int = 8000
+    # Public URL used for OAuth redirect_uri callbacks (e.g. the browser must
+    # be able to reach this). Defaults to localhost:port for local dev.
+    public_url: str = ""
 
     model_config = SettingsConfigDict(env_prefix="API_")
 

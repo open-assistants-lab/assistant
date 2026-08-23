@@ -311,158 +311,6 @@ async def test_create_sdk_loop_uses_actual_local_ollama_identity(loop_factory, m
     assert loop.middlewares[0].model == "ollama:qwen3:8b"
 
 
-@pytest.mark.asyncio
-async def test_create_sdk_loop_caches_connectkit_discovery(monkeypatch, loop_factory):
-    """Two loop creations for the same user within the TTL share one
-    ConnectKit discovery and the same bridge instance."""
-    from src.sdk import runner
-
-    discover_calls = {"n": 0}
-
-    class FakeConnectorBridge:
-        def __init__(self, user_id):
-            self.user_id = user_id
-
-        async def discover(self):
-            discover_calls["n"] += 1
-
-        def get_tool_definitions(self):
-            return []
-
-    monkeypatch.setattr("connectkit.bridge.ConnectKitBridge", FakeConnectorBridge)
-    monkeypatch.setattr(runner, "_CONNECTKIT_CACHE_TTL_SECONDS", 3600.0)
-    runner.clear_connectkit_cache()
-
-    loop1 = await loop_factory(user_id="ck_test_user")
-    loop2 = await loop_factory(user_id="ck_test_user")
-
-    assert discover_calls["n"] == 1
-    assert loop1._connectkit_bridge is loop2._connectkit_bridge
-
-
-@pytest.mark.asyncio
-async def test_connectkit_cache_re_discovers_after_ttl(monkeypatch, loop_factory):
-    """Once the TTL elapses, discovery runs again for the same user."""
-    import time
-
-    from src.sdk import runner
-
-    discover_calls = {"n": 0}
-
-    class FakeConnectorBridge:
-        def __init__(self, user_id):
-            self.user_id = user_id
-
-        async def discover(self):
-            discover_calls["n"] += 1
-
-        def get_tool_definitions(self):
-            return []
-
-    monkeypatch.setattr("connectkit.bridge.ConnectKitBridge", FakeConnectorBridge)
-    monkeypatch.setattr(runner, "_CONNECTKIT_CACHE_TTL_SECONDS", 60.0)
-    runner.clear_connectkit_cache()
-
-    await loop_factory(user_id="ck_test_user")
-    assert discover_calls["n"] == 1
-
-    # Age the cached entry past the TTL, then the next call re-discovers.
-    runner._connectkit_cache["ck_test_user"] = (time.monotonic() - 61.0, None, [])
-    await loop_factory(user_id="ck_test_user")
-    assert discover_calls["n"] == 2
-
-
-@pytest.mark.asyncio
-async def test_connectkit_cache_is_per_user(monkeypatch, loop_factory):
-    """Different users each get their own discovery (and cache entry)."""
-    from src.sdk import runner
-
-    discover_calls = {"n": 0}
-
-    class FakeConnectorBridge:
-        def __init__(self, user_id):
-            self.user_id = user_id
-
-        async def discover(self):
-            discover_calls["n"] += 1
-
-        def get_tool_definitions(self):
-            return []
-
-    monkeypatch.setattr("connectkit.bridge.ConnectKitBridge", FakeConnectorBridge)
-    monkeypatch.setattr(runner, "_CONNECTKIT_CACHE_TTL_SECONDS", 3600.0)
-    runner.clear_connectkit_cache()
-
-    await loop_factory(user_id="ck_user_a")
-    await loop_factory(user_id="ck_user_b")
-    await loop_factory(user_id="ck_user_a")
-
-    assert discover_calls["n"] == 2
-
-
-@pytest.mark.asyncio
-async def test_connectkit_failure_is_not_cached(monkeypatch, loop_factory):
-    """A failed discovery is never cached, so the next call retries."""
-    from src.sdk import runner
-
-    attempts = {"n": 0}
-
-    class FlakyConnectorBridge:
-        def __init__(self, user_id):
-            self.user_id = user_id
-
-        async def discover(self):
-            attempts["n"] += 1
-            if attempts["n"] == 1:
-                raise RuntimeError("boom")
-
-        def get_tool_definitions(self):
-            return []
-
-    monkeypatch.setattr("connectkit.bridge.ConnectKitBridge", FlakyConnectorBridge)
-    monkeypatch.setattr(runner, "_CONNECTKIT_CACHE_TTL_SECONDS", 3600.0)
-    runner.clear_connectkit_cache()
-
-    loop = await loop_factory(user_id="ck_test_user")
-    assert attempts["n"] == 1  # first failure swallowed, loop still created
-    assert getattr(loop, "_connectkit_bridge", None) is None
-
-    await loop_factory(user_id="ck_test_user")
-    assert attempts["n"] == 2  # not cached → retried
-
-
-@pytest.mark.asyncio
-async def test_connectkit_cache_is_bounded(monkeypatch, loop_factory):
-    """The cache evicts least-recently-used users beyond the cap."""
-    from src.sdk import runner
-
-    discover_calls = {"n": 0}
-
-    class FakeConnectorBridge:
-        def __init__(self, user_id):
-            self.user_id = user_id
-
-        async def discover(self):
-            discover_calls["n"] += 1
-
-        def get_tool_definitions(self):
-            return []
-
-    monkeypatch.setattr("connectkit.bridge.ConnectKitBridge", FakeConnectorBridge)
-    monkeypatch.setattr(runner, "_CONNECTKIT_CACHE_TTL_SECONDS", 3600.0)
-    monkeypatch.setattr(runner, "_CONNECTKIT_CACHE_MAX_ENTRIES", 3)
-    runner.clear_connectkit_cache()
-
-    for i in range(4):
-        await loop_factory(user_id=f"ck_user_{i}")
-    assert len(runner._connectkit_cache) <= 3
-
-    # The first user was evicted, so its next loop re-discovers; the
-    # fourth user's entry is still cached.
-    await loop_factory(user_id="ck_user_0")
-    assert discover_calls["n"] == 5  # 4 initial + 1 re-discovery
-
-
 def test_messages_from_conversation_preserves_user_storage_identity():
     from src.sdk.runner import _messages_from_conversation
 
@@ -1132,7 +980,7 @@ async def test_create_sdk_loop_rebuilds_tool_index_when_capabilities_change(monk
     assert fake_index.indexed == []
 
 
-def test_tool_reload_filters_disabled_mcp_and_connector_tools(monkeypatch, tmp_path):
+def test_tool_reload_filters_disabled_mcp_tools(monkeypatch, tmp_path):
     from src.sdk.loop import AgentLoop, _current_agent_loop
     from src.sdk.tool_index import ToolIndex
     from src.sdk.tools import ToolDefinition
@@ -1156,17 +1004,6 @@ def test_tool_reload_filters_disabled_mcp_and_connector_tools(monkeypatch, tmp_p
         def get_tool_definitions(self):
             return [ToolDefinition(name="mcp__server__disabled", description="Disabled MCP")]
 
-    class FakeConnectorBridge:
-        def get_tool_definitions(self):
-            return [
-                {
-                    "name": "connector__disabled",
-                    "description": "Disabled connector",
-                    "annotations": {"read_only": True, "destructive": False},
-                    "function": lambda **kwargs: "ok",
-                }
-            ]
-
     class FakePaths:
         def user_tools_dir(self):
             path = tmp_path / "Tools"
@@ -1182,7 +1019,7 @@ def test_tool_reload_filters_disabled_mcp_and_connector_tools(monkeypatch, tmp_p
             return tmp_path / ".mcp.json"
 
     (tmp_path / "capabilities.yaml").write_text(
-        "tools:\n  mcp__server__disabled: false\n  connector__disabled: false\n",
+        "tools:\n  mcp__server__disabled: false\n",
         encoding="utf-8",
     )
     monkeypatch.setattr("src.sdk.capabilities.user_capabilities_root", lambda user_id: tmp_path)
@@ -1195,7 +1032,6 @@ def test_tool_reload_filters_disabled_mcp_and_connector_tools(monkeypatch, tmp_p
     loop.workspace_id = "personal"
     loop._tool_index = idx
     loop._mcp_bridge = FakeMCPBridge()
-    loop._connectkit_bridge = FakeConnectorBridge()
     token = _current_agent_loop.set(loop)
     try:
         result = tool_reload.invoke({})
@@ -1205,9 +1041,7 @@ def test_tool_reload_filters_disabled_mcp_and_connector_tools(monkeypatch, tmp_p
         idx.close()
 
     assert "0 MCP" in result
-    assert "0 connector" in result
     assert "mcp__server__disabled" not in names
-    assert "connector__disabled" not in names
 
 
 @pytest.mark.asyncio
@@ -1287,3 +1121,42 @@ async def test_create_sdk_loop_uses_saved_summarization_model(monkeypatch):
     await runner.create_sdk_loop(user_id="test_user", session_id="s1")
 
     assert captured["model"] == "anthropic:saved-summary"
+
+
+def test_current_turn_messages_scopes_to_last_user_message():
+    """The grader's transcript must cover ONLY the current turn.
+
+    Regression: the verification engine used to pass the entire conversation
+    (input_messages + last assistant) to the grader, so old turns' claims
+    were misattributed to the current work (phantom verdicts) and the run's
+    tool results never reached the grader.
+    """
+    from src.sdk.runner import _current_turn_messages
+
+    msgs = [
+        Message.user("create a test file for me"),
+        Message.assistant("I created test_file.txt"),
+        Message.user("tell me a joke"),
+        Message.assistant("Why did the barista get promoted?..."),
+    ]
+    turn = _current_turn_messages(msgs)
+    assert len(turn) == 2
+    assert turn[0].role == "user"
+    assert turn[0].content == "tell me a joke"
+    assert turn[1].content == "Why did the barista get promoted?..."
+
+    # Tool messages after the current prompt stay in the turn (evidence the
+    # grader needs to verify claims).
+    msgs2 = [
+        Message.user("old"),
+        Message.assistant("old reply"),
+        Message.user("current"),
+        Message.tool_result(tool_call_id="c1", content="wrote test_example.py", name="files_write"),
+        Message.assistant("done"),
+    ]
+    turn2 = _current_turn_messages(msgs2)
+    assert [m.role for m in turn2] == ["user", "tool", "assistant"]
+    assert turn2[1].content == "wrote test_example.py"
+
+    # No user message at all: return everything (defensive fallback).
+    assert [m.role for m in _current_turn_messages([Message.assistant("x")])] == ["assistant"]

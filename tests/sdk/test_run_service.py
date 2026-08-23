@@ -425,12 +425,37 @@ async def test_run_service_session_busy(monkeypatch):
     store = InMemoryMessageStore()
     service = RunService("test-user", registry, store)
 
-    _lock = await registry.acquire("chat-1")
+    # The registry is user-scoped: the service acquires "{user}::{session}",
+    # so a raw "chat-1" hold must NOT block it (cross-user isolation).
+    _lock = await registry.acquire("test-user::chat-1")
     try:
         with pytest.raises(SessionBusyError):
             await service.execute(session_id="chat-1", prompt="Hello")
     finally:
-        await registry.release("chat-1")
+        await registry.release("test-user::chat-1")
+
+
+@pytest.mark.asyncio
+async def test_run_service_same_session_different_users_do_not_block(monkeypatch):
+    async def fake_get_sdk_loop(*args, **kwargs):
+        return FakeLoop()
+
+    monkeypatch.setattr("src.sdk.run_service.get_sdk_loop", fake_get_sdk_loop)
+    monkeypatch.setattr("src.sdk.run_service.register_user_loop", lambda *a, **k: None)
+    monkeypatch.setattr("src.sdk.run_service.unregister_user_loop", lambda *a, **k: None)
+    monkeypatch.setattr("src.sdk.middleware_rubric.load_rubric_middleware", _no_rubric)
+
+    registry = SessionWorkerRegistry()
+    store = InMemoryMessageStore()
+    service_a = RunService("user-a", registry, store)
+    service_b = RunService("user-b", registry, store)
+
+    _lock = await registry.acquire("user-a::chat-1")
+    try:
+        # user-b's "chat-1" must NOT be blocked by user-a's hold.
+        await service_b.execute(session_id="chat-1", prompt="Hello")
+    finally:
+        await registry.release("user-a::chat-1")
 
 
 @pytest.mark.asyncio
@@ -529,3 +554,48 @@ def test_tool_audit_records_excludes_history_loaded_rows() -> None:
     assert len(records) == 1, f"expected only the current run's tool row, got {len(records)}"
     assert records[0].content == "Current time: 13:00 UTC"
     assert records[0].metadata["tool_name"] == "time_get"
+
+
+async def test_execute_stream_emits_waterfall_on_failed_persist(monkeypatch):
+    """A failed persist still emits harness.waterfall with run_status failed."""
+    from src.sdk.harness_timings import HarnessTimings
+
+    class WaterfallLoop(FakeLoop):
+        def __init__(self):
+            super().__init__()
+            self.timings = HarnessTimings()
+
+    async def fake_get_sdk_loop(*args, **kwargs):
+        return WaterfallLoop()
+    monkeypatch.setattr("src.sdk.run_service.get_sdk_loop", fake_get_sdk_loop)
+    monkeypatch.setattr("src.sdk.run_service.register_user_loop", lambda *a, **k: None)
+    monkeypatch.setattr("src.sdk.run_service.unregister_user_loop", lambda *a, **k: None)
+    monkeypatch.setattr("src.sdk.middleware_rubric.load_rubric_middleware", _no_rubric)
+
+    waterfall_events: list[dict] = []
+
+    def fake_info(event, data=None, user_id="", channel="cli", level=None):
+        if event == "harness.waterfall":
+            waterfall_events.append(data)
+
+    monkeypatch.setattr("src.sdk.run_service.logger.info", fake_info)
+
+    registry = SessionWorkerRegistry()
+    store = InMemoryMessageStore()
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("persist blew up")
+
+    monkeypatch.setattr(store, "persist_run", boom)
+
+    service = RunService("test-user", registry, store)
+    events = [
+        event
+        async for event in service.execute_stream(
+            session_id="sess-wf", prompt="hello", model="test:model", provider_keys=None
+        )
+    ]
+
+    assert any(e.type == "error" for e in events)
+    assert len(waterfall_events) == 1
+    assert waterfall_events[0]["run_status"] == "failed"

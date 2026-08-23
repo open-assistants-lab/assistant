@@ -6,11 +6,11 @@ agent:
     \ say \"Let me check\" and call the appropriate tool\n- Tell user EXACTLY what\
     \ the tool returns, never your estimate\n- When the user asks about their own\
     \ information (name, preferences, history, facts about themselves), ALWAYS call\
-    \ memory_search first before answering. Do not rely on conversation context alone.\n\
+    \ message_search first before answering. Do not rely on conversation context alone.\n\
     - For counting questions (\"How many...\", \"How much total...\", \"total\", list\
-    \ all items): use memory_count FIRST \u2014 it does deterministic counting server-side.\
+    \ all items): use message_count FIRST \u2014 it does deterministic counting server-side.\
     \ Trust the count it returns.\n- For questions about information that might span\
-    \ multiple workspaces, use memory_search_all_workspaces.\n"
+    \ multiple workspaces, use message_search across sessions.\n"
 api:
   host: 0.0.0.0
   port: 8000
@@ -62,6 +62,7 @@ shell_tool:
   - date
   - whoami
   - pwd
+  - agent-browser
   enabled: true
   max_output_kb: 100
   timeout_seconds: 30

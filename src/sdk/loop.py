@@ -26,6 +26,7 @@ import contextvars
 import inspect
 import json
 import logging
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -52,6 +53,7 @@ from src.sdk.guardrails import (
     ToolGuardrail,
 )
 from src.sdk.handoffs import Handoff
+from src.sdk.harness_timings import HarnessTimings
 from src.sdk.messages import Message, StreamChunk, ToolCall, Usage
 from src.sdk.middleware import Middleware
 from src.sdk.providers.base import LLMProvider, ModelCost, ProviderContextOverflowError
@@ -214,7 +216,7 @@ class Interrupt(Exception):  # noqa: N818
 
 
 class AgentLoop:
-    """ReAct agent loop that replaces LangChain's create_agent().
+    """ReAct agent loop.
 
     Usage:
         loop = AgentLoop(
@@ -265,6 +267,17 @@ class AgentLoop:
         self.subagent_ctx: SubagentContext | None = None
         self.cancel_event: asyncio.Event | None = cancel_event
         self.rubric: str | None = None
+        # Steer queue (Pi-style): a message submitted while the agent works is
+        # delivered after the current tool completes, cancelling remaining
+        # tool calls in the current batch. Drained at tool boundaries.
+        self._steer_queue: asyncio.Queue[str] = asyncio.Queue()
+        # Per-run harness latency waterfall accumulator (E spec).
+        self.timings: HarnessTimings = HarnessTimings()
+        # Optional sink invoked when a steer is injected into state (used by
+        # the WS layer to persist the steer at injection time — the correct
+        # transcript position). Follow-up steers (no tool boundary) are
+        # persisted by the next run's normal user-message path instead.
+        self._steer_sink: Callable[[str], None] | None = None
         provider_model = getattr(provider, "model", None) or "unknown"
         inferred_model = (
             provider_model
@@ -302,6 +315,56 @@ class AgentLoop:
     def approve_tool_call(self, tc: ToolCall) -> None:
         self._approved_tool_calls.add((tc.id, tc.name, self._tool_args_key(tc)))
         self._approved_tools.add((tc.name, self._tool_args_key(tc)))
+
+    # -- Steering (Pi-style) --
+
+    def steer(self, message: str) -> None:
+        """Submit a steering message while the agent is working.
+
+        The message is delivered after the current tool completes; remaining
+        tool calls in the current batch are cancelled. If the agent is
+        generating text (no tool boundary), the message stays queued and is
+        delivered as the next turn (follow-up semantics).
+        """
+        if message and message.strip():
+            self._steer_queue.put_nowait(message.strip())
+
+    def has_pending_steer(self) -> bool:
+        """True if a steer message is queued but not yet delivered."""
+        return not self._steer_queue.empty()
+
+    def pop_steer(self) -> str | None:
+        """Pop the oldest queued steer message, or None if none pending."""
+        if self._steer_queue.empty():
+            return None
+        return self._steer_queue.get_nowait()
+
+    def set_steer_sink(self, sink: Callable[[str], None] | None) -> None:
+        """Set a callback invoked when a steer is injected into state.
+
+        The sink receives the steer text at injection time (after the current
+        tool completes), so callers can persist it in the correct transcript
+        position. Follow-up steers (no tool boundary) never reach the sink.
+        """
+        self._steer_sink = sink
+
+    def _drain_steer(self, state: AgentState) -> bool:
+        """Inject all queued steer messages as user messages.
+
+        Returns True if any steer was injected (callers cancel remaining
+        tool calls in the current batch).
+        """
+        injected = False
+        while not self._steer_queue.empty():
+            message = self._steer_queue.get_nowait()
+            state.add_message(Message.user(message))
+            if self._steer_sink is not None:
+                try:
+                    self._steer_sink(message)
+                except Exception:
+                    logger.warning("steer.sink_failed", extra={"message": message[:100]})
+            injected = True
+        return injected
 
     def register_tool(self, tool_def: ToolDefinition) -> None:
         if self._registry.has(tool_def.name):
@@ -512,24 +575,6 @@ class AgentLoop:
                     is_error=True,
                 )
             td = resolved
-        elif tool_type == "connector":
-            connectkit_bridge = getattr(self, "_connectkit_bridge", None)
-            if connectkit_bridge is None:
-                return ToolResult(content="Connector bridge not available. Restart the session.", is_error=True)
-            all_defs = connectkit_bridge.get_tool_definitions()
-            found = None
-            for d in all_defs:
-                if d.get("name") == tc.name:
-                    found = d
-                    break
-            if found is None:
-                return ToolResult(content=f"Connector tool '{tc.name}' session expired. Reconnect the service and try again.", is_error=True)
-            from src.sdk.runner import _connector_dicts_to_defs
-            resolved_list = _connector_dicts_to_defs([found])
-            if resolved_list:
-                td = resolved_list[0]
-            else:
-                return ToolResult(content=f"Failed to load connector tool '{tc.name}'.", is_error=True)
 
         self._registry.register(td)
         self._recently_used.add(tc.name)
@@ -1136,6 +1181,8 @@ class AgentLoop:
     async def _run_impl(self, messages: list[Message]) -> list[Message]:
         """Internal run implementation (wrapped by run() for ContextVar lifecycle)."""
         self._reset_context_telemetry()
+        # Per-run harness timings (loops are cached per user — reset each run).
+        self.timings = HarnessTimings()
         state = AgentState(messages=list(messages))
         self.state = state
         if self.rubric:
@@ -1179,7 +1226,11 @@ class AgentLoop:
             llm_success = False
             while overflow_retries < 3 and not llm_success:
                 await self._check_subagent_before_llm(state)
+                _t_ctx = time.monotonic()
                 prepared, tools = await self._prepare_agent_call(state)
+                self.timings.record(
+                    "context_assembly", (time.monotonic() - _t_ctx) * 1000.0
+                )
                 call_index = await self._record_agent_call(prepared, tools)
                 # The post-nudge final response is capped (FR-9).
                 call_options = (
@@ -1189,6 +1240,7 @@ class AgentLoop:
                 )
 
                 try:
+                    _t_llm = time.monotonic()
                     if self.trace_provider:
                         async with self.trace_provider.start_span(
                             SpanType.LLM_CALL, f"llm_call_{call_index}"
@@ -1222,6 +1274,9 @@ class AgentLoop:
                             output_tokens=response.usage.output_tokens if response.usage else 0,
                             reasoning_tokens=response.usage.reasoning_tokens if response.usage else 0,
                         )
+                    self.timings.record(
+                        "provider_total", (time.monotonic() - _t_llm) * 1000.0
+                    )
                     llm_success = True
                 except ProviderContextOverflowError:
                     overflow_retries += 1
@@ -1329,13 +1384,47 @@ class AgentLoop:
 
             # Execute parallel-safe tools concurrently
             if parallel_safe:
+                _t_tool = time.monotonic()
                 await self._execute_tool_batch(parallel_safe, state)
+                self.timings.add(
+                    "tool_exec", (time.monotonic() - _t_tool) * 1000.0
+                )
                 self._record_executed_tools(parallel_safe, state)
+                # A steer delivered after the batch cancels remaining tools
+                if self._drain_steer(state):
+                    for tc in sequential:
+                        state.add_message(
+                            Message.tool_result(
+                                tool_call_id=tc.id,
+                                content=json.dumps(
+                                    {"cancelled": True, "reason": "steer", "tool": tc.name}
+                                ),
+                                name=tc.name,
+                            )
+                        )
+                    continue
 
             # Execute sequential (destructive) tools one-at-a-time
-            for tc in sequential:
+            for idx, tc in enumerate(sequential):
+                _t_tool = time.monotonic()
                 await self._execute_single_tool(tc, state)
+                self.timings.add(
+                    "tool_exec", (time.monotonic() - _t_tool) * 1000.0
+                )
                 self._record_executed_tools([tc], state)
+                if self._drain_steer(state):
+                    # Cancel remaining tools in this batch
+                    for remaining in sequential[idx + 1 :]:
+                        state.add_message(
+                            Message.tool_result(
+                                tool_call_id=remaining.id,
+                                content=json.dumps(
+                                    {"cancelled": True, "reason": "steer", "tool": remaining.name}
+                                ),
+                                name=remaining.name,
+                            )
+                        )
+                    break
 
     async def run_stream(self, messages: list[Message]) -> AsyncIterator[StreamChunk]:
         """Run the agent loop, yielding StreamChunk events in real-time.
@@ -1389,6 +1478,8 @@ class AgentLoop:
         cost_tracker: CostTracker,
         all_tool_calls: list[dict[str, Any]],
     ) -> AsyncIterator[StreamChunk]:
+        # Per-run harness timings (loops are cached per user — reset each run).
+        self.timings = HarnessTimings()
         guardrail_task: asyncio.Task[GuardrailResult | None] | None = None
         try:
             guardrail_task = asyncio.ensure_future(self._check_input_guardrails(state))
@@ -1418,7 +1509,11 @@ class AgentLoop:
                     guardrail_task = None
 
                 await self._check_subagent_before_llm(state)
+                _t_ctx = time.monotonic()
                 prepared, tools = await self._prepare_agent_call(state)
+                self.timings.record(
+                    "context_assembly", (time.monotonic() - _t_ctx) * 1000.0
+                )
                 # The post-nudge final response is capped (FR-9).
                 call_options = (
                     self._with_final_response_cap(self.run_config.provider_options)
@@ -1440,12 +1535,20 @@ class AgentLoop:
                         async with self.trace_provider.start_span(
                             SpanType.LLM_CALL, f"llm_call_{call_index}"
                         ) as llm_span:
+                            _t_llm = time.monotonic()
+                            _first_llm = True
                             async for chunk in self.provider.chat_stream(
                                 prepared,
                                 tools=tools,
                                 model=None,
                                 provider_options=call_options,
                             ):
+                                if _first_llm:
+                                    _first_llm = False
+                                    self.timings.record(
+                                        "provider_ttft",
+                                        (time.monotonic() - _t_llm) * 1000.0,
+                                    )
                                 # Cooperative cancellation during token streaming
                                 if self.cancel_event and self.cancel_event.is_set():
                                     yield StreamChunk.done(content="", tool_calls=all_tool_calls)
@@ -1486,13 +1589,24 @@ class AgentLoop:
                             llm_span.set_meta("tool_calls_count", len(stream_tool_calls_map))
                             llm_span.set_meta("input_tokens", stream_usage.input_tokens)
                             llm_span.set_meta("output_tokens", stream_usage.output_tokens)
+                            self.timings.record(
+                                "provider_total", (time.monotonic() - _t_llm) * 1000.0
+                            )
                     else:
+                        _t_llm = time.monotonic()
+                        _first_llm = True
                         async for chunk in self.provider.chat_stream(
                             prepared,
                             tools=tools,
                             model=None,
                             provider_options=call_options,
                         ):
+                            if _first_llm:
+                                _first_llm = False
+                                self.timings.record(
+                                    "provider_ttft",
+                                    (time.monotonic() - _t_llm) * 1000.0,
+                                )
                             # Cooperative cancellation during token streaming
                             if self.cancel_event and self.cancel_event.is_set():
                                 yield StreamChunk.done(content="", tool_calls=all_tool_calls)
@@ -1527,6 +1641,9 @@ class AgentLoop:
                             input_tokens=stream_usage.input_tokens,
                             output_tokens=stream_usage.output_tokens,
                             reasoning_tokens=stream_usage.reasoning_tokens,
+                        )
+                        self.timings.record(
+                            "provider_total", (time.monotonic() - _t_llm) * 1000.0
                         )
 
                 except ProviderContextOverflowError:
@@ -1709,18 +1826,71 @@ class AgentLoop:
                     if self.cancel_event and self.cancel_event.is_set():
                         yield StreamChunk.done(content="", tool_calls=all_tool_calls)
                         return
+                    _t_tool = time.monotonic()
                     async for event in self._execute_tool_batch_streaming(parallel_safe, state):
                         yield event
+                    self.timings.add(
+                        "tool_exec", (time.monotonic() - _t_tool) * 1000.0
+                    )
                     self._record_executed_tools(parallel_safe, state)
+                    # A steer delivered after the batch cancels remaining tools
+                    if self._drain_steer(state):
+                        for tc in sequential:
+                            cancelled = json.dumps(
+                                {"cancelled": True, "reason": "steer", "tool": tc.name}
+                            )
+                            state.add_message(
+                                Message.tool_result(
+                                    tool_call_id=tc.id, content=cancelled, name=tc.name
+                                )
+                            )
+                            yield StreamChunk.tool_result_event(
+                                tool=tc.name, call_id=tc.id, result_preview=cancelled[:2000]
+                            )
+                            yield StreamChunk.tool_end(
+                                tool=tc.name, call_id=tc.id, result_preview=cancelled[:2000]
+                            )
+                        # Advance the iteration counter explicitly: this loop
+                        # uses `while iteration < max` with `iteration += 1`
+                        # at the end of the body, so a bare `continue` would
+                        # loop forever.
+                        iteration += 1
+                        continue
 
                 # Execute sequential (destructive) tools one-at-a-time
-                for tc in sequential:
+                for idx, tc in enumerate(sequential):
                     if self.cancel_event and self.cancel_event.is_set():
                         yield StreamChunk.done(content="", tool_calls=all_tool_calls)
                         return
+                    _t_tool = time.monotonic()
                     async for event in self._execute_single_tool_streaming(tc, state):
                         yield event
+                    self.timings.add(
+                        "tool_exec", (time.monotonic() - _t_tool) * 1000.0
+                    )
                     self._record_executed_tools([tc], state)
+                    if self._drain_steer(state):
+                        # Cancel remaining tools in this batch
+                        for remaining in sequential[idx + 1 :]:
+                            cancelled = json.dumps(
+                                {"cancelled": True, "reason": "steer", "tool": remaining.name}
+                            )
+                            state.add_message(
+                                Message.tool_result(
+                                    tool_call_id=remaining.id, content=cancelled, name=remaining.name
+                                )
+                            )
+                            yield StreamChunk.tool_result_event(
+                                tool=remaining.name,
+                                call_id=remaining.id,
+                                result_preview=cancelled[:2000],
+                            )
+                            yield StreamChunk.tool_end(
+                                tool=remaining.name,
+                                call_id=remaining.id,
+                                result_preview=cancelled[:2000],
+                            )
+                        break
 
                 overflow_retries = 0
                 iteration += 1

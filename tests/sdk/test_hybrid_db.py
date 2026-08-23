@@ -649,10 +649,31 @@ class TestHnswHeaderCorrupt:
         assert HybridDB._is_hnsw_header_corrupt(header_path) is True
 
     def test_corrupt_size_data_per_element(self, tmp_dir):
+        """Per-element size is checked against the collection's real
+        dimension-derived expectation (hybriddb 0.5.6 fix)."""
         header_path = os.path.join(tmp_dir, "header.bin")
         with open(header_path, "wb") as f:
             f.write(self._make_header(size_data_per_element=999))
-        assert HybridDB._is_hnsw_header_corrupt(header_path) is True
+        # Without an expected size the value is not judged (avoiding the
+        # healthy-index false positive); with a mismatched expectation it is.
+        assert HybridDB._is_hnsw_header_corrupt(header_path) is False
+        assert (
+            HybridDB._is_hnsw_header_corrupt(
+                header_path, expected_size=EMBEDDING_DIM * 4
+            )
+            is True
+        )
+
+    def test_matching_size_data_per_element_is_healthy(self, tmp_dir):
+        header_path = os.path.join(tmp_dir, "header.bin")
+        with open(header_path, "wb") as f:
+            f.write(self._make_header())  # default size = EMBEDDING_DIM * 4
+        assert (
+            HybridDB._is_hnsw_header_corrupt(
+                header_path, expected_size=EMBEDDING_DIM * 4
+            )
+            is False
+        )
 
     def test_corrupt_max_neighbors_too_large(self, tmp_dir):
         header_path = os.path.join(tmp_dir, "header.bin")

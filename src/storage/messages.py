@@ -4,7 +4,6 @@ Thin adapter over MemoryCore, preserving the
 Message/SearchResult dataclasses and public API for callers.
 """
 
-import asyncio
 import base64
 import json
 import sqlite3
@@ -87,12 +86,10 @@ class MessageStore:
         # Migrate old memory store data into conversation DB
         self._migrate_memory_store(user_id, base_path)
 
-        self._core = MemoryCore(
-            path=str(base_path),
-            enable_observations=True,
-            enable_reflections=True,
-            observation_kwargs={"session_id": USER_LEVEL_CONTEXT},
-        )
+        # CoreMem >=0.10 replaced the observer/reflector architecture with
+        # compiler + dreaming + search; the constructor no longer takes
+        # observation kwargs (migrated 2026-08-21).
+        self._core = MemoryCore(path=str(base_path))
 
         if root_path is not None:
             self._migrate_workspace_conversations(user_id, root_path, base_path)
@@ -120,15 +117,6 @@ class MessageStore:
             self._core.db.register_duckdb_table("messages")
         except Exception:
             pass
-
-        # Start background observer and reflector workers
-        try:
-            loop = asyncio.get_running_loop()
-            start_pipelines = getattr(self._core, "start_pipelines", None)
-            if start_pipelines is not None:
-                loop.create_task(start_pipelines())
-        except (RuntimeError, AttributeError):
-            pass  # No event loop or no pipelines — feature not available
 
     @property
     def core(self) -> MemoryCore:
@@ -388,7 +376,7 @@ class MessageStore:
         self, role: str, content: str, metadata: dict[str, Any] | None = None, session_id: str | None = None
     ) -> str:
         result = self._core.ingest(role, content or "(empty)", session_id=session_id, metadata=metadata)
-        return result or ""
+        return self._resolve_message_id(result, session_id) or result or ""
 
     def add_message_with_embedding(
         self,
@@ -401,7 +389,28 @@ class MessageStore:
         result = self._core.ingest(
             role, content or "(empty)", session_id=session_id, metadata=metadata, embedding=embedding
         )
-        return result or ""
+        return self._resolve_message_id(result, session_id) or result or ""
+
+    def _resolve_message_id(self, ingest_result: str | None, session_id: str | None) -> str | None:
+        """Resolve the row message id from an ingest result.
+
+        CoreMem >=0.10 `ingest` returns the turn_id, not the message id — the
+        app's add_message contract returns the message id (used for provenance
+        lookups and session metadata). Query the row back by turn_id.
+        """
+        if not ingest_result:
+            return None
+        try:
+            with self._core.db._connect() as cur:
+                row = cur.execute(
+                    "SELECT id FROM messages WHERE turn_id = ? ORDER BY ts DESC LIMIT 1",
+                    (ingest_result,),
+                ).fetchone()
+                if row is not None:
+                    return str(row[0])
+        except Exception:
+            pass
+        return None
 
     @staticmethod
     def _to_msg(m: _CoreMem) -> Message:
@@ -595,22 +604,23 @@ class MessageStore:
     def search_keyword(self, query: str, limit: int = 10) -> list[SearchResult]:
         if not query:
             return []
-        results = self._core.search(query, limit=limit)
-        return [self._to_sr(r) for r in results]
+        results = self._core.recall(query, strategy="direct", limit=limit)
+        return [self._to_sr(r) for r in cast(list[_CoreMemResult], results)]
 
     def search_vector(self, query: str, limit: int = 10) -> list[SearchResult]:
         if not query:
             return []
-        results = self._core.search(query, limit=limit)
-        return [self._to_sr(r) for r in results]
+        results = self._core.recall(query, strategy="episodic", limit=limit)
+        return [self._to_sr(r) for r in cast(list[_CoreMemResult], results)]
 
     def search_hybrid(
         self, query: str, query_embedding: list[float] | None = None, limit: int = 10, **kwargs: Any
     ) -> list[SearchResult]:
         if not query:
             return []
-        results = self._core.search_enhanced(query, limit=limit, **kwargs)
-        return [self._to_sr(r) for r in results]
+        strategy = kwargs.pop("strategy", "fusion")
+        results = self._core.recall(query, strategy=strategy, limit=limit, **kwargs)
+        return [self._to_sr(r) for r in cast(list[_CoreMemResult], results)]
 
     def get_messages(
         self, start_date: date | None = None, end_date: date | None = None,

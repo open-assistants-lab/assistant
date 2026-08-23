@@ -2,6 +2,7 @@
 
 import re
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -133,10 +134,26 @@ def shell_execute(command: str, user_id: str = "default_user", workspace_id: str
 
         max_output = config["max_output_kb"] * 1024
         if len(output) > max_output:
-            output = (
-                output[:max_output]
-                + f"\n... (truncated, output exceeded {config['max_output_kb']}KB)"
-            )
+            # Spill the full output to a file the agent can read back via
+            # files_read (Pi-style: truncate in context, keep full output
+            # recoverable). The file lives under the workspace files dir so
+            # it is within the agent's readable path scope.
+            out_dir = root_path / ".shell_output"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            full_path = out_dir / f"output-{ts}.txt"
+            try:
+                full_path.write_text(output, encoding="utf-8")
+                output = (
+                    output[:max_output]
+                    + f"\n... (truncated, output exceeded {config['max_output_kb']}KB)\n"
+                    f"Full output: {full_path}"
+                )
+            except OSError:
+                output = (
+                    output[:max_output]
+                    + f"\n... (truncated, output exceeded {config['max_output_kb']}KB)"
+                )
 
         logger.info(
             "shell_execute", {"command": command, "return_code": result.returncode}, user_id=user_id

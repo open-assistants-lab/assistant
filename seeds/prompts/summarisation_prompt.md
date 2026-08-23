@@ -15,24 +15,37 @@ This context will then overwrite the conversation history presented below. Becau
 The conversation history below will be replaced with the context you extract in this step.
 You want to ensure that you don't repeat any actions you've already completed, so the context you extract from the conversation history should be focused on the most important information to your overall goal.
 
-You should structure your summary using the following sections. Each section acts as a checklist - you must populate it with relevant information or explicitly state "None" if there is nothing to report for that section:
+Create a structured context checkpoint summary that another LLM will use to continue the work.
+Use this EXACT format:
 
-## SESSION INTENT
+## Goal
+[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
 
-What is the user's primary goal or request? What overall task are you trying to accomplish? This should be concise but complete enough to understand the purpose of the entire session.
+## Constraints & Preferences
+- [Any constraints, preferences, or requirements mentioned by user]
+- [Or "(none)" if none were mentioned]
 
-## SUMMARY
+## Progress
+### Done
+- [x] [Completed tasks/changes]
 
-Extract and record all of the most important context from the conversation history. Include important choices, conclusions, or strategies determined during this conversation. Include the reasoning behind key decisions. Document any rejected options and why they were not pursued.
+### In Progress
+- [ ] [Current work]
 
-## ARTIFACTS
+### Blocked
+- [Issues preventing progress, if any]
 
-What artifacts, files, or resources were created, modified, or accessed during this conversation? For file modifications, list specific file paths and briefly describe the changes made to each. This section prevents silent loss of artifact information.
+## Key Decisions
+- **[Decision]**: [Brief rationale]
 
-## NEXT STEPS
+## Next Steps
+1. [Ordered list of what should happen next]
 
-What specific tasks remain to be completed to achieve the session intent? What should you do next?
+## Critical Context
+- [Any data, examples, or references needed to continue]
+- [Or "(none)" if not applicable]
 
+Keep each section concise. Preserve exact file paths, function names, and error messages.
 </instructions>
 
 The user will message you with the full message history from which you'll extract context to create a replacement. Carefully read through it all and think deeply about what information is most important to your overall goal and should be saved:

@@ -1,4 +1,10 @@
-"""Memory tools — read from MemoryCore (observations + reflections)."""
+"""Memory tools — read from MemoryCore (post-0.10 architecture).
+
+CoreMem >=0.10 replaced the observer/reflector pipeline with compiler +
+dreaming + search. `memory_profile` now builds a digest from semantic recall
+over the conversation history; `memory_reflection` was removed (insight
+generation is owned by CoreMem's dream/compile path).
+"""
 
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -11,86 +17,63 @@ def _get_core(user_id: str, workspace_id: str) -> Any:
     return get_message_store(user_id, workspace_id).core
 
 
+_PROFILE_QUERY = (
+    "user preferences, personal facts, background, habits, work, "
+    "recurring topics, relationships"
+)
+_PROFILE_DAYS = 30
+
+
 @tool
 def memory_profile(
     user_id: str = "default_user",
     workspace_id: str = "personal",
 ) -> str:
-    """Return observations about the user — may be empty if none collected.
+    """Return a digest of the user's recent conversation context.
 
-    Returns recent observations. If no observations
-    are available, use message_search to find specific facts from conversation
-    history instead.
+    Uses semantic recall over the conversation history (CoreMem episodic
+    strategy with cross-session diversity) to surface recurring topics,
+    preferences, and personal facts. May be empty if the user has little
+    history.
 
     Use when the user asks "what do you know about me?" or the agent needs
-    to refresh its understanding of the user's context.
+    to refresh its understanding of the user's context. For specific facts
+    from a past conversation, use message_search instead.
 
     Args:
         user_id: User identifier
         workspace_id: Workspace ID (defaults to current workspace)
+
+    Returns:
+        Recent context digest, or an empty notice
     """
     core = _get_core(user_id, workspace_id)
-    cutoff = (datetime.now(UTC) - timedelta(days=7)).isoformat()
-    results = core.get_observations(ts_after=cutoff, limit=50)
+    cutoff = (datetime.now(UTC) - timedelta(days=_PROFILE_DAYS)).isoformat()
+    results = core.recall(
+        query=_PROFILE_QUERY,
+        strategy="episodic",
+        limit=8,
+        session_cap=2,
+        ts_after=cutoff,
+    )
 
     if not results:
-        return "No observations available. Try message_search to find specific facts from conversation history."
+        return (
+            "No recent conversation context available. "
+            "Try message_search to find specific facts from conversation history."
+        )
 
-    parts = ["## Working Memory (Recent Observations)\n"]
-    for obs in sorted(results, key=lambda x: str(x.get("observation_ts", "")), reverse=True):
-        importance = float(obs.get("importance") or 0.3)
-        ts = str(obs.get("observation_ts", ""))[:10]
-        content = str(obs.get("content", ""))
-        parts.append(f"[{importance:.0%}] {ts} {content}")
+    parts = ["## Working Memory (Recent Context)\n"]
+    for i, result in enumerate(results, 1):
+        memory = getattr(result, "memory", None)
+        content = str(getattr(memory, "content", "") or "")[:300]
+        ts = str(getattr(memory, "ts", "") or "")[:10]
+        score = float(getattr(result, "score", 1.0) or 1.0)
+        parts.append(f"{i}. [{ts}] (score: {score:.2f}) {content}")
 
     return "\n".join(parts)
 
 
 memory_profile.annotations = ToolAnnotations(
     title="Get User Profile", read_only=True, idempotent=True
-)
-
-
-@tool
-def memory_reflection(
-    query: str,
-    method: str = "hybrid",
-    limit: int = 5,
-    user_id: str = "default_user",
-    workspace_id: str = "personal",
-) -> str:
-    """Search synthesized reflections — patterns and insights about the user.
-
-    Reflections are higher-order patterns discovered from
-    analyzing observations across time. May be empty if no patterns have been
-    run yet (requires 10+ observations and 24h interval or 50 unreflected facts).
-
-    Use when looking for themes, trends, or synthesized understanding about
-    the user. For specific fact recall, use message_search instead.
-
-    Args:
-        query: What to search for (e.g., "career", "relationships", "habits")
-        method: Search method (fts, semantic, or hybrid) — default: hybrid
-        limit: Maximum results (default: 5)
-        user_id: User identifier
-        workspace_id: Workspace ID (defaults to current workspace)
-    """
-    core = _get_core(user_id, workspace_id)
-    results = core.reflections(query=query, limit=limit)
-
-    if not results:
-        return f"No reflections found for: {query}"
-
-    parts = [f"## Reflections for '{query}'\n"]
-    for i, refl in enumerate(results, 1):
-        score = float(refl.get("score", 1.0))
-        domain = str(refl.get("domain", ""))
-        content = str(refl.get("content", ""))
-        parts.append(f"{i}. [{domain}] {content} (confidence: {score:.0%})")
-
-    return "\n".join(parts)
-
-
-memory_reflection.annotations = ToolAnnotations(
-    title="Search Reflections", read_only=True, idempotent=True
 )

@@ -7,32 +7,41 @@ services:
     container_name: ea_app
     ports:
       - "8000:8000"
-    command: ["uv", "run", "ea", "http"]
+    command: ["uv", "run", "assistant", "http"]
     environment:
+      # Auth — set EA_API_KEY to require auth on non-localhost connections
+      EA_API_KEY: ${EA_API_KEY:-}
+      # EA_SOLO_BYPASS defaults to true: localhost requests skip auth
+
       # Ollama LLM (use your local or cloud instance)
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com}
-      
+
       # Firecrawl for web search/scraping (self-hosted or cloud)
       # Self-hosted: set FIRECRAWL_BASE_URL (no key needed)
       # Cloud: set FIRECRAWL_API_KEY (get from firecrawl.dev)
       FIRECRAWL_BASE_URL: ${FIRECRAWL_BASE_URL:-}
       FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-}
 
-      # Database (we use SQLite per-user)
-      DATA_DIR: /app/data
-      
-      # App settings
-      HOST: "0.0.0.0"
-      PORT: "8000"
-      
+      # Storage — both must point into the mounted volume, otherwise user
+      # data lands in /root/Assistant inside the container and is lost on
+      # recreation. DEPLOYMENT_EA_ROOT holds user data (conversation, files,
+      # memory, email); DEPLOYMENT_DATA_PATH holds project data (logs, cache).
+      DEPLOYMENT_EA_ROOT: /app/data
+      DEPLOYMENT_DATA_PATH: /app/data
+
+      # Server (API_* envs, see src/config/settings.py)
+      API_HOST: "0.0.0.0"
+      API_PORT: "8000"
+
       # Logging
-      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOGGING_LEVEL: ${LOGGING_LEVEL:-info}
     volumes:
       - ./data:/app/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      # python:3.13-slim has no curl — use urllib
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 10s
       retries: 3

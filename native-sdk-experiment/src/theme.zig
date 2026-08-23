@@ -6,15 +6,20 @@ const Color = canvas.Color;
 
 pub const dark_tokens: canvas.DesignTokens = .{
     .colors = .{
-        .background = Color.rgb8(8, 9, 12),
-        .surface = Color.rgb8(17, 19, 25),
-        .surface_subtle = Color.rgb8(14, 16, 21),
-        .surface_pressed = Color.rgb8(34, 38, 48),
-        .text = Color.rgb8(244, 244, 245),
-        .text_muted = Color.rgb8(139, 141, 152),
-        .border = Color.rgb8(29, 30, 34),
-        .accent = Color.rgb8(20, 184, 166),
-        .accent_text = Color.rgb8(4, 47, 46),
+        // openassistants.org tokens.css — exact flat palette. The canvas is
+        // PURE #050506 (never tinted): the site's teal "mesh" is a radial
+        // glow overlay the native renderer can't draw, so the teal lives in
+        // accents + accent-muted surfaces, exactly like the site's glass
+        // cards over the black canvas.
+        .background = Color.rgb8(5, 5, 6), // #050506
+        .surface = Color.rgba8(255, 255, 255, 8), // glass 0.03 (--ea-bg-surface)
+        .surface_subtle = Color.rgba8(255, 255, 255, 15), // glass 0.06 (--ea-bg-field)
+        .surface_pressed = Color.rgba8(255, 255, 255, 20), // glass 0.08 (hover/press)
+        .text = Color.rgb8(244, 244, 245), // --ea-text-primary
+        .text_muted = Color.rgb8(161, 161, 170), // --ea-text-secondary #A1A1AA
+        .border = Color.rgba8(255, 255, 255, 20), // 0.08 alpha hairline
+        .accent = Color.rgb8(20, 184, 166), // --ea-accent #14B8A6
+        .accent_text = Color.rgb8(4, 47, 46), // --ea-text-inverse #042F2E
         .destructive = Color.rgb8(248, 113, 113),
         .destructive_text = Color.rgb8(26, 10, 10),
         .success = Color.rgb8(74, 222, 128),
@@ -24,15 +29,26 @@ pub const dark_tokens: canvas.DesignTokens = .{
         .info = Color.rgb8(96, 165, 250),
         .info_text = Color.rgb8(10, 22, 40),
         .focus_ring = Color.rgb8(20, 184, 166),
-        .shadow = Color.rgba8(0, 0, 0, 150),
+        .shadow = Color.rgba8(0, 0, 0, 128), // --ea-shadow-ambient 0.5
         .scrim = Color.rgba8(0, 0, 0, 26),
-        .disabled = Color.rgb8(58, 61, 68),
+        .disabled = Color.rgba8(255, 255, 255, 26),
     },
     .radius = .{
-        .sm = 8,
-        .md = 12,
-        .lg = 14,
-        .xl = 18,
+        // Squircle scale from the site tokens (10/14/18/24).
+        .sm = 10,
+        .md = 14,
+        .lg = 18,
+        .xl = 24,
+    },
+    .shadow = .{
+        // Diffused ambient + lift (site: 0 24px 64px / 0 12px 32px).
+        .sm = .{ .y = 12, .blur = 32, .spread = -12 },
+        .md = .{ .y = 24, .blur = 64, .spread = -24 },
+    },
+    .motion = .{
+        .fast_ms = 120,
+        .normal_ms = 180,
+        .slow_ms = 320,
     },
     .typography = .{
         .font_id = 64, // Geist Regular
@@ -49,7 +65,7 @@ pub const light_tokens: canvas.DesignTokens = .{
         .surface_pressed = Color.rgb8(219, 222, 229),
         .text = Color.rgb8(24, 24, 27),
         .text_muted = Color.rgb8(113, 113, 122),
-        .border = Color.rgb8(229, 231, 235),
+        .border = Color.rgba8(0, 0, 0, 20), // 0.08 alpha hairline
         .accent = Color.rgb8(13, 148, 136),
         .accent_text = Color.rgb8(255, 255, 255),
         .destructive = Color.rgb8(220, 38, 38),
@@ -66,10 +82,19 @@ pub const light_tokens: canvas.DesignTokens = .{
         .disabled = Color.rgb8(212, 212, 216),
     },
     .radius = .{
-        .sm = 8,
-        .md = 12,
-        .lg = 14,
-        .xl = 18,
+        .sm = 10,
+        .md = 14,
+        .lg = 18,
+        .xl = 24,
+    },
+    .shadow = .{
+        .sm = .{ .y = 12, .blur = 32, .spread = -12 },
+        .md = .{ .y = 24, .blur = 64, .spread = -24 },
+    },
+    .motion = .{
+        .fast_ms = 120,
+        .normal_ms = 180,
+        .slow_ms = 320,
     },
     .typography = .{
         .font_id = 64, // Geist Regular

@@ -1395,3 +1395,44 @@ class TestTitleModelFromSettings:
 
         assert title == "Project Planning"
         assert captured["model"] == "ollama-cloud:deepseek-v4-flash:0731"
+
+
+class TestSseHeartbeat:
+    async def test_heartbeat_interleaves_during_silence(self):
+        """Keepalive pings must arrive while the upstream run is silent."""
+        import asyncio
+
+        from src.http.routers.conversation import _HEARTBEAT_PING, _sse_with_heartbeat
+
+        async def slow_run():
+            # Three items separated by 0.2s of silence (> 2x the 0.08s
+            # heartbeat interval), so pings must interleave.
+            yield "event-a"
+            await asyncio.sleep(0.2)
+            yield "event-b"
+            await asyncio.sleep(0.2)
+            yield "event-c"
+
+        collected: list[str] = []
+        async for item in _sse_with_heartbeat(slow_run(), interval=0.08):
+            collected.append(item)
+
+        # All three run events, in order, with at least one ping between them.
+        assert collected[0] == "event-a"
+        assert collected[-1] == "event-c"
+        assert "event-b" in collected
+        assert collected.count(_HEARTBEAT_PING) >= 1
+        # Pings never clobber the real event stream.
+        assert collected[0] != _HEARTBEAT_PING
+
+    async def test_heartbeat_fast_run_emits_no_pings(self):
+        """A run that never pauses long enough needs no keepalives."""
+        from src.http.routers.conversation import _HEARTBEAT_PING, _sse_with_heartbeat
+
+        async def fast_run():
+            yield "a"
+            yield "b"
+
+        collected = [item async for item in _sse_with_heartbeat(fast_run(), interval=60.0)]
+        assert collected == ["a", "b"]
+        assert _HEARTBEAT_PING not in collected

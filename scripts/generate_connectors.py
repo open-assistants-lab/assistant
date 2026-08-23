@@ -1,6 +1,7 @@
 """Batch generate ConnectKit connector YAMLs from Nango providers.yaml."""
-import yaml
 from pathlib import Path
+
+import yaml
 
 KNOWN_CLI = {
     "aircall", "algolia", "apify", "atlassian", "bamboohr", "bitbucket", "bitly",
@@ -137,7 +138,7 @@ def nango_to_connectkit(provider_name: str, data: dict) -> dict | None:
             tool_sources.append({
                 "type": "cli",
                 "command": provider_name.replace("_", "-"),
-                "install": f"# See service docs",
+                "install": "# See service docs",
             })
         if has_mcp or not has_cli:
             mcp_name = provider_name.replace("_", "-")

@@ -612,8 +612,9 @@ class TestGraphSync:
         nodes = db.list_nodes(type="person")
         assert len(nodes) == 2
         node_ids = {n["id"] for n in nodes}
-        assert str(rid1) in node_ids
-        assert str(rid2) in node_ids
+        # hybriddb 0.5.5: auto-synced node ids are namespaced {table}:{pk}
+        assert f"people:{rid1}" in node_ids
+        assert f"people:{rid2}" in node_ids
 
     def test_register_edge_rule(self, db):
         db.create_table("people", {"name": "TEXT"})
@@ -657,8 +658,9 @@ class TestGraphSync:
         edges = db.get_edges(type="sent_by")
 
         assert len(edges) == 1
-        assert edges[0]["source_id"] == str(email_id)
-        assert edges[0]["target_id"] == str(contact_id)
+        # hybriddb 0.5.5: synced node ids are namespaced {table}:{pk}
+        assert edges[0]["source_id"] == f"emails:{email_id}"
+        assert edges[0]["target_id"] == f"contacts:{contact_id}"
 
     def test_edge_rule_schema_migrates_existing_database(self, tmp_dir):
         db = HybridDB(tmp_dir, embedding_fn=_mock_embedding)

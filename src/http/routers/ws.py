@@ -39,6 +39,8 @@ from src.http.ws_protocol import (
     PingMessage,
     PongMessage,
     RejectMessage,
+    SteerAckMessage,
+    SteerMessage,
     parse_client_message,
 )
 from src.sdk.messages import Message, ToolCall
@@ -759,12 +761,45 @@ async def ws_conversation(websocket: WebSocket) -> None:
                         pass
                     stream_cancelled = True
                     break
+                if isinstance(control_msg, SteerMessage):
+                    steer_text = control_msg.content
+                    if steer_text.strip():
+                        from src.sdk.runner import get_user_loop
+
+                        active_loop = get_user_loop(user_id, session_id)
+                        if active_loop is not None:
+                            # Persist at injection time (correct transcript
+                            # position) via the loop's steer sink — NOT here,
+                            # or the follow-up run would persist it twice.
+                            def _persist_steer(m: str) -> None:
+                                _persist_ws_conversation_message(
+                                    conversation,
+                                    "user",
+                                    m,
+                                    session_id=session_id,
+                                    metadata={"steer": True},
+                                )
+
+                            active_loop.set_steer_sink(_persist_steer)
+                            active_loop.steer(steer_text)
+                            await websocket.send_json(
+                                SteerAckMessage(content=steer_text).model_dump()
+                                | {"workspace_id": workspace_id}
+                            )
+                        else:
+                            await websocket.send_json(
+                                ErrorMessage(
+                                    message="No active agent run to steer",
+                                    code="NO_ACTIVE_RUN",
+                                ).model_dump()
+                            )
+                    continue
                 if isinstance(control_msg, PingMessage):
                     await websocket.send_json(PongMessage().model_dump())
                 elif control_msg is not None:
                     await websocket.send_json(
                         ErrorMessage(
-                            message="Agent is currently running; only cancel is accepted",
+                            message="Agent is currently running; only cancel, steer, and ping are accepted",
                             code="AGENT_BUSY",
                         ).model_dump()
                     )
@@ -893,6 +928,27 @@ async def ws_conversation(websocket: WebSocket) -> None:
                         continue
                     pending_container[0] = None
                     break
+
+            # Steer follow-up (Pi-style): a steer that arrived while the agent
+            # was generating text (no tool boundary to inject at) is delivered
+            # as the next turn. The steer was already persisted at receive
+            # time, so the follow-up reloads history and runs it.
+            from src.sdk.runner import get_user_loop
+
+            follow_loop = get_user_loop(user_id, session_id)
+            if follow_loop is not None and follow_loop.has_pending_steer():
+                follow_steer = follow_loop.pop_steer()
+                if follow_steer:
+                    follow_msgs = _messages_from_conversation(
+                        conversation.get_messages_with_summary(
+                            session_id=session_id, limit=50
+                        )
+                    )
+                    await _run_agent_stream(
+                        websocket, user_id, follow_msgs, conversation, session_id,
+                        pending_ref=pending_container, workspace_id=workspace_id,
+                        model=msg_model, provider_keys=msg_provider_keys,
+                    )
 
     except WebSocketDisconnect:
         logger.info(

@@ -165,7 +165,6 @@ def compute_source_hashes(
     tools_dir: Path,
     workspace_tools_dir: Path | None,
     mcp_config: Path,
-    connectkit_bridge: Any | None = None,
 ) -> dict[str, str]:
     """Hash all tool sources for change detection."""
     hashes: dict[str, str] = {}
@@ -188,17 +187,6 @@ def compute_source_hashes(
 
     if mcp_config.exists():
         hashes["mcp:config"] = hashlib.sha256(mcp_config.read_bytes()).hexdigest()
-
-    ck_config = (tools_dir.parent if tools_dir.exists() else Path()) / ".connectkit.json"
-    if ck_config.exists():
-        hashes["connector:config"] = hashlib.sha256(ck_config.read_bytes()).hexdigest()
-
-    if connectkit_bridge:
-        try:
-            connected = sorted(connectkit_bridge.connected_services())
-            hashes["connector:state"] = hashlib.sha256(json.dumps(connected).encode()).hexdigest()
-        except Exception:
-            pass
 
     return hashes
 
@@ -237,7 +225,6 @@ def get_or_create_index(
     user_id: str = "default_user",
     workspace_id: str = "personal",
     index_dir: Path | None = None,
-    connectkit_bridge: Any | None = None,
 ) -> ToolIndex:
     """Get or create a ToolIndex. Rebuilds if source hashes changed.
 
@@ -250,7 +237,7 @@ def get_or_create_index(
     index_dir = index_dir or (paths.user_tools_dir() / ".index")
     hashes_path = index_dir / ".index_hashes.json"
 
-    current_hashes = compute_source_hashes(tools_dir, workspace_tools_dir, mcp_config, connectkit_bridge)
+    current_hashes = compute_source_hashes(tools_dir, workspace_tools_dir, mcp_config)
     needs_reindex = check_needs_reindex(hashes_path, current_hashes)
 
     idx = ToolIndex(index_dir)

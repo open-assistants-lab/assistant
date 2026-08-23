@@ -633,6 +633,7 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
                 model=req.model,
                 provider_keys=req.provider_keys,
                 rubric=req.verification.rubric if req.verification else None,
+                mode=req.verification.mode if req.verification else None,
             )
         except SessionBusyError:
             return MessageResponse(response="", error="Session already has an active run")
@@ -650,24 +651,29 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
         verification_verdict = None
         if result.verification.availability.value == "on":
             latest = result.verification.evaluations[-1] if result.verification.evaluations else None
-            if latest:
-                verification_verdict = VerificationVerdict(
-                    status=result.verification.status.value,
-                    iterations=result.verification.attempts,
-                    attempts=result.verification.attempts,
-                    max_attempts=result.verification.max_attempts,
-                    explanation=latest.explanation,
-                    criteria=[{"name": c.name, "passed": c.passed, "gap": c.gap} for c in latest.criteria],
-                    evaluations=[
-                        {
-                            "attempt": e.attempt,
-                            "result": e.result.value,
-                            "explanation": e.explanation,
-                            "criteria": [{"name": c.name, "passed": c.passed, "gap": c.gap} for c in e.criteria],
-                        }
-                        for e in result.verification.evaluations
-                    ],
-                )
+            # A skipped run (C11 auto mode) has no evaluations but still
+            # reports its status so clients can distinguish skip from off.
+            verification_verdict = VerificationVerdict(
+                status=result.verification.status.value,
+                iterations=result.verification.attempts,
+                attempts=result.verification.attempts,
+                max_attempts=result.verification.max_attempts,
+                explanation=latest.explanation if latest else "",
+                criteria=(
+                    [{"name": c.name, "passed": c.passed, "gap": c.gap} for c in latest.criteria]
+                    if latest
+                    else []
+                ),
+                evaluations=[
+                    {
+                        "attempt": e.attempt,
+                        "result": e.result.value,
+                        "explanation": e.explanation,
+                        "criteria": [{"name": c.name, "passed": c.passed, "gap": c.gap} for c in e.criteria],
+                    }
+                    for e in result.verification.evaluations
+                ],
+            )
 
         canvas_blocks = _extract_surfaces(response)
         response = _strip_canvas_fences(response)
@@ -693,6 +699,48 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
 
         traceback.print_exc()
         return MessageResponse(response="", error=str(e))
+
+
+_HEARTBEAT_PING = ": ping\n\n"
+
+
+async def _sse_with_heartbeat(
+    event_iter: AsyncGenerator[Any, None], interval: float = 15.0
+) -> AsyncGenerator[Any, None]:
+    """Interleave SSE keepalive comments while the upstream run is working.
+
+    Provider calls and tool executions can legitimately stay silent for
+    minutes, so the stream must emit a liveness signal that does not depend
+    on run progress. The native client treats the gap between received
+    lines as its stream-liveness clock.
+
+    Yields the upstream events unchanged plus `_HEARTBEAT_PING` (a str)
+    between them while the run is still in flight.
+    """
+    pending: set[asyncio.Task] = set()
+    next_task = asyncio.ensure_future(event_iter.__anext__())
+    pending.add(next_task)
+    try:
+        while True:
+            timer = asyncio.ensure_future(asyncio.sleep(interval))
+            pending.add(timer)
+            done, _ = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED
+            )
+            if next_task in done:
+                timer.cancel()
+                try:
+                    item = next_task.result()
+                except StopAsyncIteration:
+                    return
+                yield item
+                next_task = asyncio.ensure_future(event_iter.__anext__())
+                pending.add(next_task)
+            else:
+                yield _HEARTBEAT_PING
+    finally:
+        for task in pending:
+            task.cancel()
 
 
 @router.post("/message/stream")
@@ -723,13 +771,21 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
             persisted = False
 
             try:
-                async for event in run_service.execute_stream(
-                    session_id=session_id,
-                    prompt=req.message,
-                    model=req.model,
-                    provider_keys=req.provider_keys,
-                    rubric=req.verification.rubric if req.verification else None,
+                async for event in _sse_with_heartbeat(
+                    run_service.execute_stream(
+                        session_id=session_id,
+                        prompt=req.message,
+                        model=req.model,
+                        provider_keys=req.provider_keys,
+                        rubric=req.verification.rubric if req.verification else None,
+                        mode=req.verification.mode if req.verification else None,
+                    )
                 ):
+                    if isinstance(event, str):
+                        # Heartbeat keepalive comment — not a run event.
+                        yield event
+                        continue
+
                     if _cancel_flags.get(skey, False) or cancel_event.is_set():
                         _persist_collected_stream_state(
                             conversation,

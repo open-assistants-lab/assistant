@@ -72,7 +72,7 @@ All tools migrated from LangChain `@tool` to SDK `@tool` in `src/sdk/tools_core/
 | `file_versioning.py` | `files_versions_list`, `files_versions_restore`, `files_versions_delete`, `files_versions_clean` | 4 |
 | `memory.py` | `memory_connect`, `memory_get_history`, `memory_search`, `memory_search_all`, `memory_search_insights` | 5 |
 | `firecrawl.py` | `scrape_url`, `search_web`, `map_url`, `crawl_url`, `get_crawl_status`, `cancel_crawl`, `firecrawl_status`, `firecrawl_agent` | 8 |
-| `browser.py` | `browser_open`, `browser_snapshot`, `browser_click`, `browser_fill`, `browser_type`, `browser_press`, `browser_scroll`, `browser_hover`, `browser_screenshot`, `browser_eval`, `browser_get_title`, `browser_get_text`, `browser_get_html`, `browser_get_url`, `browser_tab_new`, `browser_tab_close`, `browser_back`, `browser_forward`, `browser_wait_text`, `browser_sessions`, `browser_close_all`, `browser_status` | 22 |
+| `browser.py` | `browser_open`, `browser_snapshot`, `browser_click`, `browser_fill`, `browser_screenshot`, `browser_eval` | 6 |
 | `apps.py` | `app_create`, `app_list`, `app_schema`, `app_delete`, `app_insert`, `app_update`, `app_delete_row`, `app_column_add`, `app_column_delete`, `app_column_rename`, `app_query`, `app_search_fts`, `app_search_semantic`, `app_search_hybrid` | 14 |
 | `mcp.py` | `mcp_list`, `mcp_reload`, `mcp_tools` | 3 |
 | `skills.py` | `skills_list`, `skills_search`, `skills_load`, `skill_create`, `sql_write_query` | 5 |

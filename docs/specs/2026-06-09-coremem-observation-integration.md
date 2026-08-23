@@ -1,4 +1,14 @@
-# EA CoreMem Observation & Reflection Integration
+# EA CoreMem Observation & Reflection Integration — SUPERSEDED
+
+**Status:** ❌ **Superseded 2026-08-21** — CoreMem **v0.10.0 removed the
+observer/reflector architecture** ("replace observer/reflector with
+compiler+dreaming+search"). `enable_observations` and `memory_reflection`
+no longer exist upstream; the app migrated to `coremem>=0.13.1` with
+`memory_profile` reworked onto `recall()` and `memory_reflection` removed
+(see `2026-06-09-observation-reflection-migration-spec.md`). This spec is
+retained for history only.
+
+---
 
 2026-06-09
 

@@ -1,6 +1,6 @@
 """Pydantic request/response models for the HTTP API."""
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -9,6 +9,9 @@ from src.sdk.run_models import RunResult
 
 class VerificationRequest(BaseModel):
     rubric: str | None = None
+    # Selective verification (C11): per-request override of the configured
+    # mode — "off" | "on" | "auto". None = use settings default.
+    mode: Literal["off", "on", "auto"] | None = None
 
 
 class MessageRequest(BaseModel):

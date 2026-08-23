@@ -15,7 +15,7 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -24,16 +24,16 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.stdout.reconfigure(line_buffering=True) if hasattr(sys.stdout, "reconfigure") else None
 
 from src.storage.gmail_cache import (
-    get_gmail_cache,
-    _extract_body,
     _extract_attachments,
-    _parse_date_to_ts,
+    _extract_body,
     _parse_address_list,
+    _parse_date_to_ts,
+    get_gmail_cache,
 )
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%H:%M:%S")
+    return datetime.now(UTC).strftime("%H:%M:%S")
 
 
 def msg_to_cache(msg: dict) -> dict | None:

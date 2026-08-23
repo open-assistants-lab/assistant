@@ -3,9 +3,8 @@
 This is the bridge between the HTTP layer and the SDK AgentLoop.
 It handles:
   - Creating LLM provider from config
-  - Loading SDK-native tools (no more LangChain adapter)
+  - Loading SDK-native tools
   - Loading MCP tools via MCPToolBridge
-  - Loading connector tools via ConnectKitBridge
   - Assembling SDK middlewares (memory, summarization)
   - Converting between WS protocol messages and StreamChunks
   - Thread-safe per-user agent instances
@@ -40,7 +39,7 @@ from src.sdk.messages import Message, StreamChunk
 from src.sdk.middleware_summarization import SummarizationMiddleware
 from src.sdk.native_tools import get_native_tools
 from src.sdk.providers.factory import create_model_from_config
-from src.sdk.tools import ToolAnnotations, ToolDefinition
+from src.sdk.tools import ToolDefinition
 from src.sdk.user_prompt import load_user_prompt
 from src.storage.paths import DataPaths
 
@@ -156,28 +155,75 @@ def _get_system_prompt(user_id: str, workspace_id: str | None = None) -> str:
     _ensure_prompt_seeded(user_id)
     user_prompt_context = _get_user_prompt_context(user_id)
     skills_context = _get_skills_context(user_id)
-    connector_context = _get_connector_context(user_id)
-
-    memory_context = """\
-## Memory Recall Strategy
-### Tool selection
-- **message_search** (use FIRST, before saying you don't know) — Full session context for specific facts, names, dates, plans, past decisions
-- **message_count** (use FOR "how many" questions) — Deterministic counting of distinct items across sessions
-- **message_timeline** (use FOR temporal reasoning) — Find dates of events, calculate "how many days between X and Y"
-- **memory_profile** — Observations collected from memory (may be empty)
-- **memory_reflection** — Synthesized patterns from memory (10+ obs, 24h min)
-
-Rule: When the user asks about past conversations, search first — don't answer from model knowledge alone."""
+    caps = _load_user_capabilities(user_id)
+    memory_context = _get_memory_context(caps)
+    file_ops_guideline = _get_file_ops_guideline(caps)
 
     sections = [
         user_prompt_context,
         skills_context,
-        connector_context,
         memory_context,
+        file_ops_guideline,
     ]
     sections = [s for s in sections if s]
     body = "\n".join(sections)
     return body + f"\n\nuser_id: {user_id}"
+
+
+# Tool-selection guidance for the memory section, keyed by tool name.
+# Only tools that are actually enabled are listed (Pi-style conditional
+# guidelines: never advertise a tool the agent cannot call).
+_MEMORY_TOOL_GUIDANCE: list[tuple[str, str | None, str]] = [
+    (
+        "message_search",
+        "use FIRST, before saying you don't know",
+        "Full session context for specific facts, names, dates, plans, past decisions",
+    ),
+    (
+        "message_count",
+        'use FOR "how many" questions',
+        "Deterministic counting of distinct items across sessions",
+    ),
+    (
+        "message_timeline",
+        "use FOR temporal reasoning",
+        'Find dates of events, calculate "how many days between X and Y"',
+    ),
+    ("memory_profile", None, "Recent conversation context digest (recurring topics, preferences, personal facts)"),
+]
+
+
+def _get_memory_context(caps: dict[str, Any]) -> str:
+    """Build the memory recall strategy section, listing only enabled tools."""
+    lines = ["## Memory Recall Strategy", "### Tool selection"]
+    any_tool = False
+    for name, usage, description in _MEMORY_TOOL_GUIDANCE:
+        if not _resource_enabled(caps, "tools", name):
+            continue
+        any_tool = True
+        if usage:
+            lines.append(f"- **{name}** ({usage}) — {description}")
+        else:
+            lines.append(f"- **{name}** — {description}")
+    if not any_tool:
+        return ""
+    lines.append("")
+    lines.append(
+        "Rule: When the user asks about past conversations, search first — "
+        "don't answer from model knowledge alone."
+    )
+    return "\n".join(lines)
+
+
+def _get_file_ops_guideline(caps: dict[str, Any]) -> str:
+    """Shell-based file-ops guideline, only when dedicated search tools are off."""
+    has_shell = _resource_enabled(caps, "tools", "shell_execute")
+    has_file_search = _resource_enabled(caps, "tools", "files_glob_search") or _resource_enabled(
+        caps, "tools", "files_grep_search"
+    )
+    if has_shell and not has_file_search:
+        return "Use shell_execute for file operations like ls, rg, find"
+    return ""
 
 
 def _get_workspace_context(workspace_id: str | None) -> str:
@@ -209,12 +255,6 @@ def _load_user_capabilities(user_id: str) -> dict[str, Any]:
 
 def _resource_enabled(caps: dict[str, Any], section: str, name: str) -> bool:
     return resource_enabled(caps, section, name)
-
-
-def _tool_name(tool_def: Any) -> str:
-    if isinstance(tool_def, dict):
-        return str(tool_def.get("name", ""))
-    return str(getattr(tool_def, "name", ""))
 
 
 def _get_skills_context(user_id: str, workspace_id: str = "personal") -> str:
@@ -290,32 +330,6 @@ def _get_skills_context(user_id: str, workspace_id: str = "personal") -> str:
         return ""
 
 
-def _get_connector_context(user_id: str) -> str:
-    """Inject connected connector info so the LLM knows about available tools."""
-    try:
-        from connectkit.bridge import ConnectKitBridge
-
-        bridge = ConnectKitBridge(user_id=user_id)
-        connected = bridge.connected_services()
-        if not connected:
-            return ""
-
-        lines = [
-            "\n\n## Connected SaaS Connectors",
-            "IMPORTANT: All connectors below are ALREADY authorized and ready to use.",
-            "Do NOT ask the user to approve or connect — just use the available tools directly.",
-            "",
-        ]
-        for service in connected:
-            ns = service.replace("-", "_")
-            lines.append(f"- **{service}**: tools named `{ns}__*` are ready to call (e.g. `{ns}__gmail_messages_list`)")
-        return "\n".join(lines)
-    except ImportError:
-        return ""
-    except Exception:
-        return ""
-
-
 async def create_sdk_loop(
     user_id: str,
     workspace_id: str = "personal",
@@ -346,7 +360,6 @@ async def create_sdk_loop(
     tools = [td for td in get_native_tools() if _resource_enabled(caps, "tools", td.name)]
 
     t2 = time.monotonic()
-
     mcp_tools: list[Any] = []
     mcp_bridge = None
     try:
@@ -364,30 +377,7 @@ async def create_sdk_loop(
     except Exception as e:
         logger.warning("sdk_runner.mcp_failed", {"error": str(e)}, user_id=user_id)
 
-    connector_tools: list[Any] = []
-    connectkit_bridge = None
-    try:
-        connectkit_bridge, discovered = await _get_connectkit_bridge(user_id)
-        connector_tools = [
-            td
-            for td in discovered
-            if _resource_enabled(caps, "tools", _tool_name(td))
-        ]
-        if connector_tools:
-            logger.info(
-                "sdk_runner.connector_tools",
-                {"count": len(connector_tools)},
-                user_id=user_id,
-            )
-    except Exception as e:
-        logger.warning(
-            "sdk_runner.connector_failed", {"error": str(e)}, user_id=user_id
-        )
-
-    connectkit_tool_defs = [
-        td for td in _connector_dicts_to_defs(connector_tools) if _resource_enabled(caps, "tools", td.name)
-    ]
-    all_tools = tools + mcp_tools + connectkit_tool_defs
+    all_tools = tools + mcp_tools
     t3 = time.monotonic()
 
     logger.info("sdk_runner.tools_loaded", {"count": len(all_tools)}, user_id=user_id)
@@ -421,7 +411,6 @@ async def create_sdk_loop(
     idx = get_or_create_index(
         user_tools_dir, workspace_tools_dir, mcp_config,
         user_id=user_id, workspace_id=runtime_workspace_id,
-        connectkit_bridge=connectkit_bridge,
     )
 
     # NOTE: do NOT call idx.clear() here. get_or_create_index already clears
@@ -431,7 +420,6 @@ async def create_sdk_loop(
     # re-indexing when the persisted index already has data.
 
     if idx.count() == 0:
-        # Index native tools
         for td in tools:
             if not is_core_tool(td.name):
                 idx.index_tool(td, tool_type="native", namespace="native")
@@ -460,14 +448,6 @@ async def create_sdk_loop(
                 server_name = parts[1] if len(parts) == 3 else ""
                 reconstruct = {"server_name": server_name, "mcp_tool_name": td.name}
                 idx.index_tool(td, tool_type="mcp", namespace=f"mcp__{server_name}",
-                               reconstruct=reconstruct)
-
-        # Index connector tools
-        for td in connectkit_tool_defs:
-            if not is_core_tool(td.name):
-                namespace = td.name.split("__")[0] if "__" in td.name else "connector"
-                reconstruct = {"namespace": namespace, "tool_name": td.name}
-                idx.index_tool(td, tool_type="connector", namespace=namespace,
                                reconstruct=reconstruct)
 
     summary_config = settings.memory.summarization
@@ -609,9 +589,6 @@ async def create_sdk_loop(
     if mcp_bridge:
         loop._mcp_bridge = mcp_bridge  # type: ignore[attr-defined]
 
-    if connectkit_bridge:
-        loop._connectkit_bridge = connectkit_bridge  # type: ignore[attr-defined]
-
     t5 = time.monotonic()
     logger.info(
         "sdk_runner.create_timing",
@@ -685,36 +662,6 @@ async def get_sdk_loop(user_id: str, workspace_id: str = "personal", model: str 
         else:
             _loop_cache.move_to_end(cache_key)
         return _loop_cache[cache_key]
-
-
-def _connector_dicts_to_defs(dicts: list[dict[str, Any]]) -> list[ToolDefinition]:
-    """Convert connectkit tool dicts to SDK ToolDefinition objects.
-
-    Connector adapters produce plain dicts (to avoid depending on the EA SDK).
-    This function converts them to proper ToolDefinition instances.
-    """
-    defs = []
-    for d in dicts:
-        annotations = ToolAnnotations(
-            title=d.get("annotations", {}).get("title", d["name"]),
-            read_only=d.get("annotations", {}).get("read_only", False),
-            destructive=d.get("annotations", {}).get("destructive", False),
-            idempotent=d.get("annotations", {}).get("idempotent", False),
-        )
-        func = d.get("function")
-        ainvoke = d.get("ainvoke")
-
-        td = ToolDefinition(
-            name=d["name"],
-            description=d["description"],
-            parameters=d.get("parameters", {}),
-            annotations=annotations,
-            function=func,
-        )
-        if ainvoke:
-            td._coroutine = ainvoke
-        defs.append(td)
-    return defs
 
 
 def _messages_from_conversation(messages: list[Any]) -> list[Message]:
@@ -1007,6 +954,109 @@ def _last_assistant_message(messages: list[Message]) -> Message | None:
     return None
 
 
+def _executed_tool_names(messages: list[Message]) -> list[str]:
+    """Tool names actually called in the run (from assistant tool calls)."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for msg in messages:
+        if msg.role == "assistant" and msg.tool_calls:
+            for tc in msg.tool_calls:
+                if tc.name and tc.name not in seen:
+                    seen.add(tc.name)
+                    names.append(tc.name)
+    return names
+
+
+async def _maybe_skip_verification(
+    loop: AgentLoop,
+    input_messages: list[Message],
+    result_messages: list[Message],
+    user_id: str,
+) -> bool:
+    """C11 auto-mode decision: True when the grader should be skipped.
+
+    Deterministic signals only — no extra LLM calls. Logs the skip reason
+    for auditability. Best-effort: any failure → verify (fail closed).
+    """
+    from src.config import get_settings as _get_settings
+    from src.sdk.verification_policy import (
+        VerificationPolicy,
+        VerificationSignals,
+        detect_code,
+        detect_risk_keywords,
+        should_verify,
+        skip_reason,
+    )
+
+    try:
+        vcfg = _get_settings().verification
+        policy = VerificationPolicy(
+            mode="auto",
+            skip_max_response_chars=vcfg.skip_max_response_chars,
+            verify_min_history_tokens=vcfg.verify_min_history_tokens,
+            verify_min_response_chars=vcfg.verify_min_response_chars,
+            risk_keywords=tuple(vcfg.risk_keywords or ()),
+        )
+
+        last_assistant = _last_assistant_message(result_messages)
+        response_text = (
+            last_assistant.content if last_assistant and isinstance(last_assistant.content, str) else ""
+        )
+        tool_names = _executed_tool_names(result_messages)
+        destructive_used = False
+        for name in tool_names:
+            td = loop._registry.get(name)
+            if td is not None and getattr(td, "annotations", None) is not None:
+                if getattr(td.annotations, "destructive", False):
+                    destructive_used = True
+                    break
+        prompt_text = " ".join(
+            str(m.content) for m in input_messages if m.role == "user" and isinstance(m.content, str)
+        )
+        history_tokens = 0
+        if last_assistant is not None and getattr(last_assistant, "usage", None) is not None:
+            history_tokens = int(getattr(last_assistant.usage, "input_tokens", 0) or 0)
+
+        signals = VerificationSignals(
+            tool_names=tool_names,
+            destructive_tool_used=destructive_used,
+            response_chars=len(response_text),
+            history_tokens=history_tokens,
+            has_code=detect_code(response_text),
+            risk_keyword_hit=detect_risk_keywords(
+                response_text + " " + prompt_text, policy.risk_keywords
+            ),
+            run_failed=False,
+        )
+        if not should_verify(signals, policy):
+            reason = skip_reason(signals, policy)
+            logger.info(
+                "verification.skipped",
+                {"reason": reason, "response_chars": len(response_text)},
+                user_id=user_id,
+            )
+            return True
+        return False
+    except Exception:
+        # Fail closed: any error in the decision means verify as usual.
+        return False
+
+
+def _current_turn_messages(messages: list[Message]) -> list[Message]:
+    """The current turn: the last user message and everything after it.
+
+    The grader must see ONLY the turn it is grading (the request being
+    verified plus the attempt's reasoning/tool/assistant output). Passing
+    the whole conversation lets the grader misattribute prior turns to the
+    current work — a phantom-verdict loop where an old turn's claims get
+    graded against the new request (the Gong Cha joke incident).
+    """
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].role == "user":
+            return messages[i:]
+    return list(messages)
+
+
 async def _verification_engine(
     loop: AgentLoop,
     messages: list[Message],
@@ -1016,6 +1066,7 @@ async def _verification_engine(
     model: str | None,
     is_cancelled: collections.abc.Callable[[], bool] | None,
     stream: bool,
+    mode: str | None = None,
 ) -> collections.abc.AsyncIterator[Any]:
     """Core verification attempt loop.
 
@@ -1028,6 +1079,12 @@ async def _verification_engine(
     from src.sdk.run_models import (
         RubricEvaluationResult as _EvalResult,
     )
+
+    # Selective verification (C11): per-request mode wins, else settings.
+    if mode is None:
+        from src.config import get_settings as _get_settings
+
+        mode = _get_settings().verification.mode or "off"
 
     rubric_mw = await _mw.load_rubric_middleware(user_id, loop, rubric)
     max_attempts = rubric_mw.max_iterations if rubric_mw else 1
@@ -1098,11 +1155,33 @@ async def _verification_engine(
             )
             break
 
+        # Selective verification (C11): in auto mode, skip the grader for
+        # trivial turns. Deterministic decision from run signals — zero
+        # extra LLM calls. The skip happens BEFORE GradeStartItem, so the
+        # client never sees a "Checking rubric…" state (native-app stream
+        # watchdog unaffected: the stream just ends earlier with done).
+        if mode == "auto":
+            _skip = await _maybe_skip_verification(
+                loop, input_messages, result_messages, user_id
+            )
+            if _skip:
+                terminal_status = "skipped"
+                yield AttemptItem(
+                    attempt, result_messages, None, None, terminal_status,
+                    rubric_available, max_attempts, grader_model_id,
+                )
+                break
+
         yield GradeStartItem(attempt, max_attempts)
         loop._rubric_started = True  # type: ignore[attr-defined]
 
+        # Grade ONLY the current turn: the current user prompt plus this
+        # attempt's full output (reasoning, tool messages WITH results, and
+        # the final answer). Passing the whole conversation lets the grader
+        # misattribute prior turns to the current work (phantom verdicts),
+        # and omitting the run's tool messages leaves claims unverifiable.
         evaluation = await rubric_mw.grade(
-            list(input_messages) + [last_assistant], attempt - 1
+            _current_turn_messages(result_messages), attempt - 1
         )
         evaluations.append(evaluation)
         raw_result = evaluation["result"]
@@ -1176,10 +1255,11 @@ async def run_with_verification_stream(
     rubric: str | None = None,
     model: str | None = None,
     is_cancelled: collections.abc.Callable[[], bool] | None = None,
+    mode: str | None = None,
 ) -> collections.abc.AsyncIterator[Any]:
     """Streaming verification run: yields chunks + attempt/grade markers."""
     async for item in _verification_engine(
-        loop, messages, user_id, session_id, rubric, model, is_cancelled, stream=True
+        loop, messages, user_id, session_id, rubric, model, is_cancelled, stream=True, mode=mode
     ):
         yield item
 
@@ -1192,6 +1272,7 @@ async def run_with_verification(
     rubric: str | None = None,
     model: str | None = None,
     is_cancelled: collections.abc.Callable[[], bool] | None = None,
+    mode: str | None = None,
 ) -> VerificationResult:
     """Non-streaming verification run: returns all attempts + verdict."""
     attempts: list[AttemptResult] = []
@@ -1200,7 +1281,7 @@ async def run_with_verification(
     max_attempts = 1
     grader_model_id: str | None = None
     async for item in _verification_engine(
-        loop, messages, user_id, session_id, rubric, model, is_cancelled, stream=False
+        loop, messages, user_id, session_id, rubric, model, is_cancelled, stream=False, mode=mode
     ):
         if isinstance(item, AttemptItem):
             attempts.append(
@@ -1400,54 +1481,6 @@ def reset_sdk_loop(
     return removed
 
 
-# ── ConnectKit discovery cache ────────────────────────────────────────────
-# ConnectKitBridge.discover() refreshes OAuth tokens and loads connector
-# specs — ~1.15s on every AgentLoop creation, even with no connectors
-# configured. Connector tool sets change only when connectors are added
-# or removed (or OAuth tokens rotate), so cache the discovered bridge
-# per user for a short TTL. reset_user_sdk_loops / reset_all_sdk_loops
-# clear it on explicit changes.
-_CONNECTKIT_CACHE_TTL_SECONDS = 60.0
-_CONNECTKIT_CACHE_MAX_ENTRIES = 128
-_connectkit_cache: collections.OrderedDict[str, tuple[float, Any, list[Any]]] = collections.OrderedDict()
-
-
-def clear_connectkit_cache(user_id: str | None = None) -> None:
-    """Drop cached ConnectKit bridges for one user (or all users)."""
-    if user_id is None:
-        _connectkit_cache.clear()
-    else:
-        _connectkit_cache.pop(user_id, None)
-
-
-async def _get_connectkit_bridge(user_id: str) -> tuple[Any, list[Any]]:
-    """Return (bridge, tool_definitions) with a per-user TTL cache.
-
-    The bridge instance is shared across loops (it is attached for tool
-    invocation); tool definitions are the plain dicts returned by
-    ``ConnectKitBridge.get_tool_definitions()``. Failures are never
-    cached, so a transient error re-runs discovery on the next call.
-    """
-    now = time.monotonic()
-    cached = _connectkit_cache.get(user_id)
-    if cached is not None and now - cached[0] < _CONNECTKIT_CACHE_TTL_SECONDS:
-        _connectkit_cache.move_to_end(user_id)  # LRU touch
-        return cached[1], cached[2]
-    # Drop expired entries so the map stays bounded even under churn.
-    for uid in list(_connectkit_cache):
-        if now - _connectkit_cache[uid][0] >= _CONNECTKIT_CACHE_TTL_SECONDS:
-            del _connectkit_cache[uid]
-    from connectkit.bridge import ConnectKitBridge
-
-    bridge = ConnectKitBridge(user_id=user_id)
-    await bridge.discover()
-    tools = bridge.get_tool_definitions()
-    _connectkit_cache[user_id] = (now, bridge, tools)
-    while len(_connectkit_cache) > _CONNECTKIT_CACHE_MAX_ENTRIES:
-        _connectkit_cache.popitem(last=False)  # evict least-recently-used
-    return bridge, tools
-
-
 def reset_user_sdk_loops(user_id: str, reason: str | None = None) -> int:
     """Reset all cached SDK agent loops for a user."""
     removed = 0
@@ -1456,7 +1489,6 @@ def reset_user_sdk_loops(user_id: str, reason: str | None = None) -> int:
         if cache_key.startswith(cache_prefix):
             del _loop_cache[cache_key]
             removed += 1
-    clear_connectkit_cache(user_id)
     logger.info(
         "sdk_runner.user_loops_reset",
         {"user_id": user_id, "reason": reason, "removed": removed},
@@ -1468,7 +1500,6 @@ def reset_user_sdk_loops(user_id: str, reason: str | None = None) -> int:
 def reset_all_sdk_loops() -> None:
     """Reset all cached agent loops."""
     _loop_cache.clear()
-    clear_connectkit_cache()
     logger.info("sdk_runner.all_loops_reset", {})
 
 

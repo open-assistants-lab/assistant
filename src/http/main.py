@@ -37,7 +37,7 @@ load_dotenv()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Lifespan context manager — SDK runtime (no LangChain agent pool needed)."""
+    """Lifespan context manager — SDK runtime."""
     try:
         from src.subagent.scheduler import get_scheduler
 
@@ -96,6 +96,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             get_logger().info("scheduler.stopped", {}, user_id="system")
     except Exception:
         pass
+
+
+def _oauth_login_error(service: str, config_fn: Any) -> str | None:
+    """Return an error message if the connector cannot authorize, else None.
+
+    The OAuth router builds the provider authorize URL from the connector's
+    client_id; an unconfigured connector (no vault token, no
+    DEFAULT_GWS_CLIENT_ID) would produce a broken URL with an empty
+    client_id. The /auth/login guard calls this before allowing the redirect.
+    """
+    try:
+        cfg = config_fn(service)
+    except Exception:
+        return f"Connector '{service}' is not configured"
+    if not cfg.get("client_id"):
+        return (
+            f"Connector '{service}' is not configured (missing client_id). "
+            "Configure credentials in Settings → Tools before connecting."
+        )
+    return None
 
 
 app = FastAPI(
@@ -162,7 +182,6 @@ try:
     from connectkit.bridge import ConnectKitBridge, _default_spec_dir
     from connectkit.oauth import create_oauth_router
     from connectkit.spec import ConnectorSpec
-    from connectkit.utils import ensure_cli_installed
 
     def _vault_factory(user_id: str) -> Any:
         bridge = ConnectKitBridge(user_id)
@@ -186,22 +205,42 @@ try:
             result["client_secret"] = os.environ.get("DEFAULT_GWS_CLIENT_SECRET", "")
         return result
 
-    from src.sdk.runner import reset_user_sdk_loops
+    from src.config import get_settings as _get_settings
 
-    def _on_connect(user_id: str) -> None:
-        """After OAuth completes, install missing CLIs and reset loop cache."""
-        bridge = ConnectKitBridge(user_id)
-        for name in bridge.vault.list_connected():
-            spec = next((s for s in _oauth_specs if s.name == name), None)
-            if spec:
-                ensure_cli_installed(spec)
-        reset_user_sdk_loops(user_id)
+    # The uvicorn bind below is 8080 (native app contract), and config.yaml's
+    # api.port is not necessarily the bind port (config.yaml init-kwargs beat
+    # env in pydantic-settings). So default the OAuth redirect base to the
+    # actual bind port; deployments behind a public URL must set
+    # API_PUBLIC_URL explicitly.
+    _api_settings = _get_settings().api
+    _oauth_base_url = _api_settings.public_url or "http://localhost:8080"
+
+    @app.middleware("http")
+    async def _guard_oauth_login(request: Request, call_next: Any) -> Any:
+        """Reject /auth/login for connectors that have no client_id configured.
+
+        Without this, the OAuth router happily redirects to the provider with
+        an empty client_id, producing a broken authorize URL (observed when an
+        agent hit /auth/login for an unconfigured connector).
+
+        INTERIM: the durable fix lives upstream in the ConnectKit repo
+        (connectkit/oauth.py — `_build_authorize_url` and the callback raise
+        400 on missing client_id). Remove this guard when the app's
+        connectkit pin bumps past 0.1.4.
+        """
+        if request.url.path == "/auth/login":
+            error = _oauth_login_error(
+                request.query_params.get("service", ""), _oauth_config
+            )
+            if error is not None:
+                return JSONResponse(status_code=400, content={"detail": error})
+        return await call_next(request)
 
     oauth_router = create_oauth_router(
         specs=_oauth_specs,
         vault_factory=_vault_factory,
         config=_oauth_config,
-        base_url="http://localhost:8080",
+        base_url=_oauth_base_url,
     )
     app.include_router(oauth_router)
     print(f"Included oauth_router: {[r.path for r in oauth_router.routes]}")
