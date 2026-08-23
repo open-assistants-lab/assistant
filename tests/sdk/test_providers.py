@@ -878,15 +878,20 @@ class TestGeminiProvider:
     @pytest.mark.asyncio
     async def test_chat_stream_handles_split_utf8_bytes(self, monkeypatch):
         """A multi-byte UTF-8 sequence split across network chunks must not
-        corrupt the character (incremental decoder, not per-chunk decode)."""
+        corrupt the character (incremental decoder, not per-chunk decode).
+        The split is forced INSIDE the é so a naive per-chunk decode fails."""
         p = GeminiProvider(api_key="test-key")
         line = 'data: ' + '{"candidates": [{"content": {"parts": [{"text": "caf\u00e9"}]}}]}'
-        b = (line + "\n\n").encode("utf-8")  # é = 2 bytes
-        mid = len(b) // 2
-        while mid < len(b) and (b[mid] & 0xC0) == 0x80:
-            mid += 1  # keep the split OUTSIDE a multi-byte char when possible
-        if mid >= len(b):
-            mid = 1
+        b = (line + "\n\n").encode("utf-8")  # é = 2 bytes: 0xC3 0xA9
+        # Force the split to land INSIDE the é: b[:mid] ends with the 0xC3
+        # lead byte, b[mid:] begins with the 0xA9 continuation byte. A naive
+        # per-chunk decode() raises on b[:mid]; only the incremental decoder
+        # keeps the pending lead byte and completes it on the next chunk.
+        cafe = "caf\u00e9".encode()  # c a f 0xC3 0xA9 (5 bytes)
+        mid = b.index(cafe) + 4  # b[:mid] ends with the 0xC3 lead byte
+        assert b[mid - 1] == 0xC3 and b[mid] == 0xA9  # split mid-é, verified
+        with pytest.raises(UnicodeDecodeError):
+            b[:mid].decode("utf-8")  # old per-chunk decode would explode here
 
         class FakeStream:
             async def __aenter__(self):
