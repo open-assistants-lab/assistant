@@ -423,6 +423,25 @@ class AgentLoop:
                 fresh.append(tc)
         return fresh, dupes
 
+    def _synthetic_duplicate_results(
+        self, duplicate_calls: list[ToolCall], prior_result: str
+    ) -> list[Message]:
+        """Provider APIs require every assistant tool_call/tool_use to be
+        answered by a tool result — an unanswered block is a hard 400 on
+        OpenAI-compatible and Anthropic APIs. Emit a synthetic result per
+        duplicate call so the guard's nudge/escalation turns stay valid."""
+        return [
+            Message.tool_result(
+                tool_call_id=tc.id,
+                content=(
+                    f"Duplicate call skipped — earlier identical call to "
+                    f"'{tc.name}' returned: {prior_result}"
+                ),
+                name=tc.name,
+            )
+            for tc in duplicate_calls
+        ]
+
     @staticmethod
     def _last_tool_result(state: AgentState, name: str, limit: int = 200) -> str:
         """The most recent tool-result content for `name` (capped) — shown in
@@ -1282,11 +1301,17 @@ class AgentLoop:
                 effective_tool_calls, state
             )
             if duplicate_calls:
+                # Answer the dangling tool_calls BEFORE either nudge branch:
+                # both branches `continue` with only a system message, which
+                # would leave the previous assistant turn's tool_calls
+                # unanswered (hard 400 on strict provider APIs).
+                tool_result = self._last_tool_result(state, duplicate_calls[0].name)
+                for synthetic in self._synthetic_duplicate_results(duplicate_calls, tool_result):
+                    state.add_message(synthetic)
                 nudges = state.extra.get("_duplicate_tool_nudges", 0)
                 max_nudges = self.run_config.max_duplicate_tool_nudges
                 if nudges < max_nudges:
                     state.extra["_duplicate_tool_nudges"] = nudges + 1
-                    tool_result = self._last_tool_result(state, duplicate_calls[0].name)
                     state.add_message(
                         Message.system(
                             f"The tool '{duplicate_calls[0].name}' was already called with the "
@@ -1647,11 +1672,21 @@ class AgentLoop:
                                "executed": [k[0] for k in state.extra.get("_executed_tool_calls", [])],
                                "nudges": state.extra.get("_duplicate_tool_nudges", 0)},
                     )
+                    # Answer the dangling tool_calls BEFORE either nudge
+                    # branch (same rationale as the non-streaming twin) and
+                    # surface the synthetic results on the wire.
+                    tool_result = self._last_tool_result(state, duplicate_calls[0].name)
+                    for synthetic in self._synthetic_duplicate_results(duplicate_calls, tool_result):
+                        state.add_message(synthetic)
+                        yield StreamChunk.tool_result_event(
+                            tool=synthetic.name or "",
+                            call_id=synthetic.tool_call_id or "",
+                            result_preview=str(synthetic.content)[:200],
+                        )
                     nudges = state.extra.get("_duplicate_tool_nudges", 0)
                     max_nudges = self.run_config.max_duplicate_tool_nudges
                     if nudges < max_nudges:
                         state.extra["_duplicate_tool_nudges"] = nudges + 1
-                        tool_result = self._last_tool_result(state, duplicate_calls[0].name)
                         state.add_message(
                             Message.system(
                                 f"The tool '{duplicate_calls[0].name}' was already called with the "

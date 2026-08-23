@@ -1850,7 +1850,9 @@ class TestDuplicateToolCallGuard:
         result = await loop.run([Message.user("Say hi")])
 
         tool_res = [m for m in result if m.role == "tool"]
-        assert len(tool_res) == 1, "the duplicate call must NOT be re-executed"
+        # Synthetic duplicate answers don't count as executions (B1).
+        real_executions = [m for m in tool_res if not str(m.content).startswith("Duplicate call skipped")]
+        assert len(real_executions) == 1, "the duplicate call must NOT be re-executed"
         nudge_msgs = [m for m in result if m.role == "system" and "already called" in str(m.content)]
         assert len(nudge_msgs) == 1
         final = [m for m in result if m.role == "assistant" and m.content == "The result is: hi"]
@@ -1891,7 +1893,9 @@ class TestDuplicateToolCallGuard:
         result = await loop.run([Message.user("say")])
 
         tool_res = [m for m in result if m.role == "tool"]
-        assert len(tool_res) == 1, "only the first execution happens"
+        # Synthetic duplicate answers don't count as executions (B1).
+        real_executions = [m for m in tool_res if not str(m.content).startswith("Duplicate call skipped")]
+        assert len(real_executions) == 1, "only the first execution happens"
         finals = [m for m in result if m.role == "assistant" and m.content == "brief final"]
         assert finals, "the final response text must be used"
         # The final call must have been capped via provider options.
@@ -1945,6 +1949,95 @@ class TestDuplicateToolCallGuard:
         result = await loop.run(previous)
 
         tool_res = [m for m in result if m.role == "tool"]
-        assert len(tool_res) == 1, "the re-run must not re-execute the previous attempt's call"
+        # Synthetic duplicate answers don't count as executions (B1).
+        real_executions = [m for m in tool_res if not str(m.content).startswith("Duplicate call skipped")]
+        assert len(real_executions) == 1, "the re-run must not re-execute the previous attempt's call"
         nudge = [m for m in result if m.role == "system" and "already called" in str(m.content)]
         assert nudge, "the re-run should nudge instead of re-executing"
+
+    async def test_duplicate_nudge_appends_tool_results(self):
+        """B1: after a duplicate nudge, every dangling tool_call id must have a
+        tool result — strict provider APIs (OpenAI/Anthropic) reject an
+        assistant tool_calls block that is never answered."""
+        provider = MockProvider(
+            responses=[
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="call_1", name="echo", arguments={"text": "hi"})],
+                ),
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="call_2", name="echo", arguments={"text": "hi"})],
+                ),
+                Message.assistant(content="The result is: hi"),
+            ]
+        )
+        loop = AgentLoop(provider=provider, tools=[echo])
+        result = await loop.run([Message.user("Say hi")])
+
+        answered = {m.tool_call_id for m in result if m.role == "tool"}
+        for msg in result:
+            for tc in msg.tool_calls or []:
+                assert tc.id in answered, f"dangling tool_call {tc.id} without tool result"
+
+    async def test_duplicate_escalation_appends_tool_results(self):
+        """B1: the final-answer escalation branch (nudges >= max) must ALSO
+        answer the duplicate tool_calls before requesting the brief final
+        response — same provider-rejection hazard as the nudge branch."""
+        provider = MockProvider(
+            responses=[
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="c1", name="echo", arguments={"text": "x"})],
+                ),
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="c2", name="echo", arguments={"text": "x"})],
+                ),
+                Message.assistant(content="brief final"),
+            ]
+        )
+        loop = AgentLoop(
+            provider=provider,
+            tools=[echo],
+            run_config=RunConfig(max_duplicate_tool_nudges=0),
+        )
+        result = await loop.run([Message.user("say")])
+
+        answered = {m.tool_call_id for m in result if m.role == "tool"}
+        for msg in result:
+            for tc in msg.tool_calls or []:
+                assert tc.id in answered, f"dangling tool_call {tc.id} without tool result"
+        finals = [m for m in result if m.role == "assistant" and m.content == "brief final"]
+        assert finals, "the escalation must still produce the capped final answer"
+
+    async def test_streaming_duplicate_nudge_emits_tool_result_events(self):
+        """B1: the streaming twin must both persist the synthetic tool results
+        and yield tool_result events so clients see the duplicate being
+        answered."""
+        provider = MockProvider(
+            responses=[
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="c1", name="echo", arguments={"text": "x"})],
+                ),
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="c2", name="echo", arguments={"text": "x"})],
+                ),
+                Message.assistant(content="final answer"),
+            ]
+        )
+        loop = AgentLoop(provider=provider, tools=[echo])
+        chunks = [c async for c in loop.run_stream([Message.user("say")])]
+
+        answered = {
+            m.tool_call_id
+            for m in loop.state.messages
+            if m.role == "tool"
+        }
+        for msg in loop.state.messages:
+            for tc in msg.tool_calls or []:
+                assert tc.id in answered, f"dangling tool_call {tc.id} without tool result"
+        tr_events = [c for c in chunks if c.type == "tool_result" and c.call_id == "c2"]
+        assert tr_events, "the duplicate call must be answered on the wire too"
