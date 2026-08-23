@@ -13,7 +13,9 @@ agent:
     \ multiple workspaces, use message_search across sessions.\n"
 api:
   host: 0.0.0.0
-  port: 8000
+  # Local dev binds 8080 = the native-app (Zig) client contract. Docker
+  # deployments override with API_PORT=8000 env (env beats yaml for api.*).
+  port: 8080
 email_sync:
   backfill_limit: 100
   batch_size: 50

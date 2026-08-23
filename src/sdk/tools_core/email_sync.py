@@ -15,7 +15,6 @@ from src.sdk.tools_core.email_db import get_engine as _get_engine
 from src.sdk.tools_core.email_db import parse_email_flags
 
 logger = get_logger()
-SETTINGS = get_settings()
 
 RATE_LIMIT_COOLDOWN: dict[str, float] = {}
 
@@ -421,7 +420,7 @@ async def _sync_emails(
     except Exception as e:
         error_str = str(e).lower()
         if "too many simultaneous connections" in error_str or "rate limit" in error_str:
-            cooldown_minutes = getattr(SETTINGS.email_sync, "cooldown_minutes", 15)
+            cooldown_minutes = getattr(get_settings().email_sync, "cooldown_minutes", 15)
             RATE_LIMIT_COOLDOWN[cooldown_key] = time.time() + (cooldown_minutes * 60)
             logger.warning(
                 "email_sync.rate_limited",
@@ -435,7 +434,7 @@ def start_background_sync(user_id: str, account_id: str) -> None:
     """Start background backfill sync (newest -> earliest)."""
 
     async def _backfill() -> None:
-        limit = SETTINGS.email_sync.backfill_limit or 500
+        limit = get_settings().email_sync.backfill_limit or 500
         count = await _sync_emails(user_id, account_id, "INBOX", "full", limit)
         logger.info(
             "email.backfill_complete",
@@ -472,7 +471,7 @@ async def start_interval_sync() -> None:
     if _scheduler_task is not None:
         return
 
-    if not SETTINGS.email_sync.enabled:
+    if not get_settings().email_sync.enabled:
         logger.info("email_sync.disabled", {}, user_id="system")
         return
 
@@ -480,7 +479,7 @@ async def start_interval_sync() -> None:
     _scheduler_task = asyncio.create_task(_run_interval_sync())
     logger.info(
         "email_sync.started",
-        {"interval_minutes": SETTINGS.email_sync.interval_minutes},
+        {"interval_minutes": get_settings().email_sync.interval_minutes},
         user_id="system",
     )
 
@@ -503,7 +502,7 @@ async def stop_interval_sync() -> None:
 
 async def _run_interval_sync() -> None:
     """Main interval sync loop."""
-    interval_seconds = SETTINGS.email_sync.interval_minutes * 60
+    interval_seconds = get_settings().email_sync.interval_minutes * 60
 
     while _running:
         try:
@@ -524,7 +523,7 @@ async def _sync_all_accounts() -> None:
     user_ids = get_all_user_ids()
     # Filter out "default_user" user - it's not valid for email operations
     user_ids = [uid for uid in user_ids if uid and uid != "default_user"]
-    batch_size = SETTINGS.email_sync.batch_size
+    batch_size = get_settings().email_sync.batch_size
 
     for user_id in user_ids:
         accounts = _load_accounts(user_id)
@@ -554,7 +553,7 @@ async def _sync_all_accounts() -> None:
             except Exception as e:
                 error_str = str(e).lower()
                 if "too many simultaneous connections" in error_str or "rate limit" in error_str:
-                    cooldown_minutes = getattr(SETTINGS.email_sync, "cooldown_minutes", 15)
+                    cooldown_minutes = getattr(get_settings().email_sync, "cooldown_minutes", 15)
                     RATE_LIMIT_COOLDOWN[cooldown_key] = time.time() + (cooldown_minutes * 60)
                     logger.warning(
                         "email_sync.rate_limited",
@@ -596,7 +595,7 @@ def email_sync(
 
     async def _sync() -> int:
         limit = (
-            SETTINGS.email_sync.backfill_limit if mode == "full" else SETTINGS.email_sync.batch_size
+            get_settings().email_sync.backfill_limit if mode == "full" else get_settings().email_sync.batch_size
         )
         count = await _sync_emails(user_id, account_id, folder, mode, limit)
         return count

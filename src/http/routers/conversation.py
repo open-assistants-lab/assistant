@@ -606,7 +606,6 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
     """Send a message to the agent (SDK-powered)."""
     try:
         user_id = req.user_id or "default_user"
-        msg_content = req.message.strip()
 
         conversation = get_message_store(user_id)
         session_id = _normalized_session_id(req.session_id)

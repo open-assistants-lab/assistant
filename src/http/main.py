@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from src.config import get_settings
+from src.config.settings import REPO_ROOT
 from src.http.routers import (
     capabilities,
     contacts_router,
@@ -33,7 +34,7 @@ from src.http.routers.connectors import router as connectors_router
 from src.http.routers.settings import router as settings_router
 from src.http.routers.ws import router as ws_router
 
-load_dotenv()
+load_dotenv(REPO_ROOT / ".env")
 
 
 @asynccontextmanager
@@ -284,10 +285,18 @@ app.include_router(connectors_router)
 
 
 def run() -> None:
-    """Run the HTTP server."""
+    """Run the HTTP server.
+
+    Binds settings.api.host/port (audit E22): docker-compose sets
+    API_PORT/API_HOST env which beats yaml; local dev uses the yaml value
+    (8080 — the native-app contract)."""
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    from src.config import get_settings
+
+    cfg = get_settings()
+    print(f"Starting assistant HTTP API on {cfg.api.host}:{cfg.api.port}")
+    uvicorn.run(app, host=cfg.api.host, port=cfg.api.port)
 
 
 if __name__ == "__main__":

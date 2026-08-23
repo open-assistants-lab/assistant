@@ -1,11 +1,16 @@
 """Settings module for Assistant."""
 
+import os
 from pathlib import Path
 from typing import Any
 
 import yaml
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Repository root — resolved from THIS file so config/.env are found
+# regardless of process CWD (audit E23).
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class _BaseSettings(BaseSettings):
@@ -331,7 +336,9 @@ class AppConfig(_BaseSettings):
     email: EmailConfig = Field(default_factory=EmailConfig)
     auth: AuthConfig = Field(default_factory=AuthConfig)
 
-    model_config = SettingsConfigDict(env_file=".env", env_nested_delimiter="__")
+    model_config = SettingsConfigDict(
+        env_file=str(REPO_ROOT / ".env"), env_nested_delimiter="__"
+    )
 
     @property
     def deployment_mode(self) -> str:
@@ -392,7 +399,19 @@ def get_settings() -> AppConfig:
     """Get application settings singleton."""
     global _config
     if _config is None:
-        _config = AppConfig.from_yaml("config.yaml")
+        # No argument -> repo-root resolution per from_yaml's contract
+        # (audit E23: a relative "config.yaml" silently missed when launched
+        # from any other directory).
+        _config = AppConfig.from_yaml()
+        # pydantic-settings gives init kwargs (yaml data) precedence over
+        # environment variables; deployment contracts (docker-compose sets
+        # API_PORT/API_HOST) must win, so apply them explicitly (audit E22).
+        host = os.environ.get("API_HOST")
+        port = os.environ.get("API_PORT")
+        if host:
+            _config.api.host = host
+        if port and port.isdigit():
+            _config.api.port = int(port)
     return _config
 
 

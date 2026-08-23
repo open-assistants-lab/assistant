@@ -2,10 +2,11 @@
 
 import argparse
 import sys
+from pathlib import Path as _Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(_Path(__file__).resolve().parents[1] / ".env")
 
 
 def main() -> None:
