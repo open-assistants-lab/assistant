@@ -4,7 +4,7 @@ import json
 import os
 import re
 import secrets
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -695,6 +695,68 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
         return MessageResponse(response="", error=str(e))
 
 
+_HEARTBEAT_PING = ": ping\n\n"
+
+
+async def _sse_with_heartbeat(
+    event_iter: AsyncGenerator[Any, None] | AsyncIterator[Any], interval: float = 15.0
+) -> AsyncGenerator[Any, None]:
+    """Interleave SSE keepalive comments while the upstream run is working.
+
+    Provider calls and tool executions can legitimately stay silent for
+    minutes, so the stream must emit a liveness signal that does not depend
+    on run progress. The native client treats the gap between received
+    lines as its stream-liveness clock.
+
+    Yields the upstream events unchanged plus `_HEARTBEAT_PING` (a str)
+    between them while the run is still in flight.
+    """
+    # Single outstanding `__anext__` + a fresh timer per iteration, with the
+    # finished task discarded each round. This preserves the original
+    # design's exact laziness: the upstream generator's mid-stream side
+    # effects (e.g. setting a cancel flag between yields) are observed by
+    # the consumer at the same point as direct iteration, because the next
+    # item is only requested after the current one is yielded. The original
+    # implementation instead accumulated every finished task into a
+    # `pending` set that was never pruned, so `asyncio.wait(...)` returned
+    # immediately forever — an unbounded ping burst.
+    #
+    # The brief's queue+pump alternative was rejected after verification:
+    # with a bounded queue the pump's `finally: await queue.put(_SENTINEL)`
+    # deadlocks when the consumer is cancelled while the queue is full (no
+    # one drains it, so the sentinel put blocks forever). The single-
+    # outstanding-`__anext__` design cannot run ahead of the consumer, so
+    # no such buffered-sentinel state exists. (pinned by
+    # test_heartbeat_cancellation_is_not_swallowed)
+    next_task: asyncio.Task[Any] = asyncio.ensure_future(event_iter.__anext__())
+    timer: asyncio.Task[Any] | None = None
+    try:
+        while True:
+            timer = asyncio.ensure_future(asyncio.sleep(interval))
+            done, _ = await asyncio.wait(
+                {next_task, timer}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if next_task in done:
+                timer.cancel()
+                try:
+                    item = next_task.result()
+                except StopAsyncIteration:
+                    return
+                yield item
+                next_task = asyncio.ensure_future(event_iter.__anext__())
+            else:
+                yield _HEARTBEAT_PING
+    finally:
+        if next_task is not None:
+            next_task.cancel()
+            try:
+                await next_task
+            except (asyncio.CancelledError, StopAsyncIteration):
+                pass
+        if timer is not None:
+            timer.cancel()
+
+
 @router.post("/message/stream")
 async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -> StreamingResponse:
     """Send a message and stream response using SSE (SDK-powered)."""
@@ -723,13 +785,20 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
             persisted = False
 
             try:
-                async for event in run_service.execute_stream(
-                    session_id=session_id,
-                    prompt=req.message,
-                    model=req.model,
-                    provider_keys=req.provider_keys,
-                    rubric=req.verification.rubric if req.verification else None,
+                async for event in _sse_with_heartbeat(
+                    run_service.execute_stream(
+                        session_id=session_id,
+                        prompt=req.message,
+                        model=req.model,
+                        provider_keys=req.provider_keys,
+                        rubric=req.verification.rubric if req.verification else None,
+                    )
                 ):
+                    if isinstance(event, str):
+                        # Heartbeat keepalive comment — not a run event.
+                        yield event
+                        continue
+
                     if _cancel_flags.get(skey, False) or cancel_event.is_set():
                         _persist_collected_stream_state(
                             conversation,
