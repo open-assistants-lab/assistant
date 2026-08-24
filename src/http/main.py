@@ -167,13 +167,36 @@ else:
     )
 
 
-_PUBLIC_PATHS = {"/health", "/health/ready", "/docs", "/redoc", "/openapi.json"}
+_PUBLIC_PATHS = {
+    "/health",
+    "/health/ready",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+    # Browser-initiated OAuth redirects carry no Bearer token (audit E24).
+    # Exact paths only — the in-app connector guard still rejects
+    # unconfigured services with 400.
+    "/auth/login",
+    "/auth/callback",
+}
+
+
+def _is_webhook_fire_path(path: str) -> bool:
+    """True for POST /webhooks/{trigger_id} — the fire endpoint only.
+
+    Audit E24: external webhook callers have no Bearer token; this path is
+    exempt from API-key auth and instead enforces a per-trigger secret in
+    the router (X-Webhook-Secret). Subpaths such as /webhooks/{id}/secret
+    (secret registration) deliberately keep Bearer auth.
+    """
+    parts = [p for p in path.split("/") if p]
+    return len(parts) == 2 and parts[0] == "webhooks"
 
 
 @app.middleware("http")
 async def api_key_auth_middleware(request: Request, call_next: Any) -> Any:
     """Apply API-key auth consistently across HTTP routes."""
-    if request.url.path in _PUBLIC_PATHS:
+    if request.url.path in _PUBLIC_PATHS or _is_webhook_fire_path(request.url.path):
         return await call_next(request)
 
     from src.config.settings import get_settings
