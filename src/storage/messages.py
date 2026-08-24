@@ -118,6 +118,16 @@ class MessageStore:
         except Exception:
             pass
 
+        # Audit P2: per-session cache of the newest valid summary
+        # (rowid + provenance). Append-safe: plain add_message never
+        # invalidates (a summary rowid is append-safe; provenance only
+        # references rows below it). Invalidated ONLY on summary-relevant
+        # writes: add_summary_message / delete_session /
+        # delete_messages_for_workspace / clear().
+        self._summary_cache: dict[
+            str, tuple[int, tuple[set[str], set[str]]] | None
+        ] = {}
+
     @property
     def core(self) -> MemoryCore:
         return self._core
@@ -737,11 +747,89 @@ class MessageStore:
         return [self._to_msg(m) for m in reversed(memories)]
 
     def _find_newest_summary_rowid(self, session_id: str) -> int | None:
-        """Find the rowid of the newest valid summary using indexed queries.
+        """Find the rowid of the newest valid summary (cached, O(1))."""
+        state = self._find_newest_summary_state(session_id)
+        return state[0] if state is not None else None
 
-        Two-phase: first find candidate summary rowids, then validate
-        provenance against only the rows needed. Avoids loading all rows.
-        Scans backwards in batches to handle many invalid summaries.
+    def _find_newest_summary_state(
+        self, session_id: str
+    ) -> tuple[int, tuple[set[str], set[str]]] | None:
+        """Return (rowid, (summarized_ids, preserved_ids)) of the newest
+        valid summary for a session, cached.
+
+        Audit P2: the summary rowid is append-safe — provenance checks only
+        reference rows strictly below it and title metadata edits are
+        harmless — so plain add_message appends never invalidate this cache.
+        It is invalidated ONLY by add_summary_message, delete_session,
+        delete_messages_for_workspace and clear() (the hot path).
+
+        Cache miss: a single indexed lookup of the newest summary row (the
+        no-summary fast path dominates for sessions that never summarize);
+        that row is then validated directly. Only sessions whose newest
+        summary row is malformed fall back to the backward batch walk.
+        """
+        if session_id in self._summary_cache:
+            return self._summary_cache[session_id]
+
+        # Fast path: single indexed query for the newest summary row.
+        with self._core.db._connect() as cur:
+            row = cur.execute(
+                "SELECT rowid FROM messages "
+                "WHERE session_id = ? AND role = 'summary' "
+                "ORDER BY rowid DESC LIMIT 1",
+                [session_id],
+            ).fetchone()
+        if row is None:
+            self._summary_cache[session_id] = None
+            return None
+
+        newest_rowid = int(row[0])
+        state = self._validate_summary_at(newest_rowid, session_id)
+        if state is None:
+            # Newest summary row is malformed: find the newest valid one.
+            state = self._backward_summary_state(session_id)
+        self._summary_cache[session_id] = state
+        return state
+
+    def _validate_summary_at(
+        self, rowid: int, session_id: str
+    ) -> tuple[int, tuple[set[str], set[str]]] | None:
+        """Validate the summary at `rowid` against its prefix rows."""
+        columns = "rowid, id, ts, role, content, metadata, session_id"
+        with self._core.db._connect() as cur:
+            rows_raw = cur.execute(
+                f"SELECT {columns} FROM messages "
+                "WHERE session_id = ? AND rowid <= ? ORDER BY rowid ASC",
+                [session_id, rowid],
+            ).fetchall()
+        rows = [
+            _StoredMessage(
+                sequence=int(r[0]),
+                id=str(r[1]),
+                ts=self._parse_stored_timestamp(r[2]),
+                role=str(r[3]),
+                content=str(r[4] or ""),
+                metadata=self._parse_stored_metadata(r[5]),
+                session_id=str(r[6] or ""),
+            )
+            for r in rows_raw
+        ]
+        target = next((r for r in rows if r.sequence == rowid), None)
+        if target is None:
+            return None
+        provenance = self._validated_summary_provenance(
+            target, {row.id: row for row in rows}, {}
+        )
+        if provenance is None:
+            return None
+        return rowid, provenance
+
+    def _backward_summary_state(
+        self, session_id: str
+    ) -> tuple[int, tuple[set[str], set[str]]] | None:
+        """Backward batch walk to the newest VALID summary (rare path).
+
+        Only reached when the newest summary row itself is malformed.
         """
         with self._core.db._connect() as cur:
             min_rowid = cur.execute(
@@ -803,8 +891,11 @@ class MessageStore:
                 rows_by_id = {row.id: row for row in all_rows}
                 cache: dict[int, tuple[set[str], set[str]] | None] = {}
                 for candidate in candidates:
-                    if self._validated_summary_provenance(candidate, rows_by_id, cache) is not None:
-                        return candidate.sequence
+                    provenance = self._validated_summary_provenance(
+                        candidate, rows_by_id, cache
+                    )
+                    if provenance is not None:
+                        return candidate.sequence, provenance
             current_max = batch_min - 1
         return None
 
@@ -812,8 +903,8 @@ class MessageStore:
         session_id = self._require_session_id(session_id)
         if limit <= 0:
             return []
-        summary_sequence = self._find_newest_summary_rowid(session_id)
-        if summary_sequence is None:
+        summary_state = self._find_newest_summary_state(session_id)
+        if summary_state is None:
             with self._core.db._connect() as cur:
                 rows_raw = cur.execute(
                     "SELECT rowid, id, ts, role, content, metadata, session_id "
@@ -838,6 +929,7 @@ class MessageStore:
             return [self._stored_to_message(row) for row in rows]
 
         # Load rows up to summary_sequence + extra after it
+        summary_sequence, (summarized_ids, preserved_ids) = summary_state
         with self._core.db._connect() as cur:
             rows_raw = cur.execute(
                 "SELECT rowid, id, ts, role, content, metadata, session_id "
@@ -859,12 +951,6 @@ class MessageStore:
             for r in rows_raw
         ]
         summary = next(r for r in rows if r.sequence == summary_sequence)
-        provenance = self._validated_summary_provenance(
-            summary,
-            {row.id: row for row in rows},
-            {},
-        )
-        summarized_ids, preserved_ids = provenance or (set(), set())
         retained = [
             row
             for row in rows
@@ -940,6 +1026,7 @@ class MessageStore:
                     ],
                 )
                 cur.execute("COMMIT")
+                self._summary_cache.pop(session_id, None)
                 return mid
             except Exception:
                 cur.execute("ROLLBACK")
@@ -1002,6 +1089,7 @@ class MessageStore:
             self._core.db.sync_duckdb_table("messages")
         except Exception:
             pass
+        self._summary_cache.clear()
         return cast(int, count)
 
     def persist_run(
@@ -1108,6 +1196,7 @@ class MessageStore:
 
     def clear(self) -> None:
         self._core.clear()
+        self._summary_cache.clear()
 
     def get_turns(
         self, session_id: str, limit: int = 50, cursor: str | None = None
@@ -1258,6 +1347,7 @@ class MessageStore:
                 self._core.db.sync_duckdb_table("messages")
             except Exception:
                 pass
+            self._summary_cache.pop(session_id, None)
             return cast(int, count)
         except Exception:
             return 0
