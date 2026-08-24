@@ -9,7 +9,13 @@ Supported providers:
 
 
 from src.sdk.providers.base import LLMProvider, ModelCost, ModelInfo
-from src.sdk.providers.factory import create_model_from_config, create_provider
+from src.sdk.providers.factory import (
+    close_all_providers,
+    create_model_from_config,
+    create_provider,
+    get_cached_model_provider,
+    get_cached_provider,
+)
 
 __all__ = [
     "LLMProvider",
@@ -17,4 +23,7 @@ __all__ = [
     "ModelInfo",
     "create_provider",
     "create_model_from_config",
+    "get_cached_provider",
+    "get_cached_model_provider",
+    "close_all_providers",
 ]

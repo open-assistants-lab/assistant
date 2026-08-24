@@ -493,9 +493,9 @@ command: echo hi
 ---
 """)
 
-        idx = get_or_create_index(tools_dir, None, mcp_config,
-                                  user_id="test_index_user", workspace_id="personal",
-                                  index_dir=index_dir)
+        idx, _commit = get_or_create_index(tools_dir, None, mcp_config,
+                                           user_id="test_index_user", workspace_id="personal",
+                                           index_dir=index_dir)
         names = idx.list_all_names()
         for core in list(CORE_TOOL_NAMES)[:3]:
             assert core not in names, f"Core tool '{core}' should not be indexed"

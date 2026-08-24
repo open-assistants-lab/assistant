@@ -75,7 +75,20 @@ def _init_db(engine: Any) -> None:
         """)
         )
 
-        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(email)"))
+        # UNIQUE email enforcement (audit B17): legacy DBs are migrated by
+        # deduping then creating the unique index; fresh DBs get it directly.
+        has_unique = conn.execute(
+            text("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='uq_contacts_email'")
+        ).scalar()
+        if not has_unique:
+            conn.execute(
+                text(
+                    "DELETE FROM contacts WHERE rowid NOT IN "
+                    "(SELECT MIN(rowid) FROM contacts GROUP BY email)"
+                )
+            )
+            conn.execute(text("DROP INDEX IF EXISTS idx_contacts_email"))
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_contacts_email ON contacts(email)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(name)"))
 
         conn.commit()
@@ -153,17 +166,20 @@ def save_contacts(user_id: str, account_id: str, contacts: list[dict[str, Any]])
             if not email:
                 continue
 
+            # Pre-check spans ALL sources: the unique index does too. A
+            # manual row must never be silently overwritten by sync nor gain
+            # a dangling contact_emails side-row (audit B17 fix round 1).
             existing = conn.execute(
-                text("SELECT id, name FROM contacts WHERE email = :email AND source = 'email'"),
+                text("SELECT id FROM contacts WHERE email = :email"),
                 {"email": email},
             ).fetchone()
 
             if existing:
-                if contact.get("name") and not existing[1]:
+                if contact.get("name"):
                     conn.execute(
                         text("""
                             UPDATE contacts SET name = :name, updated_at = :updated_at
-                            WHERE id = :id
+                            WHERE id = :id AND (name IS NULL OR name = '')
                         """),
                         {
                             "name": contact["name"],
@@ -173,12 +189,14 @@ def save_contacts(user_id: str, account_id: str, contacts: list[dict[str, Any]])
                     )
                 continue
 
+            # Missing → atomic insert; rowcount distinguishes the race-lost case.
             contact_id = str(uuid.uuid4())
-            conn.execute(
+            cur = conn.execute(
                 text("""
                     INSERT INTO contacts
                     (id, email, name, first_name, last_name, source, email_account, created_at)
                     VALUES (:id, :email, :name, :first_name, :last_name, :source, :email_account, :created_at)
+                    ON CONFLICT(email) DO NOTHING
                 """),
                 {
                     "id": contact_id,
@@ -191,6 +209,8 @@ def save_contacts(user_id: str, account_id: str, contacts: list[dict[str, Any]])
                     "created_at": int(datetime.now(UTC).timestamp()),
                 },
             )
+            if cur.rowcount != 1:
+                continue
 
             conn.execute(
                 text("""
@@ -292,20 +312,14 @@ def add_contact(
         last_name = " ".join(parts[1:]) if len(parts) > 1 else None
 
     with engine.connect() as conn:
-        # Use a single transaction to avoid TOCTOU race between check and insert
-        existing = conn.execute(
-            text("SELECT id FROM contacts WHERE email = :email"),
-            {"email": email.lower()},
-        ).fetchone()
-
-        if existing:
-            return {"success": False, "error": "Contact already exists"}
-
-        conn.execute(
+        # Conflict-safe insert (audit B17): the UNIQUE index on email makes
+        # the check-then-insert race impossible; rowcount drives the result.
+        result_cursor = conn.execute(
             text("""
                 INSERT INTO contacts
                 (id, email, name, first_name, last_name, phone, company, source, created_at)
                 VALUES (:id, :email, :name, :first_name, :last_name, :phone, :company, :source, :created_at)
+                ON CONFLICT(email) DO NOTHING
             """),
             {
                 "id": contact_id,
@@ -320,19 +334,24 @@ def add_contact(
             },
         )
 
-        conn.execute(
-            text("""
-                INSERT INTO contact_emails (id, contact_id, email, is_primary)
-                VALUES (:id, :contact_id, :email, 1)
-            """),
-            {
-                "id": str(uuid.uuid4()),
-                "contact_id": contact_id,
-                "email": email.lower(),
-            },
-        )
+        inserted = result_cursor.rowcount == 1
+        if inserted:
+            conn.execute(
+                text("""
+                    INSERT INTO contact_emails (id, contact_id, email, is_primary)
+                    VALUES (:id, :contact_id, :email, 1)
+                """),
+                {
+                    "id": str(uuid.uuid4()),
+                    "contact_id": contact_id,
+                    "email": email.lower(),
+                },
+            )
 
         conn.commit()
+
+    if not inserted:
+        return {"success": False, "error": "Contact already exists"}
 
     logger.info("contact_added", {"email": email}, user_id=user_id)
     return {"success": True, "contact_id": contact_id}
@@ -366,6 +385,9 @@ def update_contact(
             if len(parts) > 1:
                 updates.append("last_name = :last_name")
                 params["last_name"] = " ".join(parts[1:])
+            else:
+                updates.append("last_name = :last_name")
+                params["last_name"] = None
 
         if phone is not None:
             updates.append("phone = :phone")

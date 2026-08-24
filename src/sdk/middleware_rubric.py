@@ -333,6 +333,21 @@ class RubricMiddleware:
         # resets per grade, so it cannot hold cross-grade accumulation).
         self._agent_loop: AgentLoop | None = agent_loop
 
+    async def aclose(self) -> None:
+        """Release the grader provider's HTTP client.
+
+        Grader providers are created fresh per run (audit S3 keeps them out
+        of the keyed cache), so the engine closes them deterministically
+        instead of leaking connection pools until GC.
+        """
+        close = getattr(self._grader_provider, "aclose", None)
+        if close is None:
+            return
+        try:
+            await close()
+        except Exception:
+            pass
+
     async def _ensure_loop(self) -> AgentLoop:
         if self._loop is None:
             self._loop = AgentLoop(

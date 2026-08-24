@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from src.sdk.messages import Message, StreamChunk
+from src.sdk.messages import Message, StreamChunk, ToolCall, Usage
 from src.sdk.run_service import RunService
 from src.sdk.session_worker import SessionBusyError, SessionWorkerRegistry
 
@@ -47,6 +47,7 @@ class InMemoryMessageStore:
             "metadata": {**metadata, "run_id": run_id},
             "session_id": session_id,
         })
+        self.last_pre_messages = list(pre_messages or [])
         return mid
 
 
@@ -73,6 +74,44 @@ class FakeLoop:
         self.state.messages = list(messages) + [Message.assistant(content="Test response")]
         yield StreamChunk(type="text_delta", content="Test response")
         yield StreamChunk(type="done", content="Test response")
+
+class MultiStepUsageLoop(FakeLoop):
+    """FakeLoop whose run() returns multiple assistant messages with usage."""
+
+    async def run(self, messages):
+        self._reset_state()
+        self.state.messages = list(messages) + [
+            Message.assistant(
+                content="",
+                tool_calls=[ToolCall(id="t1", name="echo", arguments={"text": "x"})],
+                usage=Usage(input_tokens=10, output_tokens=5),
+            ),
+            Message.assistant(content="Final", usage=Usage(input_tokens=20, output_tokens=8)),
+        ]
+        return self.state.messages
+
+
+class ReasoningLoop(FakeLoop):
+    """FakeLoop whose final assistant message carries reasoning (audit E6)."""
+
+    async def run(self, messages):
+        self._reset_state()
+        self.state.messages = list(messages) + [
+            Message.assistant(content="Final", reasoning="thinking step")
+        ]
+        return self.state.messages
+
+
+class StreamingUsageLoop(FakeLoop):
+    """FakeLoop whose stream emits a canonical usage chunk mid-stream."""
+
+    async def run_stream(self, messages):
+        self._reset_state()
+        self.state.messages = list(messages) + [Message.assistant(content="Test response")]
+        yield StreamChunk(type="text_delta", content="Test response")
+        yield StreamChunk.usage_event(Usage(input_tokens=123, output_tokens=45))
+        yield StreamChunk(type="done", content="Test response")
+
 
 async def _no_rubric(*args: Any, **kwargs: Any) -> None:
     """Patched load_rubric_middleware: verification disabled."""
@@ -384,6 +423,32 @@ async def test_run_service_execute_returns_run_result(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_service_execute_persists_reasoning_pre_messages(monkeypatch):
+    """Audit E6: non-streaming _run persists reasoning pre_messages like _run_stream."""
+    async def fake_get_sdk_loop(*args, **kwargs):
+        return ReasoningLoop()
+    monkeypatch.setattr("src.sdk.run_service.get_sdk_loop", fake_get_sdk_loop)
+    monkeypatch.setattr("src.sdk.run_service.register_user_loop", lambda *a, **k: None)
+    monkeypatch.setattr("src.sdk.run_service.unregister_user_loop", lambda *a, **k: None)
+    monkeypatch.setattr("src.sdk.middleware_rubric.load_rubric_middleware", _no_rubric)
+
+    registry = SessionWorkerRegistry()
+    store = InMemoryMessageStore()
+    service = RunService("test-user", registry, store)
+
+    result = await service.execute(
+        session_id="chat-1",
+        prompt="Hello",
+    )
+
+    assert result.reasoning == "thinking step"
+    assert len(store.last_pre_messages) == 1
+    pre = store.last_pre_messages[0]
+    assert pre.role == "reasoning"
+    assert pre.content == "thinking step"
+
+
+@pytest.mark.asyncio
 async def test_run_service_execute_stream_yields_run_events(monkeypatch):
     async def fake_get_sdk_loop(*args, **kwargs):
         return FakeLoop()
@@ -411,6 +476,90 @@ async def test_run_service_execute_stream_yields_run_events(monkeypatch):
         assert event.run_id is not None
         assert event.session_id == "chat-1"
         assert event.attempt >= 1
+
+
+@pytest.mark.asyncio
+async def test_run_service_execute_nonstreaming_sums_all_assistant_usage(monkeypatch):
+    async def fake_get_sdk_loop(*args, **kwargs):
+        return MultiStepUsageLoop()
+    monkeypatch.setattr("src.sdk.run_service.get_sdk_loop", fake_get_sdk_loop)
+    monkeypatch.setattr("src.sdk.run_service.register_user_loop", lambda *a, **k: None)
+    monkeypatch.setattr("src.sdk.run_service.unregister_user_loop", lambda *a, **k: None)
+    monkeypatch.setattr("src.sdk.middleware_rubric.load_rubric_middleware", _no_rubric)
+
+    registry = SessionWorkerRegistry()
+    store = InMemoryMessageStore()
+    service = RunService("test-user", registry, store)
+
+    result = await service.execute(
+        session_id="chat-1",
+        prompt="Hello",
+    )
+
+    # Both assistant messages in the attempt carry usage — the aggregate
+    # must sum them (input 10+20, output 5+8) instead of only the last one.
+    assert result.usage.agent.available is True
+    assert result.usage.agent.calls == 2
+    assert result.usage.agent.input_tokens == 30
+    assert result.usage.agent.output_tokens == 13
+
+
+@pytest.mark.asyncio
+async def test_run_service_execute_stream_aggregates_usage_chunks(monkeypatch):
+    async def fake_get_sdk_loop(*args, **kwargs):
+        return StreamingUsageLoop()
+    monkeypatch.setattr("src.sdk.run_service.get_sdk_loop", fake_get_sdk_loop)
+    monkeypatch.setattr("src.sdk.run_service.register_user_loop", lambda *a, **k: None)
+    monkeypatch.setattr("src.sdk.run_service.unregister_user_loop", lambda *a, **k: None)
+    monkeypatch.setattr("src.sdk.middleware_rubric.load_rubric_middleware", _no_rubric)
+
+    registry = SessionWorkerRegistry()
+    store = InMemoryMessageStore()
+    service = RunService("test-user", registry, store)
+
+    done = None
+    async for event in service.execute_stream(
+        session_id="chat-1",
+        prompt="Hello",
+    ):
+        if event.type == "done":
+            done = event
+
+    assert done is not None, "expected a done event"
+    usage = done.data.result.usage.agent
+    # Streaming usage must come from canonical usage chunks (the done chunk
+    # carries no usage) — previously this stayed unavailable with zeroes.
+    assert usage.available is True
+    assert usage.calls >= 1
+    assert usage.input_tokens == 123
+    assert usage.output_tokens == 45
+
+
+@pytest.mark.asyncio
+async def test_run_service_execute_stream_usage_requires_calls_when_available(monkeypatch):
+    """UsageAggregate's validator rejects available=True with calls == 0."""
+    async def fake_get_sdk_loop(*args, **kwargs):
+        return StreamingUsageLoop()
+    monkeypatch.setattr("src.sdk.run_service.get_sdk_loop", fake_get_sdk_loop)
+    monkeypatch.setattr("src.sdk.run_service.register_user_loop", lambda *a, **k: None)
+    monkeypatch.setattr("src.sdk.run_service.unregister_user_loop", lambda *a, **k: None)
+    monkeypatch.setattr("src.sdk.middleware_rubric.load_rubric_middleware", _no_rubric)
+
+    registry = SessionWorkerRegistry()
+    store = InMemoryMessageStore()
+    service = RunService("test-user", registry, store)
+
+    done = None
+    async for event in service.execute_stream(
+        session_id="chat-1",
+        prompt="Hello",
+    ):
+        if event.type == "done":
+            done = event
+
+    assert done is not None
+    # Construction of the aggregate must not raise (calls >= 1 with available).
+    assert done.data.result.usage.agent.calls >= 1
 
 
 @pytest.mark.asyncio
@@ -599,3 +748,56 @@ async def test_execute_stream_emits_waterfall_on_failed_persist(monkeypatch):
     assert any(e.type == "error" for e in events)
     assert len(waterfall_events) == 1
     assert waterfall_events[0]["run_status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_failed_streaming_run_skips_persist_run(monkeypatch):
+    """Audit B11: a FAILED streaming run must not be persisted by RunService —
+    the routers persist the partial state exactly once (single write)."""
+    from src.sdk.messages import StreamChunk
+
+    class ErrorAfterToolLoop(FakeLoop):
+        async def run_stream(self, messages):
+            self._reset_state()
+            self.state.messages = list(messages)
+            yield StreamChunk(type="tool_result", content='{"ok": true}', tool="echo", call_id="c1")
+            yield StreamChunk.error(message="provider exploded")
+
+    async def fake_get_sdk_loop(*args, **kwargs):
+        return ErrorAfterToolLoop()
+
+    monkeypatch.setattr("src.sdk.run_service.get_sdk_loop", fake_get_sdk_loop)
+    monkeypatch.setattr("src.sdk.run_service.register_user_loop", lambda *a, **k: None)
+    monkeypatch.setattr("src.sdk.run_service.unregister_user_loop", lambda *a, **k: None)
+    monkeypatch.setattr("src.sdk.middleware_rubric.load_rubric_middleware", _no_rubric)
+
+    registry = SessionWorkerRegistry()
+    store = InMemoryMessageStore()
+    persist_calls: list[dict] = []
+
+    original = store.persist_run
+
+    def spy_persist(**kwargs):
+        persist_calls.append(kwargs)
+        return original(**kwargs)
+
+    store.persist_run = spy_persist
+    service = RunService("test-user", registry, store)
+
+    events = [
+        event
+        async for event in service.execute_stream(
+            session_id="chat-1",
+            prompt="Hello",
+        )
+    ]
+
+    done_events = [e for e in events if getattr(e, "type", None) == "done"]
+    assert done_events, "expected a terminal done event"
+    result = done_events[-1].data.result
+    assert result.status.value == "failed"
+    # Audit B11: RunService persists the failed run EXACTLY ONCE, with
+    # run_id grouping intact (routers must not write a second copy).
+    assert len(persist_calls) == 1
+    assert persist_calls[0]["run_id"] == result.run_id
+    assert result.final_message_id is not None

@@ -5,8 +5,9 @@ Uses aiosqlite for async access. Per-user database at data/users/{user_id}/Sched
 
 from __future__ import annotations
 
+import asyncio
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import aiosqlite
@@ -64,14 +65,19 @@ class SchedulerNotificationDB:
         self.user_id = user_id
         self._db: aiosqlite.Connection | None = None
         self._db_path = str(get_paths(user_id).scheduler_notifications_db())
+        self._init_lock = asyncio.Lock()
 
     async def _get_db(self) -> aiosqlite.Connection:
+        # Double-checked locking (mirrors WorkQueueDB): concurrent first
+        # callers must not each open their own connection (audit B10).
         if self._db is None:
-            self._db = await aiosqlite.connect(self._db_path)
-            self._db.row_factory = aiosqlite.Row
-            await self._db.execute("PRAGMA journal_mode=WAL")
-            await self._db.executescript(_NOTIF_SCHEMA)
-            await self._db.commit()
+            async with self._init_lock:
+                if self._db is None:
+                    self._db = await aiosqlite.connect(self._db_path)
+                    self._db.row_factory = aiosqlite.Row
+                    await self._db.execute("PRAGMA journal_mode=WAL")
+                    await self._db.executescript(_NOTIF_SCHEMA)
+                    await self._db.commit()
         return self._db
 
     async def close(self) -> None:
@@ -167,20 +173,56 @@ class SchedulerMemoryDB:
         self.user_id = user_id
         self._db: aiosqlite.Connection | None = None
         self._db_path = str(get_paths(user_id).scheduler_memory_db())
+        self._init_lock = asyncio.Lock()
 
     async def _get_db(self) -> aiosqlite.Connection:
+        # Double-checked locking (mirrors WorkQueueDB): concurrent first
+        # callers must not each open their own connection (audit B10).
         if self._db is None:
-            self._db = await aiosqlite.connect(self._db_path)
-            self._db.row_factory = aiosqlite.Row
-            await self._db.execute("PRAGMA journal_mode=WAL")
-            await self._db.executescript(_MEMORY_SCHEMA)
-            await self._db.commit()
+            async with self._init_lock:
+                if self._db is None:
+                    self._db = await aiosqlite.connect(self._db_path)
+                    self._db.row_factory = aiosqlite.Row
+                    await self._db.execute("PRAGMA journal_mode=WAL")
+                    await self._db.executescript(_MEMORY_SCHEMA)
+                    await self._db.commit()
         return self._db
 
     async def close(self) -> None:
         if self._db is not None:
             await self._db.close()
             self._db = None
+
+    async def upsert_fact(
+        self,
+        key: str,
+        value: str,
+        confidence: float = 0.5,
+        source: str = "inferred",
+        updated_at: str | None = None,
+    ) -> None:
+        """Insert or update one personality fact (audit B10 test seam —
+        SchedulerMemoryDB previously had no write API at all)."""
+        db = await self._get_db()
+        await db.execute(
+            "INSERT INTO companion_memory "
+            "(user_id, key, value, source, confidence, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(user_id, key) DO UPDATE SET "
+            "value = excluded.value, source = excluded.source, "
+            "confidence = excluded.confidence, updated_at = excluded.updated_at",
+            (self.user_id, key, value, source, confidence, updated_at or _now()),
+        )
+        await db.commit()
+
+    async def get_fact(self, key: str) -> dict[str, Any] | None:
+        db = await self._get_db()
+        cursor = await db.execute(
+            "SELECT * FROM companion_memory WHERE user_id = ? AND key = ?",
+            (self.user_id, key),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row is not None else None
 
     async def get_all(self) -> dict[str, str]:
         db = await self._get_db()
@@ -210,11 +252,19 @@ class SchedulerMemoryDB:
         return cursor.rowcount > 0
 
     async def _apply_decay(self) -> None:
-        """Reduce confidence by 0.01 for all facts older than 1 day."""
+        """Reduce confidence by 0.01 for facts older than 1 day.
+
+        Audit B10: the predicate used ``updated_at < now()`` (always true) and
+        never bumped ``updated_at``, so every cycle shaved every fact toward
+        eviction. Now: real 1-day cutoff, and decayed rows get ``updated_at``
+        bumped to now so an immediate re-run does not double-decay them.
+        """
         db = await self._get_db()
+        cutoff = (datetime.now(UTC) - timedelta(days=1)).isoformat()
         await db.execute(
-            "UPDATE companion_memory SET confidence = MAX(0.0, confidence - 0.01) "
+            "UPDATE companion_memory SET confidence = MAX(0.0, confidence - 0.01), "
+            "updated_at = ? "
             "WHERE user_id = ? AND updated_at < ?",
-            (self.user_id, _now()),
+            (_now(), self.user_id, cutoff),
         )
         await db.commit()

@@ -11,6 +11,7 @@ Project data lives under data/ (cache, templates, logs, traces, jobs).
 
 import re
 import warnings
+from collections import OrderedDict
 from pathlib import Path
 
 from src.config import get_settings
@@ -470,7 +471,8 @@ class DataPaths:
         return self.base / "jobs_results.db"
 
 
-_paths_cache: dict[tuple[str, str], DataPaths] = {}
+_PATHS_CACHE_MAX = 64
+_paths_cache: OrderedDict[tuple[str, str, str], DataPaths] = OrderedDict()
 
 
 def get_paths(
@@ -478,20 +480,25 @@ def get_paths(
     team_id: str | None = None,
     workspace_id: str | None = None,
 ) -> DataPaths:
-    """Get DataPaths instance (cached per user_id+team_id pair).
+    """Get DataPaths instance (cached per user_id+team_id+workspace_id).
 
     In solo mode: user_id defaults to "default_user", team_id is None.
     In team mode: user_id comes from auth (JWT), team_id from config.
-    workspace_id is NOT part of the cache key — it changes per session.
+    workspace_id is validated and part of the cache key. Because
+    workspace_id is client-supplied, the cache is LRU-capped to prevent
+    unbounded growth from arbitrary valid ids.
     """
     uid = _validate_path_id(user_id or DEFAULT_USER_ID, "user_id")
     tid = team_id  # None for solo mode
-    cache_key = (uid, tid or "")
+    ws = _validate_path_id(workspace_id or "personal", "workspace_id")
+    cache_key = (uid, tid or "", ws)
 
-    if cache_key not in _paths_cache:
-        _paths_cache[cache_key] = DataPaths(user_id=uid, team_id=tid)
+    if cache_key in _paths_cache:
+        _paths_cache.move_to_end(cache_key)
+        return _paths_cache[cache_key]
 
-    dp = _paths_cache[cache_key]
-    if workspace_id and workspace_id != dp.workspace_id:
-        return DataPaths(user_id=uid, team_id=tid, workspace_id=workspace_id)
+    dp = DataPaths(user_id=uid, team_id=tid, workspace_id=ws)
+    _paths_cache[cache_key] = dp
+    while len(_paths_cache) > _PATHS_CACHE_MAX:
+        _paths_cache.popitem(last=False)
     return dp

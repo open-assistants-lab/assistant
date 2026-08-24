@@ -1,5 +1,6 @@
 """Filesystem tools — SDK-native implementation."""
 
+import itertools
 from contextvars import ContextVar
 from pathlib import Path
 
@@ -8,6 +9,9 @@ from src.sdk.tools import ToolAnnotations, tool
 from src.storage.paths import get_paths
 
 logger = get_logger()
+
+#: files_read refuses files larger than this (helpful message instead).
+MAX_READ_FILE_SIZE = 50 * 1024 * 1024
 
 _current_user_id: ContextVar[str] = ContextVar("current_user_id", default="default_user")
 _current_workspace_id: ContextVar[str] = ContextVar("current_workspace_id", default="personal")
@@ -142,13 +146,24 @@ def files_read(path: str, offset: int = 0, limit: int = 100, user_id: str = "def
         if not target.is_file():
             return f"Not a file: {path}"
 
-        lines = target.read_text(encoding="utf-8").splitlines()
+        try:
+            if target.stat().st_size > MAX_READ_FILE_SIZE:
+                size_mb = target.stat().st_size / (1024 * 1024)
+                return (
+                    f"File too large to read: {path} is {size_mb:.1f} MB "
+                    f"(max {MAX_READ_FILE_SIZE // (1024 * 1024)} MB). "
+                    "Use files_grep_search with a pattern or files_glob_search "
+                    "to find the relevant section instead."
+                )
+        except OSError:
+            pass
 
-        total = len(lines)
-        lines = lines[offset : offset + limit]
+        with target.open(encoding="utf-8") as handle:
+            lines = list(itertools.islice(handle, offset, offset + limit))
 
+        total = offset + len(lines)
         content = "\n".join(lines)
-        return f"--- {path} ({offset}-{offset + len(lines)}/{total}) ---\n{content}"
+        return f"--- {path} ({offset}-{total}/{target.stat().st_size} bytes) ---\n{content}"
     except Exception as e:
         logger.error("files_read.error", {"path": path, "error": str(e)}, user_id=user_id)
         return f"Error: {e}"

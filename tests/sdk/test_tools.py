@@ -318,3 +318,42 @@ class TestToolRegistry:
         assert len(result) == 1
         assert result[0]["name"] == "time_get"
         assert "input_schema" in result[0]
+
+
+# ─── Sync-tool offloading (audit S1) ───
+
+
+class TestSyncToolOffload:
+    @pytest.mark.asyncio
+    async def test_ainvoke_offloads_sync_tool(self):
+        """Two concurrent slow sync tools must overlap — proving no event-loop blocking."""
+        import asyncio
+        import time as _time
+        calls = {"n": 0}
+
+        @tool
+        def slow_tool(x: int) -> int:
+            """Sleeps then returns x."""
+            calls["n"] += 1
+            _time.sleep(0.2)
+            return x * 2
+
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        results = await asyncio.gather(slow_tool.ainvoke({"x": 1}), slow_tool.ainvoke({"x": 2}))
+        elapsed = loop.time() - start
+        assert results == [2, 4]
+        assert elapsed < 0.35  # serial would be >= 0.4
+
+    @pytest.mark.asyncio
+    async def test_ainvoke_still_supports_coroutine_tools(self):
+        """Coroutine tools keep awaiting directly (no thread offload)."""
+        import asyncio
+
+        @tool
+        async def async_tool(x: int) -> int:
+            """Async tool."""
+            await asyncio.sleep(0)
+            return x + 1
+
+        assert await async_tool.ainvoke({"x": 1}) == 2

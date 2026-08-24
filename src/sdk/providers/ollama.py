@@ -68,6 +68,13 @@ class OllamaCloud(LLMProvider):
     def get_client(self) -> httpx.AsyncClient | None:
         return self._get_client()
 
+    async def aclose(self) -> None:
+        """Close the lazily-created httpx client, if any."""
+        client = self._http_client
+        if client is not None and not client.is_closed:
+            await client.aclose()
+        self._http_client = None
+
     def _build_payload(
         self,
         messages: list[Message],
@@ -351,7 +358,9 @@ class OllamaCloud(LLMProvider):
                                 # Ollama's native API doesn't report reasoning tokens
                                 # separately; estimate from the streamed thinking.
                                 chunk.usage.reasoning_tokens = len(total_thinking) // 4
-                            if chunk.canonical_type in ("text_delta", "reasoning_delta", "tool_input_delta"):
+                            if chunk.canonical_type in (
+                                "text_delta", "reasoning_delta", "tool_input_delta", "tool_input_start",
+                            ):
                                 emitted = True
                             yield chunk
                 return

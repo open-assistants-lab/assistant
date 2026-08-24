@@ -1,7 +1,7 @@
 """Integration tests for loop engineering — verifies all transport paths and gaps."""
 
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -65,7 +65,7 @@ def test_sse_stream_resolves_rubric_from_request(monkeypatch):
     monkeypatch.setattr(
         "src.sdk.middleware_rubric.load_rubric_middleware", fake_load_rubric
     )
-    monkeypatch.setattr("src.http.routers.conversation.get_message_store", MagicMock(return_value=MagicMock(
+    monkeypatch.setattr("src.http.routers.conversation.aget_message_store", AsyncMock(return_value=MagicMock(
         add_message=MagicMock(),
         get_messages_with_summary=MagicMock(return_value=[]),
         persist_run=MagicMock(return_value="msg-1"),
@@ -168,7 +168,7 @@ def test_rest_message_returns_verification_verdict(monkeypatch):
         )
 
     monkeypatch.setattr("src.http.routers.conversation.RunService.execute", fake_execute)
-    monkeypatch.setattr("src.http.routers.conversation.get_message_store", MagicMock(return_value=MagicMock(
+    monkeypatch.setattr("src.http.routers.conversation.aget_message_store", AsyncMock(return_value=MagicMock(
         add_message=MagicMock(),
         get_messages_by_session_id=MagicMock(return_value=[]),
     )))

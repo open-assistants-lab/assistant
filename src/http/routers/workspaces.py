@@ -15,6 +15,7 @@ from src.sdk.workspace_models import (
 from src.sdk.workspace_models import (
     delete_workspace as _delete_ws,
 )
+from src.storage.messages import get_message_store
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
@@ -99,6 +100,14 @@ async def delete_workspace_endpoint(workspace_id: str, user_id: str = "default_u
     if ws is None or ws.id == "personal":
         return {"error": "Cannot delete"}, 400
 
+    # Audit E7: purge the workspace's messages (and legacy-{ws}-* imported
+    # sessions) and report the real deleted count instead of a hardcoded 0.
+    store = get_message_store(user_id)
+    count = store.delete_messages_for_workspace(ws.id)
+    for session in store.get_sessions():
+        if session["session_id"].startswith(f"legacy-{ws.id}-"):
+            count += store.delete_session(session["session_id"])
+
     _delete_ws(ws.id, user_id=user_id)
     reset_user_sdk_loops(user_id, reason=f"workspace_deleted:{workspace_id}")
-    return {"status": "deleted", "messages_deleted": 0}
+    return {"status": "deleted", "messages_deleted": count}

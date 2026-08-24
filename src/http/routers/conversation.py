@@ -4,7 +4,7 @@ import json
 import os
 import re
 import secrets
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -39,14 +39,17 @@ from src.sdk.runner import (
     reset_sdk_loop,
     run_sdk_agent_stream,
 )
-from src.sdk.session_worker import SessionBusyError, SessionWorkerRegistry
-from src.storage.messages import get_message_store
+from src.sdk.session_worker import (
+    SessionBusyError,
+    get_session_registry,
+    session_key,
+)
+from src.storage.messages import aget_message_store, get_message_store
 
-_pending_approvals: dict[str, dict[str, Any]] = {}
 _pending_interrupts: dict[str, dict[str, Any]] = {}
 _cancel_flags: dict[str, bool] = {}
 _active_streams: dict[str, asyncio.Event] = {}
-_session_registry = SessionWorkerRegistry()
+_session_registry = get_session_registry()
 
 router = APIRouter(tags=["conversation"])
 logger = get_logger()
@@ -170,7 +173,10 @@ def _strip_canvas_fences(text: str) -> str:
 
 
 def _persist_tool_messages(
-    conversation: Any, tool_events: list[dict[str, Any]], session_id: str
+    conversation: Any,
+    tool_events: list[dict[str, Any]],
+    session_id: str,
+    run_id: str | None = None,
 ) -> None:
     seen_call_ids: set[str] = set()
     for event in tool_events:
@@ -187,6 +193,7 @@ def _persist_tool_messages(
             session_id=session_id,
             tool_name=event.get("tool") or event.get("tool_name") or "unknown",
             tool_call_id=call_id,
+            metadata={"run_id": run_id} if run_id else None,
         )
 
 
@@ -198,7 +205,9 @@ def _persist_collected_stream_state(
     reasoning_parts: list[str],
     tool_metadata_list: list[dict[str, Any]],
     tool_results: dict[str, str],
+    run_id: str | None = None,
 ) -> None:
+    run_meta = {"run_id": run_id} if run_id else None
     for tm in tool_metadata_list:
         call_id = tm.get("tool_call_id", "")
         output = tool_results.get(call_id, "")
@@ -209,13 +218,19 @@ def _persist_collected_stream_state(
                 session_id=session_id,
                 tool_name=tm.get("tool_name", "unknown"),
                 tool_call_id=call_id,
+                metadata=run_meta,
             )
     if reasoning_parts:
-        persist_reasoning_message(conversation, "".join(reasoning_parts), session_id=session_id)
+        persist_reasoning_message(
+            conversation, "".join(reasoning_parts), session_id=session_id, metadata=run_meta
+        )
     response = "".join(ai_content_parts).strip()
     if response:
         persist_assistant_message(
-            conversation, response, metadata={"stream": True}, session_id=session_id
+            conversation,
+            response,
+            metadata={"stream": True, **(run_meta or {})},
+            session_id=session_id,
         )
 
 
@@ -288,7 +303,7 @@ async def get_conversation(
     user_id: str = "default_user", limit: int = 100, session_id: str | None = None
 ) -> dict[str, Any]:
     """Get conversation history, optionally filtered by session_id."""
-    conversation = get_message_store(user_id)
+    conversation = await aget_message_store(user_id)
     if session_id:
         messages = conversation.get_messages_by_session_id(session_id, limit)
     else:
@@ -316,7 +331,7 @@ async def get_conversation_turns(
     cursor: str | None = None,
 ) -> dict[str, Any]:
     """Get conversation turns grouped by run_id."""
-    conversation = get_message_store(user_id)
+    conversation = await aget_message_store(user_id)
     sid = session_id or "default"
     turns, next_cursor = conversation.get_turns(sid, limit=limit, cursor=cursor)
     return {
@@ -344,7 +359,7 @@ async def get_conversation_turns(
 @router.get("/conversation/sessions")
 async def list_sessions(user_id: str = "default_user") -> dict[str, Any]:
     """List all chat sessions with titles derived from first user message."""
-    conversation = get_message_store(user_id)
+    conversation = await aget_message_store(user_id)
     sessions = conversation.get_sessions()
     return {"sessions": sessions}
 
@@ -354,7 +369,10 @@ async def delete_session(user_id: str = "default_user", session_id: str = "") ->
     """Delete all messages in a specific chat session."""
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id required")
-    conversation = get_message_store(user_id)
+    # Audit E26: never delete out from under an active run.
+    if _session_registry.holds(session_key(user_id, session_id)):
+        raise HTTPException(status_code=409, detail="Session has an active run; cancel it before deleting")
+    conversation = await aget_message_store(user_id)
     conversation.delete_session(session_id)
     reset_sdk_loop(user_id, session_id=session_id)
     return {"status": "deleted", "session_id": session_id}
@@ -483,7 +501,7 @@ async def _summarize_title(
     When existing_titles is provided, the prompt asks the model to avoid
     reusing any of them so the sidebar never shows duplicate chat titles.
     """
-    from src.sdk.providers.factory import create_model_from_config
+    from src.sdk.providers.factory import get_cached_model_provider
 
     settings = get_settings()
     # User-configured title model wins over the host config; falls back to
@@ -496,7 +514,7 @@ async def _summarize_title(
         if saved is not None and saved.title_model
         else (settings.agent.title_model or settings.agent.model)
     )
-    provider = create_model_from_config(model, user_id=user_id)
+    provider = await asyncio.to_thread(get_cached_model_provider, model, user_id=user_id)
 
     prompt = (
         "Summarize the following conversation in 3-5 words. "
@@ -544,7 +562,7 @@ async def _summarize_title(
 @router.post("/conversation/title")
 async def generate_title(req: TitleRequest, _: None = Depends(require_auth)) -> dict[str, str]:
     """Generate a short title for a chat session."""
-    conversation = get_message_store(req.user_id)
+    conversation = await aget_message_store(req.user_id)
 
     # Idempotent: a session that already has a stored title keeps it — the
     # LLM is only consulted once per session, and a lost response never
@@ -597,7 +615,7 @@ async def generate_title(req: TitleRequest, _: None = Depends(require_auth)) -> 
 @router.delete("/conversation")
 async def clear_conversation(user_id: str = "default_user") -> dict[str, Any]:
     """Clear conversation history."""
-    conversation = get_message_store(user_id)
+    conversation = await aget_message_store(user_id)
     conversation.clear()
     return {"status": "cleared", "user_id": user_id}
 
@@ -607,22 +625,8 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
     """Send a message to the agent (SDK-powered)."""
     try:
         user_id = req.user_id or "default_user"
-        msg_content = req.message.strip()
 
-        if user_id in _pending_approvals and msg_content.lower() in ("approve", "reject", "edit"):
-            pending = _pending_approvals.pop(user_id)
-            tool_name = pending["tool_name"]
-
-            if msg_content.lower() == "reject":
-                return MessageResponse(response=f"{tool_name} rejected.")
-
-            tool_args = pending.get("tool_args", {})
-            if "user_id" not in tool_args:
-                tool_args["user_id"] = user_id
-
-            return MessageResponse(response=f"{tool_name} approved (execution pending).")
-
-        conversation = get_message_store(user_id)
+        conversation = await aget_message_store(user_id)
         session_id = _normalized_session_id(req.session_id)
 
         try:
@@ -639,7 +643,7 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
             return MessageResponse(response="", error="Session already has an active run")
 
         response = result.response
-        reasoning_text = None
+        reasoning_text = result.reasoning
         usage_data = None
         if result.usage.agent.available:
             usage_data = {
@@ -705,7 +709,7 @@ _HEARTBEAT_PING = ": ping\n\n"
 
 
 async def _sse_with_heartbeat(
-    event_iter: AsyncGenerator[Any, None], interval: float = 15.0
+    event_iter: AsyncGenerator[Any, None] | AsyncIterator[Any], interval: float = 15.0
 ) -> AsyncGenerator[Any, None]:
     """Interleave SSE keepalive comments while the upstream run is working.
 
@@ -717,15 +721,30 @@ async def _sse_with_heartbeat(
     Yields the upstream events unchanged plus `_HEARTBEAT_PING` (a str)
     between them while the run is still in flight.
     """
-    pending: set[asyncio.Task] = set()
-    next_task = asyncio.ensure_future(event_iter.__anext__())
-    pending.add(next_task)
+    # Single outstanding `__anext__` + a fresh timer per iteration, with the
+    # finished task discarded each round. This preserves the original
+    # design's exact laziness: the upstream generator's mid-stream side
+    # effects (e.g. setting a cancel flag between yields) are observed by
+    # the consumer at the same point as direct iteration, because the next
+    # item is only requested after the current one is yielded. The original
+    # implementation instead accumulated every finished task into a
+    # `pending` set that was never pruned, so `asyncio.wait(...)` returned
+    # immediately forever — an unbounded ping burst.
+    #
+    # The brief's queue+pump alternative was rejected after verification:
+    # with a bounded queue the pump's `finally: await queue.put(_SENTINEL)`
+    # deadlocks when the consumer is cancelled while the queue is full (no
+    # one drains it, so the sentinel put blocks forever). The single-
+    # outstanding-`__anext__` design cannot run ahead of the consumer, so
+    # no such buffered-sentinel state exists. (pinned by
+    # test_heartbeat_cancellation_is_not_swallowed)
+    next_task: asyncio.Task[Any] = asyncio.ensure_future(event_iter.__anext__())
+    timer: asyncio.Task[Any] | None = None
     try:
         while True:
             timer = asyncio.ensure_future(asyncio.sleep(interval))
-            pending.add(timer)
             done, _ = await asyncio.wait(
-                pending, return_when=asyncio.FIRST_COMPLETED
+                {next_task, timer}, return_when=asyncio.FIRST_COMPLETED
             )
             if next_task in done:
                 timer.cancel()
@@ -735,12 +754,17 @@ async def _sse_with_heartbeat(
                     return
                 yield item
                 next_task = asyncio.ensure_future(event_iter.__anext__())
-                pending.add(next_task)
             else:
                 yield _HEARTBEAT_PING
     finally:
-        for task in pending:
-            task.cancel()
+        if next_task is not None:
+            next_task.cancel()
+            try:
+                await next_task
+            except (asyncio.CancelledError, StopAsyncIteration):
+                pass
+        if timer is not None:
+            timer.cancel()
 
 
 @router.post("/message/stream")
@@ -750,15 +774,25 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
         user_id = req.user_id or "default_user"
         session_id = _normalized_session_id(req.session_id)
         skey = _stream_key(user_id, session_id)
+        cancel_event: asyncio.Event | None = None
 
-        conversation = get_message_store(user_id)
+        conversation = await aget_message_store(user_id)
+
+        # Audit B12: probe BEFORE mutating cancel/slot dicts. A request that
+        # is about to fail session-busy must not clobber the live stream's
+        # registration (old code wiped the flag, failed busy in the lazy
+        # acquire, then popped A's slot in its finally). The lazy acquire
+        # inside execute_stream remains as the authoritative backstop.
+        run_service = RunService(user_id, _session_registry, conversation)
+        if run_service.probe_session_busy(session_id):
+            async def busy_stream() -> AsyncGenerator[str, None]:
+                yield sse("error", {"code": "session_busy", "message": "Session already has an active run"})
+            return StreamingResponse(busy_stream(), media_type="text/event-stream")
 
         # Set up cancellation for this session's stream
         _cancel_flags[skey] = False
         cancel_event = asyncio.Event()
         _active_streams[skey] = cancel_event
-
-        run_service = RunService(user_id, _session_registry, conversation)
 
         async def generate() -> AsyncGenerator[str, None]:
             ai_content_parts: list[str] = []
@@ -794,6 +828,7 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                             reasoning_parts=reasoning_parts,
                             tool_metadata_list=tool_metadata_list,
                             tool_results=tool_results,
+                            run_id=event.run_id,
                         )
                         persisted = True
                         aborted = True
@@ -845,6 +880,7 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                             reasoning_parts=reasoning_parts,
                             tool_metadata_list=tool_metadata_list,
                             tool_results=tool_results,
+                            run_id=event.run_id,
                         )
                         persisted = True
                         aborted = True
@@ -858,6 +894,7 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                             reasoning_parts=reasoning_parts,
                             tool_metadata_list=tool_metadata_list,
                             tool_results=tool_results,
+                            run_id=event.run_id,
                         )
                         persisted = True
                         aborted = True
@@ -885,22 +922,23 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                         response = result.get("response", "")
                         if not ai_content_parts and response:
                             ai_content_parts.append(response)
-                        yield sse_raw(data)
+                        if run_failed:
+                            # Audit E-streaming: mirror the WS path — surface a
+                            # failed run as an error event (the done envelope
+                            # with status=failed is skipped for failed runs).
+                            yield sse("error", {"code": "AGENT_ERROR", "message": "Agent run failed"})
+                        else:
+                            yield sse_raw(data)
 
                 if aborted:
                     return
 
                 if run_failed:
-                    # A failed run must not persist the success fallback; keep
-                    # whatever partial state streamed before the failure.
-                    _persist_collected_stream_state(
-                        conversation,
-                        session_id=session_id,
-                        ai_content_parts=ai_content_parts,
-                        reasoning_parts=reasoning_parts,
-                        tool_metadata_list=tool_metadata_list,
-                        tool_results=tool_results,
-                    )
+                    # B11: RunService.persist_run already persisted this run's
+                    # partial state WITH run_id. The legacy fallback collector
+                    # here wrote a second, run_id-less copy of the same rows
+                    # (duplicate tool/reasoning/assistant rows in turns). Do
+                    # nothing — the done event above already reached the client.
                     return
 
                 response = "".join(ai_content_parts) if ai_content_parts else ""
@@ -963,15 +1001,19 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                     )
                 raise
             finally:
-                _active_streams.pop(skey, None)
-                _cancel_flags.pop(skey, None)
+                # Identity-checked pop (audit B12): only clean up if the slot
+                # still holds THIS request's event — never a concurrent owner's.
+                if _active_streams.get(skey) is cancel_event:
+                    _active_streams.pop(skey, None)
+                    _cancel_flags.pop(skey, None)
 
         return StreamingResponse(generate(), media_type="text/event-stream")
 
     except Exception as e:
         skey = _stream_key(req.user_id or "default_user", req.session_id)
-        _active_streams.pop(skey, None)
-        _cancel_flags.pop(skey, None)
+        if cancel_event is not None and _active_streams.get(skey) is cancel_event:
+            _active_streams.pop(skey, None)
+            _cancel_flags.pop(skey, None)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1061,17 +1103,41 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
     model = pending.get("model")
     provider_keys = pending.get("provider_keys")
 
-    loop = await get_sdk_loop(
-        req.user_id,
-        model=model,
-        provider_keys=provider_keys,
-        session_id=session_id,
-    )
-    loop.approve_tool_call(
-        ToolCall(id=pending.get("call_id") or req.call_id, name=tool_name, arguments=pending.get("args") or {})
-    )
+    conversation = await aget_message_store(req.user_id)
 
-    conversation = get_message_store(req.user_id)
+    # Audit E26 hazard 3: acquire the session lock BEFORE mutating anything —
+    # a race where a new run started must surface as a machine-actionable 409
+    # with the pending interrupt RESTORED, never a consumed one.
+    rkey = session_key(req.user_id, session_id)
+    if _session_registry.holds(rkey):
+        _pending_interrupts[skey] = pending  # restore for the promised retry
+        raise HTTPException(status_code=409, detail="Session has an active run; retry approval when idle")
+    approved = False
+    try:
+        await _session_registry.acquire(rkey)  # held until generate() finally
+    except SessionBusyError:
+        _pending_interrupts[skey] = pending  # restore for the promised retry
+        raise HTTPException(status_code=409, detail="Session has an active run; retry approval when idle")
+    try:
+        loop = await get_sdk_loop(
+            req.user_id,
+            model=model,
+            provider_keys=provider_keys,
+            session_id=session_id,
+        )
+        loop.approve_tool_call(
+            ToolCall(id=pending.get("call_id") or req.call_id, name=tool_name, arguments=pending.get("args") or {})
+        )
+        approved = True
+    except BaseException:
+        # F3: endpoint died post-acquire — never leak the session lock.
+        await _session_registry.release(rkey)
+        if not approved:
+            # P2-4: approval never landed — restore the pending interrupt so
+            # the promised retry doesn't 404 forever.
+            _pending_interrupts[skey] = pending
+        raise
+
     cancel_event = asyncio.Event()
     _cancel_flags[skey] = False
     _active_streams[skey] = cancel_event
@@ -1099,14 +1165,21 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
                 )
             )
 
-            async for chunk in run_sdk_agent_stream(
-                user_id=req.user_id,
-                messages=retry_msgs,
-                model=model,
-                provider_keys=provider_keys,
-                cancel_event=cancel_event,
-                session_id=session_id,
+            async for item in _sse_with_heartbeat(
+                run_sdk_agent_stream(
+                    user_id=req.user_id,
+                    messages=retry_msgs,
+                    model=model,
+                    provider_keys=provider_keys,
+                    cancel_event=cancel_event,
+                    session_id=session_id,
+                )
             ):
+                if isinstance(item, str):
+                    # Heartbeat keepalive comment — not a run event.
+                    yield item
+                    continue
+                chunk = item
                 if _cancel_flags.get(skey, False) or cancel_event.is_set():
                     _persist_collected_stream_state(
                         conversation,
@@ -1207,10 +1280,26 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
                     yield sse("error", {"code": "error", "message": event.content})
                     break
 
-                elif event.kind == "done" and event.content:
-                    if not ai_content_parts:
+                elif event.kind == "usage":
+                    # P2-2: parity with the main SSE path — forward usage.
+                    u = chunk.usage
+                    if u is not None:
+                        yield sse("usage", {
+                            "input_tokens": u.input_tokens,
+                            "output_tokens": u.output_tokens,
+                            "reasoning_tokens": u.reasoning_tokens,
+                            "cache_read_tokens": u.cache_read_tokens,
+                            "cache_creation_tokens": u.cache_creation_tokens,
+                        })
+
+                elif event.kind == "done":
+                    # Audit E-streaming: a resumed run may finish with empty
+                    # final content (e.g. tool-only turn or silent failure).
+                    # The done event must still reach the client or the stream
+                    # ends without a terminal event — never gate on content.
+                    if event.content and not ai_content_parts:
                         ai_content_parts.append(event.content)
-                        yield sse("done", {"result": {"response": event.content}})
+                    yield sse("done", {"result": {"response": event.content}})
 
             response = "".join(ai_content_parts) if ai_content_parts else ""
             if aborted:
@@ -1257,10 +1346,17 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
             raise
         except Exception as e:
             logger.error("approve_stream_error", {"error": str(e)}, user_id=req.user_id, channel="http")
-            yield sse("error", {"content": str(e)})
+            # Audit E-streaming: match the canonical error shape
+            # (code + message) used by the message/stream sibling branch.
+            yield sse("error", {"code": "error", "message": str(e)})
         finally:
-            _cancel_flags.pop(skey, None)
-            _active_streams.pop(skey, None)
+            # Audit E26: hold the session lock for the whole resumed run;
+            # release it when the resumed stream terminates.
+            await _session_registry.release(rkey)
+            # Identity-checked pop (audit B12): never evict a concurrent owner.
+            if _active_streams.get(skey) is cancel_event:
+                _cancel_flags.pop(skey, None)
+                _active_streams.pop(skey, None)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -1291,12 +1387,16 @@ async def cancel_message(req: CancelRequest, _: None = Depends(require_auth)) ->
     event = _active_streams.get(skey)
     if event:
         event.set()
+    # E26: signal the registry lock too — NON-STREAMING runs only observe
+    # cancellation via the registry's SessionLock.
+    await _session_registry.stop(session_key(req.user_id, session_id))
     reset_sdk_loop(req.user_id, session_id=session_id)
     return {"status": "cancelled"}
 
 
 class ConversationImportRequest(BaseModel):
     user_id: str = "default_user"
+    session_id: str = "default"
     messages: list[dict[str, Any]]  # [{"role": "user", "content": "..."}, ...]
 
 
@@ -1308,13 +1408,13 @@ async def import_conversation(req: ConversationImportRequest, _: None = Depends(
     before asking a single question. Each message is added to the
     conversation store but NOT sent to the agent.
     """
-    from src.storage.messages import get_message_store
+    from src.storage.messages import aget_message_store
 
-    conversation = get_message_store(req.user_id)
+    conversation = await aget_message_store(req.user_id)
     for msg in req.messages:
         role = msg.get("role", "user")
         content = msg.get("content", "")
         if content.strip():
             meta = msg.get("metadata")
-            conversation.add_message(role, content, metadata=meta)
+            conversation.add_message(role, content, metadata=meta, session_id=req.session_id)
     return {"imported": len(req.messages)}

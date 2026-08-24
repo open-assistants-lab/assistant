@@ -289,3 +289,84 @@ def test_estimate_message_tokens_tolerates_objects_without_reasoning() -> None:
     only_sdk = estimate_message_tokens([sdk_msg], _length)
     only_storage = estimate_message_tokens([historic], _length)
     assert total == only_sdk + only_storage
+
+
+# --- Audit P3: token-count measurement reuse ---------------------------------
+
+from src.sdk.middleware_summarization import (
+    SummarizationMiddleware,
+    count_tokens_approximately,
+)
+
+
+def test_token_based_cutoff_matches_brute_force_reference() -> None:
+    """Suffix-sum cutoff must equal a brute-force earliest-index reference."""
+    mw = SummarizationMiddleware(model="mock:test", keep=("tokens", 60))
+    messages = [
+        Message.system("s" * 100),
+        Message.user("u" * 100),
+        Message.assistant("a" * 100),
+        Message.user("b" * 100),
+    ]
+    counts = [count_tokens_approximately([m]) for m in messages]
+
+    def reference() -> int:
+        for i in range(len(messages)):
+            if sum(counts[i:]) <= 60:
+                return i
+        return len(messages)
+
+    cutoff = mw._find_token_based_cutoff(messages)
+    # _find_safe_cutoff_point must not move a non-tool cutoff.
+    assert cutoff == reference()
+
+
+def test_token_based_cutoff_counts_each_message_once() -> None:
+    """The cutoff pass must count per-message (suffix sums), never slices."""
+    calls: list[int] = []
+
+    original = count_tokens_approximately
+    mw = SummarizationMiddleware(model="mock:test", keep=("tokens", 60))
+
+    def spy(messages):
+        calls.append(len(messages))
+        return original(messages)
+
+    mw._partial_token_counter = spy  # type: ignore[assignment]
+    messages = [
+        Message.system("s" * 100),
+        Message.user("u" * 100),
+        Message.assistant("a" * 100),
+        Message.user("b" * 100),
+    ]
+    mw._find_token_based_cutoff(messages)
+    assert calls
+    assert all(size == 1 for size in calls), f"expected per-message counts, got sizes {calls}"
+
+
+def test_sync_before_model_is_noop_unless_debug_logging(monkeypatch) -> None:
+    """Sync before_model must not tokenize unless debug logging is enabled."""
+    import src.sdk.middleware_summarization as mw_module
+
+    mw = SummarizationMiddleware(model="mock:test", keep=("tokens", 60))
+    state = _state_with_many_messages()
+    token_calls = []
+
+    original = mw.token_counter
+    mw.token_counter = lambda msgs: (token_calls.append(msgs), original(msgs))[1]  # type: ignore[assignment]
+
+    # INFO level (default): no-op.
+    monkeypatch.setattr(mw_module.logger, "_should_log", lambda level: level >= 20)
+    assert mw.before_model(state) is None
+    assert token_calls == []
+
+    # DEBUG level: tokenized and trigger checked.
+    monkeypatch.setattr(mw_module.logger, "_should_log", lambda level: level >= 10)
+    assert mw.before_model(state) is None
+    assert token_calls
+
+
+def _state_with_many_messages():
+    from src.sdk.state import AgentState
+
+    return AgentState(messages=[Message.user("x" * 500)] * 20)

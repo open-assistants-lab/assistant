@@ -465,37 +465,64 @@ app_column_rename.annotations = ToolAnnotations(title="Rename App Column")
 
 
 def _convert_date_in_query(query: str) -> str:
+    """Rewrite date words/ISO dates to epoch-ms OUTSIDE single-quoted literals.
+
+    Date words inside string literals (e.g. ``note LIKE '%today%'``) are
+    user data and must survive untouched (audit B17): the query is split on
+    single quotes and only even-index segments (outside literals) are
+    rewritten.
+    """
     now = datetime.now()
-    query = re.sub(
-        r"last month",
-        str(int(datetime(now.year, now.month - 1 if now.month > 1 else 12, 1).timestamp() * 1000)),
-        query,
-        flags=re.IGNORECASE,
+    dec_epoch = str(
+        int(
+            datetime(
+                now.year - 1 if now.month == 1 else now.year,
+                now.month - 1 if now.month > 1 else 12,
+                1,
+            ).timestamp()
+            * 1000
+        )
     )
-    query = re.sub(
-        r"this month",
-        str(int(datetime(now.year, now.month, 1).timestamp() * 1000)),
-        query,
-        flags=re.IGNORECASE,
-    )
-    query = re.sub(
-        r"today",
-        str(int(datetime(now.year, now.month, now.day).timestamp() * 1000)),
-        query,
-        flags=re.IGNORECASE,
-    )
+    this_month_epoch = str(int(datetime(now.year, now.month, 1).timestamp() * 1000))
+    today_epoch = str(int(datetime(now.year, now.month, now.day).timestamp() * 1000))
 
-    date_pattern = re.compile(r"(\d{4}-\d{2}-\d{2})")
-    for match in date_pattern.finditer(query):
-        date_str = match.group(1)
-        try:
-            dt = datetime.strptime(date_str, "%Y-%m-%d")
-            ts = int(dt.timestamp() * 1000)
-            query = query.replace(date_str, str(ts))
-        except ValueError:
-            pass
+    def _rewrite(segment: str) -> str:
+        segment = re.sub(r"last month", dec_epoch, segment, flags=re.IGNORECASE)
+        segment = re.sub(r"this month", this_month_epoch, segment, flags=re.IGNORECASE)
+        segment = re.sub(r"today", today_epoch, segment, flags=re.IGNORECASE)
 
-    return query
+        date_pattern = re.compile(r"(\d{4}-\d{2}-\d{2})")
+        for match in date_pattern.finditer(segment):
+            date_str = match.group(1)
+            try:
+                dt = datetime.strptime(date_str, "%Y-%m-%d")
+                segment = segment.replace(date_str, str(int(dt.timestamp() * 1000)))
+            except ValueError:
+                pass
+        return segment
+
+    # Sequential walk with an in-literal flag (audit B17 fix round 1):
+    # robust against SQL doubled quotes ('') — an escaped pair never flips
+    # the literal state, unlike positional even/odd parity.
+    out_parts: list[str] = []
+    buf: list[str] = []
+    i = 0
+    n = len(query)
+    in_literal = False
+    while i < n:
+        ch = query[i]
+        if ch == "'" and in_literal and i + 1 < n and query[i + 1] == "'":
+            buf.append("''")
+            i += 2
+            continue
+        buf.append(ch)
+        if ch == "'":
+            out_parts.append(_rewrite("".join(buf)) if not in_literal else "".join(buf))
+            buf = []
+            in_literal = not in_literal
+        i += 1
+    out_parts.append(_rewrite("".join(buf)) if not in_literal else "".join(buf))
+    return "".join(out_parts)
 
 
 @tool

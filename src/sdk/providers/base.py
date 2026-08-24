@@ -19,6 +19,8 @@ from src.sdk.tools import ToolDefinition
 _TIMEOUT_ERRORS: tuple[type[BaseException], ...] = (
     httpx.ReadTimeout,
     httpx.ConnectTimeout,
+    httpx.WriteTimeout,
+    httpx.PoolTimeout,
     httpx.ConnectError,
 )
 
@@ -181,6 +183,16 @@ class LLMProvider(ABC):
 
     def get_client(self) -> Any | None:
         """Return the underlying HTTP client, if available, for connection testing."""
+        return None
+
+    async def aclose(self) -> None:
+        """Release any underlying HTTP client (connection pool).
+
+        Default is a no-op. Providers that lazily create httpx/AsyncOpenAI
+        clients override this so long-lived consumers (the factory's keyed
+        provider cache) and short-lived consumers (rubric graders) can
+        release sockets deterministically instead of waiting on GC.
+        """
         return None
 
     def _extract_provider_options(

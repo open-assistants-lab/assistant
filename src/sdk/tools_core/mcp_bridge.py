@@ -83,7 +83,7 @@ class MCPToolBridge:
         manager = self._get_manager()
         await manager._ensure_started()
 
-        connections = manager._connections
+        connections = await manager.snapshot_connections()
         if not connections:
             return 0
 
@@ -131,7 +131,7 @@ class MCPToolBridge:
 
         async def _invoke(**kwargs: Any) -> ToolResult:
             manager = self._get_manager()
-            conn = manager._connections.get(server_name)
+            conn = await manager.get_connection(server_name)
             if conn is None:
                 return ToolResult(
                     content=f"MCP server '{server_name}' is not connected",

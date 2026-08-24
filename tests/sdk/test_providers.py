@@ -17,7 +17,7 @@ import pytest
 
 from src.config.user_settings import SavedUserSettings
 from src.config.user_settings_store import UserSettingsStore
-from src.sdk.messages import Message
+from src.sdk.messages import Message, ToolCall
 from src.sdk.providers.anthropic import AnthropicProvider
 from src.sdk.providers.factory import (
     _ENV_KEY_MAP,
@@ -582,6 +582,204 @@ class TestOpenAIProvider:
 # ─── Anthropic Provider Tests ───
 
 
+class TestProviderCallIdPairingB17:
+    """audit B15/B17: repaired args, paired fallback call_ids, in-stream errors."""
+
+    def test_openai_repairs_malformed_tool_args(self):
+        from types import SimpleNamespace
+        p = OpenAIProvider(api_key="sk-test")
+        tc = SimpleNamespace(
+            id="call_x",
+            function=SimpleNamespace(name="files_read", arguments="{'path': 'a.txt'}"),
+        )
+        msg = SimpleNamespace(content="", tool_calls=[tc], reasoning_content=None)
+        choice = SimpleNamespace(message=msg, finish_reason="stop")
+        resp = SimpleNamespace(choices=[choice], usage=None)
+        msg = p._parse_response(resp)
+        assert msg.tool_calls and msg.tool_calls[0].arguments == {"path": "a.txt"}
+
+    def test_openai_fallback_call_ids_paired(self):
+        from types import SimpleNamespace
+        p = OpenAIProvider(api_key="sk-test")
+        chunk = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(index=0, id="", function=SimpleNamespace(name="f", arguments='{"a"'))
+                        ]
+                    ),
+                    finish_reason=None,
+                )
+            ],
+            usage=None,
+        )
+        chunk2 = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(index=0, id="", function=SimpleNamespace(name=None, arguments='": 1}'))
+                        ]
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            usage=None,
+        )
+        acc = {}
+        evs = p._parse_stream_chunk(chunk, acc) + p._parse_stream_chunk(chunk2, acc)
+        starts = [e for e in evs if e.canonical_type == "tool_input_start"]
+        deltas = [e for e in evs if e.canonical_type == "tool_input_delta"]
+        ends = [e for e in evs if e.canonical_type == "tool_input_end"]
+        assert len(starts) >= 1 and len(ends) == 1
+        ids = {e.call_id for e in starts + deltas + ends}
+        # start + its alias share one id; delta/end reuse the SAME fallback id
+        assert len({e.call_id for e in ends}) == 1
+        assert ends[0].call_id == deltas[0].call_id
+        assert len(ids - {starts[0].call_id}) <= 1  # at most: alias shares start's id
+
+    def test_anthropic_fallback_call_ids_paired(self):
+        p = AnthropicProvider(api_key="test", model="claude-sonnet-4")
+        acc = {}
+        evs = []
+        evs += p._parse_sse_event(
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "tool_use", "id": "", "name": "f"}}, acc)
+        evs += p._parse_sse_event(
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "input_json_delta", "partial_json": '{"x"}'}}, acc)
+        evs += p._parse_sse_event({"type": "content_block_stop", "index": 0}, acc)
+        starts = [e for e in evs if e.canonical_type == "tool_input_start"]
+        deltas = [e for e in evs if e.canonical_type == "tool_input_delta"]
+        ends = [e for e in evs if e.canonical_type == "tool_input_end"]
+        assert starts and ends and deltas
+        assert ends[0].call_id != ""
+        assert ends[0].call_id == deltas[0].call_id
+
+    @pytest.mark.asyncio
+    async def test_openai_retry_guard_counts_tool_input_start(self, monkeypatch):
+        """audit B17: a timeout AFTER a tool_input_start must not retry —
+        the retry would re-emit a duplicate start for the same call."""
+        import httpx
+
+        p = OpenAIProvider(api_key="sk-test")
+        attempts = {"n": 0}
+
+        def mk_chunk(finish=None):
+            from types import SimpleNamespace
+
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content=None,
+                            tool_calls=(
+                                [
+                                    SimpleNamespace(
+                                        index=0,
+                                        id="",
+                                        function=SimpleNamespace(name="f", arguments=None),
+                                    )
+                                ]
+                                if finish is None
+                                else None
+                            ),
+                        ),
+                        finish_reason=finish,
+                    )
+                ],
+                usage=None,
+            )
+
+        class FakeStream:
+            def __init__(self):
+                attempts["n"] += 1
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not hasattr(self, "_n"):
+                    self._n = 0
+                self._n += 1
+                if self._n == 1:
+                    return mk_chunk()
+                raise httpx.ReadTimeout("stall")
+
+        class FakeCompletions:
+            async def _create(self, **kwargs):
+                return FakeStream()
+
+        monkeypatch.setattr(
+            p._client.chat, "completions", SimpleNamespace(create=FakeCompletions().__dict__["create"] if False else (lambda **kw: FakeCompletions()._create(**kw)))
+        )
+
+        got = []
+
+        async def collect():
+            async for c in p.chat_stream([Message.user("hi")]):
+                got.append(c)
+
+        with pytest.raises(httpx.ReadTimeout):
+            await collect()
+        # count raw types (canonical_type maps the 'tool_start' alias too)
+        starts = [c for c in got if c.type == "tool_input_start"]
+        assert len(starts) == 1  # emitted exactly once — no duplicate on retry
+        assert attempts["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_anthropic_in_stream_error_surfaces_through_chat_stream(self, monkeypatch):
+        """audit B17: an in-stream Anthropic error event reaches the consumer."""
+        import json as _json
+
+        p = AnthropicProvider(api_key="test", model="claude-sonnet-4")
+
+        class FakeResp:
+            def raise_for_status(self):
+                pass
+
+            async def aiter_lines(self):
+                yield "data: " + _json.dumps(
+                    {"type": "error", "error": {"message": "overloaded"}}
+                )
+
+        monkeypatch.setattr(
+            p, "_get_client", lambda: SimpleNamespace(
+                stream=lambda *a, **k: _Ctx(FakeResp())
+            )
+        )
+
+        got = []
+        async for c in p.chat_stream([Message.user("hi")]):
+            got.append(c)
+        assert any(c.canonical_type == "error" and "overloaded" in c.content for c in got)
+
+
+    def test_anthropic_in_stream_error_yields_error_chunk(self):
+        p = AnthropicProvider(api_key="test", model="claude-sonnet-4")
+        events = p._parse_sse_event(
+            {"type": "error", "error": {"type": "overloaded_error", "message": "overloaded"}}, {}
+        )
+        assert any(e.canonical_type == "error" for e in events)
+
+
+from types import SimpleNamespace
+
+
+class _Ctx:
+    def __init__(self, resp):
+        self.resp = resp
+
+    async def __aenter__(self):
+        return self.resp
+
+    async def __aexit__(self, *a):
+        return False
+
+
 class TestAnthropicProvider:
     def test_default_config(self):
         p = AnthropicProvider(api_key="sk-ant-test")
@@ -595,6 +793,23 @@ class TestAnthropicProvider:
         assert "system" in payload
         assert payload["system"] == "Be helpful"
         assert len(payload["messages"]) == 1
+
+    def test_anthropic_system_concatenates_all_system_messages(self):
+        """Audit B2: a mid-conversation system nudge must JOIN the system
+        prompt, not replace it (last-one-wins dropped the real prompt)."""
+        p = AnthropicProvider(api_key="sk-ant-test")
+        msgs = [
+            Message.system("You are a helpful agent."),
+            Message.user("hi"),
+            Message.assistant(tool_calls=[ToolCall(id="t1", name="time_get", arguments={})]),
+            Message.system("The tool was already called. Answer directly."),
+        ]
+        payload = p._build_payload(msgs, None, "claude-sonnet-4-20250514")
+        assert payload["system"] == (
+            "You are a helpful agent.\n\nThe tool was already called. Answer directly."
+        )
+        # Non-system messages are unaffected (user + assistant-with-tool_calls).
+        assert len(payload["messages"]) == 2
 
     def test_build_payload_extracts_system(self):
         p = AnthropicProvider(api_key="sk-ant-test")
@@ -744,6 +959,163 @@ class TestGeminiProvider:
         p = GeminiProvider(api_key="test-key")
         info = p.get_model_info("gemini-unknown")
         assert info.provider_id == "gemini"
+
+    def test_stream_url_includes_alt_sse(self):
+        """Streaming uses the SSE endpoint (?alt=sse); non-streaming is unchanged."""
+        p = GeminiProvider(api_key="test-key")
+        stream_url = p._url("gemini-2.5-flash", stream=True)
+        assert "streamGenerateContent" in stream_url
+        assert "alt=sse" in stream_url
+        assert "key=test-key" in stream_url
+        plain_url = p._url("gemini-2.5-flash", stream=False)
+        assert "generateContent" in plain_url
+        assert "alt=sse" not in plain_url
+
+    def test_parse_stream_chunk_routes_thought_text_to_reasoning(self):
+        """Gemini 2.5 thought parts carry both 'text' and 'thought': the text must
+        go to reasoning deltas, never to the visible answer, and reasoning must
+        never be set to the bare boolean flag."""
+        p = GeminiProvider(api_key="test-key")
+        data = {
+            "candidates": [{"content": {"parts": [
+                {"text": "thinking...", "thought": True},
+                {"text": "answer"},
+            ]}}]
+        }
+        events = p._parse_stream_chunk(data, {})
+        reasoning = "".join(e.content for e in events if e.type == "reasoning_delta")
+        content = "".join(e.content for e in events if e.type == "text_delta")
+        assert reasoning == "thinking..."
+        assert content == "answer"
+        # canonical reasoning_delta AND backward-compat alias, both strings.
+        aliases = [e for e in events if e.type == "reasoning"]
+        assert len(aliases) == 1
+        assert aliases[0].content == "thinking..."
+        # No event carries a boolean as content.
+        assert all(not isinstance(e.content, bool) for e in events)
+
+    def test_parse_stream_chunk_skips_pure_flag_thought_parts(self):
+        """A part carrying only the thought flag (no text) emits nothing."""
+        p = GeminiProvider(api_key="test-key")
+        data = {"candidates": [{"content": {"parts": [{"thought": True}]}}]}
+        events = p._parse_stream_chunk(data, {})
+        assert events == []
+
+    def test_parse_response_routes_thought_to_reasoning(self):
+        """Non-streaming responses route thought text to Message.reasoning."""
+        p = GeminiProvider(api_key="test-key")
+        data = {
+            "candidates": [{"content": {"parts": [
+                {"text": "thinking...", "thought": True},
+                {"text": "answer"},
+            ]}}]
+        }
+        msg = p._parse_response(data)
+        assert msg.content == "answer"
+        assert msg.reasoning == "thinking..."
+        assert not isinstance(msg.reasoning, bool)
+
+    def test_parse_stream_chunk_maps_in_stream_error(self):
+        """A mid-stream {'error': {...}} object becomes an error chunk."""
+        p = GeminiProvider(api_key="test-key")
+        data = {"error": {"code": 429, "message": "Quota exceeded", "status": "RESOURCE_EXHAUSTED"}}
+        events = p._parse_stream_chunk(data, {})
+        assert len(events) == 1
+        assert events[0].canonical_type == "error"
+        assert "Quota exceeded" in events[0].content
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_parses_sse_data_lines(self, monkeypatch):
+        """alt=sse streams deliver `data: {json}` lines; each parses into
+        block events, and usage stays gated on the terminal chunk."""
+        import json as _json
+
+        p = GeminiProvider(api_key="test-key")
+        lines = [
+            'data: ' + _json.dumps({"candidates": [{"content": {"parts": [{"text": "Hel"}]}}]}),
+            'data: ' + _json.dumps({"candidates": [{"content": {"parts": [{"text": "lo"}]}}]}),
+            'data: ' + _json.dumps({"candidates": [{"content": {"parts": [{"text": "!"}]}, "finishReason": "STOP"}],
+                                       "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 3}}),
+        ]
+
+        class FakeStream:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            def raise_for_status(self):
+                pass
+
+            async def aiter_bytes(self):
+                for line in lines:
+                    yield (line + "\n\n").encode("utf-8")
+
+        class FakeClient:
+            def stream(self, method, url, json=None):
+                captured["url"] = url
+                return FakeStream()
+
+        captured: dict[str, str] = {}
+        monkeypatch.setattr(p, "_get_client", lambda: FakeClient())
+
+        chunks = []
+        async for c in p.chat_stream([Message.user("hi")]):
+            chunks.append(c)
+
+        assert "alt=sse" in captured["url"]
+        text = "".join(c.content for c in chunks if c.type == "text_delta")
+        assert text == "Hello!"
+        # usage emitted exactly once, on the terminal chunk
+        usage = [c for c in chunks if c.type == "usage"]
+        assert len(usage) == 1
+        assert usage[0].usage.input_tokens == 10
+        assert usage[0].usage.output_tokens == 3
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_handles_split_utf8_bytes(self, monkeypatch):
+        """A multi-byte UTF-8 sequence split across network chunks must not
+        corrupt the character (incremental decoder, not per-chunk decode).
+        The split is forced INSIDE the é so a naive per-chunk decode fails."""
+        p = GeminiProvider(api_key="test-key")
+        line = 'data: ' + '{"candidates": [{"content": {"parts": [{"text": "caf\u00e9"}]}}]}'
+        b = (line + "\n\n").encode("utf-8")  # é = 2 bytes: 0xC3 0xA9
+        # Force the split to land INSIDE the é: b[:mid] ends with the 0xC3
+        # lead byte, b[mid:] begins with the 0xA9 continuation byte. A naive
+        # per-chunk decode() raises on b[:mid]; only the incremental decoder
+        # keeps the pending lead byte and completes it on the next chunk.
+        cafe = "caf\u00e9".encode()  # c a f 0xC3 0xA9 (5 bytes)
+        mid = b.index(cafe) + 4  # b[:mid] ends with the 0xC3 lead byte
+        assert b[mid - 1] == 0xC3 and b[mid] == 0xA9  # split mid-é, verified
+        with pytest.raises(UnicodeDecodeError):
+            b[:mid].decode("utf-8")  # old per-chunk decode would explode here
+
+        class FakeStream:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            def raise_for_status(self):
+                pass
+
+            async def aiter_bytes(self):
+                yield b[:mid]
+                yield b[mid:]
+
+        class FakeClient:
+            def stream(self, method, url, json=None):
+                return FakeStream()
+
+        monkeypatch.setattr(p, "_get_client", lambda: FakeClient())
+
+        chunks = []
+        async for c in p.chat_stream([Message.user("hi")]):
+            chunks.append(c)
+        text = "".join(c.content for c in chunks if c.type == "text_delta")
+        assert text == "café"
 
 
 # ─── Factory Tests ───
@@ -1443,6 +1815,23 @@ class TestOpenAIUsageExtraction:
         assert msg.usage.input_tokens == 100
         assert msg.usage.output_tokens == 50
 
+    def test_parse_response_normalizes_cached_input_tokens(self):
+        """OpenAI's prompt_tokens INCLUDES cached_tokens; input_tokens must
+        exclude them so CostTracker doesn't double-count (audit S2.4)."""
+        p = OpenAIProvider(api_key="test")
+        data = MagicMock()
+        data.choices = [MagicMock()]
+        data.choices[0].message.content = "Hello"
+        data.choices[0].message.tool_calls = None
+        data.usage.prompt_tokens = 100
+        data.usage.completion_tokens = 50
+        data.usage.completion_tokens_details = None
+        data.usage.prompt_tokens_details = MagicMock(cached_tokens=30)
+        msg = p._parse_response(data)
+        assert msg.usage is not None
+        assert msg.usage.input_tokens == 70  # 100 - 30 cached
+        assert msg.usage.cache_read_tokens == 30
+
     def test_parse_response_no_usage(self):
         p = OpenAIProvider(api_key="test")
         data = MagicMock()
@@ -1466,6 +1855,37 @@ class TestOpenAIUsageExtraction:
         assert len(usage_events) == 1
         assert usage_events[0].usage.input_tokens == 200
         assert usage_events[0].usage.output_tokens == 80
+
+    def test_stream_chunk_normalizes_cached_input_tokens(self):
+        p = OpenAIProvider(api_key="test")
+        chunk = MagicMock()
+        chunk.choices = []
+        chunk.usage.prompt_tokens = 200
+        chunk.usage.completion_tokens = 80
+        chunk.usage.completion_tokens_details = None
+        chunk.usage.prompt_tokens_details = MagicMock(cached_tokens=40)
+        events = p._parse_stream_chunk(chunk, {})
+        usage_events = [e for e in events if e.type == "usage"]
+        assert len(usage_events) == 1
+        assert usage_events[0].usage.input_tokens == 160  # 200 - 40 cached
+        assert usage_events[0].usage.cache_read_tokens == 40
+
+    def test_stream_finish_reason_chunk_normalizes_cached_input_tokens(self):
+        p = OpenAIProvider(api_key="test")
+        delta = MagicMock()
+        delta.content = "Hi"
+        choice = MagicMock()
+        choice.delta = delta
+        choice.finish_reason = "stop"
+        chunk = MagicMock()
+        chunk.choices = [choice]
+        chunk.usage = MagicMock(prompt_tokens=80, completion_tokens=30)
+        chunk.usage.prompt_tokens_details = MagicMock(cached_tokens=20)
+        events = p._parse_stream_chunk(chunk, {})
+        usage_events = [e for e in events if e.type == "usage"]
+        assert len(usage_events) == 1
+        assert usage_events[0].usage.input_tokens == 60  # 80 - 20 cached
+        assert usage_events[0].usage.cache_read_tokens == 20
 
 
 class TestAnthropicUsageExtraction:
@@ -1498,7 +1918,7 @@ class TestAnthropicUsageExtraction:
         assert msg.usage.cache_read_tokens == 30
         assert msg.usage.cache_creation_tokens == 10
 
-    def test_sse_message_start_extracts_usage(self):
+    def test_sse_message_start_stashes_usage_for_terminal_emission(self):
         p = AnthropicProvider(api_key="test")
         data = {
             "type": "message_start",
@@ -1507,20 +1927,46 @@ class TestAnthropicUsageExtraction:
             },
         }
         events = p._parse_sse_event(data, {})
-        usage_events = [e for e in events if e.type == "usage"]
-        assert len(usage_events) == 1
-        assert usage_events[0].usage.input_tokens == 500
+        # Input usage is stashed at message_start and emitted only at
+        # message_stop — emitting per-chunk usage caused the loop to sum
+        # cumulative values and inflate totals (audit S2.3).
+        assert [e for e in events if e.type == "usage"] == []
 
-    def test_sse_message_delta_extracts_usage(self):
+    def test_sse_message_delta_alone_emits_no_usage(self):
         p = AnthropicProvider(api_key="test")
         data = {
             "type": "message_delta",
             "usage": {"output_tokens": 120},
         }
         events = p._parse_sse_event(data, {})
-        usage_events = [e for e in events if e.type == "usage"]
+        # No message_start preceded this delta, so there is no stream usage
+        # state and nothing to emit (output is cumulative, emitted at stop).
+        assert [e for e in events if e.type == "usage"] == []
+
+    def test_sse_usage_emitted_once_at_message_stop(self):
+        """One cumulative usage chunk per stream, merged at message_stop."""
+        p = AnthropicProvider(api_key="test")
+        calls: dict = {}
+        start = {
+            "type": "message_start",
+            "message": {"usage": {"input_tokens": 500, "output_tokens": 0}},
+        }
+        delta = {"type": "message_delta", "usage": {"output_tokens": 120}}
+        stop = {"type": "message_stop"}
+
+        events_start = p._parse_sse_event(start, calls)
+        events_delta = p._parse_sse_event(delta, calls)
+        events_stop = p._parse_sse_event(stop, calls)
+
+        assert [e for e in events_start if e.type == "usage"] == []
+        assert [e for e in events_delta if e.type == "usage"] == []
+        usage_events = [e for e in events_stop if e.type == "usage"]
         assert len(usage_events) == 1
+        # Input from message_start, cumulative output from message_delta —
+        # merged into a single terminal chunk (not summed across deltas).
+        assert usage_events[0].usage.input_tokens == 500
         assert usage_events[0].usage.output_tokens == 120
+        assert [e.type for e in events_stop] == ["usage", "done"]
 
     def test_parse_response_no_usage(self):
         p = AnthropicProvider(api_key="test")
@@ -1549,6 +1995,23 @@ class TestGeminiUsageExtraction:
         assert msg.usage.output_tokens == 70
         assert msg.usage.reasoning_tokens == 20
 
+    def test_parse_response_normalizes_cached_input_tokens(self):
+        """Gemini's promptTokenCount includes cachedContentTokenCount; input
+        must exclude cached tokens to avoid double counting (audit S2.4)."""
+        p = GeminiProvider(api_key="test")
+        data = {
+            "candidates": [{"content": {"parts": [{"text": "Hello"}]}}],
+            "usageMetadata": {
+                "promptTokenCount": 300,
+                "candidatesTokenCount": 70,
+                "cachedContentTokenCount": 40,
+            },
+        }
+        msg = p._parse_response(data)
+        assert msg.usage is not None
+        assert msg.usage.input_tokens == 260  # 300 - 40 cached
+        assert msg.usage.cache_read_tokens == 40
+
     def test_stream_chunk_extracts_usage(self):
         p = GeminiProvider(api_key="test")
         data = {
@@ -1558,6 +2021,44 @@ class TestGeminiUsageExtraction:
                 "candidatesTokenCount": 40,
             },
         }
+        events = p._parse_stream_chunk(data, {})
+        usage_events = [e for e in events if e.type == "usage"]
+        assert len(usage_events) == 1
+        assert usage_events[0].usage.input_tokens == 100
+        assert usage_events[0].usage.output_tokens == 40
+
+    def test_stream_chunk_normalizes_cached_input_tokens(self):
+        p = GeminiProvider(api_key="test")
+        data = {
+            "candidates": [{"content": {"parts": [{"text": "Hi"}]}, "finishReason": "STOP"}],
+            "usageMetadata": {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 40,
+                "cachedContentTokenCount": 25,
+            },
+        }
+        events = p._parse_stream_chunk(data, {})
+        usage_events = [e for e in events if e.type == "usage"]
+        assert len(usage_events) == 1
+        assert usage_events[0].usage.input_tokens == 75  # 100 - 25 cached
+        assert usage_events[0].usage.cache_read_tokens == 25
+    def test_stream_chunk_usage_gated_on_finish_reason(self):
+        """Gemini's usageMetadata is cumulative per request — emitting it on
+        every chunk would overcount when the loop sums usage (audit S2.3).
+        It is reported only on the terminal chunk (finishReason present)."""
+        p = GeminiProvider(api_key="test")
+        data = {
+            "candidates": [{"content": {"parts": [{"text": "Hi"}]}}],
+            "usageMetadata": {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 40,
+            },
+        }
+        # No finishReason yet → no usage event.
+        events = p._parse_stream_chunk(data, {})
+        assert [e for e in events if e.type == "usage"] == []
+        # Terminal chunk carries the cumulative usage exactly once.
+        data["candidates"][0]["finishReason"] = "STOP"
         events = p._parse_stream_chunk(data, {})
         usage_events = [e for e in events if e.type == "usage"]
         assert len(usage_events) == 1
@@ -1574,6 +2075,8 @@ class TestOpenAIProviderUsageExtraction:
         response = MagicMock()
         response.choices = [choice]
         response.usage = MagicMock(prompt_tokens=80, completion_tokens=30)
+        # No cache info reported -> input_tokens reported as-is (nothing to subtract).
+        response.usage.prompt_tokens_details = None
         msg = p._parse_response(response)
         assert msg.usage is not None
         assert msg.usage.input_tokens == 80
@@ -1601,6 +2104,7 @@ class TestOpenAIProviderUsageExtraction:
         chunk = MagicMock()
         chunk.choices = [choice]
         chunk.usage = MagicMock(prompt_tokens=80, completion_tokens=30)
+        chunk.usage.prompt_tokens_details = None
         events = p._parse_stream_chunk(chunk, {})
         usage_events = [e for e in events if e.type == "usage"]
         assert len(usage_events) == 1

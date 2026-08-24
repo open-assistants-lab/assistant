@@ -67,6 +67,13 @@ class AnthropicProvider(LLMProvider):
     def get_client(self) -> httpx.AsyncClient | None:
         return self._get_client()
 
+    async def aclose(self) -> None:
+        """Close the lazily-created httpx client, if any."""
+        client = self._http_client
+        if client is not None and not client.is_closed:
+            await client.aclose()
+        self._http_client = None
+
     def _build_payload(
         self,
         messages: list[Message],
@@ -77,11 +84,14 @@ class AnthropicProvider(LLMProvider):
         provider_options: dict[str, dict[str, Any]] | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        system_content = None
+        system_parts: list[str] = []
         anthropic_msgs = []
         for m in messages:
             if m.role == "system":
-                system_content = str(m.content)
+                # Audit B2: JOIN all system messages. The duplicate-tool-call
+                # guard appends mid-conversation system nudges; last-one-wins
+                # here silently replaced the agent's real system prompt.
+                system_parts.append(str(m.content))
                 continue
             am = m.to_anthropic()
             if m.role == "tool":
@@ -96,6 +106,8 @@ class AnthropicProvider(LLMProvider):
                     ],
                 }
             anthropic_msgs.append(am)
+
+        system_content: str | None = "\n\n".join(system_parts) if system_parts else None
 
         payload: dict[str, Any] = {
             "model": model,
@@ -211,7 +223,7 @@ class AnthropicProvider(LLMProvider):
         # text the loop already appended (duplication).
         attempts = 0
         while True:
-            current_tool_calls: dict[int, dict[str, Any]] = {}
+            current_tool_calls: dict[int | str, dict[str, Any]] = {}
             emitted = False
             try:
                 async with client.stream("POST", f"{self.base_url}/v1/messages", json=payload) as response:
@@ -231,7 +243,9 @@ class AnthropicProvider(LLMProvider):
                         except json.JSONDecodeError:
                             continue
                         for event in self._parse_sse_event(data, current_tool_calls):
-                            if event.canonical_type in ("text_delta", "reasoning_delta", "tool_input_delta"):
+                            if event.canonical_type in (
+                                "text_delta", "reasoning_delta", "tool_input_delta", "tool_input_start",
+                            ):
                                 emitted = True
                             yield event
                 return
@@ -242,10 +256,18 @@ class AnthropicProvider(LLMProvider):
                 raise
 
     def _parse_sse_event(
-        self, data: dict[str, Any], current_tool_calls: dict[int, dict[str, Any]]
+        self, data: dict[str, Any], current_tool_calls: dict[int | str, dict[str, Any]]
     ) -> list[StreamChunk]:
         events: list[StreamChunk] = []
         event_type = data.get("type", "")
+
+        # audit B17: Anthropic emits in-stream {"type":"error"} events
+        # (e.g. overloaded_error). Previously these fell through silently and
+        # the stream ended looking like an empty success.
+        if event_type == "error":
+            err = data.get("error", {})
+            msg = err.get("message") if isinstance(err, dict) else str(err)
+            return [StreamChunk.error(message=str(msg or "unknown provider error"))]
 
         if event_type == "content_block_delta":
             delta = data.get("delta", {})
@@ -271,8 +293,10 @@ class AnthropicProvider(LLMProvider):
             block = data.get("content_block", {})
             idx = data.get("index", 0)
             if block.get("type") == "tool_use":
+                # audit B17: resolve the id once; delta/end reuse it.
+                resolved_id = block.get("id") or f"call_{uuid4().hex[:8]}"
                 current_tool_calls[idx] = {
-                    "id": block.get("id", ""),
+                    "id": resolved_id,
                     "name": block.get("name", ""),
                     "arguments": "",
                     "_type": "tool_use",
@@ -280,13 +304,13 @@ class AnthropicProvider(LLMProvider):
                 events.append(
                     StreamChunk.tool_input_start(
                         tool=block.get("name", ""),
-                        call_id=block.get("id", f"call_{uuid4().hex[:8]}"),
+                        call_id=resolved_id,
                     )
                 )
                 events.append(
                     StreamChunk.tool_start(
                         tool=block.get("name", ""),
-                        call_id=block.get("id", f"call_{uuid4().hex[:8]}"),
+                        call_id=resolved_id,
                     )
                 )
             elif block.get("type") == "thinking":
@@ -316,30 +340,39 @@ class AnthropicProvider(LLMProvider):
             msg_data = data.get("message", {})
             raw_usage = msg_data.get("usage")
             if raw_usage:
-                events.append(
-                    StreamChunk.usage_event(
-                        Usage(
-                            input_tokens=raw_usage.get("input_tokens", 0),
-                            output_tokens=raw_usage.get("output_tokens", 0),
-                            cache_read_tokens=raw_usage.get("cache_read_input_tokens", 0),
-                            cache_creation_tokens=raw_usage.get("cache_creation_input_tokens", 0),
-                        )
-                    )
-                )
+                # Stash input/cache usage; emitted once at message_stop so
+                # each stream yields a single cumulative usage chunk (the
+                # loop uses last-seen semantics per LLM call — audit S2.3).
+                current_tool_calls["_stream_usage"] = {
+                    "input_tokens": raw_usage.get("input_tokens", 0),
+                    "output_tokens": 0,
+                    "cache_read_tokens": raw_usage.get("cache_read_input_tokens", 0),
+                    "cache_creation_tokens": raw_usage.get("cache_creation_input_tokens", 0),
+                }
 
         elif event_type == "message_delta":
             delta_usage = data.get("usage", {})
-            if delta_usage:
+            if delta_usage and "_stream_usage" in current_tool_calls:
+                # Anthropic's message_delta.usage.output_tokens is CUMULATIVE
+                # for the whole request — record it as-is; emitted once at
+                # message_stop (audit S2.3).
+                current_tool_calls["_stream_usage"]["output_tokens"] = delta_usage.get("output_tokens", 0)
+
+        elif event_type == "message_stop":
+            pending = current_tool_calls.get("_stream_usage")
+            if pending:
+                # One merged, cumulative usage chunk per stream: input from
+                # message_start, output from the final message_delta.
                 events.append(
                     StreamChunk.usage_event(
                         Usage(
-                            input_tokens=0,
-                            output_tokens=delta_usage.get("output_tokens", 0),
+                            input_tokens=pending.get("input_tokens", 0),
+                            output_tokens=pending.get("output_tokens", 0),
+                            cache_read_tokens=pending.get("cache_read_tokens", 0),
+                            cache_creation_tokens=pending.get("cache_creation_tokens", 0),
                         )
                     )
                 )
-
-        elif event_type == "message_stop":
             events.append(StreamChunk.done())
 
         return events

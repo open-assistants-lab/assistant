@@ -11,6 +11,7 @@ Handles:
 
 from __future__ import annotations
 
+import codecs
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -56,6 +57,13 @@ class GeminiProvider(LLMProvider):
                 timeout=httpx.Timeout(self.timeout),
             )
         return self._http_client
+
+    async def aclose(self) -> None:
+        """Close the lazily-created httpx client, if any."""
+        client = self._http_client
+        if client is not None and not client.is_closed:
+            await client.aclose()
+        self._http_client = None
 
     def _messages_to_contents(self, messages: list[Message]) -> list[dict[str, Any]]:
         contents = []
@@ -113,7 +121,13 @@ class GeminiProvider(LLMProvider):
 
     def _url(self, model: str, stream: bool = False) -> str:
         method = "streamGenerateContent" if stream else "generateContent"
-        return f"{self.base_url}/models/{model}:{method}?key={self.api_key}"
+        url = f"{self.base_url}/models/{model}:{method}?key={self.api_key}"
+        if stream:
+            # alt=sse returns true SSE (`data: {json}` lines) instead of the
+            # bare newline-delimited array stream, so parsing is uniform and
+            # incremental (audit B6).
+            url += "&alt=sse"
+        return url
 
     async def chat(
         self,
@@ -168,12 +182,17 @@ class GeminiProvider(LLMProvider):
             return Message.assistant(content="")
         content = candidates[0].get("content", {})
         parts = content.get("parts", [])
-        text_parts = []
+        reasoning_parts: list[str] = []
+        text_parts: list[str] = []
         tool_calls = []
-        reasoning = None
         for part in parts:
-            if "text" in part:
-                text_parts.append(part["text"])
+            # Gemini 2.5+ thought parts carry BOTH 'text' and 'thought': the
+            # text is the reasoning content and must not leak into the visible
+            # answer. Pure-flag parts ({'thought': True} only) emit nothing.
+            if part.get("thought"):
+                thought_text = part.get("text", "")
+                if thought_text:
+                    reasoning_parts.append(thought_text)
             elif "functionCall" in part:
                 fc = part["functionCall"]
                 tool_calls.append(
@@ -183,18 +202,25 @@ class GeminiProvider(LLMProvider):
                         arguments=fc.get("args", {}),
                     )
                 )
-            elif "thought" in part:
-                reasoning = part["thought"]
+            elif "text" in part:
+                text_parts.append(part["text"])
         text = "\n".join(text_parts) if text_parts else ""
+
+        reasoning = "\n".join(reasoning_parts) if reasoning_parts else None
 
         usage = None
         usage_meta = data.get("usageMetadata")
         if usage_meta:
+            prompt = usage_meta.get("promptTokenCount", 0)
+            cached = usage_meta.get("cachedContentTokenCount", 0)
+            # Gemini's promptTokenCount includes cachedContentTokenCount; input
+            # must exclude cached tokens so CostTracker prices cache reads
+            # separately without double counting (audit S2.4).
             usage = Usage(
-                input_tokens=usage_meta.get("promptTokenCount", 0),
+                input_tokens=max(0, prompt - cached),
                 output_tokens=usage_meta.get("candidatesTokenCount", 0),
                 reasoning_tokens=usage_meta.get("thoughtsTokenCount", 0),
-                cache_read_tokens=usage_meta.get("cachedContentTokenCount", 0),
+                cache_read_tokens=cached,
             )
 
         result = Message.assistant(content=text, tool_calls=tool_calls, usage=usage)
@@ -229,30 +255,52 @@ class GeminiProvider(LLMProvider):
                     except Exception as e:
                         raise_if_context_overflow(e)
                         raise
+                    # alt=sse yields `data: {json}` lines. Decode bytes with an
+                    # incremental decoder so a multi-byte UTF-8 sequence split
+                    # across network chunks never corrupts a character (audit
+                    # B6 — the old per-chunk decode() could split é/emoji).
+                    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
                     buffer = ""
                     async for chunk_bytes in response.aiter_bytes():
-                        buffer += chunk_bytes.decode("utf-8")
-                        while "[\n" in buffer or "]\n" in buffer:
-                            chunk_str = buffer
-                            buffer = ""
-                            for line in chunk_str.split(",\n"):
-                                line = line.strip().strip("[]")
-                                if not line:
-                                    continue
-                                try:
-                                    data = json.loads(line)
-                                except json.JSONDecodeError:
-                                    continue
-                                for event in self._parse_stream_chunk(data, current_tool_calls):
-                                    if event.canonical_type in ("text_delta", "reasoning_delta", "tool_input_delta"):
-                                        emitted = True
-                                    yield event
+                        buffer += decoder.decode(chunk_bytes)
+                        while "\n" in buffer:
+                            line, buffer = buffer.split("\n", 1)
+                            for event in self._parse_sse_line(line, current_tool_calls):
+                                if event.canonical_type in (
+                                    "text_delta", "reasoning_delta", "tool_input_delta", "tool_input_start",
+                                ):
+                                    emitted = True
+                                yield event
+                    # Flush the final decoder state and any trailing line.
+                    buffer += decoder.decode(b"", final=True)
+                    for event in self._parse_sse_line(buffer, current_tool_calls):
+                        if event.canonical_type in (
+                                    "text_delta", "reasoning_delta", "tool_input_delta", "tool_input_start",
+                                ):
+                            emitted = True
+                        yield event
                 return
             except Exception as e:
                 if attempts == 0 and not emitted and is_timeout_error(e):
                     attempts += 1
                     continue
                 raise
+
+    def _parse_sse_line(
+        self, line: str, current_tool_calls: dict[int, dict[str, Any]]
+    ) -> list[StreamChunk]:
+        """Parse one SSE line (`data: <json>`) into stream events."""
+        line = line.strip()
+        if not line.startswith("data:"):
+            return []
+        data_str = line[5:].strip()
+        if not data_str:
+            return []
+        try:
+            data = json.loads(data_str)
+        except json.JSONDecodeError:
+            return []
+        return self._parse_stream_chunk(data, current_tool_calls)
 
     def _parse_stream_chunk(
         self, data: dict[str, Any], current_tool_calls: dict[int, dict[str, Any]]
@@ -263,6 +311,13 @@ class GeminiProvider(LLMProvider):
         We accumulate them in current_tool_calls and emit block-structured events.
         """
         events: list[StreamChunk] = []
+        if "error" in data:
+            # Mid-stream error objects (e.g. RESOURCE_EXHAUSTED) arrive as
+            # normal SSE data — surface them instead of silently ending the
+            # stream as an empty successful response (audit B6).
+            err = data.get("error")
+            message = err.get("message", "") if isinstance(err, dict) else str(err)
+            return [StreamChunk.error(message=message or "Gemini stream error")]
         candidates = data.get("candidates", [])
         if not candidates:
             return events
@@ -270,9 +325,15 @@ class GeminiProvider(LLMProvider):
         parts = content.get("parts", [])
 
         for part in parts:
-            if "text" in part:
-                events.append(StreamChunk.text_delta(content=part["text"]))
-                events.append(StreamChunk.ai_token(content=part["text"]))
+            # Gemini 2.5 thought parts carry BOTH 'text' and 'thought': the
+            # text is the reasoning content and must never leak into the
+            # visible answer. Pure-flag parts ({'thought': True} with no
+            # text) emit nothing. Never set reasoning to the boolean flag.
+            if part.get("thought"):
+                thought_text = part.get("text", "")
+                if thought_text:
+                    events.append(StreamChunk.reasoning_delta(content=thought_text))
+                    events.append(StreamChunk.reasoning(content=thought_text))
             elif "functionCall" in part:
                 fc = part["functionCall"]
                 idx = len(current_tool_calls)
@@ -309,23 +370,30 @@ class GeminiProvider(LLMProvider):
                         tool=fc.get("name", ""),
                     )
                 )
-            elif "thought" in part:
-                events.append(StreamChunk.reasoning_delta(content=part["thought"]))
-                events.append(StreamChunk.reasoning(content=part["thought"]))
+            elif "text" in part:
+                events.append(StreamChunk.text_delta(content=part["text"]))
+                events.append(StreamChunk.ai_token(content=part["text"]))
 
         finish_reason = candidates[0].get("finishReason")
         if finish_reason:
             events.append(StreamChunk.done())
 
         usage_meta = data.get("usageMetadata")
-        if usage_meta:
+        # Gemini reports cumulative totals on every chunk — emitting on each
+        # one would be summed by the loop into a ~50x overcount (audit S2.3).
+        # Report usage only on the terminal chunk (finishReason present).
+        if finish_reason and usage_meta:
+            prompt = usage_meta.get("promptTokenCount", 0)
+            cached = usage_meta.get("cachedContentTokenCount", 0)
             events.append(
                 StreamChunk.usage_event(
                     Usage(
-                        input_tokens=usage_meta.get("promptTokenCount", 0),
+                        # promptTokenCount includes cachedContentTokenCount —
+                        # subtract so CostTracker prices cache separately (audit S2.4).
+                        input_tokens=max(0, prompt - cached),
                         output_tokens=usage_meta.get("candidatesTokenCount", 0),
                         reasoning_tokens=usage_meta.get("thoughtsTokenCount", 0),
-                        cache_read_tokens=usage_meta.get("cachedContentTokenCount", 0),
+                        cache_read_tokens=cached,
                     )
                 )
             )

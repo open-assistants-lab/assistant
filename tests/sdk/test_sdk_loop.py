@@ -1292,6 +1292,42 @@ class TestUsageTracking:
         assert chunk.usage.input_tokens == 100
         assert chunk.usage.output_tokens == 50
 
+    async def test_cost_tracker_prices_cache_tokens(self):
+        """Cache read/write tokens are priced and counted toward budgets.
+
+        Anthropic bills cache reads at 0.1x and cache writes at 1.25x of the
+        input price; ignoring them under-reported cost and let long-context
+        runs blow past token budgets unnoticed (audit S2.4).
+        """
+        from src.sdk.loop import CostTracker
+        from src.sdk.providers.base import ModelCost
+
+        tracker = CostTracker()
+        cost = ModelCost(input=3.0, output=15.0, cache_read=0.3, cache_write=3.75)
+        tracker.add_usage(
+            input_tokens=1000,
+            output_tokens=100,
+            cache_read_tokens=50_000,
+            cache_creation_tokens=10_000,
+            cost=cost,
+        )
+        # 1k*3.0 + 100*15 + 50k*0.3 + 10k*3.75 (per million)
+        assert abs(tracker.total_cost_usd - (0.003 + 0.0015 + 0.015 + 0.0375)) < 1e-9
+        assert tracker.total_input_tokens == 61_000  # budget accounting includes cache
+        assert tracker.total_cache_read_tokens == 50_000
+        assert tracker.total_cache_creation_tokens == 10_000
+
+    async def test_cost_tracker_cache_tokens_count_toward_max_tokens_total(self):
+        """Cache tokens count toward max_tokens_total so long cached contexts trip the budget."""
+        from src.sdk.loop import CostTracker
+
+        tracker = CostTracker()
+        tracker.add_usage(input_tokens=900_000, cache_read_tokens=200_000)
+        assert (
+            tracker.exceeds_limits(RunConfig(max_tokens_total=1_000_000))
+            == "max_tokens_total (1000000) exceeded"
+        )
+
     async def test_streaming_usage_accumulation(self):
         """Usage chunks from streaming accumulate in CostTracker via CostTracker.add_usage()."""
         from src.sdk.loop import CostTracker
@@ -1303,6 +1339,83 @@ class TestUsageTracking:
         assert tracker.total_output_tokens == 125
         assert tracker.total_reasoning_tokens == 10
         assert tracker.llm_calls == 2
+
+    async def test_streaming_usage_fieldwise_last_nonzero(self, monkeypatch):
+        """Cumulative usage chunks REPLACE (not sum) per field per LLM call.
+
+        Providers emit cumulative values (Anthropic message_start input +
+        final message_delta output, Gemini finishReason chunk). Summing them
+        inflated totals ~50x on long streams (audit S2.3).
+        """
+        from src.sdk.loop import CostTracker
+
+        captured: dict[str, int] = {}
+        orig = CostTracker.add_usage
+
+        def spy(self, input_tokens=0, output_tokens=0, reasoning_tokens=0, cache_read_tokens=0, cache_creation_tokens=0, cost=None):
+            captured["input"] = input_tokens
+            captured["output"] = output_tokens
+            captured["cache_read"] = cache_read_tokens
+            return orig(
+                self,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                reasoning_tokens=reasoning_tokens,
+                cache_read_tokens=cache_read_tokens,
+                cache_creation_tokens=cache_creation_tokens,
+                cost=cost,
+            )
+
+        monkeypatch.setattr(CostTracker, "add_usage", spy)
+
+        provider = MockProvider()
+        provider.set_stream_events(
+            [
+                [
+                    StreamChunk.usage_event(Usage(input_tokens=100, output_tokens=0)),
+                    StreamChunk.usage_event(Usage(input_tokens=100, output_tokens=50)),
+                    StreamChunk.done(content="Hi"),
+                ]
+            ]
+        )
+        loop = AgentLoop(provider=provider, tools=[])
+        chunks = [c async for c in loop.run_stream([Message.user("Hi")])]
+
+        # Field-wise last-nonzero: the second chunk's cumulative input (100)
+        # does NOT double it to 200; output comes from the final chunk.
+        assert captured.get("input") == 100, captured
+        assert captured.get("output") == 50, captured
+        assert "done" in [c.type for c in chunks]
+
+    async def test_streaming_emits_single_merged_usage_per_round(self):
+        """Multiple usage chunks in one round yield EXACTLY ONE merged chunk.
+
+        RunService aggregates streaming usage per chunk with `calls + 1` —
+        that is only correct when each LLM round produces one cumulative
+        usage chunk (audit S2 fix round 1: openai's parser can emit usage on
+        both an empty-choices chunk and the finish_reason chunk, which would
+        double-count tokens AND calls). The loop owns the round boundary, so
+        it coalesces per-round usage into a single emission.
+        """
+        provider = MockProvider()
+        provider.set_stream_events(
+            [
+                [
+                    # openai-style double emission: empty-choices usage +
+                    # finish_reason chunk usage, both cumulative.
+                    StreamChunk.usage_event(Usage(input_tokens=100)),
+                    StreamChunk.usage_event(Usage(input_tokens=100, output_tokens=50)),
+                    StreamChunk.done(content="Hi"),
+                ]
+            ]
+        )
+        loop = AgentLoop(provider=provider, tools=[])
+        chunks = [c async for c in loop.run_stream([Message.user("Hi")])]
+
+        usage_chunks = [c for c in chunks if c.type == "usage"]
+        assert len(usage_chunks) == 1, [c.type for c in chunks]
+        assert usage_chunks[0].usage.input_tokens == 100
+        assert usage_chunks[0].usage.output_tokens == 50
 
     async def test_cost_tracker_add_usage_with_cost(self):
         """CostTracker correctly computes cost from ModelCost."""
@@ -1850,7 +1963,9 @@ class TestDuplicateToolCallGuard:
         result = await loop.run([Message.user("Say hi")])
 
         tool_res = [m for m in result if m.role == "tool"]
-        assert len(tool_res) == 1, "the duplicate call must NOT be re-executed"
+        # Synthetic duplicate answers don't count as executions (B1).
+        real_executions = [m for m in tool_res if not str(m.content).startswith("Duplicate call skipped")]
+        assert len(real_executions) == 1, "the duplicate call must NOT be re-executed"
         nudge_msgs = [m for m in result if m.role == "system" and "already called" in str(m.content)]
         assert len(nudge_msgs) == 1
         final = [m for m in result if m.role == "assistant" and m.content == "The result is: hi"]
@@ -1891,7 +2006,9 @@ class TestDuplicateToolCallGuard:
         result = await loop.run([Message.user("say")])
 
         tool_res = [m for m in result if m.role == "tool"]
-        assert len(tool_res) == 1, "only the first execution happens"
+        # Synthetic duplicate answers don't count as executions (B1).
+        real_executions = [m for m in tool_res if not str(m.content).startswith("Duplicate call skipped")]
+        assert len(real_executions) == 1, "only the first execution happens"
         finals = [m for m in result if m.role == "assistant" and m.content == "brief final"]
         assert finals, "the final response text must be used"
         # The final call must have been capped via provider options.
@@ -1945,6 +2062,204 @@ class TestDuplicateToolCallGuard:
         result = await loop.run(previous)
 
         tool_res = [m for m in result if m.role == "tool"]
-        assert len(tool_res) == 1, "the re-run must not re-execute the previous attempt's call"
+        # Synthetic duplicate answers don't count as executions (B1).
+        real_executions = [m for m in tool_res if not str(m.content).startswith("Duplicate call skipped")]
+        assert len(real_executions) == 1, "the re-run must not re-execute the previous attempt's call"
         nudge = [m for m in result if m.role == "system" and "already called" in str(m.content)]
         assert nudge, "the re-run should nudge instead of re-executing"
+
+    async def test_duplicate_nudge_appends_tool_results(self):
+        """B1: after a duplicate nudge, every dangling tool_call id must have a
+        tool result — strict provider APIs (OpenAI/Anthropic) reject an
+        assistant tool_calls block that is never answered."""
+        provider = MockProvider(
+            responses=[
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="call_1", name="echo", arguments={"text": "hi"})],
+                ),
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="call_2", name="echo", arguments={"text": "hi"})],
+                ),
+                Message.assistant(content="The result is: hi"),
+            ]
+        )
+        loop = AgentLoop(provider=provider, tools=[echo])
+        result = await loop.run([Message.user("Say hi")])
+
+        answered = {m.tool_call_id for m in result if m.role == "tool"}
+        for msg in result:
+            for tc in msg.tool_calls or []:
+                assert tc.id in answered, f"dangling tool_call {tc.id} without tool result"
+
+    async def test_duplicate_escalation_appends_tool_results(self):
+        """B1: the final-answer escalation branch (nudges >= max) must ALSO
+        answer the duplicate tool_calls before requesting the brief final
+        response — same provider-rejection hazard as the nudge branch."""
+        provider = MockProvider(
+            responses=[
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="c1", name="echo", arguments={"text": "x"})],
+                ),
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="c2", name="echo", arguments={"text": "x"})],
+                ),
+                Message.assistant(content="brief final"),
+            ]
+        )
+        loop = AgentLoop(
+            provider=provider,
+            tools=[echo],
+            run_config=RunConfig(max_duplicate_tool_nudges=0),
+        )
+        result = await loop.run([Message.user("say")])
+
+        answered = {m.tool_call_id for m in result if m.role == "tool"}
+        for msg in result:
+            for tc in msg.tool_calls or []:
+                assert tc.id in answered, f"dangling tool_call {tc.id} without tool result"
+        finals = [m for m in result if m.role == "assistant" and m.content == "brief final"]
+        assert finals, "the escalation must still produce the capped final answer"
+
+    async def test_streaming_duplicate_nudge_emits_tool_result_events(self):
+        """B1: the streaming twin must both persist the synthetic tool results
+        and yield tool_result events so clients see the duplicate being
+        answered."""
+        provider = MockProvider(
+            responses=[
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="c1", name="echo", arguments={"text": "x"})],
+                ),
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="c2", name="echo", arguments={"text": "x"})],
+                ),
+                Message.assistant(content="final answer"),
+            ]
+        )
+        loop = AgentLoop(provider=provider, tools=[echo])
+        chunks = [c async for c in loop.run_stream([Message.user("say")])]
+
+        answered = {
+            m.tool_call_id
+            for m in loop.state.messages
+            if m.role == "tool"
+        }
+        for msg in loop.state.messages:
+            for tc in msg.tool_calls or []:
+                assert tc.id in answered, f"dangling tool_call {tc.id} without tool result"
+        tr_events = [c for c in chunks if c.type == "tool_result" and c.call_id == "c2"]
+        assert tr_events, "the duplicate call must be answered on the wire too"
+
+    async def test_mixed_batch_executes_fresh_and_answers_duplicates(self):
+        """B1 fix round 1: a mixed batch (fresh + duplicate calls) must still
+        EXECUTE the fresh call — dropping it leaves its id unanswered, the
+        same hard-400 this guard exists to prevent."""
+        provider = MockProvider(
+            responses=[
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="c1", name="echo", arguments={"text": "x"})],
+                ),
+                Message.assistant(
+                    content="",
+                    tool_calls=[
+                        ToolCall(id="c2", name="echo", arguments={"text": "x"}),
+                        ToolCall(id="c3", name="echo", arguments={"text": "fresh-args"}),
+                    ],
+                ),
+                Message.assistant(content="done"),
+            ]
+        )
+        loop = AgentLoop(provider=provider, tools=[echo])
+        result = await loop.run([Message.user("say")])
+
+        real = [
+            m for m in result
+            if m.role == "tool" and not str(m.content).startswith("Duplicate call skipped")
+        ]
+        assert len(real) == 2, "both the original AND the fresh call must execute"
+        assert any("fresh-args" in str(m.content) for m in real), "the fresh call must run with its own args"
+        answered = {m.tool_call_id for m in result if m.role == "tool"}
+        assert {"c1", "c2", "c3"} <= answered, "every id must be answered"
+        nudge = [m for m in result if m.role == "system" and "already called" in str(m.content)]
+        assert nudge, "the model should still be nudged off the duplicate"
+
+    async def test_streaming_mixed_batch_executes_fresh_and_answers_duplicates(self):
+        """B1 fix round 1 (streaming twin): fresh call executes on the wire,
+        duplicate gets its tool_result event, no id left unanswered."""
+        provider = MockProvider()
+        # Realistic stream events: args arrive via tool_input_delta (the loop
+        # accumulates deltas; tool_input_start args alone don't populate).
+        provider.set_stream_events([
+            [
+                StreamChunk.tool_input_start(tool="echo", call_id="c1"),
+                StreamChunk.tool_input_delta(call_id="c1", content='{"text": "x"}'),
+                StreamChunk.tool_input_end(call_id="c1", tool="echo"),
+                StreamChunk.done(content=""),
+            ],
+            [
+                StreamChunk.tool_input_start(tool="echo", call_id="c2"),
+                StreamChunk.tool_input_delta(call_id="c2", content='{"text": "x"}'),
+                StreamChunk.tool_input_end(call_id="c2", tool="echo"),
+                StreamChunk.tool_input_start(tool="echo", call_id="c3"),
+                StreamChunk.tool_input_delta(call_id="c3", content='{"text": "fresh-args"}'),
+                StreamChunk.tool_input_end(call_id="c3", tool="echo"),
+                StreamChunk.done(content=""),
+            ],
+            [StreamChunk.done(content="done")],
+        ])
+        loop = AgentLoop(provider=provider, tools=[echo])
+        chunks = [c async for c in loop.run_stream([Message.user("say")])]
+
+        answered = {m.tool_call_id for m in loop.state.messages if m.role == "tool"}
+        for msg in loop.state.messages:
+            for tc in msg.tool_calls or []:
+                assert tc.id in answered, f"dangling tool_call {tc.id} without tool result"
+        starts = [c.call_id for c in chunks if c.type == "tool_input_start"]
+        assert "c3" in starts, "the fresh call must be executed on the wire"
+        assert any(c.type == "tool_result" and c.call_id == "c2" for c in chunks), \
+            "the duplicate must be answered on the wire"
+
+
+class TestP3MeasurementReuse:
+    """Audit P3: prepared-snapshot token counts are measured once per call."""
+
+    async def test_prepared_context_measured_once_not_twice(self):
+        """_prepare_agent_call threads its snapshot; _record_agent_call must not re-tokenize."""
+        measured = []
+
+        def measurer(**kwargs):
+            measured.append((kwargs["llm_call_index"], kwargs["source"]))
+            return _measured_snapshot(**kwargs)
+
+        loop = AgentLoop(
+            provider=MockProvider([Message.assistant("ok")]),
+            tools=[echo],
+            context_measurer=measurer,
+        )
+        await loop.run([Message.user("go")])
+        # one call: before (pre-hook) + prepared snapshot (threaded) = exactly 2
+        prepared = [m for m in measured if m[1] is ContextSource.PREPARED_CONTEXT]
+        assert len(prepared) == 2
+        assert [idx for idx, _ in prepared] == [1, 1]
+
+    async def test_compressed_prepared_snapshot_is_after_context(self):
+        """Compressed path reuses the same prepared snapshot for telemetry + record."""
+        observed = []
+
+        def measurer(**kwargs):
+            return _measured_snapshot(**kwargs)
+
+        loop = AgentLoop(
+            provider=MockProvider([Message.assistant("done")]),
+            middlewares=[ScriptedCompressionMiddleware(automatic=True)],
+            compression_sink=observed.append,
+            context_measurer=measurer,
+        )
+        await loop.run([Message.user("history")])
+        assert observed[0].after_context is loop.last_call_context

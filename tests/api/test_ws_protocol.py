@@ -2,6 +2,7 @@
 
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from starlette.websockets import WebSocketDisconnect
@@ -202,6 +203,126 @@ class TestParseServerMessage:
         assert msg is None
 
 
+class TestParseServerEnvelope:
+    """Canonical-envelope parsing (audit E-streaming).
+
+    Every frame emitted by the routers (via make_run_event_factory) must
+    parse through parse_server_envelope — the wire contract test F1.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "sequence",
+        [
+            [("text_start",)] + [("text_delta", f"t{i}") for i in range(2)] + [("text_end",)],
+            [("reasoning_start",)] + [("reasoning_delta", f"r{i}") for i in range(2)] + [("reasoning_end",)],
+            [("tool_input_start",)],
+            [("tool_result",)],
+            [("interrupt",)],
+            [("done",)],
+            [("error",)],
+        ],
+        ids=["text_block", "reasoning_block", "tool_input", "tool_result", "interrupt", "done", "error"],
+    )
+    async def test_every_emitted_frame_parses(self, monkeypatch, sequence):
+        """Contract: every emitted server frame parses via the protocol parser."""
+        from src.http.ws_protocol import parse_server_envelope
+        from src.sdk.messages import StreamChunk
+
+        def _chunk(spec):
+            if isinstance(spec, str):
+                if spec == "tool_result":
+                    return StreamChunk.tool_result_event("email_list", "call-1", "rows")
+                if spec == "interrupt":
+                    return StreamChunk.interrupt("files_delete", "call-2", {"path": "x"})
+                if spec == "done":
+                    return StreamChunk.done("final")
+                if spec == "error":
+                    return StreamChunk.error("boom")
+            kind, payload = spec
+            if kind == "text_start":
+                return StreamChunk.text_start()
+            if kind == "text_delta":
+                return StreamChunk.text_delta(payload)
+            if kind == "text_end":
+                return StreamChunk.text_end()
+            if kind == "reasoning_start":
+                return StreamChunk.reasoning_start()
+            if kind == "reasoning_delta":
+                return StreamChunk.reasoning_delta(payload)
+            if kind == "reasoning_end":
+                return StreamChunk.reasoning_end()
+            if kind == "tool_input_start":
+                return StreamChunk.tool_input_start("email_list", "call-1")
+            raise AssertionError(f"unhandled spec {spec}")
+
+        async def fake_run_sdk_agent_stream(**kwargs):
+            for spec in sequence:
+                yield _chunk(spec)
+
+        monkeypatch.setattr(
+            ws_router.RunService,
+            "execute_stream",
+            make_run_event_factory(fake_run_sdk_agent_stream),
+        )
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.sent = []
+
+            async def send_json(self, payload):
+                self.sent.append(payload)
+
+        websocket = FakeWebSocket()
+        await ws_router._run_agent_stream(
+            websocket, "test_user", [], object(), session_id="chat-1"
+        )
+
+        assert websocket.sent, "no frames emitted"
+        for frame in websocket.sent:
+            parsed = parse_server_envelope(frame)
+            assert parsed is not None, f"frame did not parse: {frame.get('type')}"
+
+    @pytest.mark.asyncio
+    async def test_failed_tool_chunk_renders_status_failed_end_to_end(self, monkeypatch):
+        """Audit F2: is_error=True on a tool_result chunk must surface as
+        status='failed' in the emitted ToolResultData envelope."""
+        from src.sdk.messages import StreamChunk
+
+        class FakeConversation:
+            def add_message(self, *args, **kwargs):
+                return "msg-1"
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.sent = []
+
+            async def send_json(self, payload):
+                self.sent.append(payload)
+
+        async def fake_run_sdk_agent_stream(**kwargs):
+            yield StreamChunk.tool_input_start("email_list", "call-1")
+            yield StreamChunk.tool_result_event("email_list", "call-1", "boom", is_error=True)
+            yield StreamChunk.done()
+
+        monkeypatch.setattr(
+            ws_router.RunService,
+            "execute_stream",
+            make_run_event_factory(fake_run_sdk_agent_stream),
+        )
+
+        websocket = FakeWebSocket()
+        await ws_router._run_agent_stream(
+            websocket, "test_user", [], FakeConversation(), session_id="chat-1"
+        )
+
+        tool_results = [m for m in websocket.sent if m.get("type") == "tool_result"]
+        assert tool_results
+        assert tool_results[0]["data"]["status"] == "failed"
+        assert tool_results[0]["data"]["name"] == "email_list"
+        assert tool_results[0]["data"]["content"] == "boom"
+
+
 class TestMessageSerialization:
     """Tests for JSON round-trip of messages."""
 
@@ -298,7 +419,7 @@ class TestWebSocketPersistence:
                 verification=SimpleNamespace(enabled=False),
             ),
         )
-        monkeypatch.setattr(ws_router, "get_message_store", lambda *args: Store())
+        monkeypatch.setattr(ws_router, "aget_message_store", AsyncMock(return_value=Store()))
         monkeypatch.setattr(ws_router, "_run_agent_stream", fake_run_agent_stream)
 
         await ws_router.ws_conversation(FakeWebSocket())
@@ -507,7 +628,9 @@ class TestWebSocketPersistence:
         )
 
         tool_result_payloads = [m for m in websocket.sent if m.get("type") == "tool_result"]
-        assert [m["result_preview"] for m in tool_result_payloads] == ["canonical"]
+        # Canonical envelope (audit E-streaming): tool results travel as
+        # RunEvent envelopes with the payload under "data".
+        assert [m["data"]["content"] for m in tool_result_payloads] == ["canonical"]
         # The router forwards the canonical result but does not persist it on
         # success — RunService.persist_run owns the tool audit records.
         assert [args for args, kwargs in conversation.calls if args[0] == "tool"] == []
@@ -555,12 +678,15 @@ class TestWebSocketPersistence:
             (
                 ("tool", "noon"),
                 {
-                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1"},
+                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1", "run_id": "r1"},
                     "session_id": "chat-1",
                 },
             ),
-            (("reasoning", "thinking"), {"metadata": {}, "session_id": "chat-1"}),
-            (("assistant", "partial"), {"metadata": {"stream": True}, "session_id": "chat-1"}),
+            (("reasoning", "thinking"), {"metadata": {"run_id": "r1"}, "session_id": "chat-1"}),
+            (
+                ("assistant", "partial"),
+                {"metadata": {"stream": True, "run_id": "r1"}, "session_id": "chat-1"},
+            ),
         ]
 
     @pytest.mark.asyncio
@@ -666,9 +792,20 @@ class TestWebSocketPersistence:
         class FakeLoop:
             def __init__(self):
                 self.approved = []
+                self.executed = None
 
             def approve_tool_call(self, tool_call):
                 self.approved.append(tool_call)
+
+            async def _execute_tool(self, tool_call):
+                # The approved tool is executed directly (audit B4): record it
+                # so the test can assert args + call id of the plain-approve.
+                self.executed = tool_call
+                return _FakeResult("deleted")
+
+        class _FakeResult:
+            def __init__(self, content):
+                self.content = content
 
         class FakeConversation:
             def add_message(self, *args, **kwargs):
@@ -710,6 +847,8 @@ class TestWebSocketPersistence:
             async def send_json(self, payload):
                 self.sent.append(payload)
 
+        loop = FakeLoop()
+
         async def fake_run_agent_stream(*args, **kwargs):
             nonlocal stream_calls
             stream_calls += 1
@@ -719,14 +858,14 @@ class TestWebSocketPersistence:
 
         async def fake_get_sdk_loop(*args, **kwargs):
             captured_calls.append((args, kwargs))
-            return FakeLoop()
+            return loop
 
         monkeypatch.setattr(
             ws_router,
             "get_settings",
             lambda: SimpleNamespace(auth=SimpleNamespace(api_key="", solo_bypass=True)),
         )
-        monkeypatch.setattr(ws_router, "get_message_store", lambda *args, **kwargs: FakeConversation())
+        monkeypatch.setattr(ws_router, "aget_message_store", AsyncMock(return_value=FakeConversation()))
         monkeypatch.setattr(ws_router, "_run_agent_stream", fake_run_agent_stream)
         monkeypatch.setattr(ws_router, "get_sdk_loop", fake_get_sdk_loop)
 
@@ -735,6 +874,12 @@ class TestWebSocketPersistence:
         assert captured_calls
         assert captured_calls[0][1]["session_id"] == "chat-1"
         assert history_calls == [("chat-1", 50), ("chat-1", 50)]
+        # B4: the plain-approve path executes the pending call directly.
+        assert loop.approved[0].arguments == {}
+        assert loop.executed is not None
+        assert loop.executed.name == "files_delete"
+        assert loop.executed.arguments == {}
+        assert loop.executed.id == "call-1"
 
     @pytest.mark.asyncio
     async def test_ws_cancel_sets_running_stream_cancel_event(self, monkeypatch):
@@ -778,7 +923,7 @@ class TestWebSocketPersistence:
             "get_settings",
             lambda: SimpleNamespace(auth=SimpleNamespace(api_key="", solo_bypass=True)),
         )
-        monkeypatch.setattr(ws_router, "get_message_store", lambda *args, **kwargs: FakeConversation())
+        monkeypatch.setattr(ws_router, "aget_message_store", AsyncMock(return_value=FakeConversation()))
         monkeypatch.setattr(ws_router, "_run_agent_stream", fake_run_agent_stream)
 
         websocket = FakeWebSocket()
@@ -838,7 +983,7 @@ class TestWebSocketPersistence:
             "get_settings",
             lambda: SimpleNamespace(auth=SimpleNamespace(api_key="", solo_bypass=True)),
         )
-        monkeypatch.setattr(ws_router, "get_message_store", lambda *args, **kwargs: FakeConversation())
+        monkeypatch.setattr(ws_router, "aget_message_store", AsyncMock(return_value=FakeConversation()))
         monkeypatch.setattr(ws_router, "_run_agent_stream", fake_run_agent_stream)
 
         websocket = FakeWebSocket()
@@ -963,9 +1108,20 @@ class TestWebSocketPersistence:
         class FakeLoop:
             def __init__(self):
                 self.approved = []
+                self.executed = None
 
             def approve_tool_call(self, tool_call):
                 self.approved.append(tool_call)
+
+            async def _execute_tool(self, tool_call):
+                # The approved tool is now executed directly (audit B4):
+                # record it so the test can assert edited args + call id.
+                self.executed = tool_call
+                return _FakeResult("deleted")
+
+        class _FakeResult:
+            def __init__(self, content):
+                self.content = content
 
         class FakeConversation:
             def add_message(self, *args, **kwargs):
@@ -1032,7 +1188,7 @@ class TestWebSocketPersistence:
             "get_settings",
             lambda: SimpleNamespace(auth=SimpleNamespace(api_key="", solo_bypass=True)),
         )
-        monkeypatch.setattr(ws_router, "get_message_store", lambda *args, **kwargs: FakeConversation())
+        monkeypatch.setattr(ws_router, "aget_message_store", AsyncMock(return_value=FakeConversation()))
         monkeypatch.setattr(ws_router, "_run_agent_stream", fake_run_agent_stream)
         monkeypatch.setattr(ws_router, "get_sdk_loop", fake_get_sdk_loop)
 
@@ -1040,6 +1196,12 @@ class TestWebSocketPersistence:
 
         assert stream_calls == 2
         assert loop.approved[0].arguments == {"path": "/edited"}
+        # B4: the edited args are executed directly under the original
+        # call_id instead of being re-proposed to the model.
+        assert loop.executed is not None
+        assert loop.executed.name == "files_delete"
+        assert loop.executed.arguments == {"path": "/edited"}
+        assert loop.executed.id == "call-1"
         assert history_calls == [("session-a", 50), ("session-a", 50)]
 
     @pytest.mark.asyncio
@@ -1092,7 +1254,7 @@ class TestWebSocketPersistence:
             "get_settings",
             lambda: SimpleNamespace(auth=SimpleNamespace(api_key="", solo_bypass=True)),
         )
-        monkeypatch.setattr(ws_router, "get_message_store", lambda *args, **kwargs: FakeConversation())
+        monkeypatch.setattr(ws_router, "aget_message_store", AsyncMock(return_value=FakeConversation()))
         monkeypatch.setattr(ws_router, "_run_agent_stream", fake_run_agent_stream)
         monkeypatch.setattr(ws_router, "get_sdk_loop", fake_get_sdk_loop)
 
@@ -1265,10 +1427,137 @@ class TestWebSocketPersistence:
             "get_settings",
             lambda: SimpleNamespace(auth=SimpleNamespace(api_key="", solo_bypass=True)),
         )
-        monkeypatch.setattr(ws_router, "get_message_store", lambda *args, **kwargs: FakeConversation())
+        monkeypatch.setattr(ws_router, "aget_message_store", AsyncMock(return_value=FakeConversation()))
         monkeypatch.setattr(ws_router, "_run_agent_stream", fake_run_agent_stream)
 
         await ws_router.ws_conversation(FakeWebSocket())
 
         assert captured["cancel_event"].is_set()
         assert captured["cleaned_up"] is True
+
+
+class TestFailedRunSinglePersistWS:
+    """Audit B11 (WS transport): a failed run's done event must not trigger
+    the router fallback collector — RunService already persisted with run_id."""
+
+    @pytest.mark.asyncio
+    async def test_ws_failed_done_does_not_double_persist(self, monkeypatch):
+        import json as _json
+        from datetime import UTC, datetime
+
+        from src.http.routers import ws as ws_router
+        from src.sdk.run_events import (
+            DoneData,
+            DoneEvent,
+            ToolInputStartEvent,
+            ToolResultData,
+            ToolResultEvent,
+            ToolStartData,
+        )
+        from src.sdk.run_models import (
+            RunResult,
+            RunStatus,
+            RunUsage,
+            VerificationOutcome,
+        )
+
+        common = dict(
+            event_id="e1", sequence=1, timestamp="2026-01-01T00:00:00Z",
+            session_id="chat-1", run_id="r-b11", attempt=1,
+        )
+        result = RunResult(
+            run_id="r-b11",
+            session_id="chat-1",
+            status=RunStatus.FAILED,
+            attempt=1,
+            model="test:model",
+            response="",
+            final_message_id="msg-persisted",
+            usage=RunUsage(),
+            verification=VerificationOutcome(),
+            persisted_at=datetime.now(UTC),
+        )
+
+        async def fake_execute_stream(self, **kwargs):
+            yield ToolInputStartEvent(
+                data=ToolStartData(block_id="b1", tool_call_id="c1", name="files_delete"),
+                **common,
+            )
+            yield ToolResultEvent(
+                data=ToolResultData(
+                    block_id="b1", tool_call_id="c1", name="files_delete",
+                    status="completed", content="rows",
+                ),
+                **common,
+            )
+            yield DoneEvent(data=DoneData(result=result), **common)
+
+        calls: list[dict] = []
+
+        async def spy_persist(*args, **kwargs):
+            calls.append(kwargs)
+
+        class FakeConversation:
+            def add_message(self, *args, **kwargs):
+                return "msg-1"
+
+            def get_messages_with_summary(self, *, session_id, limit):
+                return []
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.messages = [
+                    _json.dumps(
+                        {
+                            "type": "user_message",
+                            "content": "go",
+                            "user_id": "test_user",
+                            "workspace_id": "personal",
+                            "session_id": "chat-1",
+                        }
+                    ),
+                ]
+                self.sent = []
+
+            async def accept(self):
+                pass
+
+            async def receive_text(self):
+                if not self.messages:
+                    raise WebSocketDisconnect()
+                return self.messages.pop(0)
+
+            async def send_json(self, payload):
+                self.sent.append(payload)
+
+        async def fake_run_agent_stream(*args, **kwargs):
+            async for ev in fake_execute_stream(None):
+                yield ev
+
+        monkeypatch.setattr(ws_router, "aget_message_store", AsyncMock(return_value=FakeConversation()))
+        monkeypatch.setattr(
+            ws_router.RunService, "execute_stream", lambda self, **kwargs: fake_run_agent_stream()
+        )
+        monkeypatch.setattr(ws_router, "_persist_collected_stream_state", spy_persist)
+
+        ws = FakeWebSocket()
+        await ws_router.ws_conversation(ws)
+
+        assert calls == [], "failed done must NOT re-persist already-persisted state"
+        # The failure surfaces to the client even without the fallback write.
+        assert any(p.get("code") == "AGENT_ERROR" for p in ws.sent)
+
+
+class TestToolInputEndHonestMapping:
+    """P2-3: tool_input_end flat projection must never fabricate an empty name."""
+
+    def test_parse_tool_input_end_has_no_fabricated_tool_name(self):
+        from src.http.ws_protocol import parse_server_envelope
+
+        parsed = parse_server_envelope(
+            {"type": "tool_input_end", "data": {"tool_call_id": "call-9"}}
+        )
+        assert parsed is not None
+        assert getattr(parsed, "call_id", None) == "call-9"
+        # ToolEndData carries no tool name; "" must never be fabricated.
+        assert parsed.tool != ""

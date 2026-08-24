@@ -10,6 +10,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from src.config import get_settings
+from src.config.settings import REPO_ROOT
 from src.http.routers import (
     capabilities,
     contacts_router,
@@ -31,8 +33,9 @@ from src.http.routers import (
 from src.http.routers.connectors import router as connectors_router
 from src.http.routers.settings import router as settings_router
 from src.http.routers.ws import router as ws_router
+from src.storage.paths import DEFAULT_USER_ID
 
-load_dotenv()
+load_dotenv(REPO_ROOT / ".env")
 
 
 @asynccontextmanager
@@ -48,6 +51,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Start companion scheduler if enabled
     try:
         from src.app_logging import get_logger
+
         from src.config import get_settings
         settings = get_settings()
         if getattr(settings.companion, "enabled", False):
@@ -73,8 +77,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     from connectkit.bridge import ConnectKitBridge
                     bridge = ConnectKitBridge("system")
                     await bridge.refresh_all()
-                except Exception:
-                    pass
+                except Exception as e:
+                    from src.app_logging import get_logger as _gl
+
+                    _gl().warning(
+                        "connectkit.refresh_failed",
+                        {"error": str(e), "error_type": type(e).__name__},
+                    )
 
         try:
             loop = asyncio.get_event_loop()
@@ -94,6 +103,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if _token_refresh_task is not None:
             _token_refresh_task.cancel()
             get_logger().info("scheduler.stopped", {}, user_id="system")
+    except Exception:
+        pass
+
+    # Close cached provider HTTP clients (audit S3) so sockets are released
+    # deterministically instead of waiting on GC.
+    try:
+        from src.sdk.providers.factory import close_all_providers
+
+        await close_all_providers()
     except Exception:
         pass
 
@@ -125,22 +143,62 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-    allow_credentials=True,
-)
+# CORS (audit B17): wildcard origins combined with allow_credentials lets any
+# site ride authenticated sessions. Trust only explicitly configured origins;
+# with none configured, stay permissive but credential-free.
+_trusted_origins = [
+    o.strip()
+    for o in get_settings().auth.cors_origins.split(",")
+    if o.strip()
+]
+if _trusted_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_trusted_origins,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        allow_credentials=True,
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+        allow_credentials=False,
+    )
 
 
-_PUBLIC_PATHS = {"/health", "/health/ready", "/docs", "/redoc", "/openapi.json"}
+_PUBLIC_PATHS = {
+    "/health",
+    "/health/ready",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+    # Browser-initiated OAuth redirects carry no Bearer token (audit E24).
+    # Exact paths only — the in-app connector guard still rejects
+    # unconfigured services with 400.
+    "/auth/login",
+    "/auth/callback",
+}
+
+
+def _is_webhook_fire_path(path: str) -> bool:
+    """True for POST /webhooks/{trigger_id} — the fire endpoint only.
+
+    Audit E24: external webhook callers have no Bearer token; this path is
+    exempt from API-key auth and instead enforces a per-trigger secret in
+    the router (X-Webhook-Secret). Subpaths such as /webhooks/{id}/secret
+    (secret registration) deliberately keep Bearer auth.
+    """
+    parts = [p for p in path.split("/") if p]
+    return len(parts) == 2 and parts[0] == "webhooks"
 
 
 @app.middleware("http")
 async def api_key_auth_middleware(request: Request, call_next: Any) -> Any:
     """Apply API-key auth consistently across HTTP routes."""
-    if request.url.path in _PUBLIC_PATHS:
+    if request.url.path in _PUBLIC_PATHS or _is_webhook_fire_path(request.url.path):
         return await call_next(request)
 
     from src.config.settings import get_settings
@@ -184,7 +242,13 @@ try:
     from connectkit.spec import ConnectorSpec
 
     def _vault_factory(user_id: str) -> Any:
-        bridge = ConnectKitBridge(user_id)
+        # Audit E24 fix-round: /auth/login is PUBLIC, so its client-supplied
+        # user_id has no authority — honouring it would let an attacker
+        # plant their provider token into an arbitrary user's credential
+        # vault (login-CSRF). This deployment model is one owner per process
+        # (container-per-user), so every OAuth-router vault operation binds
+        # to the deployment owner regardless of query parameters.
+        bridge = ConnectKitBridge(DEFAULT_USER_ID)
         return bridge.vault
 
     # Load specs once — shared between config provider and oauth router
@@ -207,13 +271,12 @@ try:
 
     from src.config import get_settings as _get_settings
 
-    # The uvicorn bind below is 8080 (native app contract), and config.yaml's
-    # api.port is not necessarily the bind port (config.yaml init-kwargs beat
-    # env in pydantic-settings). So default the OAuth redirect base to the
-    # actual bind port; deployments behind a public URL must set
-    # API_PUBLIC_URL explicitly.
+    # Default the OAuth redirect base to the configured bind port —
+    # get_settings() applies API_HOST/API_PORT env over yaml (audit E22), so
+    # this tracks whichever source is authoritative. Deployments behind a
+    # public URL must set API_PUBLIC_URL explicitly.
     _api_settings = _get_settings().api
-    _oauth_base_url = _api_settings.public_url or "http://localhost:8080"
+    _oauth_base_url = _api_settings.public_url or f"http://localhost:{_api_settings.port}"
 
     @app.middleware("http")
     async def _guard_oauth_login(request: Request, call_next: Any) -> Any:
@@ -234,6 +297,7 @@ try:
             )
             if error is not None:
                 return JSONResponse(status_code=400, content={"detail": error})
+
         return await call_next(request)
 
     oauth_router = create_oauth_router(
@@ -252,10 +316,18 @@ app.include_router(connectors_router)
 
 
 def run() -> None:
-    """Run the HTTP server."""
+    """Run the HTTP server.
+
+    Binds settings.api.host/port (audit E22): docker-compose sets
+    API_PORT/API_HOST env which beats yaml; local dev uses the yaml value
+    (8080 — the native-app contract)."""
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    from src.config import get_settings
+
+    cfg = get_settings()
+    print(f"Starting assistant HTTP API on {cfg.api.host}:{cfg.api.port}")
+    uvicorn.run(app, host=cfg.api.host, port=cfg.api.port)
 
 
 if __name__ == "__main__":

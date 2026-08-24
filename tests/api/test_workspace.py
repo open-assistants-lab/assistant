@@ -74,6 +74,13 @@ class TestWorkspaceDeletionAndRecreation:
         deleted = []
         workspace = Workspace(id="project", name="Project")
 
+        class FakeStore:
+            def delete_messages_for_workspace(self, workspace_id):
+                return 3
+
+            def get_sessions(self):
+                return []
+
         monkeypatch.setattr(workspaces_router, "load_workspace", lambda workspace_id, user_id=None: workspace)
         monkeypatch.setattr(
             workspaces_router,
@@ -86,12 +93,62 @@ class TestWorkspaceDeletionAndRecreation:
             lambda user_id, reason=None: calls.append((user_id, reason)),
             raising=False,
         )
+        monkeypatch.setattr(
+            workspaces_router,
+            "get_message_store",
+            lambda user_id: FakeStore(),
+        )
 
         result = await workspaces_router.delete_workspace_endpoint("project", user_id="test_user")
 
-        assert result == {"status": "deleted", "messages_deleted": 0}
+        assert result == {"status": "deleted", "messages_deleted": 3}
         assert deleted == [("project", "test_user")]
         assert calls == [("test_user", "workspace_deleted:project")]
+
+    @pytest.mark.asyncio
+    async def test_delete_workspace_purges_workspace_messages(self, monkeypatch):
+        """Audit E7: deleting a workspace purges its messages and reports the count."""
+        workspace = Workspace(id="llm", name="LLM")
+        monkeypatch.setattr(workspaces_router, "load_workspace", lambda workspace_id, user_id=None: workspace)
+        monkeypatch.setattr(workspaces_router, "_delete_ws", lambda workspace_id, user_id=None: None)
+        monkeypatch.setattr(
+            workspaces_router, "reset_user_sdk_loops", lambda user_id, reason=None: None, raising=False
+        )
+
+        store = get_message_store("test_user")
+        store.clear()
+        store.add_message("user", "ws msg 1", metadata={"workspace_id": "llm"}, session_id="s1")
+        store.add_message("assistant", "ws msg 2", metadata={"workspace_id": "llm"}, session_id="s1")
+        store.add_message("user", "other ws", metadata={"workspace_id": "other"}, session_id="s2")
+
+        result = await workspaces_router.delete_workspace_endpoint("llm", user_id="test_user")
+
+        assert result == {"status": "deleted", "messages_deleted": 2}
+        remaining = store.get_messages_with_summary("s1", limit=50)
+        assert remaining == []
+        other = store.get_messages_with_summary("s2", limit=50)
+        assert len(other) == 1
+
+    @pytest.mark.asyncio
+    async def test_delete_workspace_purges_legacy_sessions(self, monkeypatch):
+        """Audit E7: legacy-{ws}-* imported sessions are purged on workspace delete."""
+        workspace = Workspace(id="llm", name="LLM")
+        monkeypatch.setattr(workspaces_router, "load_workspace", lambda workspace_id, user_id=None: workspace)
+        monkeypatch.setattr(workspaces_router, "_delete_ws", lambda workspace_id, user_id=None: None)
+        monkeypatch.setattr(
+            workspaces_router, "reset_user_sdk_loops", lambda user_id, reason=None: None, raising=False
+        )
+
+        store = get_message_store("test_user")
+        store.clear()
+        store.add_message("user", "legacy msg", session_id="legacy-llm-s1")
+        store.add_message("user", "unrelated", session_id="legacy-other-s1")
+
+        result = await workspaces_router.delete_workspace_endpoint("llm", user_id="test_user")
+
+        assert result == {"status": "deleted", "messages_deleted": 1}
+        assert store.get_messages_with_summary("legacy-llm-s1", limit=50) == []
+        assert len(store.get_messages_with_summary("legacy-other-s1", limit=50)) == 1
 
     def test_workspace_metadata_is_isolated_per_user(self, client, test_user_id, test_user_id_2):
         r = client.post("/workspaces", params={"user_id": test_user_id}, json={"name": "Private"})

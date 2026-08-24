@@ -4,10 +4,12 @@ Thin adapter over MemoryCore, preserving the
 Message/SearchResult dataclasses and public API for callers.
 """
 
+import asyncio
 import base64
 import json
 import sqlite3
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -113,14 +115,95 @@ class MessageStore:
         except Exception:
             pass
 
+        # Audit P1: VIRTUAL generated columns + indexes for the common
+        # json_extract probes (run_id on persist, workspace_id on deletes).
+        # Runs AFTER MemoryCore so the messages table exists, and BEFORE
+        # register_duckdb_table so the DuckDB mirror picks up the columns.
+        self._generated_columns = self._migrate_generated_columns(base_path)
+
         try:
             self._core.db.register_duckdb_table("messages")
         except Exception:
             pass
 
+        # Audit P2: per-session cache of the newest valid summary
+        # (rowid + provenance). Append-safe: plain add_message never
+        # invalidates (a summary rowid is append-safe; provenance only
+        # references rows below it). Invalidated ONLY via
+        # _invalidate_summary_cache() at summary-relevant writes:
+        # add_summary_message / delete_session /
+        # delete_messages_for_workspace / clear().
+        #
+        # Staleness contract (P2-5): the cache is NOT invalidated by direct
+        # SQL writes to the `messages` table from outside this class (tests,
+        # migrations, manual edits). Any such path that adds/removes a summary
+        # row MUST call _invalidate_summary_cache() afterwards.
+        self._summary_cache: dict[
+            str, tuple[int, tuple[set[str], set[str]]] | None
+        ] = {}
+
+    def _invalidate_summary_cache(self, session_id: str | None = None) -> None:
+        """Single entry point for summary-cache invalidation.
+
+        With session_id: drop only that session's entry. Without: clear all
+        (used by delete_session / delete_messages_for_workspace / clear(),
+        which affect many sessions). Direct out-of-band SQL writers must call
+        this too — see the staleness contract on _summary_cache.
+        """
+        if session_id is None:
+            self._summary_cache.clear()
+        else:
+            self._summary_cache.pop(session_id, None)
+
     @property
     def core(self) -> MemoryCore:
         return self._core
+
+    @staticmethod
+    def _migrate_generated_columns(base_path: Path) -> bool:
+        """Add VIRTUAL generated columns for run_id/workspace_id + indexes.
+
+        The messages table is created by CoreMem/HybridDB; generated columns
+        must be added with ALTER TABLE once the table exists (after MemoryCore
+        init). Returns True when the columns are present and usable, False when
+        the running SQLite lacks generated-column support (probes then fall
+        back to json_extract).
+        """
+        db_path = base_path / "app.db"
+        if not db_path.exists():
+            return False
+        conn = None
+        try:
+            conn = sqlite3.connect(str(db_path))
+            existing = {
+                r[1] for r in conn.execute("PRAGMA table_info('messages')")
+            }
+            if "run_id" not in existing:
+                conn.execute(
+                    "ALTER TABLE messages ADD COLUMN run_id TEXT "
+                    "GENERATED ALWAYS AS (json_extract(metadata, '$.run_id')) VIRTUAL"
+                )
+            if "workspace_id" not in existing:
+                conn.execute(
+                    "ALTER TABLE messages ADD COLUMN workspace_id TEXT "
+                    "GENERATED ALWAYS AS (json_extract(metadata, '$.workspace_id')) VIRTUAL"
+                )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_run_id ON messages(run_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_workspace_id ON messages(workspace_id)"
+            )
+            conn.commit()
+        except Exception:
+            # Old SQLite without generated-column support (or a legacy
+            # messages table without the metadata column): fall back to the
+            # json_extract probes.
+            return False
+        finally:
+            if conn is not None:
+                conn.close()
+        return True
 
     @staticmethod
     def _migrate_id_column(base_path: Path) -> None:
@@ -695,18 +778,33 @@ class MessageStore:
             return None
 
     def update_session_title(self, session_id: str, title: str) -> None:
-        """Update the title for a chat session (stored on first user message metadata)."""
+        """Update the title for a chat session (stored on first user message metadata).
+
+        Targets the OLDEST user row explicitly (audit B17): coremem fetch
+        ordering is not guaranteed, and get_session_title reads the first
+        user row by ts ASC — writing to any other row loses the title.
+        """
         try:
-            memories = self._core.fetch(limit=1, session_id=session_id, role="user")
-            if not memories:
-                return
-            first = memories[0]
-            meta = first.metadata or {}
-            meta["session_title"] = title
             with self._core.db._connect() as cur:
+                row = cur.execute(
+                    "SELECT id, metadata FROM messages "
+                    "WHERE session_id = ? AND role = 'user' "
+                    "ORDER BY ts ASC LIMIT 1",
+                    [session_id],
+                ).fetchone()
+                if not row:
+                    return
+                msg_id, raw_meta = row[0], row[1]
+                try:
+                    meta = json.loads(raw_meta) if raw_meta else {}
+                except (TypeError, ValueError):
+                    meta = {}
+                if not isinstance(meta, dict):
+                    meta = {}
+                meta["session_title"] = title
                 cur.execute(
                     "UPDATE messages SET metadata = ? WHERE id = ?",
-                    [json.dumps(meta), first.id],
+                    [json.dumps(meta), msg_id],
                 )
         except Exception:
             pass
@@ -722,11 +820,89 @@ class MessageStore:
         return [self._to_msg(m) for m in reversed(memories)]
 
     def _find_newest_summary_rowid(self, session_id: str) -> int | None:
-        """Find the rowid of the newest valid summary using indexed queries.
+        """Find the rowid of the newest valid summary (cached, O(1))."""
+        state = self._find_newest_summary_state(session_id)
+        return state[0] if state is not None else None
 
-        Two-phase: first find candidate summary rowids, then validate
-        provenance against only the rows needed. Avoids loading all rows.
-        Scans backwards in batches to handle many invalid summaries.
+    def _find_newest_summary_state(
+        self, session_id: str
+    ) -> tuple[int, tuple[set[str], set[str]]] | None:
+        """Return (rowid, (summarized_ids, preserved_ids)) of the newest
+        valid summary for a session, cached.
+
+        Audit P2: the summary rowid is append-safe — provenance checks only
+        reference rows strictly below it and title metadata edits are
+        harmless — so plain add_message appends never invalidate this cache.
+        It is invalidated ONLY by add_summary_message, delete_session,
+        delete_messages_for_workspace and clear() (the hot path).
+
+        Cache miss: a single indexed lookup of the newest summary row (the
+        no-summary fast path dominates for sessions that never summarize);
+        that row is then validated directly. Only sessions whose newest
+        summary row is malformed fall back to the backward batch walk.
+        """
+        if session_id in self._summary_cache:
+            return self._summary_cache[session_id]
+
+        # Fast path: single indexed query for the newest summary row.
+        with self._core.db._connect() as cur:
+            row = cur.execute(
+                "SELECT rowid FROM messages "
+                "WHERE session_id = ? AND role = 'summary' "
+                "ORDER BY rowid DESC LIMIT 1",
+                [session_id],
+            ).fetchone()
+        if row is None:
+            self._summary_cache[session_id] = None
+            return None
+
+        newest_rowid = int(row[0])
+        state = self._validate_summary_at(newest_rowid, session_id)
+        if state is None:
+            # Newest summary row is malformed: find the newest valid one.
+            state = self._backward_summary_state(session_id)
+        self._summary_cache[session_id] = state
+        return state
+
+    def _validate_summary_at(
+        self, rowid: int, session_id: str
+    ) -> tuple[int, tuple[set[str], set[str]]] | None:
+        """Validate the summary at `rowid` against its prefix rows."""
+        columns = "rowid, id, ts, role, content, metadata, session_id"
+        with self._core.db._connect() as cur:
+            rows_raw = cur.execute(
+                f"SELECT {columns} FROM messages "
+                "WHERE session_id = ? AND rowid <= ? ORDER BY rowid ASC",
+                [session_id, rowid],
+            ).fetchall()
+        rows = [
+            _StoredMessage(
+                sequence=int(r[0]),
+                id=str(r[1]),
+                ts=self._parse_stored_timestamp(r[2]),
+                role=str(r[3]),
+                content=str(r[4] or ""),
+                metadata=self._parse_stored_metadata(r[5]),
+                session_id=str(r[6] or ""),
+            )
+            for r in rows_raw
+        ]
+        target = next((r for r in rows if r.sequence == rowid), None)
+        if target is None:
+            return None
+        provenance = self._validated_summary_provenance(
+            target, {row.id: row for row in rows}, {}
+        )
+        if provenance is None:
+            return None
+        return rowid, provenance
+
+    def _backward_summary_state(
+        self, session_id: str
+    ) -> tuple[int, tuple[set[str], set[str]]] | None:
+        """Backward batch walk to the newest VALID summary (rare path).
+
+        Only reached when the newest summary row itself is malformed.
         """
         with self._core.db._connect() as cur:
             min_rowid = cur.execute(
@@ -788,8 +964,11 @@ class MessageStore:
                 rows_by_id = {row.id: row for row in all_rows}
                 cache: dict[int, tuple[set[str], set[str]] | None] = {}
                 for candidate in candidates:
-                    if self._validated_summary_provenance(candidate, rows_by_id, cache) is not None:
-                        return candidate.sequence
+                    provenance = self._validated_summary_provenance(
+                        candidate, rows_by_id, cache
+                    )
+                    if provenance is not None:
+                        return candidate.sequence, provenance
             current_max = batch_min - 1
         return None
 
@@ -797,8 +976,8 @@ class MessageStore:
         session_id = self._require_session_id(session_id)
         if limit <= 0:
             return []
-        summary_sequence = self._find_newest_summary_rowid(session_id)
-        if summary_sequence is None:
+        summary_state = self._find_newest_summary_state(session_id)
+        if summary_state is None:
             with self._core.db._connect() as cur:
                 rows_raw = cur.execute(
                     "SELECT rowid, id, ts, role, content, metadata, session_id "
@@ -823,6 +1002,7 @@ class MessageStore:
             return [self._stored_to_message(row) for row in rows]
 
         # Load rows up to summary_sequence + extra after it
+        summary_sequence, (summarized_ids, preserved_ids) = summary_state
         with self._core.db._connect() as cur:
             rows_raw = cur.execute(
                 "SELECT rowid, id, ts, role, content, metadata, session_id "
@@ -844,12 +1024,6 @@ class MessageStore:
             for r in rows_raw
         ]
         summary = next(r for r in rows if r.sequence == summary_sequence)
-        provenance = self._validated_summary_provenance(
-            summary,
-            {row.id: row for row in rows},
-            {},
-        )
-        summarized_ids, preserved_ids = provenance or (set(), set())
         retained = [
             row
             for row in rows
@@ -925,6 +1099,7 @@ class MessageStore:
                     ],
                 )
                 cur.execute("COMMIT")
+                self._invalidate_summary_cache(session_id)
                 return mid
             except Exception:
                 cur.execute("ROLLBACK")
@@ -962,10 +1137,16 @@ class MessageStore:
         from INSERT statements).
         """
         with self._core.db._connect() as cur:
-            cur.execute(
-                "DELETE FROM messages WHERE json_extract(metadata, '$.workspace_id') = ?",
-                [workspace_id],
-            )
+            if self._generated_columns:
+                cur.execute(
+                    "DELETE FROM messages WHERE workspace_id = ?",
+                    [workspace_id],
+                )
+            else:
+                cur.execute(
+                    "DELETE FROM messages WHERE json_extract(metadata, '$.workspace_id') = ?",
+                    [workspace_id],
+                )
             count = cur.rowcount
             cur.execute(
                 "DELETE FROM _journal WHERE app_table = 'messages'"
@@ -987,6 +1168,7 @@ class MessageStore:
             self._core.db.sync_duckdb_table("messages")
         except Exception:
             pass
+        self._invalidate_summary_cache()
         return cast(int, count)
 
     def persist_run(
@@ -1016,10 +1198,16 @@ class MessageStore:
         with self._core.db._connect() as cur:
             cur.execute("BEGIN IMMEDIATE")
             try:
-                existing = cur.execute(
-                    "SELECT id FROM messages WHERE session_id = ? AND json_extract(metadata, '$.run_id') = ? AND role = ?",
-                    [session_id, run_id, final_answer.role],
-                ).fetchone()
+                if self._generated_columns:
+                    existing = cur.execute(
+                        "SELECT id FROM messages WHERE session_id = ? AND run_id = ? AND role = ?",
+                        [session_id, run_id, final_answer.role],
+                    ).fetchone()
+                else:
+                    existing = cur.execute(
+                        "SELECT id FROM messages WHERE session_id = ? AND json_extract(metadata, '$.run_id') = ? AND role = ?",
+                        [session_id, run_id, final_answer.role],
+                    ).fetchone()
                 if existing is not None:
                     cur.execute("COMMIT")
                     return str(existing[0])
@@ -1093,6 +1281,7 @@ class MessageStore:
 
     def clear(self) -> None:
         self._core.clear()
+        self._invalidate_summary_cache()
 
     def get_turns(
         self, session_id: str, limit: int = 50, cursor: str | None = None
@@ -1122,6 +1311,12 @@ class MessageStore:
         last_msg_id: str | None = None
         fetch_size = limit * 5
 
+        # The open run is carried ACROSS batch boundaries: a run larger than
+        # the fetch window must never be flushed as two turns. It is only
+        # closed when a new run starts (split) or when data ends.
+        current_run_id: str | None = None
+        current_turn: list[Message] = []
+
         while len(turns) < limit:
             with self._core.db._connect() as cur:
                 rows_raw = cur.execute(
@@ -1133,6 +1328,12 @@ class MessageStore:
                 ).fetchall()
 
             if not rows_raw:
+                # End of data (e.g. the previous batch was exactly fetch_size
+                # rows): flush the still-open run exactly once.
+                if current_turn:
+                    turns.append(self._build_turn(current_run_id, current_turn))
+                    current_turn = []
+                    current_run_id = None
                 break
 
             rows = [
@@ -1147,9 +1348,6 @@ class MessageStore:
                 )
                 for r in rows_raw
             ]
-
-            current_run_id: str | None = None
-            current_turn: list[Message] = []
 
             for row in rows:
                 msg = self._stored_to_message(row)
@@ -1166,20 +1364,28 @@ class MessageStore:
                         should_split = True
 
                 if should_split:
+                    # The just-closed turn ends at the LAST message we appended
+                    # (the row before the split row).
+                    last_msg_id = current_turn[-1].id if current_turn else None
                     turns.append(self._build_turn(current_run_id, current_turn))
                     current_turn = []
+                    current_run_id = None
                     if len(turns) >= limit:
-                        last_msg_id = row.id
                         break
 
                 current_run_id = run_id
                 current_turn.append(msg)
-                last_msg_id = row.id
+                last_msg_id = msg.id
 
-            if current_turn and len(turns) < limit:
-                turns.append(self._build_turn(current_run_id, current_turn))
+            if len(turns) >= limit:
+                break
 
             if len(rows_raw) < fetch_size:
+                # End of data: flush the still-open run exactly once.
+                if current_turn:
+                    turns.append(self._build_turn(current_run_id, current_turn))
+                    current_turn = []
+                    current_run_id = None
                 break
 
             start_rowid = rows_raw[-1][0]
@@ -1210,7 +1416,12 @@ class MessageStore:
         }
 
     def delete_session(self, session_id: str) -> int:
-        """Delete all messages in a specific chat session."""
+        """Delete all messages in a specific chat session.
+
+        Audit E4: also purges the matching ``_journal`` rows and ChromaDB
+        vectors (mirroring ``delete_messages_for_workspace``), so deleted
+        sessions no longer surface via memory/hybrid recall.
+        """
         try:
             with self._core.db._connect() as cur:
                 cur.execute(
@@ -1218,26 +1429,80 @@ class MessageStore:
                     [session_id],
                 )
                 count = cur.rowcount
+                cur.execute(
+                    "DELETE FROM _journal WHERE app_table = 'messages'"
+                    " AND json_extract(metadata, '$.session_id') = ?",
+                    [session_id],
+                )
+            if self._core.db._chroma is not None:
+                try:
+                    memories = self._core.fetch(limit=10000, metadata={"session_id": session_id})
+                    ids = [m.id for m in memories if m.id != "None"]
+                    if ids:
+                        self._core.db._chroma.delete(
+                            collection_name="messages_content",
+                            ids=ids,
+                        )
+                except Exception:
+                    pass
             try:
                 self._core.db.sync_duckdb_table("messages")
             except Exception:
                 pass
+            self._invalidate_summary_cache(session_id)
             return cast(int, count)
         except Exception:
             return 0
 
 
-_stores: dict[str, MessageStore] = {}
+_stores: OrderedDict[str, MessageStore] = OrderedDict()
+_MESSAGE_STORE_CACHE_MAX = 64
+
+# Per-user asyncio locks for single-flight first construction (audit S4):
+# concurrent first access must construct MessageStore exactly once, off the
+# event loop, so SQLite migrations never block the async request handlers.
+_store_locks: dict[str, asyncio.Lock] = {}
+
+
+def _store_key(user_id: str) -> str:
+    return f"{user_id}:msgstore"
+
+
+def _cache_store(key: str, store: MessageStore) -> None:
+    _stores[key] = store
+    _stores.move_to_end(key)
+    while len(_stores) > _MESSAGE_STORE_CACHE_MAX:
+        _stores.popitem(last=False)
 
 
 def get_message_store(user_id: str = "default_user", workspace_id: str = "personal") -> MessageStore:
-    key = f"{user_id}:msgstore"
+    key = _store_key(user_id)
     if key not in _stores:
-        _stores[key] = MessageStore(user_id, workspace_id=workspace_id)
+        _cache_store(key, MessageStore(user_id, workspace_id=workspace_id))
+    else:
+        _stores.move_to_end(key)
     return _stores[key]
+
+
+async def aget_message_store(
+    user_id: str = "default_user", workspace_id: str = "personal"
+) -> MessageStore:
+    """Async get-or-create with single-flight off-thread construction (audit S4)."""
+    key = _store_key(user_id)
+    if key in _stores:
+        _stores.move_to_end(key)
+        return _stores[key]
+    lock = _store_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        if key in _stores:
+            return _stores[key]
+        store = await asyncio.to_thread(MessageStore, user_id, workspace_id=workspace_id)
+        _cache_store(key, store)
+        return store
 
 
 def clear_message_store(user_id: str, workspace_id: str) -> None:
     """Evict a MessageStore from the cache (e.g. after workspace deletion)."""
-    key = f"{user_id}:msgstore"
+    key = _store_key(user_id)
     _stores.pop(key, None)
+    _store_locks.pop(key, None)

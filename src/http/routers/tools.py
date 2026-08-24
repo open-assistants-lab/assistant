@@ -1,5 +1,6 @@
 """Tools API — list tools with metadata, toggle user-level enabled state."""
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -7,6 +8,8 @@ from fastapi import APIRouter, HTTPException, Query
 from src.sdk.capabilities import load_user_capabilities, resource_enabled, save_user_capabilities
 from src.sdk.native_tools import get_tool_category
 from src.storage.paths import _validate_path_id
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/tools", tags=["tools"])
 
@@ -43,6 +46,31 @@ def _reset_user_loops(user_id: str) -> None:
     from src.sdk.runner import reset_user_sdk_loops
 
     reset_user_sdk_loops(user_id)
+
+
+def _purge_tool_index_entry(user_id: str, workspace_id: str, name: str) -> None:
+    """Remove a disabled tool's row from the persisted search index (audit E24).
+
+    Without this the stale row keeps advertising the tool via tool_search even
+    after scope=none. Best-effort: a failure here must not fail the PATCH —
+    the execution-boundary caps check still blocks the tool.
+    """
+    try:
+        from src.sdk.tool_index import get_or_create_index
+        from src.storage.paths import get_paths
+
+        paths = get_paths(user_id=user_id, workspace_id=workspace_id)
+        idx, _commit = get_or_create_index(
+            paths.user_tools_dir(),
+            None,
+            paths.user_mcp_config(),
+            user_id=user_id,
+            workspace_id=workspace_id,
+        )
+        idx.remove_tool(name)
+        logger.info("tools.index_entry_purged", {"tool": name})
+    except Exception as e:
+        logger.warning("tools.index_entry_purge_failed", {"tool": name, "error": str(e)})
 
 
 @router.get("")
@@ -166,6 +194,10 @@ async def toggle_tool(
             )
         enabled = new_scope != "none"
         _save_user_enabled(user_id, "tools", name, enabled)
+        if not enabled:
+            # Audit E24-tools: purge the stale persisted-index row so the
+            # disabled tool stops being advertised via tool_search.
+            _purge_tool_index_entry(user_id, workspace_id, name)
         scope, wids = _scope_response(enabled)
         _reset_user_loops(user_id)
         return {

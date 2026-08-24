@@ -324,3 +324,174 @@ class TestRegistryWithMockData:
         assert len(providers) >= 3
         names = [p["name"] for p in providers]
         assert "OpenAI" in names
+
+
+class TestRegistryTTL:
+    """Audit B13: in-process cache TTL is honored and stale disk data beats the builtin."""
+
+    @staticmethod
+    def _big_cache_data(n_models: int = 150) -> dict:
+        return {
+            "_fetched_at": 0,  # replaced by callers with an actual timestamp
+            "test-provider": {
+                "id": "test-provider",
+                "name": "Test Provider",
+                "npm": "@ai-sdk/openai-compatible",
+                "models": {
+                    f"m{i}": {"id": f"m{i}", "name": f"Model {i}"} for i in range(n_models)
+                },
+            },
+        }
+
+    def test_expired_cache_plus_fetch_failure_falls_back_to_stale_cache(self, tmp_path, monkeypatch):
+        """Expired disk cache + failed fetch must use the stale cache, not the 4-model builtin."""
+        import json
+        import time
+
+        import src.sdk.registry as reg
+
+        reg._models_cache = None
+        reg._providers_cache = None
+        reg._last_fetch_time = 0.0
+
+        cache_path = tmp_path / "models.json"
+        data = self._big_cache_data()
+        data["_fetched_at"] = time.time() - reg.REGISTRY_TTL_SECONDS - 60  # expired
+        cache_path.write_text(json.dumps(data))
+
+        monkeypatch.setattr(reg, "_get_cache_path", lambda: cache_path)
+        monkeypatch.setattr(reg, "_fetch_api", lambda: None)
+
+        reg._ensure_loaded(force=True)
+
+        assert reg._models_cache is not None
+        assert len(reg._models_cache) > 100  # stale cache, NOT the 4-model builtin
+        assert "test-provider/m0" in reg._models_cache
+        assert "test-provider/m149" in reg._models_cache
+
+    def test_ttl_expiry_triggers_refresh(self, tmp_path, monkeypatch):
+        """An expired in-process cache must re-fetch on the next call."""
+        import time
+
+        import src.sdk.registry as reg
+
+        reg._models_cache = None
+        reg._providers_cache = None
+        reg._last_fetch_time = 0.0
+
+        cache_path = tmp_path / "models.json"
+        monkeypatch.setattr(reg, "_get_cache_path", lambda: cache_path)
+        monkeypatch.setattr(reg, "_get_cache_ttl", lambda: 0)  # everything is always expired
+
+        calls = {"n": 0}
+
+        def fake_fetch() -> dict:
+            calls["n"] += 1
+            return {
+                "_fetched_at": time.time(),
+                "openai": {
+                    "id": "openai",
+                    "name": "OpenAI",
+                    "models": {
+                        f"v{calls['n']}-model": {
+                            "id": f"v{calls['n']}-model",
+                            "name": f"V{calls['n']}",
+                        }
+                    },
+                },
+            }
+
+        monkeypatch.setattr(reg, "_fetch_api", fake_fetch)
+
+        reg._ensure_loaded()
+        first = reg._models_cache
+        assert first is not None
+
+        reg._ensure_loaded()
+
+        assert calls["n"] == 2, "expired TTL must trigger a re-fetch"
+        assert reg._models_cache is not first
+
+    def test_refresh_failure_keeps_in_memory_cache(self, tmp_path, monkeypatch):
+        """A failed refresh with no disk cache must keep in-memory data, not downgrade to builtin."""
+        import time
+
+        import src.sdk.registry as reg
+
+        reg._models_cache = None
+        reg._providers_cache = None
+        reg._last_fetch_time = 0.0
+
+        cache_path = tmp_path / "models.json"
+        monkeypatch.setattr(reg, "_get_cache_path", lambda: cache_path)
+        monkeypatch.setattr(reg, "_get_cache_ttl", lambda: 0)
+
+        fetch_calls = {"n": 0}
+
+        def failing_fetch():
+            fetch_calls["n"] += 1
+            return None
+
+        # First load: fresh fetch succeeds.
+        def ok_fetch() -> dict:
+            fetch_calls["n"] += 1
+            return dict(SAMPLE_API_DATA, _fetched_at=time.time())
+
+        monkeypatch.setattr(reg, "_fetch_api", ok_fetch)
+        reg._ensure_loaded()
+        first = reg._models_cache
+        assert first is not None and len(first) > 4
+
+        # Now: cache is expired (ttl=0), fetch fails. The patched fetch never
+        # writes the disk cache, so there is no stale disk copy either.
+        monkeypatch.setattr(reg, "_fetch_api", failing_fetch)
+
+        reg._ensure_loaded()
+
+        assert fetch_calls["n"] == 2, "expired TTL must have attempted a re-fetch"
+        assert reg._models_cache is first, "must keep the existing in-memory cache"
+        assert len(reg._models_cache) > 4, "must NOT downgrade to the 4-model builtin"
+
+    def test_concurrent_first_callers_single_flight(self, tmp_path, monkeypatch):
+        """Concurrent first callers must perform exactly one fetch (thread-safe single-flight)."""
+        import threading
+        import time
+
+        import src.sdk.registry as reg
+
+        reg._models_cache = None
+        reg._providers_cache = None
+        reg._last_fetch_time = 0.0
+
+        cache_path = tmp_path / "models.json"
+        monkeypatch.setattr(reg, "_get_cache_path", lambda: cache_path)
+
+        fetch_calls = {"n": 0}
+
+        def slow_fetch() -> dict:
+            fetch_calls["n"] += 1
+            time.sleep(0.05)
+            return dict(SAMPLE_API_DATA, _fetched_at=time.time())
+
+        monkeypatch.setattr(reg, "_fetch_api", slow_fetch)
+
+        results: list = []
+        errors: list = []
+
+        def worker() -> None:
+            try:
+                reg._ensure_loaded()
+                results.append(reg._models_cache)
+            except Exception as exc:  # pragma: no cover - failure path
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors
+        assert len(results) == 8
+        assert fetch_calls["n"] == 1, "single-flight: exactly one fetch across all callers"
+        assert all(r is results[0] for r in results)

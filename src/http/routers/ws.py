@@ -23,6 +23,7 @@ from src.app_logging import get_logger
 from src.config.settings import get_settings
 from src.http.auth import verify_key
 from src.http.routers.conversation import (
+    _execute_approved_tool,
     _extract_surfaces,
     _persist_collected_stream_state,
     _strip_canvas_fences,
@@ -49,14 +50,14 @@ from src.sdk.runner import (
     _messages_from_conversation,
     get_sdk_loop,
 )
-from src.sdk.session_worker import SessionBusyError, SessionWorkerRegistry
-from src.storage.messages import get_message_store
+from src.sdk.session_worker import SessionBusyError, get_session_registry
+from src.storage.messages import aget_message_store
 
 logger = get_logger()
 
 router = APIRouter(tags=["websocket"])
 
-_session_registry = SessionWorkerRegistry()
+_session_registry = get_session_registry()
 
 
 def _persist_ws_conversation_message(
@@ -96,8 +97,14 @@ async def _run_agent_stream(
     provider_keys: dict[str, str] | None = None,
     cancel_event: asyncio.Event | None = None,
     rubric: str | None = None,
+    stream_loop_out: dict[str, Any] | None = None,
 ) -> None:
-    """Run the agent streaming loop and handle all chunk types."""
+    """Run the agent streaming loop and handle all chunk types.
+
+    ``stream_loop_out`` (audit E25): when provided, the live loop is written
+    into the dict via execute_stream's on_stream_end callback so the caller
+    can run follow-up steers after RunService unregisters the loop.
+    """
     import uuid as _uuid
 
     def _with_workspace(payload: dict[str, Any]) -> dict[str, Any]:
@@ -119,6 +126,11 @@ async def _run_agent_stream(
             prompt=str(sdk_messages[-1].content) if sdk_messages else "",
             model=model,
             provider_keys=provider_keys,
+            on_stream_end=(
+                (lambda lp: stream_loop_out.__setitem__("loop", lp))
+                if stream_loop_out is not None
+                else None
+            ),
         ):
             if cancel_event is not None and cancel_event.is_set():
                 if not persisted:
@@ -129,6 +141,7 @@ async def _run_agent_stream(
                         reasoning_parts=reasoning_parts,
                         tool_metadata_list=tool_metadata_list,
                         tool_results=tool_results,
+                        run_id=event.run_id,
                     )
                     persisted = True
                 break
@@ -185,22 +198,21 @@ async def _run_agent_stream(
                 if call_id in emitted_tool_results:
                     continue
                 emitted_tool_results.add(call_id)
-                from src.http.ws_protocol import SkillsLoadMessage, ToolResultMessage
-
-                await websocket.send_json(
-                    ToolResultMessage(
-                        tool=tool_name,
-                        call_id=call_id,
-                        result_preview=str(content)[:500],
-                    ).model_dump() | {"workspace_id": workspace_id}
-                )
+                # Canonical envelope (E-streaming): forward the RunEvent
+                # envelope as-is; ToolResultData carries name/tool_call_id/
+                # status/content, so no flat re-wrap is needed.
+                await websocket.send_json(_with_workspace(data))
 
                 if tool_name == "skills_load":
                     skill_name = skill_load_names.pop(call_id, "unknown")
                     await websocket.send_json(
-                        SkillsLoadMessage(name=skill_name).model_dump()
-                        | {"workspace_id": workspace_id}
+                        {"type": "skills_load", "data": {"name": skill_name}, "workspace_id": workspace_id}
                     )
+
+            elif event_type == "usage":
+                # Forward usage events (canonical envelope) so WS clients
+                # see token accounting like SSE clients do.
+                await websocket.send_json(_with_workspace(data))
 
             elif event_type == "interrupt":
                 if pending_ref is not None:
@@ -220,6 +232,7 @@ async def _run_agent_stream(
                     reasoning_parts=reasoning_parts,
                     tool_metadata_list=tool_metadata_list,
                     tool_results=tool_results,
+                    run_id=event.run_id,
                 )
                 persisted = True
                 break
@@ -227,17 +240,9 @@ async def _run_agent_stream(
             elif event_type == "done":
                 result = event_data.get("result", {})
                 if result.get("status") == "failed":
-                    # A failed run must not be persisted as a success; keep
-                    # whatever partial state streamed before the failure.
-                    _persist_collected_stream_state(
-                        conversation,
-                        session_id=session_id,
-                        ai_content_parts=ai_content_parts,
-                        reasoning_parts=reasoning_parts,
-                        tool_metadata_list=tool_metadata_list,
-                        tool_results=tool_results,
-                    )
-                    persisted = True
+                    # B11: RunService.persist_run already persisted this run's
+                    # partial state WITH run_id — the fallback collector here
+                    # wrote a duplicate, run_id-less copy. Do nothing.
                     await websocket.send_json(
                         ErrorMessage(message="Agent run failed", code="AGENT_ERROR").model_dump()
                         | {"workspace_id": workspace_id}
@@ -290,6 +295,7 @@ async def _run_agent_stream(
                     reasoning_parts=reasoning_parts,
                     tool_metadata_list=tool_metadata_list,
                     tool_results=tool_results,
+                    run_id=event.run_id,
                 )
                 persisted = True
                 await websocket.send_json(
@@ -454,11 +460,28 @@ async def ws_conversation(websocket: WebSocket) -> None:
     current_provider_keys: dict[str, str] | None = None
     pending_container: list[Any] = [None]
 
-    try:
+    # Persistent reader (audit P6 part B): ONE task owns the socket and feeds
+    # an asyncio.Queue. Per-pass receive tasks raced the stream and cancelled a
+    # pending frame at stream end, losing it (a frame popped from the socket
+    # then discarded). The queue preserves every frame; consumers cancel a
+    # queue.get() safely because the frame stays queued.
+    control_queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    async def _ws_reader() -> None:
         while True:
             try:
-                raw_data = await websocket.receive_text()
+                raw = await websocket.receive_text()
             except WebSocketDisconnect:
+                await control_queue.put(None)
+                return
+            await control_queue.put(raw)
+
+    reader_task = asyncio.create_task(_ws_reader())
+
+    try:
+        while True:
+            raw_data = await control_queue.get()
+            if raw_data is None:
                 break
 
             try:
@@ -515,7 +538,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     approved_args = pending_container[0].get("args") or {}
                     approved_call_id = pending_container[0].get("call_id") or msg.call_id
                     pending_container[0] = None
-                    conversation = get_message_store(user_id, workspace_id)
+                    conversation = await aget_message_store(user_id, workspace_id)
                     retry_msgs = _messages_from_conversation(
                         conversation.get_messages_with_summary(
                             session_id=run_session_id, limit=50
@@ -525,8 +548,6 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     # conversation._execute_approved_tool (re-proposals never
                     # match the approved call, so the old instruction-only
                     # flow looped on HITL interrupts).
-                    from src.http.routers.conversation import _execute_approved_tool
-
                     retry_msgs.extend(
                         await _execute_approved_tool(
                             loop,
@@ -596,21 +617,33 @@ async def ws_conversation(websocket: WebSocket) -> None:
                         provider_keys=run_provider_keys,
                     )
                     edited_args = msg.edited_args or {}
+                    approved_call_id = pending_container[0].get("call_id") or msg.call_id
                     loop.approve_tool_call(
                         ToolCall(
-                            id=pending_container[0].get("call_id") or msg.call_id,
+                            id=approved_call_id,
                             name=tool_name,
                             arguments=edited_args,
                         )
                     )
                     pending_container[0] = None
-                    conversation = get_message_store(user_id, workspace_id)
+                    conversation = await aget_message_store(user_id, workspace_id)
                     retry_msgs = _messages_from_conversation(
                         conversation.get_messages_with_summary(
                             session_id=run_session_id, limit=50
                         )
                     )
-                    retry_msgs.append(Message.user(f"approved: proceed with {tool_name} with edited args: {msg.edited_args}"))
+                    # Execute the approved tool directly — the instruction-only
+                    # retry (the old approved-nudge message) looped forever because
+                    # re-proposals never match the approved call (see
+                    # conversation._execute_approved_tool).
+                    retry_msgs.extend(
+                        await _execute_approved_tool(
+                            loop,
+                            tool_name,
+                            edited_args,
+                            approved_call_id or f"call_{secrets.token_hex(4)}",
+                        )
+                    )
                     await _run_agent_stream(
                         websocket, user_id, retry_msgs, conversation, run_session_id,
                         pending_ref=pending_container, workspace_id=workspace_id,
@@ -642,7 +675,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                 continue
 
             content = msg.content
-            conversation = get_message_store(user_id, workspace_id)
+            conversation = await aget_message_store(user_id, workspace_id)
 
             # If user types "approve" while a tool is pending, trigger retry
             if pending_container[0] and content.strip().lower() in ("approve", "yes", "accept"):
@@ -704,6 +737,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
             if ws_verification and getattr(ws_verification, "enabled", False) and getattr(ws_verification, "default_rubric", ""):
                 ws_rubric = ws_verification.default_rubric
 
+            stream_loop_holder: dict[str, Any] = {}
             cancel_event = asyncio.Event()
             deferred_control: str | None = None
             stream_cancelled = False
@@ -714,38 +748,37 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     model=msg_model, provider_keys=msg_provider_keys,
                     cancel_event=cancel_event,
                     rubric=ws_rubric,
+                    stream_loop_out=stream_loop_holder,
                 )
             )
             while not stream_task.done():
-                receive_task = asyncio.create_task(websocket.receive_text())
+                get_task = asyncio.create_task(control_queue.get())
                 done, pending = await asyncio.wait(
-                    {stream_task, receive_task}, return_when=asyncio.FIRST_COMPLETED
+                    {stream_task, get_task}, return_when=asyncio.FIRST_COMPLETED
                 )
                 if stream_task in done:
-                    if receive_task in done:
-                        try:
-                            deferred_control = receive_task.result()
-                        except WebSocketDisconnect:
+                    if get_task in done:
+                        deferred_control = get_task.result()
+                        if deferred_control is None:
                             cancel_event.set()
                             stream_task.cancel()
                             try:
                                 await stream_task
                             except asyncio.CancelledError:
                                 pass
-                            raise
+                            raise WebSocketDisconnect()
                     else:
-                        receive_task.cancel()
+                        get_task.cancel()
                     break
-                try:
-                    raw_control = receive_task.result()
-                except WebSocketDisconnect:
+                raw_control = get_task.result()
+                if raw_control is None:
                     cancel_event.set()
                     stream_task.cancel()
                     try:
                         await stream_task
                     except asyncio.CancelledError:
                         pass
-                    raise
+                    raise WebSocketDisconnect()
                 try:
                     control_data = json.loads(raw_control)
                 except json.JSONDecodeError:
@@ -813,8 +846,14 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     deferred_control = None
                 else:
                     try:
-                        raw = await asyncio.wait_for(websocket.receive_text(), timeout=300)
-                    except (TimeoutError, WebSocketDisconnect):
+                        raw = await asyncio.wait_for(
+                            control_queue.get(),  # type: ignore[arg-type]
+                            timeout=300,
+                        )
+                    except TimeoutError:
+                        pending_container[0] = None
+                        break
+                    if raw is None:
                         pending_container[0] = None
                         break
                 try:
@@ -852,21 +891,31 @@ async def ws_conversation(websocket: WebSocket) -> None:
                         model=run_model,
                         provider_keys=run_provider_keys,
                     )
+                    approved_args = pending_container[0].get("args") or {}
+                    approved_call_id = pending_container[0].get("call_id") or call_id
                     loop.approve_tool_call(
                         ToolCall(
-                            id=pending_container[0].get("call_id") or call_id,
+                            id=approved_call_id,
                             name=tool_name,
-                            arguments=pending_container[0].get("args") or {},
+                            arguments=approved_args,
                         )
                     )
                     pending_container[0] = None
-                    # Retry with approval context
+                    # Execute the approved tool directly instead of the
+                    # instruction-only retry that looped forever (B4).
                     retry_msgs = _messages_from_conversation(
                         conversation.get_messages_with_summary(
                             session_id=run_session_id, limit=50
                         )
                     )
-                    retry_msgs.append(Message.user(f"approve: please proceed with {tool_name}"))
+                    retry_msgs.extend(
+                        await _execute_approved_tool(
+                            loop,
+                            tool_name,
+                            approved_args,
+                            approved_call_id or f"call_{secrets.token_hex(4)}",
+                        )
+                    )
                     await _run_agent_stream(
                         websocket, user_id, retry_msgs, conversation, run_session_id,
                         pending_ref=pending_container, workspace_id=workspace_id,
@@ -883,6 +932,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                         )
                         continue
                     edited_args = data.get("edited_args") or {}
+                    approved_call_id = pending_container[0].get("call_id") or call_id
                     run_session_id, run_model, run_provider_keys = _pending_runtime_context(
                         pending_container[0], session_id, msg_model, msg_provider_keys
                     )
@@ -895,7 +945,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     )
                     loop.approve_tool_call(
                         ToolCall(
-                            id=pending_container[0].get("call_id") or call_id,
+                            id=approved_call_id,
                             name=tool_name,
                             arguments=edited_args,
                         )
@@ -906,9 +956,14 @@ async def ws_conversation(websocket: WebSocket) -> None:
                             session_id=run_session_id, limit=50
                         )
                     )
-                    retry_msgs.append(
-                        Message.user(
-                            f"approved: proceed with {tool_name} with edited args: {edited_args}"
+                    # Execute the approved tool with the edited args directly
+                    # (B4) — instruction-only retries looped forever.
+                    retry_msgs.extend(
+                        await _execute_approved_tool(
+                            loop,
+                            tool_name,
+                            edited_args,
+                            approved_call_id or f"call_{secrets.token_hex(4)}",
                         )
                     )
                     await _run_agent_stream(
@@ -933,22 +988,27 @@ async def ws_conversation(websocket: WebSocket) -> None:
             # was generating text (no tool boundary to inject at) is delivered
             # as the next turn. The steer was already persisted at receive
             # time, so the follow-up reloads history and runs it.
-            from src.sdk.runner import get_user_loop
-
-            follow_loop = get_user_loop(user_id, session_id)
-            if follow_loop is not None and follow_loop.has_pending_steer():
+            #
+            # Audit E25: RunService unregisters the loop when the stream ends,
+            # so get_user_loop is always None here. _run_agent_stream captured
+            # the live loop via execute_stream's on_stream_end callback.
+            follow_loop = stream_loop_holder.get("loop")
+            # P2-1: drain ALL pending steers — each queued steer gets its own
+            # follow-up turn, not just the first.
+            while follow_loop is not None and follow_loop.has_pending_steer():
                 follow_steer = follow_loop.pop_steer()
-                if follow_steer:
-                    follow_msgs = _messages_from_conversation(
-                        conversation.get_messages_with_summary(
-                            session_id=session_id, limit=50
-                        )
+                if not follow_steer:
+                    break
+                follow_msgs = _messages_from_conversation(
+                    conversation.get_messages_with_summary(
+                        session_id=session_id, limit=50
                     )
-                    await _run_agent_stream(
-                        websocket, user_id, follow_msgs, conversation, session_id,
-                        pending_ref=pending_container, workspace_id=workspace_id,
-                        model=msg_model, provider_keys=msg_provider_keys,
-                    )
+                )
+                await _run_agent_stream(
+                    websocket, user_id, follow_msgs, conversation, session_id,
+                    pending_ref=pending_container, workspace_id=workspace_id,
+                    model=msg_model, provider_keys=msg_provider_keys,
+                )
 
     except WebSocketDisconnect:
         logger.info(
@@ -967,3 +1027,6 @@ async def ws_conversation(websocket: WebSocket) -> None:
             )
         except Exception:
             pass
+    finally:
+        if not reader_task.done():
+            reader_task.cancel()

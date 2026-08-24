@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from functools import partial
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
-from src.app_logging import get_logger
+from src.app_logging import LogLevel, get_logger
 from src.sdk.compression import (
     CompressionArtifact,
     CompressionContext,
@@ -250,10 +251,14 @@ def _load_prompt_file(prompt_file: str, user_id: str = "default_user") -> str:
     user_path = Path(settings.data_path) / "users" / user_id / prompt_file
     seed_path = Path(__file__).parent.parent.parent / "seeds" / "prompts" / prompt_file
 
-    # Seed: copy from seeds/ to per-user if user file doesn't exist
+    # Seed: copy from seeds/ to per-user if user file doesn't exist.
+    # Atomic: write to a temp file then os.replace() so concurrent readers
+    # (and crash mid-write) never observe a partial prompt file.
     if not user_path.exists() and seed_path.exists():
         user_path.parent.mkdir(parents=True, exist_ok=True)
-        user_path.write_text(seed_path.read_text())
+        tmp_path = user_path.with_suffix(".tmp")
+        tmp_path.write_text(seed_path.read_text())
+        os.replace(tmp_path, user_path)
         logger.info("summarization.prompt_seeded", {"user_id": user_id, "path": str(user_path)}, user_id=user_id)
 
     # Read per-user file
@@ -301,6 +306,13 @@ class SummarizationMiddleware(Middleware):
         self._summary_sink = summary_sink
         self._summary_provider_factory = summary_provider_factory
         self._summary_provider: Any | None = None
+        # Degraded-summary stash (audit B14): when the persistence sink
+        # fails, the generated summary is cached here keyed by session so a
+        # later successful sink can persist it — preserving the incremental
+        # provenance invariant (the next compression locates the prior
+        # summary by its PERSISTED message; an unpersisted summary would
+        # silently force a full re-summarize after restart).
+        self._degraded_summaries: dict[str, CompressionArtifact] = {}
         self._prompt_file = prompt_file
         self.user_id = user_id or "default_user"
 
@@ -346,8 +358,10 @@ class SummarizationMiddleware(Middleware):
 
     def before_model(self, state: AgentState) -> dict[str, Any] | None:
         """Sync version — not fully supported (providers are async)."""
-        # Our providers are async-only; sync before_model can't call the summary LLM.
-        # Just check if we would trigger and log.
+        # Our providers are async-only; sync before_model can't call the summary
+        # LLM. Skip the token count entirely unless debug logging is enabled.
+        if not logger._should_log(LogLevel.DEBUG):
+            return None
         messages = state.messages
         total_tokens = self.token_counter(messages)
         if not self._should_summarize(messages, total_tokens):
@@ -484,18 +498,18 @@ class SummarizationMiddleware(Middleware):
         if self.token_counter(messages) <= target:
             return 0
 
-        # Binary search for earliest index that keeps suffix within budget
-        left, right = 0, len(messages)
+        # Single reverse pass: per-message counts with running suffix sums
+        # (O(n) total tokenization instead of O(n log n) slice re-tokenization).
+        # Valid because _partial_token_counter is self.token_counter, which is
+        # additive over messages.
+        suffix = 0
         cutoff = len(messages)
-        for _ in range(len(messages).bit_length() + 1):
-            if left >= right:
-                break
-            mid = (left + right) // 2
-            if self._partial_token_counter(messages[mid:]) <= target:
-                cutoff = mid
-                right = mid
+        for i in range(len(messages) - 1, -1, -1):
+            suffix += self._partial_token_counter([messages[i]])
+            if suffix <= target:
+                cutoff = i
             else:
-                left = mid + 1
+                break
 
         if cutoff >= len(messages):
             cutoff = max(0, len(messages) - 1)
@@ -579,9 +593,14 @@ class SummarizationMiddleware(Middleware):
         loaded back from the message store.
         """
         content = message.content if isinstance(message.content, str) else ""
-        for prefix in (SUMMARY_MESSAGE_PREFIX, "[SUMMARY OF PREVIOUS CONVERSATION]"):
-            if content.startswith(prefix):
-                content = content[len(prefix) :].lstrip("\n")
+        while True:
+            matched = next(
+                (p for p in (SUMMARY_MESSAGE_PREFIX, "[SUMMARY OF PREVIOUS CONVERSATION]") if content.startswith(p)),
+                None,
+            )
+            if matched is None:
+                break
+            content = content[len(matched):].lstrip("\n")
         content = content.strip()
         return content or None
 
@@ -803,10 +822,14 @@ class SummarizationMiddleware(Middleware):
         """
         try:
             return await self._call_summary_provider(provider, messages)
-        except (ConnectionError, TimeoutError, OSError):
+        except Exception as exc:
+            from src.sdk.providers.base import is_timeout_error
+
+            if not (is_timeout_error(exc) or isinstance(exc, ConnectionError)):
+                raise
             logger.warning(
                 "summarization.retry",
-                {"error_type": "transient"},
+                {"error_type": type(exc).__name__},
                 user_id=self.user_id,
             )
             return await self._call_summary_provider(provider, messages)
@@ -1034,22 +1057,49 @@ class SummarizationMiddleware(Middleware):
             )
 
         if persistence_eligible and sink is not None:
+            # Retry a previously stashed degraded summary (audit B14): persist
+            # it before the fresh one so the incremental provenance invariant
+            # holds (the next compression locates the prior summary by its
+            # PERSISTED message). A still-failing sink keeps the stash for
+            # another attempt instead of dropping it.
+            stale_artifact = self._degraded_summaries.pop(context.session_id, None)
+            if stale_artifact is not None:
+                try:
+                    stale_result = await self._invoke_sink(
+                        sink, sink_is_async, context, stale_artifact
+                    )
+                    if stale_result.status is PersistenceStatus.SUCCEEDED:
+                        logger.info(
+                            "summarization.degraded_recovered",
+                            {
+                                "degraded": False,
+                                "summary_id": stale_result.summary_id,
+                                "session_id": context.session_id,
+                            },
+                            user_id=self.user_id,
+                        )
+                    else:
+                        self._degraded_summaries[context.session_id] = stale_artifact
+                except Exception as exc:
+                    self._degraded_summaries[context.session_id] = stale_artifact
+                    logger.warning(
+                        "summarization.degraded_retry_failed",
+                        {"degraded": True, "error_type": type(exc).__name__},
+                        user_id=self.user_id,
+                    )
+
             try:
                 sink_artifact = base_result.artifact
                 assert sink_artifact is not None
-                sink_result = sink(context, sink_artifact)
-                if sink_is_async:
-                    sink_result = await cast(
-                        Awaitable[SummaryPersistenceResult], sink_result
-                    )
-                elif inspect.isawaitable(sink_result):
-                    sink_result = await sink_result
-                if not self._valid_sink_result(sink_result):
-                    raise TypeError("summary sink must return SummaryPersistenceResult")
+                sink_result = await self._invoke_sink(
+                    sink, sink_is_async, context, sink_artifact
+                )
             except Exception as exc:
+                if base_result.artifact is not None:
+                    self._degraded_summaries[context.session_id] = base_result.artifact
                 logger.warning(
                     "summarization.persistence_failed",
-                    {"error_type": type(exc).__name__},
+                    {"degraded": True, "error_type": type(exc).__name__},
                     user_id=self.user_id,
                 )
                 return failed_persistence_result
@@ -1057,6 +1107,13 @@ class SummarizationMiddleware(Middleware):
                 assert success_template is not None
                 return self._finalize_persisted_result(success_template, sink_result.summary_id)
             if sink_result.status is PersistenceStatus.FAILED:
+                if base_result.artifact is not None:
+                    self._degraded_summaries[context.session_id] = base_result.artifact
+                logger.warning(
+                    "summarization.persistence_failed",
+                    {"degraded": True, "status": PersistenceStatus.FAILED.value},
+                    user_id=self.user_id,
+                )
                 return failed_persistence_result
 
         logger.info(
@@ -1157,6 +1214,25 @@ class SummarizationMiddleware(Middleware):
         if value.status is PersistenceStatus.SUCCEEDED:
             return isinstance(value.summary_id, str) and bool(value.summary_id.strip())
         return value.summary_id is None
+
+    @staticmethod
+    async def _invoke_sink(
+        sink: SummarySink,
+        sink_is_async: bool,
+        context: CompressionContext,
+        artifact: CompressionArtifact,
+    ) -> SummaryPersistenceResult:
+        """Call a persistence sink (sync or async) and validate its result."""
+        sink_result = sink(context, artifact)
+        if sink_is_async:
+            sink_result = await cast(
+                Awaitable[SummaryPersistenceResult], sink_result
+            )
+        elif inspect.isawaitable(sink_result):
+            sink_result = await sink_result
+        if not SummarizationMiddleware._valid_sink_result(sink_result):
+            raise TypeError("summary sink must return SummaryPersistenceResult")
+        return sink_result
 
     @staticmethod
     def _finalize_persisted_result(

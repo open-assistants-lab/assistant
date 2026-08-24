@@ -11,6 +11,7 @@ Key compatibility:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Callable
 from typing import Any, get_type_hints
@@ -97,7 +98,11 @@ class ToolDefinition(BaseModel):
             raise ValueError(f"Tool {self.name} has no function bound")
         if self._coroutine:
             return await self._coroutine(**merged)
-        return self.function(**merged)
+        # Sync tool bodies run in a worker thread so they never block the
+        # event loop (audit S1: SQLite/subprocess/IMAP tools stalled every
+        # concurrent session). to_thread copies contextvars, so
+        # get_current_agent_loop() consumers keep working.
+        return await asyncio.to_thread(self.function, **merged)
 
     def to_openai_format(self) -> dict[str, Any]:
         result: dict[str, Any] = {

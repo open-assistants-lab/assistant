@@ -10,6 +10,11 @@ from src.app_logging import get_logger
 
 logger = get_logger()
 
+# Cached SQLAlchemy engines per user (audit P1): get_engine previously built
+# a fresh engine + re-ran the full DDL on every invocation and never disposed
+# it — pooled SQLite connections piled up until GC.
+_engines: dict[str, Any] = {}
+
 
 def get_db_path(user_id: str) -> str:
     """Get SQLite database path for user."""
@@ -20,10 +25,14 @@ def get_db_path(user_id: str) -> str:
 
 
 def get_engine(user_id: str) -> Any:
-    """Get SQLAlchemy engine with schema initialized."""
+    """Get SQLAlchemy engine with schema initialized (cached per user)."""
+    cached = _engines.get(user_id)
+    if cached is not None:
+        return cached
     db_path = get_db_path(user_id)
     engine = create_engine(f"sqlite:///{db_path}")
     init_db(engine)
+    _engines[user_id] = engine
     return engine
 
 
@@ -227,10 +236,27 @@ def email_to_dict(msg: Any) -> dict[str, Any]:
         )
         if msg.headers
         else False,
-        "read": not msg.flags.Seen if hasattr(msg.flags, "Seen") else True,
-        "flagged": msg.flags.Flagged if hasattr(msg.flags, "Flagged") else False,
+        **parse_email_flags(msg),
         "has_attachments": bool(attachments),
         "attachments": attachments,
+    }
+
+
+def parse_email_flags(msg: Any) -> dict[str, bool]:
+    """Extract read/flagged state from an imap_tools message.
+
+    imap_tools >=1.x returns ``msg.flags`` as a tuple of flag strings
+    (``('SEEN', '\\Flagged')``). The previous ``hasattr(msg.flags, "Seen")``
+    check was always False on a tuple, hardcoding every email to
+    ``read=True / flagged=False`` (audit B7) — which also zeroed the
+    scheduler's unread/urgent counts.
+    """
+    flags = msg.flags or ()
+    return {
+        "read": "SEEN" in {str(f).upper() for f in flags},
+        "flagged": any(
+            str(f).upper().lstrip("\\") == "FLAGGED" for f in flags
+        ),
     }
 
 

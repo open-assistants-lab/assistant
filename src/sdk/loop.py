@@ -173,6 +173,8 @@ class CostTracker:
         self.total_input_tokens: int = 0
         self.total_output_tokens: int = 0
         self.total_reasoning_tokens: int = 0
+        self.total_cache_read_tokens: int = 0
+        self.total_cache_creation_tokens: int = 0
         self.total_cost_usd: float = 0.0
         self.llm_calls: int = 0
 
@@ -181,11 +183,19 @@ class CostTracker:
         input_tokens: int = 0,
         output_tokens: int = 0,
         reasoning_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        cache_creation_tokens: int = 0,
         cost: ModelCost | None = None,
     ) -> None:
-        self.total_input_tokens += input_tokens
+        # Cache tokens count toward the context budget: they are input
+        # tokens the run paid for (audit S2.4). Providers normalize
+        # input_tokens to EXCLUDE cached tokens (OpenAI/Gemini report them
+        # as a subset of prompt tokens), so summing here never double-counts.
+        self.total_input_tokens += input_tokens + cache_read_tokens + cache_creation_tokens
         self.total_output_tokens += output_tokens
         self.total_reasoning_tokens += reasoning_tokens
+        self.total_cache_read_tokens += cache_read_tokens
+        self.total_cache_creation_tokens += cache_creation_tokens
         self.llm_calls += 1
         if cost:
             self.total_cost_usd += (input_tokens / 1_000_000) * cost.input + (
@@ -193,6 +203,12 @@ class CostTracker:
             ) * cost.output
             if cost.reasoning and reasoning_tokens:
                 self.total_cost_usd += (reasoning_tokens / 1_000_000) * cost.reasoning
+            if cost.cache_read and cache_read_tokens:
+                # Anthropic bills cache reads at 0.1x the input price.
+                self.total_cost_usd += (cache_read_tokens / 1_000_000) * cost.cache_read
+            if cost.cache_write and cache_creation_tokens:
+                # Anthropic bills cache writes at 1.25x the input price.
+                self.total_cost_usd += (cache_creation_tokens / 1_000_000) * cost.cache_write
 
     def exceeds_limits(self, config: RunConfig) -> str | None:
         if self.llm_calls >= config.max_llm_calls:
@@ -248,6 +264,7 @@ class AgentLoop:
         workspace_id: str | None = None,
         cancel_event: asyncio.Event | None = None,
         model_id: CanonicalModel | None = None,
+        caps_check: Callable[[str], bool] | None = None,
         context_measurer: ContextMeasurer = build_context_snapshot,
         context_sink: ContextSink | None = None,
         compression_sink: CompressionObserver | None = None,
@@ -266,6 +283,11 @@ class AgentLoop:
         self.workspace_id = workspace_id
         self.subagent_ctx: SubagentContext | None = None
         self.cancel_event: asyncio.Event | None = cancel_event
+        # Capability gate (audit E24-tools): when provided, returns True iff
+        # the named tool is enabled for this loop's user. Checked at the
+        # execution boundary (registry hits AND lazy-loads) so a mid-session
+        # scope change cannot be bypassed via an already-registered tool.
+        self._caps_check = caps_check
         self.rubric: str | None = None
         # Steer queue (Pi-style): a message submitted while the agent works is
         # delivered after the current tool completes, cancelling remaining
@@ -486,6 +508,25 @@ class AgentLoop:
                 fresh.append(tc)
         return fresh, dupes
 
+    def _synthetic_duplicate_results(
+        self, duplicate_calls: list[ToolCall], prior_result: str
+    ) -> list[Message]:
+        """Provider APIs require every assistant tool_call/tool_use to be
+        answered by a tool result — an unanswered block is a hard 400 on
+        OpenAI-compatible and Anthropic APIs. Emit a synthetic result per
+        duplicate call so the guard's nudge/escalation turns stay valid."""
+        return [
+            Message.tool_result(
+                tool_call_id=tc.id,
+                content=(
+                    f"Duplicate call skipped — earlier identical call to "
+                    f"'{tc.name}' returned: {prior_result}"
+                ),
+                name=tc.name,
+            )
+            for tc in duplicate_calls
+        ]
+
     @staticmethod
     def _last_tool_result(state: AgentState, name: str, limit: int = 200) -> str:
         """The most recent tool-result content for `name` (capped) — shown in
@@ -511,6 +552,21 @@ class AgentLoop:
             merged[key]["max_tokens"] = DUPLICATE_TOOL_FINAL_MAX_TOKENS
         return merged
 
+    def _tool_allowed(self, name: str) -> bool:
+        """Capability gate for tool execution (audit E24-tools).
+
+        Fail-open on lookup errors to match resource_enabled's default
+        (unconfigured tools are enabled); a broken caps file must not brick
+        every tool — but any definitive `disabled` verdict is final.
+        """
+        if self._caps_check is None:
+            return True
+        try:
+            return bool(self._caps_check(name))
+        except Exception as e:
+            logger.warning(f"caps_check_error tool={name}: {e}")
+            return True
+
     async def _execute_tool(self, tc: ToolCall) -> ToolResult:
         """Execute a tool call, returning a ToolResult with structured content."""
         tool_def = self._registry.get(tc.name)
@@ -520,14 +576,16 @@ class AgentLoop:
                 return result
             return ToolResult(content=f"Unknown tool: {tc.name}", is_error=True)
 
+        if not self._tool_allowed(tc.name):
+            return ToolResult(content=f"Tool is disabled: {tc.name}", is_error=True)
+
         self._recently_used.add(tc.name)
         tc = self._with_runtime_context(tc)
 
         try:
-            if tool_def._coroutine:
-                result = await tool_def.ainvoke(tc.arguments)
-            else:
-                result = tool_def.invoke(tc.arguments)
+            # Always route through ainvoke: sync tool bodies are offloaded to
+            # a worker thread there (audit S1) instead of blocking the loop.
+            result = await tool_def.ainvoke(tc.arguments)
             logger.info(
                 f"sdk.tool_executed tool={tc.name} source={tool_def.function.__module__ if tool_def.function else 'unknown'}"
             )
@@ -538,6 +596,11 @@ class AgentLoop:
 
     async def _try_lazy_load(self, tc: ToolCall) -> ToolResult | None:
         """Try to lazy-load a tool from the index and reconstruct its function."""
+        # Audit E24-tools: check capabilities BEFORE consulting the index or
+        # the global registry — disabled tools are never advertised, resolved,
+        # or registered, regardless of what the persisted index contains.
+        if not self._tool_allowed(tc.name):
+            return ToolResult(content=f"Tool is disabled: {tc.name}", is_error=True)
         if self._tool_index is None:
             return None
         td = self._tool_index.get_definition(tc.name)
@@ -581,10 +644,9 @@ class AgentLoop:
         tc = self._with_runtime_context(tc)
 
         try:
-            if td._coroutine:
-                result = await td.ainvoke(tc.arguments)
-            else:
-                result = td.invoke(tc.arguments)
+            # Same as _execute_tool: route through ainvoke so sync bodies
+            # (lazy-loaded custom/native tools) run off the event loop.
+            result = await td.ainvoke(tc.arguments)
             return ToolResult.from_raw(result)
         except Exception as e:
             return ToolResult(content=str(e), is_error=True)
@@ -621,20 +683,24 @@ class AgentLoop:
         # and the shell-subprocess model is wrong for streaming.
         # Use middleware (_add_middleware) for tool interception instead.
 
+        # Copy-then-transform (batch-path parity, audit B17): middleware sees
+        # and mutates a copy; the ToolCall embedded in persisted history keeps
+        # the model's original arguments.
+        tc_exec = ToolCall(id=tc.id, name=tc.name, arguments=dict(tc.arguments))
         for mw in self.middlewares:
             try:
-                tc.arguments = mw.wrap_tool_call(tc.name, tc.arguments)
+                tc_exec.arguments = mw.wrap_tool_call(tc_exec.name, tc_exec.arguments)
             except Exception:
                 mw_name = getattr(mw, "name", type(mw).__name__)
                 logger.warning(f"wrap_tool_call error in {mw_name} for {tc.name}", exc_info=True)
 
         if self.trace_provider:
             async with self.trace_provider.start_span(SpanType.TOOL_EXECUTION, tc.name) as span:
-                result = await self._execute_tool(tc)
+                result = await self._execute_tool(tc_exec)
                 span.set_meta("result_length", len(result.content))
                 span.set_meta("is_error", result.is_error)
         else:
-            result = await self._execute_tool(tc)
+            result = await self._execute_tool(tc_exec)
 
         self._record_subagent_tool(tc)
         if (ctx := self.subagent_ctx) and ctx.on_progress:
@@ -752,16 +818,20 @@ class AgentLoop:
                 Message.tool_result(tool_call_id=tc.id, content=blocked_result, name=tc.name)
             )
             yield StreamChunk.tool_result_event(
-                tool=tc.name, call_id=tc.id,                 result_preview=blocked_result[:2000]
+                tool=tc.name, call_id=tc.id,                 result_preview=blocked_result[:2000], is_error=True
             )
             yield StreamChunk.tool_end(
                 tool=tc.name, call_id=tc.id, result_preview=blocked_result[:2000]
             )
             return
 
+        # Copy-then-transform (audit B17, Task-19 review F1): the ToolCall is
+        # persisted via assistant_msg.tool_calls — middleware must transform a
+        # copy so history keeps the model's original arguments.
+        tc_exec = ToolCall(id=tc.id, name=tc.name, arguments=dict(tc.arguments))
         for mw in self.middlewares:
             try:
-                tc.arguments = mw.wrap_tool_call(tc.name, tc.arguments)
+                tc_exec.arguments = mw.wrap_tool_call(tc_exec.name, tc_exec.arguments)
             except Exception:
                 mw_name = getattr(mw, "name", type(mw).__name__)
                 logger.warning(f"wrap_tool_call error in {mw_name} for {tc.name}", exc_info=True)
@@ -770,11 +840,11 @@ class AgentLoop:
             async with self.trace_provider.start_span(
                 SpanType.TOOL_EXECUTION, tc.name
             ) as tool_span:
-                result = await self._execute_tool(tc)
+                result = await self._execute_tool(tc_exec)
                 tool_span.set_meta("result_length", len(result.content))
                 tool_span.set_meta("is_error", result.is_error)
         else:
-            result = await self._execute_tool(tc)
+            result = await self._execute_tool(tc_exec)
 
         self._record_subagent_tool(tc)
         if (ctx := self.subagent_ctx) and ctx.on_progress:
@@ -797,7 +867,7 @@ class AgentLoop:
             )
         )
         preview = result_content[:2000] if result_content else ""
-        yield StreamChunk.tool_result_event(tool=tc.name, call_id=tc.id, result_preview=preview)
+        yield StreamChunk.tool_result_event(tool=tc.name, call_id=tc.id, result_preview=preview, is_error=result.is_error)
         yield StreamChunk.tool_end(tool=tc.name, call_id=tc.id, result_preview=preview)
 
     async def _execute_tool_batch_streaming(
@@ -814,11 +884,11 @@ class AgentLoop:
                 tool=tc.name, call_id=tc.id, args=tc.arguments
             )
 
-        async def _run_one(tc: ToolCall) -> tuple[ToolCall, str]:
+        async def _run_one(tc: ToolCall) -> tuple[ToolCall, str, bool]:
             try:
                 await self._check_tool_guardrails(tc, "input", tc.arguments)
             except GuardrailTripwire as e:
-                return tc, json.dumps({"error": f"Tool input blocked: {e.result.message}"})
+                return tc, json.dumps({"error": f"Tool input blocked: {e.result.message}"}), True
 
             tc_args = dict(tc.arguments)
             for mw in self.middlewares:
@@ -850,18 +920,27 @@ class AgentLoop:
                 await self._check_tool_guardrails(tc, "output", result_content)
             except GuardrailTripwire as e:
                 result_content = json.dumps({"error": f"Tool output blocked: {e.result.message}"})
+                return tc, result_content, True
 
-            return tc, result_content
+            return tc, result_content, result.is_error
 
         results = await asyncio.gather(*[_run_one(tc) for tc in tool_calls], return_exceptions=True)
 
         for i, result in enumerate(results):
             tc = tool_calls[i]
+            is_error = False
             if isinstance(result, Exception):
                 logger.error(f"parallel_tool_error tool={tc.name}: {result}")
                 result_content = json.dumps({"error": f"Tool execution failed: {result}"})
+                is_error = True
+            elif isinstance(result, BaseException):
+                # CancelledError etc. from gather(return_exceptions=True):
+                # answer the id instead of crashing on tuple-unpack.
+                logger.error(f"parallel_base_exception tool={tc.name}: {result!r}")
+                result_content = json.dumps({"error": f"Tool execution failed: {result}"})
+                is_error = True
             else:
-                tc_r, result_content = result  # type: ignore[misc]
+                tc_r, result_content, is_error = result
 
             state.add_message(
                 Message.tool_result(
@@ -871,7 +950,7 @@ class AgentLoop:
                 )
             )
             preview = result_content[:500] if result_content else ""
-            yield StreamChunk.tool_result_event(tool=tc.name, call_id=tc.id, result_preview=preview)
+            yield StreamChunk.tool_result_event(tool=tc.name, call_id=tc.id, result_preview=preview, is_error=is_error)
             yield StreamChunk.tool_end(tool=tc.name, call_id=tc.id, result_preview=preview)
 
     async def _run_hooks(self, hook_name: str, state: AgentState) -> None:
@@ -1027,7 +1106,7 @@ class AgentLoop:
 
     async def _prepare_agent_call(
         self, state: AgentState
-    ) -> tuple[list[Message], list[ToolDefinition] | None]:
+    ) -> tuple[list[Message], list[ToolDefinition] | None, ContextSnapshot | None]:
         intended_index = self._agent_call_index + 1
         state.extra.pop("_compression_context", None)
         state.extra.pop("_compression_result", None)
@@ -1052,22 +1131,27 @@ class AgentLoop:
 
         prepared = self._prepare_messages(state)
         tools = self._registry.list_tools() or None
+        # Measure the final prepared context exactly once here and thread it
+        # into _record_agent_call so the post-hook snapshot isn't re-tokenized.
+        prepared_snapshot = self._measure_context(prepared, tools, intended_index)
         if isinstance(compression_result, CompressionResult):
             if compression_result.compressed:
-                after = self._measure_context(prepared, tools, intended_index)
                 telemetry = compression_result.telemetry.model_copy(
-                    update={"before_context": before, "after_context": after}
+                    update={"before_context": before, "after_context": prepared_snapshot}
                 )
                 compression_result = compression_result.model_copy(update={"telemetry": telemetry})
             self.last_compression = compression_result.telemetry
             await self._notify_compression(compression_result.telemetry)
-        return prepared, tools
+        return prepared, tools, prepared_snapshot
 
     async def _record_agent_call(
-        self, prepared: list[Message], tools: list[ToolDefinition] | None
+        self,
+        prepared: list[Message],
+        tools: list[ToolDefinition] | None,
+        prepared_snapshot: ContextSnapshot | None = None,
     ) -> int:
         self._agent_call_index += 1
-        snapshot = self._measure_context(prepared, tools, self._agent_call_index)
+        snapshot = prepared_snapshot
         self.last_call_context = snapshot
         if snapshot is not None:
             await self._notify_context(snapshot)
@@ -1208,7 +1292,6 @@ class AgentLoop:
         except SubagentCancelledError:
             await self._run_hooks("aafter_agent", state)
             raise
-
         await self._run_hooks("aafter_agent", state)
         self._project_next_context(state)
         return state.messages
@@ -1227,11 +1310,11 @@ class AgentLoop:
             while overflow_retries < 3 and not llm_success:
                 await self._check_subagent_before_llm(state)
                 _t_ctx = time.monotonic()
-                prepared, tools = await self._prepare_agent_call(state)
+                prepared, tools, prepared_snapshot = await self._prepare_agent_call(state)
                 self.timings.record(
                     "context_assembly", (time.monotonic() - _t_ctx) * 1000.0
                 )
-                call_index = await self._record_agent_call(prepared, tools)
+                call_index = await self._record_agent_call(prepared, tools, prepared_snapshot)
                 # The post-nudge final response is capped (FR-9).
                 call_options = (
                     self._with_final_response_cap(self.run_config.provider_options)
@@ -1261,6 +1344,12 @@ class AgentLoop:
                                 reasoning_tokens=response.usage.reasoning_tokens
                                 if response.usage
                                 else 0,
+                                cache_read_tokens=response.usage.cache_read_tokens
+                                if response.usage
+                                else 0,
+                                cache_creation_tokens=response.usage.cache_creation_tokens
+                                if response.usage
+                                else 0,
                             )
                     else:
                         response = await self.provider.chat(
@@ -1273,6 +1362,8 @@ class AgentLoop:
                             input_tokens=response.usage.input_tokens if response.usage else 0,
                             output_tokens=response.usage.output_tokens if response.usage else 0,
                             reasoning_tokens=response.usage.reasoning_tokens if response.usage else 0,
+                            cache_read_tokens=response.usage.cache_read_tokens if response.usage else 0,
+                            cache_creation_tokens=response.usage.cache_creation_tokens if response.usage else 0,
                         )
                     self.timings.record(
                         "provider_total", (time.monotonic() - _t_llm) * 1000.0
@@ -1339,26 +1430,33 @@ class AgentLoop:
                 effective_tool_calls, state
             )
             if duplicate_calls:
+                # Answer the dangling duplicate ids BEFORE either branch:
+                # unanswered assistant tool_calls are a hard 400 on strict
+                # provider APIs.
+                tool_result = self._last_tool_result(state, duplicate_calls[0].name)
+                for synthetic in self._synthetic_duplicate_results(duplicate_calls, tool_result):
+                    state.add_message(synthetic)
                 nudges = state.extra.get("_duplicate_tool_nudges", 0)
                 max_nudges = self.run_config.max_duplicate_tool_nudges
                 if nudges < max_nudges:
                     state.extra["_duplicate_tool_nudges"] = nudges + 1
-                    tool_result = self._last_tool_result(state, duplicate_calls[0].name)
-                    state.add_message(
-                        Message.system(
-                            f"The tool '{duplicate_calls[0].name}' was already called with the "
-                            f"same arguments and returned: {tool_result}. Do not call it again — "
-                            "answer the user directly."
-                        )
+                    guard_msg = Message.system(
+                        f"The tool '{duplicate_calls[0].name}' was already called with the "
+                        f"same arguments and returned: {tool_result}. Do not call it again — "
+                        "answer the user directly."
                     )
-                    continue
-                state.extra["_final_answer_requested"] = True
-                state.add_message(
-                    Message.system(
+                else:
+                    state.extra["_final_answer_requested"] = True
+                    guard_msg = Message.system(
                         "Respond now with a brief final answer. Do not call any tools."
                     )
-                )
-                continue
+                state.add_message(guard_msg)
+                if not fresh_calls:
+                    # Every proposed call was a duplicate: hand the turn back
+                    # to the model with the guidance above.
+                    continue
+                # Mixed batch: fall through and EXECUTE the fresh calls —
+                # skipping them would leave their ids unanswered too.
             effective_tool_calls = fresh_calls
 
             # Classify tool calls: parallel-safe, sequential, interrupts
@@ -1510,7 +1608,7 @@ class AgentLoop:
 
                 await self._check_subagent_before_llm(state)
                 _t_ctx = time.monotonic()
-                prepared, tools = await self._prepare_agent_call(state)
+                prepared, tools, prepared_snapshot = await self._prepare_agent_call(state)
                 self.timings.record(
                     "context_assembly", (time.monotonic() - _t_ctx) * 1000.0
                 )
@@ -1529,7 +1627,7 @@ class AgentLoop:
                 in_reasoning_block = False
                 stream_usage = Usage()
 
-                call_index = await self._record_agent_call(prepared, tools)
+                call_index = await self._record_agent_call(prepared, tools, prepared_snapshot)
                 try:
                     if self.trace_provider:
                         async with self.trace_provider.start_span(
@@ -1554,14 +1652,27 @@ class AgentLoop:
                                     yield StreamChunk.done(content="", tool_calls=all_tool_calls)
                                     return
                                 if chunk.type == "usage" and chunk.usage:
-                                    stream_usage.input_tokens += chunk.usage.input_tokens
-                                    stream_usage.output_tokens += chunk.usage.output_tokens
-                                    stream_usage.reasoning_tokens += chunk.usage.reasoning_tokens
-                                    stream_usage.cache_read_tokens += chunk.usage.cache_read_tokens
-                                    stream_usage.cache_creation_tokens += (
-                                        chunk.usage.cache_creation_tokens
-                                    )
-                                    yield chunk
+                                    # Field-wise last-nonzero replace (audit
+                                    # S2.3): providers emit CUMULATIVE usage
+                                    # (Anthropic message_start input + final
+                                    # message_delta output; Gemini only on the
+                                    # finishReason chunk). Summing cumulative
+                                    # chunks inflated totals up to ~50x.
+                                    u = chunk.usage
+                                    if u.input_tokens:
+                                        stream_usage.input_tokens = u.input_tokens
+                                    if u.output_tokens:
+                                        stream_usage.output_tokens = u.output_tokens
+                                    if u.reasoning_tokens:
+                                        stream_usage.reasoning_tokens = u.reasoning_tokens
+                                    if u.cache_read_tokens:
+                                        stream_usage.cache_read_tokens = u.cache_read_tokens
+                                    if u.cache_creation_tokens:
+                                        stream_usage.cache_creation_tokens = u.cache_creation_tokens
+                                    # NOTE: raw usage chunks are NOT re-yielded
+                                    # here — one merged cumulative chunk is
+                                    # emitted at round end (below) so
+                                    # consumers count one call per round.
                                     continue
                                 async for event in self._process_stream_chunk(
                                     chunk,
@@ -1581,10 +1692,32 @@ class AgentLoop:
                                     elif event.type == "reasoning_end":
                                         in_reasoning_block = False
 
+                            # Emit ONE merged, cumulative usage chunk per LLM
+                            # round (audit S2 fix round 1). Providers can
+                            # report usage on several chunks per round (e.g.
+                            # openai: an empty-choices usage chunk AND the
+                            # finish_reason chunk); downstream consumers
+                            # (RunService, wire) count one call per usage
+                            # chunk, so a raw passthrough would double-count
+                            # tokens and calls. The round counter lives in
+                            # this loop — this is the aggregation seam.
+                            if any(
+                                (
+                                    stream_usage.input_tokens,
+                                    stream_usage.output_tokens,
+                                    stream_usage.reasoning_tokens,
+                                    stream_usage.cache_read_tokens,
+                                    stream_usage.cache_creation_tokens,
+                                )
+                            ):
+                                yield StreamChunk.usage_event(stream_usage.model_copy())
+
                             cost_tracker.add_usage(
                                 input_tokens=stream_usage.input_tokens,
                                 output_tokens=stream_usage.output_tokens,
                                 reasoning_tokens=stream_usage.reasoning_tokens,
+                                cache_read_tokens=stream_usage.cache_read_tokens,
+                                cache_creation_tokens=stream_usage.cache_creation_tokens,
                             )
                             llm_span.set_meta("tool_calls_count", len(stream_tool_calls_map))
                             llm_span.set_meta("input_tokens", stream_usage.input_tokens)
@@ -1612,12 +1745,22 @@ class AgentLoop:
                                 yield StreamChunk.done(content="", tool_calls=all_tool_calls)
                                 return
                             if chunk.type == "usage" and chunk.usage:
-                                stream_usage.input_tokens += chunk.usage.input_tokens
-                                stream_usage.output_tokens += chunk.usage.output_tokens
-                                stream_usage.reasoning_tokens += chunk.usage.reasoning_tokens
-                                stream_usage.cache_read_tokens += chunk.usage.cache_read_tokens
-                                stream_usage.cache_creation_tokens += chunk.usage.cache_creation_tokens
-                                yield chunk
+                                # Same field-wise last-wins replace as the
+                                # trace-span branch above (audit S2.3).
+                                u = chunk.usage
+                                if u.input_tokens:
+                                    stream_usage.input_tokens = u.input_tokens
+                                if u.output_tokens:
+                                    stream_usage.output_tokens = u.output_tokens
+                                if u.reasoning_tokens:
+                                    stream_usage.reasoning_tokens = u.reasoning_tokens
+                                if u.cache_read_tokens:
+                                    stream_usage.cache_read_tokens = u.cache_read_tokens
+                                if u.cache_creation_tokens:
+                                    stream_usage.cache_creation_tokens = u.cache_creation_tokens
+                                # NOTE: raw usage chunks are NOT re-yielded
+                                # here — see the trace-span branch comment:
+                                # one merged cumulative chunk per round.
                                 continue
                             async for event in self._process_stream_chunk(
                                 chunk,
@@ -1637,10 +1780,25 @@ class AgentLoop:
                                 elif event.type == "reasoning_end":
                                     in_reasoning_block = False
 
+                        # Same merged per-round emission as the trace-span
+                        # branch (audit S2 fix round 1).
+                        if any(
+                            (
+                                stream_usage.input_tokens,
+                                stream_usage.output_tokens,
+                                stream_usage.reasoning_tokens,
+                                stream_usage.cache_read_tokens,
+                                stream_usage.cache_creation_tokens,
+                            )
+                        ):
+                            yield StreamChunk.usage_event(stream_usage.model_copy())
+
                         cost_tracker.add_usage(
                             input_tokens=stream_usage.input_tokens,
                             output_tokens=stream_usage.output_tokens,
                             reasoning_tokens=stream_usage.reasoning_tokens,
+                            cache_read_tokens=stream_usage.cache_read_tokens,
+                            cache_creation_tokens=stream_usage.cache_creation_tokens,
                         )
                         self.timings.record(
                             "provider_total", (time.monotonic() - _t_llm) * 1000.0
@@ -1710,8 +1868,12 @@ class AgentLoop:
                 # and use the text as the answer (checked before the FR-4
                 # hold so the final text is not stripped).
                 if state.extra.get("_final_answer_requested"):
-                    if stream_tool_calls:
+                    if stream_tool_calls or assistant_msg.tool_calls:
+                        # FR-9 id fix (audit B17 / Task-7 F3): the assistant
+                        # message is already persisted in state — rebinding the
+                        # local variable alone leaves dangling tool_call ids.
                         stream_tool_calls = []
+                        assistant_msg.tool_calls = []
                     output_text = assistant_content
                     try:
                         await self._check_output_guardrails(output_text, state)
@@ -1766,26 +1928,38 @@ class AgentLoop:
                                "executed": [k[0] for k in state.extra.get("_executed_tool_calls", [])],
                                "nudges": state.extra.get("_duplicate_tool_nudges", 0)},
                     )
+                    # Answer the dangling tool_calls BEFORE either nudge
+                    # branch (same rationale as the non-streaming twin) and
+                    # surface the synthetic results on the wire.
+                    tool_result = self._last_tool_result(state, duplicate_calls[0].name)
+                    for synthetic in self._synthetic_duplicate_results(duplicate_calls, tool_result):
+                        state.add_message(synthetic)
+                        yield StreamChunk.tool_result_event(
+                            tool=synthetic.name or "",
+                            call_id=synthetic.tool_call_id or "",
+                            result_preview=str(synthetic.content)[:200],
+                        )
                     nudges = state.extra.get("_duplicate_tool_nudges", 0)
                     max_nudges = self.run_config.max_duplicate_tool_nudges
                     if nudges < max_nudges:
                         state.extra["_duplicate_tool_nudges"] = nudges + 1
-                        tool_result = self._last_tool_result(state, duplicate_calls[0].name)
-                        state.add_message(
-                            Message.system(
-                                f"The tool '{duplicate_calls[0].name}' was already called with the "
-                                f"same arguments and returned: {tool_result}. Do not call it again — "
-                                "answer the user directly."
-                            )
+                        guard_msg = Message.system(
+                            f"The tool '{duplicate_calls[0].name}' was already called with the "
+                            f"same arguments and returned: {tool_result}. Do not call it again — "
+                            "answer the user directly."
                         )
-                        continue
-                    state.extra["_final_answer_requested"] = True
-                    state.add_message(
-                        Message.system(
+                    else:
+                        state.extra["_final_answer_requested"] = True
+                        guard_msg = Message.system(
                             "Respond now with a brief final answer. Do not call any tools."
                         )
-                    )
-                    continue
+                    state.add_message(guard_msg)
+                    if not fresh_calls:
+                        # Every proposed call was a duplicate: hand the turn
+                        # back to the model with the guidance above.
+                        continue
+                    # Mixed batch: fall through and EXECUTE the fresh calls —
+                    # skipping them would leave their ids unanswered too.
                 stream_tool_calls = fresh_calls
 
                 # Record tool calls AFTER dedup so only unique names are reported
@@ -1898,6 +2072,11 @@ class AgentLoop:
         except SubagentCancelledError:
             await self._run_hooks("aafter_agent", state)
             raise
+        finally:
+            # Guardrail task hygiene (audit B17): early returns/breaks before
+            # the first await of the input-guardrail check must not strand it.
+            if guardrail_task is not None and not guardrail_task.done():
+                guardrail_task.cancel()
 
         await self._run_hooks("aafter_agent", state)
         self._project_next_context(state)

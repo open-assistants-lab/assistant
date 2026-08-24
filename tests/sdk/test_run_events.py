@@ -11,6 +11,7 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from src.sdk.history_models import ReasoningBlock, ToolBlock, TurnsResponse
+from src.sdk.messages import StreamChunk, Usage
 from src.sdk.run_events import (
     BlockDeltaData,
     ContextCompressedEvent,
@@ -38,6 +39,7 @@ from src.sdk.run_events import (
     parse_run_event,
 )
 from src.sdk.run_models import RunResult, UsageCategory
+from src.sdk.run_service import _stream_chunk_to_event
 
 NOW = datetime(2026, 8, 2, 12, tzinfo=UTC)
 FIXTURE_DIR = Path(__file__).parents[1] / "fixtures" / "run_contracts"
@@ -721,3 +723,55 @@ def test_event_json_roundtrip() -> None:
     event = parse_run_event(envelope("text_delta", {"block_id": "block-1", "delta": "Hi"}))
 
     assert parse_run_event(json.loads(event.model_dump_json())) == event
+
+
+def _emit_recorder():
+    emitted = []
+
+    def emit(event_cls, data, attempt=1):
+        emitted.append((event_cls, data, attempt))
+        return parse_run_event(_envelope(event_cls, data, attempt))
+    return emit, emitted
+
+
+def _envelope(event_cls, data, attempt=1):
+    return {
+        "schema_version": 1,
+        "event_id": "event-1",
+        "sequence": 1,
+        "timestamp": NOW,
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "attempt": attempt,
+        "type": event_cls.model_fields["type"].default,
+        "data": data,
+    }
+
+
+@pytest.mark.parametrize(
+    "chunk_type",
+    ["tool_end", "rubric_evaluation_start", "rubric_evaluation_end", "done", "error"],
+)
+def test_stream_chunk_drops_unmapped_terminal_types(chunk_type: str) -> None:
+    """Unknown/unmapped canonical types are dropped, never empty text deltas."""
+    emit, emitted = _emit_recorder()
+    chunk = StreamChunk(type=chunk_type, content="ignored")
+    result = _stream_chunk_to_event(chunk, emit, attempt=1, model_id="openai:gpt-5")
+    assert result is None
+    assert emitted == []
+
+
+def test_stream_chunk_usage_llm_call_index_is_running_counter() -> None:
+    """Usage events carry a running llm_call_index, not a hardcoded 1."""
+    emit, emitted = _emit_recorder()
+    for index in (1, 2, 3):
+        chunk = StreamChunk.usage_event(
+            Usage(input_tokens=10 * index, output_tokens=5 * index)
+        )
+        _stream_chunk_to_event(
+            chunk, emit, attempt=1, model_id="openai:gpt-5", llm_call_index=index
+        )
+    usage_events = [ev for ev in emitted if ev[0].__name__ == "UsageEvent"]
+    assert len(usage_events) == 3
+    indices = [ev[1]["llm_call_index"] for ev in usage_events]
+    assert indices == [1, 2, 3]

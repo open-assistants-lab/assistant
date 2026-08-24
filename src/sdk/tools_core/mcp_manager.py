@@ -180,6 +180,16 @@ class MCPManager:
 
         return False
 
+    async def snapshot_connections(self) -> dict[str, MCPServerConnection]:
+        """Return a copy of active connections taken under the lock."""
+        async with self._lock:
+            return dict(self._connections)
+
+    async def get_connection(self, server_name: str) -> MCPServerConnection | None:
+        """Return a single connection under the lock, or None."""
+        async with self._lock:
+            return self._connections.get(server_name)
+
     async def get_tools(self, server_name: str | None = None) -> list[Any]:
         """Get tools from MCP servers (lazy start on first call)."""
         if not self._is_enabled():

@@ -2,6 +2,7 @@
 
 import re
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -91,6 +92,28 @@ def _validate_command(command: str) -> str | None:
     return None
 
 
+def _sweep_old_spill_files(out_dir: Path, max_age_days: int = 7) -> int:
+    """Delete spilled ``output-*.txt`` files older than *max_age_days*.
+
+    Spill files accumulate forever otherwise (audit B17). Called
+    opportunistically whenever a new spill is written. Returns the number
+    of files removed.
+    """
+    cutoff = time.time() - max_age_days * 86400
+    removed = 0
+    try:
+        for f in out_dir.glob("output-*.txt"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink(missing_ok=True)
+                    removed += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return removed
+
+
 @tool
 def shell_execute(command: str, user_id: str = "default_user", workspace_id: str = "personal") -> str:
     """Run a shell command.
@@ -140,6 +163,7 @@ def shell_execute(command: str, user_id: str = "default_user", workspace_id: str
             # it is within the agent's readable path scope.
             out_dir = root_path / ".shell_output"
             out_dir.mkdir(parents=True, exist_ok=True)
+            _sweep_old_spill_files(out_dir)
             ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
             full_path = out_dir / f"output-{ts}.txt"
             try:

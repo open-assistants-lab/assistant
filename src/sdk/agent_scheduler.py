@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from src.app_logging import get_logger
 from src.sdk.loop import AgentLoop, RunConfig
 from src.sdk.messages import Message
-from src.sdk.providers.factory import create_model_from_config
+from src.sdk.providers.factory import get_cached_model_provider
 from src.sdk.tools_core.agent_scheduler_db import SchedulerMemoryDB, SchedulerNotificationDB
 from src.sdk.workspace_models import list_workspaces
 
@@ -110,7 +110,7 @@ class AgentScheduler:
         logger.info("scheduler.resumed", {}, user_id=self.user_id)
 
     def _create_loop(self) -> AgentLoop:
-        provider = create_model_from_config("ollama:minimax-m2.5")
+        provider = get_cached_model_provider("ollama:minimax-m2.5")
         return AgentLoop(
             provider=provider,
             tools=[],

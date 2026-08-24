@@ -1,6 +1,13 @@
 """Contract tests for conversation endpoints."""
 
 import pytest
+from unittest.mock import AsyncMock
+
+def _astub(store):
+    """Async stand-in for aget_message_store (S4: call sites await it)."""
+    async def _get(user_id="default_user", workspace_id="personal"):
+        return store
+    return _get
 
 
 def _make_run_event_factory(chunk_gen):
@@ -144,7 +151,7 @@ class TestMessageSessionPropagation:
             captured.update(kwargs)
             yield StreamChunk.done()
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda user_id: FakeConversation())
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(FakeConversation()))
         monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
 
         await conversation_router.handle_message(
@@ -183,14 +190,14 @@ class TestTitleGeneration:
             async def chat(self, **kwargs):
                 return Message.assistant("Project Planning")
 
-        def fake_create_model_from_config(model, **kwargs):
+        def fake_get_cached_model_provider(model, **kwargs):
             captured["model"] = model
             captured.update(kwargs)
             return FakeProvider()
 
         monkeypatch.setattr(
-            "src.sdk.providers.factory.create_model_from_config",
-            fake_create_model_from_config,
+            "src.sdk.providers.factory.get_cached_model_provider",
+            fake_get_cached_model_provider,
         )
 
         title = await conversation_router._summarize_title(
@@ -231,7 +238,7 @@ class TestTitleGeneration:
         async def fake_summarize(*args, **kwargs):
             return "Useful title"
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda user_id: Store())
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(Store()))
         monkeypatch.setattr(conversation_router, "_summarize_title", fake_summarize)
 
         result = await conversation_router.generate_title(
@@ -258,7 +265,7 @@ class TestTitleGeneration:
         async def fake_summarize(*args, **kwargs):
             raise AssertionError("must not call the LLM when a title exists")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda user_id: Store())
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(Store()))
         monkeypatch.setattr(conversation_router, "_summarize_title", fake_summarize)
 
         result = await conversation_router.generate_title(
@@ -299,7 +306,7 @@ class TestTitleGeneration:
             captured["existing_titles"] = kwargs.get("existing_titles")
             return "Useful title"
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda user_id: Store())
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(Store()))
         monkeypatch.setattr(conversation_router, "_summarize_title", fake_summarize)
 
         result = await conversation_router.generate_title(
@@ -323,12 +330,12 @@ class TestTitleGeneration:
                 captured["prompt"] = kwargs["messages"][0].content
                 return Message.assistant("Roadmap review")
 
-        def fake_create_model_from_config(model, **kwargs):
+        def fake_get_cached_model_provider(model, **kwargs):
             return FakeProvider()
 
         monkeypatch.setattr(
-            "src.sdk.providers.factory.create_model_from_config",
-            fake_create_model_from_config,
+            "src.sdk.providers.factory.get_cached_model_provider",
+            fake_get_cached_model_provider,
         )
 
         title = await conversation_router._summarize_title(
@@ -374,7 +381,7 @@ class TestStreamEdgeCases:
                 **common,
             )
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *a, **kw: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(conversation_router.RunService, "execute_stream", fake_execute_stream)
 
         response = await conversation_router.message_stream(
@@ -419,7 +426,7 @@ class TestStreamEdgeCases:
         async def fake_stream(**kwargs):
             yield StreamChunk.error("boom")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
 
         result = await conversation_router.handle_message(
@@ -445,7 +452,7 @@ class TestStreamEdgeCases:
             yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
             yield StreamChunk.interrupt("files_delete", "call-2", {"path": "x"})
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(
             conversation_router.RunService, "execute_stream",
             _make_run_event_factory(fake_stream),
@@ -460,12 +467,15 @@ class TestStreamEdgeCases:
             (
                 ("tool", "noon"),
                 {
-                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1"},
+                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1", "run_id": "r1"},
                     "session_id": "default",
                 },
             ),
-            (("reasoning", "thinking"), {"metadata": {}, "session_id": "default"}),
-            (("assistant", "partial"), {"metadata": {"stream": True}, "session_id": "default"}),
+            (("reasoning", "thinking"), {"metadata": {"run_id": "r1"}, "session_id": "default"}),
+            (
+                ("assistant", "partial"),
+                {"metadata": {"stream": True, "run_id": "r1"}, "session_id": "default"},
+            ),
         ]
 
     @pytest.mark.asyncio
@@ -497,7 +507,7 @@ class TestStreamEdgeCases:
             captured_get_loop.update(kwargs)
             return FakeLoop()
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(
             conversation_router.RunService, "execute_stream",
             _make_run_event_factory(fake_initial_stream),
@@ -573,7 +583,7 @@ class TestStreamEdgeCases:
             captured_streams.append(kwargs)
             yield StreamChunk.done("approved")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(conversation_router, "get_sdk_loop", fake_get_sdk_loop)
         monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
 
@@ -638,7 +648,7 @@ class TestStreamEdgeCases:
             captured.update(kwargs)
             yield StreamChunk.done("approved")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args: Store())
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(Store()))
         monkeypatch.setattr(conversation_router, "get_sdk_loop", fake_get_loop)
         monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
 
@@ -668,7 +678,7 @@ class TestStreamEdgeCases:
             yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
             yield StreamChunk.error("boom")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(
             conversation_router.RunService, "execute_stream",
             _make_run_event_factory(fake_stream),
@@ -682,12 +692,15 @@ class TestStreamEdgeCases:
             (
                 ("tool", "noon"),
                 {
-                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1"},
+                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1", "run_id": "r1"},
                     "session_id": "default",
                 },
             ),
-            (("reasoning", "thinking"), {"metadata": {}, "session_id": "default"}),
-            (("assistant", "partial"), {"metadata": {"stream": True}, "session_id": "default"}),
+            (("reasoning", "thinking"), {"metadata": {"run_id": "r1"}, "session_id": "default"}),
+            (
+                ("assistant", "partial"),
+                {"metadata": {"stream": True, "run_id": "r1"}, "session_id": "default"},
+            ),
         ]
 
     @pytest.mark.asyncio
@@ -706,7 +719,7 @@ class TestStreamEdgeCases:
             conversation_router._cancel_flags["u:default"] = True
             yield StreamChunk.text_delta("ignored")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(
             conversation_router.RunService, "execute_stream",
             _make_run_event_factory(fake_stream),
@@ -720,12 +733,15 @@ class TestStreamEdgeCases:
             (
                 ("tool", "noon"),
                 {
-                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1"},
+                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1", "run_id": "r1"},
                     "session_id": "default",
                 },
             ),
-            (("reasoning", "thinking"), {"metadata": {}, "session_id": "default"}),
-            (("assistant", "partial"), {"metadata": {"stream": True}, "session_id": "default"}),
+            (("reasoning", "thinking"), {"metadata": {"run_id": "r1"}, "session_id": "default"}),
+            (
+                ("assistant", "partial"),
+                {"metadata": {"stream": True, "run_id": "r1"}, "session_id": "default"},
+            ),
         ]
 
     @pytest.mark.asyncio
@@ -741,7 +757,7 @@ class TestStreamEdgeCases:
             conversation_router._cancel_flags["u:default"] = True
             yield StreamChunk.text_delta("ignored")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(
             conversation_router.RunService, "execute_stream",
             _make_run_event_factory(fake_stream),
@@ -784,7 +800,7 @@ class TestStreamEdgeCases:
             yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
             yield StreamChunk.done()
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(conversation_router, "get_sdk_loop", fake_get_sdk_loop)
         monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
 
@@ -885,7 +901,7 @@ class TestStreamEdgeCases:
             yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
             yield StreamChunk.error("boom")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(conversation_router, "get_sdk_loop", fake_get_sdk_loop)
         monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
 
@@ -939,7 +955,7 @@ class TestStreamEdgeCases:
             conversation_router._cancel_flags["u:default"] = True
             yield StreamChunk.text_delta("ignored")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(conversation_router, "get_sdk_loop", fake_get_sdk_loop)
         monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
 
@@ -991,7 +1007,7 @@ class TestStreamEdgeCases:
             yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
             yield StreamChunk.text_delta("more")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(conversation_router, "get_sdk_loop", fake_get_sdk_loop)
         monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
 
@@ -1027,7 +1043,7 @@ class TestStreamEdgeCases:
         async def fake_stream(**kwargs):
             yield StreamChunk.text_delta("```html:canvas\n<div>hi</div>\n```\nDone")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(
             conversation_router.RunService, "execute_stream",
             _make_run_event_factory(fake_stream),
@@ -1076,7 +1092,7 @@ class TestStreamEdgeCases:
             # Raise so handle_message returns early without needing a full RunResult.
             raise ValueError("captured")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda user_id: FakeConversation())
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(FakeConversation()))
         monkeypatch.setattr(conversation_router.RunService, "execute", fake_execute)
 
         result = await conversation_router.handle_message(
@@ -1112,8 +1128,7 @@ class TestGetConversation:
             def get_messages_with_summary(self, **kwargs):
                 raise AssertionError("GET transcript must stay raw")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda user_id: Store())
-
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(Store()))
         result = await conversation_router.get_conversation(
             user_id="u", session_id="session-a", limit=17
         )
@@ -1330,6 +1345,34 @@ class TestEditorIntegration:
         assert blocks[0]["surface_type"] == "canvas"
         assert blocks[1]["surface_type"] == "editor"
 
+    def test_rest_endpoint_populates_reasoning(self, client, monkeypatch):
+        """Audit E6: REST /message returns reasoning from the last assistant message."""
+
+        async def fake_execute(self, *, session_id, prompt, model=None, provider_keys=None, **kwargs):
+            from src.sdk.run_models import RunResult, RunStatus, RunUsage, VerificationOutcome
+            return RunResult(
+                run_id="r1",
+                session_id=session_id,
+                status=RunStatus.COMPLETED,
+                attempt=1,
+                model="x:y",
+                response="Done.",
+                reasoning="thinking step",
+                usage=RunUsage(),
+                verification=VerificationOutcome(),
+            )
+
+        import src.http.routers.conversation as conv_mod
+        monkeypatch.setattr(conv_mod.RunService, "execute", fake_execute)
+
+        r = client.post("/message", json={
+            "message": "think about it",
+            "verbose": False,
+        })
+        assert r.status_code == 200
+        data = r.json()
+        assert data["reasoning"] == "thinking step"
+
 
 class TestTitleModelFromSettings:
     @pytest.mark.asyncio
@@ -1344,13 +1387,13 @@ class TestTitleModelFromSettings:
             async def chat(self, **kwargs):
                 return Message.assistant("Project Planning")
 
-        def fake_create_model_from_config(model, **kwargs):
+        def fake_get_cached_model_provider(model, **kwargs):
             captured["model"] = model
             return FakeProvider()
 
         monkeypatch.setattr(
-            "src.sdk.providers.factory.create_model_from_config",
-            fake_create_model_from_config,
+            "src.sdk.providers.factory.get_cached_model_provider",
+            fake_get_cached_model_provider,
         )
         monkeypatch.setattr(
             "src.config.user_settings_service.load_saved_user_settings",
@@ -1376,13 +1419,13 @@ class TestTitleModelFromSettings:
             async def chat(self, **kwargs):
                 return Message.assistant("Project Planning")
 
-        def fake_create_model_from_config(model, **kwargs):
+        def fake_get_cached_model_provider(model, **kwargs):
             captured["model"] = model
             return FakeProvider()
 
         monkeypatch.setattr(
-            "src.sdk.providers.factory.create_model_from_config",
-            fake_create_model_from_config,
+            "src.sdk.providers.factory.get_cached_model_provider",
+            fake_get_cached_model_provider,
         )
         monkeypatch.setattr(
             "src.config.user_settings_service.load_saved_user_settings",
@@ -1436,3 +1479,237 @@ class TestSseHeartbeat:
         collected = [item async for item in _sse_with_heartbeat(fast_run(), interval=60.0)]
         assert collected == ["a", "b"]
         assert _HEARTBEAT_PING not in collected
+
+
+@pytest.mark.asyncio
+async def test_failed_stream_not_double_persisted(monkeypatch):
+    """B11: a failed run is persisted exactly once — by RunService.persist_run
+    (with run_id). The SSE failed-branch must NOT also run the fallback
+    collector, which wrote a second, run_id-less copy of the same rows."""
+    from src.http.models import MessageRequest
+    from src.http.routers import conversation as conversation_router
+    from src.sdk.messages import Message  # noqa: F401
+    from src.sdk.run_events import (
+        DoneData,
+        DoneEvent,
+        ToolResultData,
+        ToolResultEvent,
+    )
+    from src.sdk.run_models import (
+        RunResult,
+        RunStatus,
+        RunUsage,
+        VerificationOutcome,
+    )
+
+    store = FakeConversation()
+    collect_calls: list[dict] = []
+
+    async def fake_collect(*args, **kwargs):
+        collect_calls.append(kwargs)
+
+    common = dict(
+        event_id="e1", sequence=1, timestamp="2026-01-01T00:00:00Z",
+        session_id="default", run_id="r1", attempt=1,
+    )
+    run_result = RunResult(
+        run_id="r1", session_id="default", status=RunStatus.FAILED,
+        attempt=1, model="ollama:minimax-m2", response="",
+        usage=RunUsage(), verification=VerificationOutcome(),
+        persisted_at="2026-01-01T00:00:00Z",
+        final_message_id="m-1",
+    )
+
+    async def fake_execute_stream(self, **kwargs):
+        yield ToolResultEvent(
+            data=ToolResultData(block_id="b1", tool_call_id="c1", name="t1", status="failed", content="boom"),
+            **common,
+        )
+        yield DoneEvent(data=DoneData(result=run_result), **common)
+
+    monkeypatch.setattr(conversation_router, "_persist_collected_stream_state", fake_collect)
+    monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
+    monkeypatch.setattr(conversation_router.RunService, "execute_stream", fake_execute_stream)
+
+    response = await conversation_router.message_stream(
+        MessageRequest(message="go", user_id="u")
+    )
+    output = "".join([c async for c in response.body_iterator])
+
+    assert '"status": "failed"' in output
+    # Exactly one persistence authority: NOT the router fallback.
+    assert collect_calls == [], "failed-run fallback collector fired (duplicate rows)"
+
+
+class TestFailedRunSinglePersist:
+    """Audit B11: failed runs are persisted exactly once — RunService owns the
+    write (with run_id); the router's failed branch must not add a second,
+    run_id-less copy via _persist_collected_stream_state."""
+
+    @pytest.mark.asyncio
+    async def test_failed_done_does_not_double_persist(self, monkeypatch):
+        from datetime import UTC, datetime
+
+        from src.http.models import MessageRequest
+        from src.http.routers import conversation as conversation_router
+        from src.sdk.run_events import (
+            BlockDeltaData,
+            DoneData,
+            DoneEvent,
+            TextDeltaEvent,
+            ToolInputStartEvent,
+            ToolResultData,
+            ToolResultEvent,
+            ToolStartData,
+        )
+        from src.sdk.run_models import (
+            RunResult,
+            RunStatus,
+            RunUsage,
+            VerificationOutcome,
+        )
+
+        store = FakeConversation()
+        common = dict(
+            event_id="e1", sequence=1, timestamp="2026-01-01T00:00:00Z",
+            session_id="default", run_id="r-b11", attempt=1,
+        )
+        result = RunResult(
+            run_id="r-b11",
+            session_id="default",
+            status=RunStatus.FAILED,
+            attempt=1,
+            model="test:model",
+            response="",
+            final_message_id="msg-persisted",
+            usage=RunUsage(),
+            verification=VerificationOutcome(),
+            persisted_at=datetime.now(UTC),
+        )
+
+        async def fake_execute_stream(self, **kwargs):
+            yield TextDeltaEvent(data=BlockDeltaData(block_id="b1", delta="partial"), **common)
+            yield ToolInputStartEvent(
+                data=ToolStartData(block_id="b2", tool_call_id="c1", name="email_list"),
+                **common,
+            )
+            yield ToolResultEvent(
+                data=ToolResultData(
+                    block_id="b2", tool_call_id="c1", name="email_list",
+                    status="completed", content="rows",
+                ),
+                **common,
+            )
+            yield DoneEvent(data=DoneData(result=result), **common)
+
+        calls: list[dict] = []
+
+        async def spy_persist(*args, **kwargs):
+            calls.append(kwargs)
+
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
+        monkeypatch.setattr(conversation_router.RunService, "execute_stream", fake_execute_stream)
+        monkeypatch.setattr(conversation_router, "_persist_collected_stream_state", spy_persist)
+
+        response = await conversation_router.message_stream(
+            MessageRequest(message="go", user_id="u")
+        )
+        output = "".join([c async for c in response.body_iterator])
+        # Audit E-streaming: a failed run is surfaced as an error SSE event,
+        # not a done envelope (mirrors the WS path).
+        assert '"type": "error"' in output
+        assert '"type": "done"' not in output
+        assert calls == [], "failed done must NOT re-persist already-persisted state"
+
+
+class TestImportSessionTargeting:
+    """Audit E-lifecycle part A, sub-item 1: /conversation/import must target
+    the requested session so imported eval history is visible to the agent's
+    session-scoped queries."""
+
+    @pytest.mark.asyncio
+    async def test_import_passes_session_id_to_add_message(self, monkeypatch):
+        from src.http.routers import conversation as conversation_router
+
+        store = FakeConversation()
+
+        monkeypatch.setattr("src.storage.messages.aget_message_store", AsyncMock(return_value=store))
+
+        req = conversation_router.ConversationImportRequest(
+            user_id="u",
+            session_id="eval-session-1",
+            messages=[
+                {"role": "user", "content": "context line one"},
+                {"role": "assistant", "content": "context answer"},
+            ],
+        )
+        result = await conversation_router.import_conversation(req)
+
+        assert result == {"imported": 2}
+        assert all(kwargs.get("session_id") == "eval-session-1" for _, kwargs in store.messages)
+        assert [args[0] for args, _ in store.messages] == ["user", "assistant"]
+
+    @pytest.mark.asyncio
+    async def test_import_defaults_session_to_default(self, monkeypatch):
+        from src.http.routers import conversation as conversation_router
+
+        store = FakeConversation()
+
+        monkeypatch.setattr("src.storage.messages.aget_message_store", AsyncMock(return_value=store))
+
+        req = conversation_router.ConversationImportRequest(
+            user_id="u",
+            messages=[{"role": "user", "content": "hello"}],
+        )
+        await conversation_router.import_conversation(req)
+
+        assert store.messages[0][1].get("session_id") == "default"
+
+
+class TestInterruptedTurnRunId:
+    """Audit E-lifecycle part A, sub-item 2: fallback persist helpers must
+    thread run_id into metadata so get_turns does not fragment cancelled or
+    interrupted turns."""
+
+    def test_persist_collected_stream_state_threads_run_id(self):
+        from src.http.routers.conversation import _persist_collected_stream_state
+
+        calls = []
+
+        class FakeConversation:
+            def add_message(self, *args, **kwargs):
+                calls.append((args, kwargs))
+                return "m"
+
+        _persist_collected_stream_state(
+            FakeConversation(),
+            session_id="default",
+            ai_content_parts=["partial"],
+            reasoning_parts=["thinking"],
+            tool_metadata_list=[{"tool_name": "time_get", "tool_call_id": "c1"}],
+            tool_results={"c1": "noon"},
+            run_id="run-42",
+        )
+
+        assert calls, "expected persisted rows"
+        for args, kwargs in calls:
+            assert kwargs["metadata"].get("run_id") == "run-42", f"missing run_id in {args[0]} row"
+
+    def test_persist_tool_messages_threads_run_id(self):
+        from src.http.routers.conversation import _persist_tool_messages
+
+        calls = []
+
+        class FakeConversation:
+            def add_message(self, *args, **kwargs):
+                calls.append((args, kwargs))
+                return "m"
+
+        _persist_tool_messages(
+            FakeConversation(),
+            [{"tool": "message_search", "stage": "end", "call_id": "call-1", "output": "found"}],
+            session_id="chat-1",
+            run_id="run-7",
+        )
+
+        assert calls[0][1]["metadata"].get("run_id") == "run-7"

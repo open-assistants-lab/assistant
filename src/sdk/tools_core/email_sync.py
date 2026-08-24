@@ -12,12 +12,31 @@ from src.app_logging import get_logger
 from src.config import get_settings
 from src.sdk.tools import tool
 from src.sdk.tools_core.email_db import get_engine as _get_engine
+from src.sdk.tools_core.email_db import parse_email_flags
 
 logger = get_logger()
-SETTINGS = get_settings()
 
 RATE_LIMIT_COOLDOWN: dict[str, float] = {}
 
+
+
+
+def _resolve_watermark(account: dict[str, Any]) -> int:
+    """Quick-sync watermark: SQL NULL / missing means "never synced" → 0.
+
+    ``account.get("last_timestamp", 0)`` returns None — not the default —
+    when the nullable accounts.last_timestamp column is NULL, and
+    ``None > 0`` raises TypeError, breaking every quick sync for such
+    accounts.
+    """
+    return account.get("last_timestamp") or 0
+
+
+def _clamp_watermark(newest: int, now_ts: int) -> int:
+    """Never advance the watermark past now: a future Date header would
+    otherwise poison every subsequent sync (date__gt would skip all mail
+    older than the bogus future timestamp)."""
+    return min(newest, now_ts)
 
 def _load_accounts(user_id: str) -> dict[str, Any]:
     """Load accounts from database."""
@@ -124,8 +143,7 @@ def _email_to_dict(msg: Any) -> dict[str, Any]:
         )
         if msg.headers
         else False,
-        "read": not msg.flags.Seen if hasattr(msg.flags, "Seen") else True,
-        "flagged": msg.flags.Flagged if hasattr(msg.flags, "Flagged") else False,
+        **parse_email_flags(msg),
         "has_attachments": bool(attachments),
         "attachments": attachments,
     }
@@ -149,6 +167,45 @@ def _get_imap_connection(account_id: str, user_id: str) -> Any:
     from imap_tools import MailBox
 
     return MailBox(imap_host, imap_port).login(email, password)
+
+
+def _email_row_params(email_data: dict[str, Any]) -> dict[str, Any]:
+    """Flatten an _email_to_dict payload into bound INSERT parameters."""
+    return {
+        **email_data,
+        "to_addrs": ",".join(email_data["to_addrs"]),
+        "cc_addrs": ",".join(email_data["cc_addrs"]),
+        "attachments": str(email_data["attachments"]),
+        "read": 1 if email_data["read"] else 0,
+        "flagged": 1 if email_data["flagged"] else 0,
+        "has_attachments": 1 if email_data["has_attachments"] else 0,
+        "is_forwarded": 1 if email_data.get("is_forwarded") else 0,
+        "tags": "",
+    }
+
+
+_INSERT_EMAIL_SQL = text("""
+    INSERT OR REPLACE INTO emails
+    (account_id, folder, message_id, from_addr, from_name,
+     to_addrs, cc_addrs, subject, body_text, timestamp,
+     in_reply_to, thread_references, is_forwarded,
+     read, flagged, has_attachments, attachments, tags, created_at)
+    VALUES
+    (:account_id, :folder, :message_id, :from_addr, :from_name,
+     :to_addrs, :cc_addrs, :subject, :body_text, :timestamp,
+     :in_reply_to, :thread_references, :is_forwarded,
+     :read, :flagged, :has_attachments, :attachments, :tags, :created_at)
+""")
+
+
+def _insert_email_rows(engine: Any, rows: list[dict[str, Any]]) -> None:
+    """Insert email rows in ONE transaction (audit P1): the old code opened a
+    connection + fsync commit PER EMAIL, so a 500-message backfill paid 500
+    connects + 500 commits."""
+    if not rows:
+        return
+    with engine.begin() as conn:
+        conn.execute(_INSERT_EMAIL_SQL, rows)
 
 
 def _sync_folder(
@@ -217,6 +274,7 @@ def _sync_folder(
                 if not messages:
                     break
 
+                batch_rows: list[dict[str, Any]] = []
                 for msg in messages:
                     msg_uid = str(msg.uid)
                     if msg_uid in existing_ids:
@@ -227,36 +285,13 @@ def _sync_folder(
                     email_data["folder"] = folder
                     email_data["created_at"] = int(datetime.now(UTC).timestamp())
 
-                    with engine.connect() as conn:
-                        conn.execute(
-                            text("""
-                                INSERT OR REPLACE INTO emails
-                                (account_id, folder, message_id, from_addr, from_name,
-                                 to_addrs, cc_addrs, subject, body_text, timestamp,
-                                 in_reply_to, thread_references, is_forwarded,
-                                 read, flagged, has_attachments, attachments, tags, created_at)
-                                VALUES
-                                (:account_id, :folder, :message_id, :from_addr, :from_name,
-                                 :to_addrs, :cc_addrs, :subject, :body_text, :timestamp,
-                                 :in_reply_to, :thread_references, :is_forwarded,
-                                 :read, :flagged, :has_attachments, :attachments, :tags, :created_at)
-                            """),
-                            {
-                                **email_data,
-                                "to_addrs": ",".join(email_data["to_addrs"]),
-                                "cc_addrs": ",".join(email_data["cc_addrs"]),
-                                "attachments": str(email_data["attachments"]),
-                                "read": 1 if email_data["read"] else 0,
-                                "flagged": 1 if email_data["flagged"] else 0,
-                                "has_attachments": 1 if email_data["has_attachments"] else 0,
-                                "is_forwarded": 1 if email_data.get("is_forwarded") else 0,
-                                "tags": "",
-                            },
-                        )
-                        conn.commit()
+                    batch_rows.append(_email_row_params(email_data))
 
                     existing_ids.add(msg_uid)
                     synced += 1
+
+                # One transaction per IMAP batch instead of one commit per row.
+                _insert_email_rows(engine, batch_rows)
 
                 # Track lowest UID for pagination
                 batch_uids = [msg.uid for msg in messages if msg.uid is not None]
@@ -300,7 +335,7 @@ def _sync_folder(
 
         else:
             # Quick sync - fetch recent emails
-            last_timestamp = account.get("last_timestamp", 0)
+            last_timestamp = _resolve_watermark(account)
             synced = 0
 
             existing_ids = set()
@@ -314,9 +349,19 @@ def _sync_folder(
                 for row in result:
                     existing_ids.add(row[0])
 
-            messages = list(mailbox.fetch(limit=limit, reverse=True))
+            # Incremental watermark (audit B7): the old code ignored
+            # last_timestamp entirely, so >limit new mails between syncs were
+            # permanently missed. IMAP SINCE is day-granular; the UID dedup
+            # above/below absorbs any overlap from the coarse cutoff.
+            fetch_kwargs: dict[str, Any] = {"limit": limit, "reverse": True}
+            if last_timestamp > 0:
+                fetch_kwargs["date__gt"] = datetime.fromtimestamp(
+                    last_timestamp, tz=UTC
+                ).date()
+            messages = list(mailbox.fetch(**fetch_kwargs))
 
             newest_timestamp = last_timestamp
+            new_rows: list[dict[str, Any]] = []
 
             for msg in messages:
                 msg_uid = str(msg.uid)
@@ -328,41 +373,20 @@ def _sync_folder(
                 email_data["folder"] = folder
                 email_data["created_at"] = int(datetime.now(UTC).timestamp())
 
-                with engine.connect() as conn:
-                    conn.execute(
-                        text("""
-                            INSERT OR REPLACE INTO emails
-                            (account_id, folder, message_id, from_addr, from_name,
-                             to_addrs, cc_addrs, subject, body_text, timestamp,
-                             in_reply_to, thread_references, is_forwarded,
-                             read, flagged, has_attachments, attachments, tags, created_at)
-                            VALUES
-                            (:account_id, :folder, :message_id, :from_addr, :from_name,
-                             :to_addrs, :cc_addrs, :subject, :body_text, :timestamp,
-                             :in_reply_to, :thread_references, :is_forwarded,
-                             :read, :flagged, :has_attachments, :attachments, :tags, :created_at)
-                        """),
-                        {
-                            **email_data,
-                            "to_addrs": ",".join(email_data["to_addrs"]),
-                            "cc_addrs": ",".join(email_data["cc_addrs"]),
-                            "attachments": str(email_data["attachments"]),
-                            "read": 1 if email_data["read"] else 0,
-                            "flagged": 1 if email_data["flagged"] else 0,
-                            "has_attachments": 1 if email_data["has_attachments"] else 0,
-                            "is_forwarded": 1 if email_data.get("is_forwarded") else 0,
-                            "tags": "",
-                        },
-                    )
-                    conn.commit()
+                new_rows.append(_email_row_params(email_data))
 
                 if email_data["timestamp"] > newest_timestamp:
                     newest_timestamp = email_data["timestamp"]
                 synced += 1
 
+            # One transaction for the whole quick sync (audit P1).
+            _insert_email_rows(engine, new_rows)
+
             if synced > 0:
                 account["last_sync"] = int(datetime.now(UTC).timestamp())
-                account["last_timestamp"] = newest_timestamp
+                account["last_timestamp"] = _clamp_watermark(
+                    newest_timestamp, int(datetime.now(UTC).timestamp())
+                )
                 _save_account(user_id, account_id, account)
 
             logger.info(
@@ -396,7 +420,7 @@ async def _sync_emails(
     except Exception as e:
         error_str = str(e).lower()
         if "too many simultaneous connections" in error_str or "rate limit" in error_str:
-            cooldown_minutes = getattr(SETTINGS.email_sync, "cooldown_minutes", 15)
+            cooldown_minutes = getattr(get_settings().email_sync, "cooldown_minutes", 15)
             RATE_LIMIT_COOLDOWN[cooldown_key] = time.time() + (cooldown_minutes * 60)
             logger.warning(
                 "email_sync.rate_limited",
@@ -410,7 +434,7 @@ def start_background_sync(user_id: str, account_id: str) -> None:
     """Start background backfill sync (newest -> earliest)."""
 
     async def _backfill() -> None:
-        limit = SETTINGS.email_sync.backfill_limit or 500
+        limit = get_settings().email_sync.backfill_limit or 500
         count = await _sync_emails(user_id, account_id, "INBOX", "full", limit)
         logger.info(
             "email.backfill_complete",
@@ -447,7 +471,7 @@ async def start_interval_sync() -> None:
     if _scheduler_task is not None:
         return
 
-    if not SETTINGS.email_sync.enabled:
+    if not get_settings().email_sync.enabled:
         logger.info("email_sync.disabled", {}, user_id="system")
         return
 
@@ -455,7 +479,7 @@ async def start_interval_sync() -> None:
     _scheduler_task = asyncio.create_task(_run_interval_sync())
     logger.info(
         "email_sync.started",
-        {"interval_minutes": SETTINGS.email_sync.interval_minutes},
+        {"interval_minutes": get_settings().email_sync.interval_minutes},
         user_id="system",
     )
 
@@ -478,7 +502,7 @@ async def stop_interval_sync() -> None:
 
 async def _run_interval_sync() -> None:
     """Main interval sync loop."""
-    interval_seconds = SETTINGS.email_sync.interval_minutes * 60
+    interval_seconds = get_settings().email_sync.interval_minutes * 60
 
     while _running:
         try:
@@ -499,7 +523,7 @@ async def _sync_all_accounts() -> None:
     user_ids = get_all_user_ids()
     # Filter out "default_user" user - it's not valid for email operations
     user_ids = [uid for uid in user_ids if uid and uid != "default_user"]
-    batch_size = SETTINGS.email_sync.batch_size
+    batch_size = get_settings().email_sync.batch_size
 
     for user_id in user_ids:
         accounts = _load_accounts(user_id)
@@ -529,7 +553,7 @@ async def _sync_all_accounts() -> None:
             except Exception as e:
                 error_str = str(e).lower()
                 if "too many simultaneous connections" in error_str or "rate limit" in error_str:
-                    cooldown_minutes = getattr(SETTINGS.email_sync, "cooldown_minutes", 15)
+                    cooldown_minutes = getattr(get_settings().email_sync, "cooldown_minutes", 15)
                     RATE_LIMIT_COOLDOWN[cooldown_key] = time.time() + (cooldown_minutes * 60)
                     logger.warning(
                         "email_sync.rate_limited",
@@ -571,7 +595,7 @@ def email_sync(
 
     async def _sync() -> int:
         limit = (
-            SETTINGS.email_sync.backfill_limit if mode == "full" else SETTINGS.email_sync.batch_size
+            get_settings().email_sync.backfill_limit if mode == "full" else get_settings().email_sync.batch_size
         )
         count = await _sync_emails(user_id, account_id, folder, mode, limit)
         return count

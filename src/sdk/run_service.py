@@ -8,6 +8,7 @@ Routers do not write conversation records directly.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -66,7 +67,12 @@ from src.sdk.run_models import (
     VerificationOutcome,
 )
 from src.sdk.runner import get_sdk_loop, register_user_loop, unregister_user_loop
-from src.sdk.session_worker import SessionBusyError, SessionLock, SessionWorkerRegistry
+from src.sdk.session_worker import (
+    SessionBusyError,
+    SessionLock,
+    SessionWorkerRegistry,
+    session_key,
+)
 from src.storage.messages import Message as StorageMessage
 from src.storage.messages import MessageStore
 
@@ -260,6 +266,7 @@ def _stream_chunk_to_event(
     attempt: int,
     model_id: str = "",
     accumulated_args: dict[str, str] | None = None,
+    llm_call_index: int = 1,
 ) -> RunEvent | None:
     """Convert a StreamChunk to the corresponding RunEvent.
 
@@ -271,13 +278,13 @@ def _stream_chunk_to_event(
         accumulated_args = {}
     ct = chunk.canonical_type
     if ct == "text_start":
-        return emit(TextStartEvent, BlockData(block_id=chunk.call_id or str(uuid.uuid4())).model_dump(), attempt)
+        return emit(TextStartEvent, BlockData(block_id=chunk.call_id or "text").model_dump(), attempt)
     elif ct == "text_delta":
         return emit(TextDeltaEvent, BlockDeltaData(block_id="text", delta=chunk.content).model_dump(), attempt)
     elif ct == "text_end":
         return emit(TextEndEvent, BlockData(block_id="text").model_dump(), attempt)
     elif ct == "reasoning_start":
-        return emit(ReasoningStartEvent, BlockData(block_id=chunk.call_id or str(uuid.uuid4())).model_dump(), attempt)
+        return emit(ReasoningStartEvent, BlockData(block_id=chunk.call_id or "reasoning").model_dump(), attempt)
     elif ct == "reasoning_delta":
         return emit(ReasoningDeltaEvent, BlockDeltaData(block_id="reasoning", delta=chunk.content).model_dump(), attempt)
     elif ct == "reasoning_end":
@@ -298,7 +305,6 @@ def _stream_chunk_to_event(
     elif ct == "tool_input_end":
         call_id = chunk.call_id or ""
         args_str = accumulated_args.pop(call_id, "")
-        import json
         try:
             args = json.loads(args_str) if args_str else {}
         except json.JSONDecodeError:
@@ -311,7 +317,7 @@ def _stream_chunk_to_event(
             block_id=chunk.call_id or str(uuid.uuid4()),
             tool_call_id=chunk.call_id or "",
             name=chunk.tool or "unknown",
-            status="completed",
+            status="failed" if chunk.is_error else "completed",
             content=chunk.result_preview or "",
         ).model_dump(), attempt)
     elif ct == "interrupt":
@@ -324,7 +330,7 @@ def _stream_chunk_to_event(
         return emit(UsageEvent, UsageEventData(
             category="agent",
             model=model_id,
-            llm_call_index=1,
+            llm_call_index=llm_call_index,
             usage={
                 "input_tokens": chunk.usage.input_tokens or 0,
                 "output_tokens": chunk.usage.output_tokens or 0,
@@ -337,7 +343,10 @@ def _stream_chunk_to_event(
         return None
     elif ct == "error":
         return None
-    return emit(TextDeltaEvent, BlockDeltaData(block_id="text", delta=chunk.content).model_dump(), attempt)
+    # Unknown/unmapped canonical types are dropped — never projected as
+    # empty text deltas (audit P6): a future event type must not regress
+    # into a silent no-op delta.
+    return None
 
 
 class RunService:
@@ -390,6 +399,17 @@ class RunService:
         except Exception:
             pass
 
+    def probe_session_busy(self, session_id: str) -> bool:
+        """Cheap synchronous busy-check WITHOUT starting a run or mutating any
+        state (audit B12).
+
+        Advisory only — the authoritative check remains the registry acquire
+        inside ``execute``/``execute_stream``. Exists so HTTP endpoints can
+        fail fast BEFORE touching cancel-flag/slot dicts, so a request that is
+        about to be rejected cannot clobber the live stream's registration.
+        """
+        return self._registry.holds(session_key(self._user_id, session_id))
+
     async def execute(
         self,
         session_id: str,
@@ -403,7 +423,7 @@ class RunService:
         # Lock key is user-scoped: the registry is process-global, and two
         # users sharing a session id (e.g. both using "chat-1") must not
         # block each other.
-        lock = await self._registry.acquire(f"{self._user_id}::{session_id}")
+        lock = await self._registry.acquire(session_key(self._user_id, session_id))
         try:
             # Run-level trace root: the loop's agent_run span and the rubric
             # grader both nest under it (no-op when Langfuse is disabled).
@@ -412,7 +432,7 @@ class RunService:
         except SessionBusyError:
             raise
         finally:
-            await self._registry.release(f"{self._user_id}::{session_id}")
+            await self._registry.release(session_key(self._user_id, session_id))
 
     async def execute_stream(
         self,
@@ -422,19 +442,25 @@ class RunService:
         provider_keys: dict[str, str] | None = None,
         rubric: str | None = None,
         mode: str | None = None,
+        on_stream_end: Callable[[AgentLoop], None] | None = None,
     ) -> AsyncIterator[RunEvent]:
-        """Streaming execution. Yields RunEvent envelopes."""
+        """Streaming execution. Yields RunEvent envelopes.
+
+        ``on_stream_end`` (audit E25) fires with the live loop right before
+        it is unregistered, letting callers capture it for post-done work
+        (e.g. the WS follow-up steer) that must survive unregistration.
+        """
         # Lock key is user-scoped: the registry is process-global, and two
         # users sharing a session id (e.g. both using "chat-1") must not
         # block each other.
-        lock = await self._registry.acquire(f"{self._user_id}::{session_id}")
+        lock = await self._registry.acquire(session_key(self._user_id, session_id))
         try:
             # Run-level trace root covering the whole stream (agent + grader).
             with LangfuseTracer.trace_run(self._user_id, session_id):
-                async for event in self._run_stream(session_id, prompt, model, provider_keys, lock, rubric, mode):
+                async for event in self._run_stream(session_id, prompt, model, provider_keys, lock, rubric, mode, on_stream_end=on_stream_end):
                     yield event
         finally:
-            await self._registry.release(f"{self._user_id}::{session_id}")
+            await self._registry.release(session_key(self._user_id, session_id))
 
     async def _run(
         self,
@@ -468,12 +494,31 @@ class RunService:
             )
 
             _t_persist = time.monotonic()
+            # Audit E6: persist the assistant's reasoning as a pre-message
+            # (mirroring _run_stream) so the stored transcript order matches
+            # what the client saw, and surface it on the RunResult.
+            pre_messages: list[StorageMessage] = []
+            reasoning_text: str | None = None
+            if loop.state is not None:
+                for msg in reversed(loop.state.messages):
+                    if msg.role == "assistant" and getattr(msg, "reasoning", None):
+                        reasoning_text = str(msg.reasoning or "")
+                        pre_messages.append(StorageMessage(
+                            id="",
+                            ts=datetime.now(UTC),
+                            role="reasoning",
+                            content=reasoning_text,
+                            metadata={"stream": False},
+                            session_id=session_id,
+                        ))
+                        break
             persisted_id = self._message_store.persist_run(
                 run_id=run_id,
                 session_id=session_id,
                 user_message_id=user_msg_id,
                 final_answer=_sdk_message_to_storage(Message.assistant(content=result.response), session_id),
                 audit_records=_tool_audit_records(loop, session_id),
+                pre_messages=pre_messages,
                 metadata={"model": result.model, "verification": _verification_metadata(result.verification)},
             )
             try:
@@ -498,6 +543,7 @@ class RunService:
                 attempt=result.attempt,
                 model=result.model,
                 response=result.response,
+                reasoning=reasoning_text,
                 final_message_id=persisted_id,
                 usage=result.usage,
                 verification=result.verification,
@@ -516,6 +562,7 @@ class RunService:
         lock: SessionLock,
         rubric: str | None = None,
         mode: str | None = None,
+        on_stream_end: Callable[[AgentLoop], None] | None = None,
     ) -> AsyncIterator[RunEvent]:
         run_id = str(uuid.uuid4())
         sequence = 0
@@ -589,19 +636,29 @@ class RunService:
                         if chunk.type == "done":
                             final_response = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
                             final_attempt = item.attempt
-                            if chunk.usage:
-                                agent_usage = UsageAggregate(
-                                    available=True,
-                                    calls=agent_usage.calls + 1,
-                                    models=(loop.model_id,),
-                                    input_tokens=agent_usage.input_tokens + (chunk.usage.input_tokens or 0),
-                                    output_tokens=agent_usage.output_tokens + (chunk.usage.output_tokens or 0),
-                                    reasoning_tokens=agent_usage.reasoning_tokens + (chunk.usage.reasoning_tokens or 0),
-                                )
+                        elif chunk.canonical_type == "usage" and chunk.usage:
+                            # Aggregate from canonical usage chunks. The loop
+                            # coalesces per-LLM-round usage into ONE merged
+                            # cumulative chunk (audit S2.1 + fix round 1), so
+                            # each chunk == one LLM round: `calls + 1` and the
+                            # token sums are exact. The done chunk never
+                            # carries usage (StreamChunk.done has no usage
+                            # field), so the old done-branch accumulation
+                            # always stayed unavailable with zero tokens.
+                            agent_usage = UsageAggregate(
+                                available=True,
+                                calls=agent_usage.calls + 1,
+                                models=(loop.model_id,),
+                                input_tokens=agent_usage.input_tokens + (chunk.usage.input_tokens or 0),
+                                output_tokens=agent_usage.output_tokens + (chunk.usage.output_tokens or 0),
+                                reasoning_tokens=agent_usage.reasoning_tokens + (chunk.usage.reasoning_tokens or 0),
+                                cache_read_tokens=agent_usage.cache_read_tokens + (chunk.usage.cache_read_tokens or 0),
+                                cache_creation_tokens=agent_usage.cache_creation_tokens + (chunk.usage.cache_creation_tokens or 0),
+                            )
                         elif chunk.type == "error":
                             run_status = RunStatus.FAILED
                             break
-                        ev = _stream_chunk_to_event(chunk, _emit, item.attempt, loop.model_id, accumulated_args)
+                        ev = _stream_chunk_to_event(chunk, _emit, item.attempt, loop.model_id, accumulated_args, agent_usage.calls)
                         if ev is not None:
                             yield ev
                     elif isinstance(item, GradeStartItem):
@@ -705,6 +762,9 @@ class RunService:
                 }
 
             _t_persist = time.monotonic()
+            # Audit B11: persist runs unconditionally here (WITH run_id) —
+            # including failures — so partial state keeps its run grouping.
+            # The routers' failure branches must NOT write a second copy.
             persisted_id = self._message_store.persist_run(
                 run_id=run_id,
                 session_id=session_id,
@@ -778,6 +838,17 @@ class RunService:
                 retryable=False,
             ).model_dump())
         finally:
+            # Audit E25: hand the live loop to the caller BEFORE unregistering
+            # so post-done work (WS follow-up steer) can still reach it.
+            if on_stream_end is not None:
+                try:
+                    on_stream_end(loop)
+                except Exception as exc:
+                    logger.warning(
+                        "run_service.on_stream_end_error",
+                        {"error": str(exc)},
+                        user_id=self._user_id,
+                    )
             unregister_user_loop(self._user_id, loop, session_id=session_id)
 
     async def _run_bounded_orchestration(
@@ -891,22 +962,31 @@ class RunService:
                 if tool_call_records:
                     result_tool_calls = tool_call_records
 
-                # Agent usage summed across attempts.
+                # Agent usage summed across attempts. Every assistant message
+                # carrying usage counts — a ReAct iteration calls the LLM many
+                # times per attempt, and only counting the last message
+                # under-reported multi-step runs (audit S2.2). Reruns replay
+                # history, so dedupe by message identity to avoid charging
+                # shared messages twice across attempts.
+                counted: set[int] = set()
                 for at in attempts:
-                    la = None
-                    for msg in reversed(at.messages):
-                        if msg.role == "assistant":
-                            la = msg
-                            break
-                    if la is not None and la.usage:
-                        agent_usage = UsageAggregate(
-                            available=True,
-                            calls=agent_usage.calls + 1,
-                            models=(loop.model_id,),
-                            input_tokens=agent_usage.input_tokens + (la.usage.input_tokens or 0),
-                            output_tokens=agent_usage.output_tokens + (la.usage.output_tokens or 0),
-                            reasoning_tokens=agent_usage.reasoning_tokens + (la.usage.reasoning_tokens or 0),
-                        )
+                    for msg in at.messages:
+                        if (
+                            msg.role == "assistant"
+                            and msg.usage
+                            and id(msg) not in counted
+                        ):
+                            counted.add(id(msg))
+                            agent_usage = UsageAggregate(
+                                available=True,
+                                calls=agent_usage.calls + 1,
+                                models=(loop.model_id,),
+                                input_tokens=agent_usage.input_tokens + (msg.usage.input_tokens or 0),
+                                output_tokens=agent_usage.output_tokens + (msg.usage.output_tokens or 0),
+                                reasoning_tokens=agent_usage.reasoning_tokens + (msg.usage.reasoning_tokens or 0),
+                                cache_read_tokens=agent_usage.cache_read_tokens + (msg.usage.cache_read_tokens or 0),
+                                cache_creation_tokens=agent_usage.cache_creation_tokens + (msg.usage.cache_creation_tokens or 0),
+                            )
 
         if rubric_status == TerminalRubricStatus.NOT_RUN and rubric_availability == RubricAvailability.ON:
             # Only claim satisfaction when the agent run completed (see the

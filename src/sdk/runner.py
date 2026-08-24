@@ -38,7 +38,7 @@ from src.sdk.loop import AgentLoop
 from src.sdk.messages import Message, StreamChunk
 from src.sdk.middleware_summarization import SummarizationMiddleware
 from src.sdk.native_tools import get_native_tools
-from src.sdk.providers.factory import create_model_from_config
+from src.sdk.providers.factory import get_cached_model_provider
 from src.sdk.tools import ToolDefinition
 from src.sdk.user_prompt import load_user_prompt
 from src.storage.paths import DataPaths
@@ -46,6 +46,11 @@ from src.storage.paths import DataPaths
 logger = get_logger()
 
 _MAX_LOOP_CACHE = 50
+# Bumped on every reset_user_sdk_loops call. get_sdk_loop snapshots it before
+# creating a loop and discards the result if it changed — closing the race
+# where an in-flight creation re-inserts a loop built from pre-reset caps
+# (audit E24 drift). Deterministic for both sync and async reset callers.
+_loop_generation = 0
 _loop_cache: collections.OrderedDict[str, AgentLoop] = collections.OrderedDict()
 _loop_lock = asyncio.Lock()
 
@@ -216,14 +221,60 @@ def _get_memory_context(caps: dict[str, Any]) -> str:
 
 
 def _get_file_ops_guideline(caps: dict[str, Any]) -> str:
-    """Shell-based file-ops guideline, only when dedicated search tools are off."""
+    """Shell-based file-ops guideline, only when dedicated search tools are off.
+
+    Audit drift fix: only commands actually in the shell allowlist may be
+    named — advertising ls/rg/find when the allowlist rejects them steers the
+    model into a guaranteed-fail loop.
+    """
     has_shell = _resource_enabled(caps, "tools", "shell_execute")
     has_file_search = _resource_enabled(caps, "tools", "files_glob_search") or _resource_enabled(
         caps, "tools", "files_grep_search"
     )
-    if has_shell and not has_file_search:
-        return "Use shell_execute for file operations like ls, rg, find"
-    return ""
+    if not (has_shell and not has_file_search):
+        return ""
+    try:
+        from src.sdk.tools_core.shell import _get_shell_config
+
+        allowed = set(_get_shell_config()["allowed_commands"])
+    except Exception:
+        allowed = set()
+    mentioned = [c for c in ("ls", "rg", "find", "cat", "grep") if c in allowed]
+    if mentioned:
+        return f"Use shell_execute for file operations like {', '.join(mentioned)}"
+    return (
+        "Use shell_execute for file operations via python3 "
+        "(e.g. os.listdir/open) — dedicated file tools are disabled for this session"
+    )
+
+
+def _build_tool_preferences(caps: dict[str, Any]) -> str:
+    """Tool preference hints built from ENABLED tools only (audit E24 drift):
+    a preference naming an unregistered tool actively pushes the model toward
+    a name that will fail (or bypass scoping)."""
+
+    def on(name: str) -> bool:
+        return _resource_enabled(caps, "tools", name)
+
+    lines: list[str] = []
+    if on("web_fetch"):
+        lines.append("- For fetching a URL or web page: use **web_fetch**, NOT shell_execute with curl.")
+    if on("web_search"):
+        lines.append("- For web search: use **web_search**, NOT shell_execute with curl.")
+    if on("files_read"):
+        lines.append("- For reading files: use **files_read**, NOT shell_execute with cat.")
+    if on("files_list") or on("files_glob_search"):
+        files_list = "**files_list** or **files_glob_search**" if on("files_list") else "**files_glob_search**"
+        lines.append(f"- For listing files: use {files_list}, NOT shell_execute with ls.")
+    if on("files_write"):
+        lines.append("- For writing files: use **files_write**, NOT shell_execute with echo/tee.")
+    if on("files_grep_search"):
+        lines.append("- For searching file contents: use **files_grep_search**, NOT shell_execute with grep.")
+    if on("shell_execute"):
+        lines.append("- Use shell_execute only for commands that have no dedicated tool.")
+    if not lines:
+        return ""
+    return "\n\n## Tool Preferences\n" + "\n".join(lines)
 
 
 def _get_workspace_context(workspace_id: str | None) -> str:
@@ -345,7 +396,9 @@ async def create_sdk_loop(
     t0 = time.monotonic()
     settings = get_settings()
 
-    provider = create_model_from_config(model, provider_keys=provider_keys, user_id=user_id)
+    provider = await asyncio.to_thread(
+        get_cached_model_provider, model, provider_keys=provider_keys, user_id=user_id
+    )
     provider_model: str = cast(
         str,
         getattr(provider, "model", None)
@@ -408,7 +461,7 @@ async def create_sdk_loop(
     workspace_tools_dir = None
     mcp_config = paths.user_mcp_config()
 
-    idx = get_or_create_index(
+    idx, commit_index_hashes = get_or_create_index(
         user_tools_dir, workspace_tools_dir, mcp_config,
         user_id=user_id, workspace_id=runtime_workspace_id,
     )
@@ -449,6 +502,9 @@ async def create_sdk_loop(
                 reconstruct = {"server_name": server_name, "mcp_tool_name": td.name}
                 idx.index_tool(td, tool_type="mcp", namespace=f"mcp__{server_name}",
                                reconstruct=reconstruct)
+
+        # Crash-safe: only now that indexing finished, persist source hashes.
+        commit_index_hashes()
 
     summary_config = settings.memory.summarization
 
@@ -551,6 +607,10 @@ async def create_sdk_loop(
         user_id=user_id,
         workspace_id=runtime_workspace_id,
         model_id=model_id,
+        # Audit E24-tools: execution-boundary capability gate. `caps` is the
+        # same snapshot that filtered registration; PATCH scope changes reset
+        # loops (generation guard below), so per-creation freshness is sound.
+        caps_check=lambda name: _resource_enabled(caps, "tools", name),
     )
 
     # The flow identity (used by compression contexts and middleware reruns)
@@ -574,17 +634,10 @@ async def create_sdk_loop(
 
     # Tool preference hints: steer the model toward the right tool for common tasks
     # so it doesn't default to shell_execute for things that have dedicated tools.
-    tool_prefs = (
-        "\n\n## Tool Preferences\n"
-        "- For fetching a URL or web page: use **web_fetch**, NOT shell_execute with curl.\n"
-        "- For web search: use **web_search**, NOT shell_execute with curl.\n"
-        "- For reading files: use **files_read**, NOT shell_execute with cat.\n"
-        "- For listing files: use **files_list** or **files_glob_search**, NOT shell_execute with ls.\n"
-        "- For writing files: use **files_write**, NOT shell_execute with echo/tee.\n"
-        "- For searching file contents: use **files_grep_search**, NOT shell_execute with grep.\n"
-        "- Use shell_execute only for commands that have no dedicated tool."
-    )
-    loop.system_prompt = (loop.system_prompt or "") + tool_prefs
+    # Built from enabled tools only (audit E24 drift).
+    tool_prefs = _build_tool_preferences(caps)
+    if tool_prefs:
+        loop.system_prompt = (loop.system_prompt or "") + tool_prefs
 
     if mcp_bridge:
         loop._mcp_bridge = mcp_bridge  # type: ignore[attr-defined]
@@ -637,31 +690,75 @@ async def get_sdk_loop(user_id: str, workspace_id: str = "personal", model: str 
     cache_key = _loop_cache_key(
         user_id, workspace_id, model, provider_keys, runtime_session_id
     )
-    async with _loop_lock:
-        if cache_key not in _loop_cache:
-            _loop_cache[cache_key] = await create_sdk_loop(
-                user_id,
-                workspace_id,
-                model=model,
-                provider_keys=provider_keys,
-                session_id=runtime_session_id,
-            )
-            logger.info(
-                "sdk_runner.loop_created",
-                {
-                    "user_id": user_id,
-                    "workspace_id": workspace_id,
-                    "model": model,
-                    "session_id": runtime_session_id,
-                },
-                user_id=user_id,
-            )
-            _loop_cache.move_to_end(cache_key)
-            if len(_loop_cache) > _MAX_LOOP_CACHE:
-                _loop_cache.popitem(last=False)
-        else:
-            _loop_cache.move_to_end(cache_key)
-        return _loop_cache[cache_key]
+    # Retry-on-reset loop (audit E24 drift): a reset landing while creation is
+    # in flight invalidates the freshly created loop. We cannot recurse while
+    # holding _loop_lock (non-reentrant), so the whole acquire/create/check
+    # sequence sits in a bounded retry loop OUTSIDE the lock on retry.
+    for _attempt in range(3):
+        superseded = False
+        async with _loop_lock:
+            gen_before = _loop_generation
+            if cache_key not in _loop_cache:
+                new_loop = await create_sdk_loop(
+                    user_id,
+                    workspace_id,
+                    model=model,
+                    provider_keys=provider_keys,
+                    session_id=runtime_session_id,
+                )
+                if _loop_generation != gen_before:
+                    # A reset landed mid-creation — the fresh loop may carry
+                    # pre-change capabilities. Discard it and re-run against
+                    # the post-reset generation.
+                    superseded = True
+                    logger.info(
+                        "sdk_runner.loop_creation_superseded_by_reset",
+                        {"user_id": user_id, "session_id": runtime_session_id},
+                        user_id=user_id,
+                    )
+                    aclose = getattr(new_loop, "aclose", None)
+                    if aclose is not None:
+                        try:
+                            await aclose()
+                        except Exception:
+                            pass
+                else:
+                    _loop_cache[cache_key] = new_loop
+            if not superseded:
+                logger.info(
+                    "sdk_runner.loop_created",
+                    {
+                        "user_id": user_id,
+                        "workspace_id": workspace_id,
+                        "model": model,
+                        "session_id": runtime_session_id,
+                    },
+                    user_id=user_id,
+                ) if cache_key in _loop_cache and _loop_cache[cache_key] is not None else None
+                _loop_cache.move_to_end(cache_key)
+                _evict_loop_cache_until_bounded()
+                return _loop_cache[cache_key]
+    raise RuntimeError(f"get_sdk_loop: loop creation kept being superseded by resets ({user_id})")
+
+
+def _evict_loop_cache_until_bounded() -> None:
+    """Evict LRU entries while the cache exceeds _MAX_LOOP_CACHE.
+
+    Audit P6: eviction skips loops currently registered in _user_loops (a live
+    session must keep its loop cached); the starvation fallback evicts the LRU
+    anyway when every cached loop is active so the cache stays bounded instead
+    of growing forever (>50 live sessions).
+    """
+    while len(_loop_cache) > _MAX_LOOP_CACHE:
+        active_loops = set(id(loop) for loop in _user_loops.values())
+        victim = None
+        for key, loop in _loop_cache.items():
+            if id(loop) not in active_loops:
+                victim = key
+                break
+        if victim is None:
+            victim = next(iter(_loop_cache))
+        _loop_cache.pop(victim)
 
 
 def _messages_from_conversation(messages: list[Any]) -> list[Message]:
@@ -1101,144 +1198,153 @@ async def _verification_engine(
     # mid-verification exception (run FAILED) to rubric CANCELLED instead
     # of leaving verification "not_run". Reset per engine run.
     loop._rubric_started = False  # type: ignore[attr-defined]
+    try:
+        while True:
+            if is_cancelled is not None and is_cancelled():
+                terminal_status = "cancelled"
+                yield AttemptItem(
+                    attempt, input_messages, None, None, terminal_status,
+                    rubric_available, max_attempts, grader_model_id,
+                )
+                break
 
-    while True:
-        if is_cancelled is not None and is_cancelled():
-            terminal_status = "cancelled"
-            yield AttemptItem(
-                attempt, input_messages, None, None, terminal_status,
-                rubric_available, max_attempts, grader_model_id,
-            )
-            break
+            # 1. Run one attempt.
+            result_messages: list[Message] = []
+            if stream:
+                async for chunk in loop.run_stream(input_messages):
+                    yield ChunkItem(attempt, chunk)
+                result_messages = list(loop.state.messages) if loop.state else []
+            else:
+                result_messages = await loop.run(input_messages)
 
-        # 1. Run one attempt.
-        result_messages: list[Message] = []
-        if stream:
-            async for chunk in loop.run_stream(input_messages):
-                yield ChunkItem(attempt, chunk)
-            result_messages = list(loop.state.messages) if loop.state else []
-        else:
-            result_messages = await loop.run(input_messages)
+            # 2. Drain middleware-queued rerun events from this run.
+            fired = await _fire_pending_reruns(loop, user_id, session_id, model)
+            if fired:
+                input_messages = fired[-1]
+                attempt += 1
+                continue
 
-        # 2. Drain middleware-queued rerun events from this run.
-        fired = await _fire_pending_reruns(loop, user_id, session_id, model)
-        if fired:
-            input_messages = fired[-1]
-            attempt += 1
-            continue
-
-        # 3. Grade when verification is active.
-        if rubric_mw is None:
-            terminal_status = "off"
-            yield AttemptItem(
-                attempt, result_messages, None, None, terminal_status,
-                rubric_available, max_attempts, grader_model_id,
-            )
-            break
-
-        # No assistant output means the attempt failed — verification never
-        # ran, so no grading phase starts (no dangling rubric_start event).
-        last_assistant = _last_assistant_message(result_messages)
-        if last_assistant is None:
-            terminal_status = "failed"
-            yield AttemptItem(
-                attempt, result_messages, None, None, terminal_status,
-                rubric_available, max_attempts, grader_model_id,
-            )
-            break
-
-        if is_cancelled is not None and is_cancelled():
-            terminal_status = "cancelled"
-            yield AttemptItem(
-                attempt, result_messages, None, None, terminal_status,
-                rubric_available, max_attempts, grader_model_id,
-            )
-            break
-
-        # Selective verification (C11): in auto mode, skip the grader for
-        # trivial turns. Deterministic decision from run signals — zero
-        # extra LLM calls. The skip happens BEFORE GradeStartItem, so the
-        # client never sees a "Checking rubric…" state (native-app stream
-        # watchdog unaffected: the stream just ends earlier with done).
-        if mode == "auto":
-            _skip = await _maybe_skip_verification(
-                loop, input_messages, result_messages, user_id
-            )
-            if _skip:
-                terminal_status = "skipped"
+            # 3. Grade when verification is active.
+            if rubric_mw is None:
+                terminal_status = "off"
                 yield AttemptItem(
                     attempt, result_messages, None, None, terminal_status,
                     rubric_available, max_attempts, grader_model_id,
                 )
                 break
 
-        yield GradeStartItem(attempt, max_attempts)
-        loop._rubric_started = True  # type: ignore[attr-defined]
+            # No assistant output means the attempt failed — verification never
+            # ran, so no grading phase starts (no dangling rubric_start event).
+            last_assistant = _last_assistant_message(result_messages)
+            if last_assistant is None:
+                terminal_status = "failed"
+                yield AttemptItem(
+                    attempt, result_messages, None, None, terminal_status,
+                    rubric_available, max_attempts, grader_model_id,
+                )
+                break
 
-        # Grade ONLY the current turn: the current user prompt plus this
-        # attempt's full output (reasoning, tool messages WITH results, and
-        # the final answer). Passing the whole conversation lets the grader
-        # misattribute prior turns to the current work (phantom verdicts),
-        # and omitting the run's tool messages leaves claims unverifiable.
-        evaluation = await rubric_mw.grade(
-            _current_turn_messages(result_messages), attempt - 1
-        )
-        evaluations.append(evaluation)
-        raw_result = evaluation["result"]
-        eval_result = (
-            _EvalResult.INVALID_RUBRIC
-            if raw_result == "failed"
-            else _EvalResult(raw_result)
-        )
+            if is_cancelled is not None and is_cancelled():
+                terminal_status = "cancelled"
+                yield AttemptItem(
+                    attempt, result_messages, None, None, terminal_status,
+                    rubric_available, max_attempts, grader_model_id,
+                )
+                break
 
-        if eval_result in (
-            _EvalResult.SATISFIED,
-            _EvalResult.INVALID_RUBRIC,
-            _EvalResult.GRADER_ERROR,
-        ) or attempt >= max_attempts:
-            terminal_status = {
-                _EvalResult.SATISFIED: "satisfied",
-                _EvalResult.INVALID_RUBRIC: "invalid_rubric",
-                _EvalResult.GRADER_ERROR: "grader_error",
-            }.get(eval_result, "max_attempts_reached")
-            yield GradeEndItem(attempt, evaluation, None, True, max_attempts)
+            # Selective verification (C11): in auto mode, skip the grader for
+            # trivial turns. Deterministic decision from run signals — zero
+            # extra LLM calls. The skip happens BEFORE GradeStartItem, so the
+            # client never sees a "Checking rubric…" state (native-app stream
+            # watchdog unaffected: the stream just ends earlier with done).
+            if mode == "auto":
+                _skip = await _maybe_skip_verification(
+                    loop, input_messages, result_messages, user_id
+                )
+                if _skip:
+                    terminal_status = "skipped"
+                    yield AttemptItem(
+                        attempt, result_messages, None, None, terminal_status,
+                        rubric_available, max_attempts, grader_model_id,
+                    )
+                    break
+
+            yield GradeStartItem(attempt, max_attempts)
+            loop._rubric_started = True  # type: ignore[attr-defined]
+
+            # Grade ONLY the current turn: the current user prompt plus this
+            # attempt's full output (reasoning, tool messages WITH results, and
+            # the final answer). Passing the whole conversation lets the grader
+            # misattribute prior turns to the current work (phantom verdicts),
+            # and omitting the run's tool messages leaves claims unverifiable.
+            evaluation = await rubric_mw.grade(
+                _current_turn_messages(result_messages), attempt - 1
+            )
+            evaluations.append(evaluation)
+            raw_result = evaluation["result"]
+            eval_result = (
+                _EvalResult.INVALID_RUBRIC
+                if raw_result == "failed"
+                else _EvalResult(raw_result)
+            )
+
+            if eval_result in (
+                _EvalResult.SATISFIED,
+                _EvalResult.INVALID_RUBRIC,
+                _EvalResult.GRADER_ERROR,
+            ) or attempt >= max_attempts:
+                terminal_status = {
+                    _EvalResult.SATISFIED: "satisfied",
+                    _EvalResult.INVALID_RUBRIC: "invalid_rubric",
+                    _EvalResult.GRADER_ERROR: "grader_error",
+                }.get(eval_result, "max_attempts_reached")
+                yield GradeEndItem(attempt, evaluation, None, True, max_attempts)
+                yield AttemptItem(
+                    attempt, result_messages, evaluation, None, terminal_status,
+                    rubric_available, max_attempts, grader_model_id,
+                )
+                break
+
+            feedback = _mw._revision_prompt(evaluation)
+            yield GradeEndItem(attempt, evaluation, feedback, False, max_attempts)
+
+            # 4. Producer: queue the rerun event for the registry.
+            _mw.queue_rerun_event(
+                loop,
+                feedback,
+                user_id,
+                session_id,
+                model,
+                attempt,
+                max_attempts,
+                input_messages,
+                stream=stream,
+            )
+
+            # 5. Consumer: fire queued events; the handler appends the feedback.
+            fired = await _fire_pending_reruns(loop, user_id, session_id, model)
+            if not fired:
+                terminal_status = "max_attempts_reached"
+                yield AttemptItem(
+                    attempt, result_messages, evaluation, None, terminal_status,
+                    rubric_available, max_attempts, grader_model_id,
+                )
+                break
+            input_messages = fired[-1]
             yield AttemptItem(
-                attempt, result_messages, evaluation, None, terminal_status,
+                attempt, result_messages, evaluation, feedback, "needs_revision",
                 rubric_available, max_attempts, grader_model_id,
             )
-            break
+            attempt += 1
 
-        feedback = _mw._revision_prompt(evaluation)
-        yield GradeEndItem(attempt, evaluation, feedback, False, max_attempts)
-
-        # 4. Producer: queue the rerun event for the registry.
-        _mw.queue_rerun_event(
-            loop,
-            feedback,
-            user_id,
-            session_id,
-            model,
-            attempt,
-            max_attempts,
-            input_messages,
-            stream=stream,
-        )
-
-        # 5. Consumer: fire queued events; the handler appends the feedback.
-        fired = await _fire_pending_reruns(loop, user_id, session_id, model)
-        if not fired:
-            terminal_status = "max_attempts_reached"
-            yield AttemptItem(
-                attempt, result_messages, evaluation, None, terminal_status,
-                rubric_available, max_attempts, grader_model_id,
-            )
-            break
-        input_messages = fired[-1]
-        yield AttemptItem(
-            attempt, result_messages, evaluation, feedback, "needs_revision",
-            rubric_available, max_attempts, grader_model_id,
-        )
-        attempt += 1
+    finally:
+        # Grader providers are created fresh per run (audit S3 keeps them out
+        # of the keyed cache) — close them deterministically.
+        if rubric_mw is not None:
+            try:
+                await rubric_mw.aclose()
+            except Exception:
+                pass
 
     # Store the verdict for the runner's finally block (loop._verification_verdict).
     if loop.state is not None and hasattr(loop.state, "extra"):
@@ -1483,12 +1589,14 @@ def reset_sdk_loop(
 
 def reset_user_sdk_loops(user_id: str, reason: str | None = None) -> int:
     """Reset all cached SDK agent loops for a user."""
+    global _loop_generation
     removed = 0
     cache_prefix = f"{user_id}:"
     for cache_key in list(_loop_cache):
         if cache_key.startswith(cache_prefix):
             del _loop_cache[cache_key]
             removed += 1
+    _loop_generation += 1
     logger.info(
         "sdk_runner.user_loops_reset",
         {"user_id": user_id, "reason": reason, "removed": removed},

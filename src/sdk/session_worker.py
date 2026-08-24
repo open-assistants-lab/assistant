@@ -8,6 +8,33 @@ from __future__ import annotations
 import asyncio
 
 
+def session_key(user_id: str, session_id: str | None) -> str:
+    """Canonical registry key shared by ALL callers (audit E26 hazard #2).
+
+    RunService and both routers previously formatted divergent keys
+    ("user::session" vs "user:session-or-default"), so registry.stop() from a
+    router silently missed the RunService-registered lock. Use this builder
+    for every acquire/release/holds/stop call.
+    """
+    return f"{user_id}::{session_id or 'default'}"
+
+
+_registry: SessionWorkerRegistry | None = None
+
+
+def get_session_registry() -> SessionWorkerRegistry:
+    """Process-global registry (audit E26).
+
+    A module-level singleton so REST/SSE and WS serialize the same session
+    on the same lock. The class stays public for tests that want isolated
+    instances.
+    """
+    global _registry
+    if _registry is None:
+        _registry = SessionWorkerRegistry()
+    return _registry
+
+
 class SessionLock:
     """Exclusive session lock with cancellation support."""
 
@@ -41,6 +68,16 @@ class SessionWorkerRegistry:
             lock = SessionLock()
             self._locks[session_id] = lock
             return lock
+
+    def holds(self, session_id: str) -> bool:
+        """Synchronous advisory check: is a lock currently held for this key?
+
+        Atomic within the event loop (no await inside). Advisory only — the
+        authoritative check remains ``acquire`` (audit B12 lets HTTP endpoints
+        probe BEFORE mutating cancel/slot dicts so a doomed request cannot
+        clobber the live stream's registration).
+        """
+        return session_id in self._locks
 
     async def release(self, session_id: str) -> None:
         """Release session lock."""

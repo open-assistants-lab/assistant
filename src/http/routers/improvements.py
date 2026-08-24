@@ -76,14 +76,14 @@ async def analyze_outcomes(
     """Trigger analysis job manually to propose improvements."""
     from src.config import get_settings
     from src.sdk.loops.improvement import AnalysisJob
-    from src.sdk.providers.factory import create_model_from_config
+    from src.sdk.providers.factory import get_cached_model_provider
 
     settings = get_settings()
     db = LoopEngineeringDB(get_loop_engineering_db_path(user_id))
     await db.init()
 
     analysis_model = settings.hill_climbing.analysis_model or settings.agent.model
-    provider = create_model_from_config(analysis_model, user_id=user_id)
+    provider = get_cached_model_provider(analysis_model, user_id=user_id)
 
     job = AnalysisJob(
         analysis_provider=provider,
