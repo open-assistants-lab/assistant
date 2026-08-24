@@ -113,6 +113,12 @@ class MessageStore:
         except Exception:
             pass
 
+        # Audit P1: VIRTUAL generated columns + indexes for the common
+        # json_extract probes (run_id on persist, workspace_id on deletes).
+        # Runs AFTER MemoryCore so the messages table exists, and BEFORE
+        # register_duckdb_table so the DuckDB mirror picks up the columns.
+        self._generated_columns = self._migrate_generated_columns(base_path)
+
         try:
             self._core.db.register_duckdb_table("messages")
         except Exception:
@@ -131,6 +137,52 @@ class MessageStore:
     @property
     def core(self) -> MemoryCore:
         return self._core
+
+    @staticmethod
+    def _migrate_generated_columns(base_path: Path) -> bool:
+        """Add VIRTUAL generated columns for run_id/workspace_id + indexes.
+
+        The messages table is created by CoreMem/HybridDB; generated columns
+        must be added with ALTER TABLE once the table exists (after MemoryCore
+        init). Returns True when the columns are present and usable, False when
+        the running SQLite lacks generated-column support (probes then fall
+        back to json_extract).
+        """
+        db_path = base_path / "app.db"
+        if not db_path.exists():
+            return False
+        conn = None
+        try:
+            conn = sqlite3.connect(str(db_path))
+            existing = {
+                r[1] for r in conn.execute("PRAGMA table_info('messages')")
+            }
+            if "run_id" not in existing:
+                conn.execute(
+                    "ALTER TABLE messages ADD COLUMN run_id TEXT "
+                    "GENERATED ALWAYS AS (json_extract(metadata, '$.run_id')) VIRTUAL"
+                )
+            if "workspace_id" not in existing:
+                conn.execute(
+                    "ALTER TABLE messages ADD COLUMN workspace_id TEXT "
+                    "GENERATED ALWAYS AS (json_extract(metadata, '$.workspace_id')) VIRTUAL"
+                )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_run_id ON messages(run_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_workspace_id ON messages(workspace_id)"
+            )
+            conn.commit()
+        except Exception:
+            # Old SQLite without generated-column support (or a legacy
+            # messages table without the metadata column): fall back to the
+            # json_extract probes.
+            return False
+        finally:
+            if conn is not None:
+                conn.close()
+        return True
 
     @staticmethod
     def _migrate_id_column(base_path: Path) -> None:
@@ -1064,10 +1116,16 @@ class MessageStore:
         from INSERT statements).
         """
         with self._core.db._connect() as cur:
-            cur.execute(
-                "DELETE FROM messages WHERE json_extract(metadata, '$.workspace_id') = ?",
-                [workspace_id],
-            )
+            if self._generated_columns:
+                cur.execute(
+                    "DELETE FROM messages WHERE workspace_id = ?",
+                    [workspace_id],
+                )
+            else:
+                cur.execute(
+                    "DELETE FROM messages WHERE json_extract(metadata, '$.workspace_id') = ?",
+                    [workspace_id],
+                )
             count = cur.rowcount
             cur.execute(
                 "DELETE FROM _journal WHERE app_table = 'messages'"
@@ -1119,10 +1177,16 @@ class MessageStore:
         with self._core.db._connect() as cur:
             cur.execute("BEGIN IMMEDIATE")
             try:
-                existing = cur.execute(
-                    "SELECT id FROM messages WHERE session_id = ? AND json_extract(metadata, '$.run_id') = ? AND role = ?",
-                    [session_id, run_id, final_answer.role],
-                ).fetchone()
+                if self._generated_columns:
+                    existing = cur.execute(
+                        "SELECT id FROM messages WHERE session_id = ? AND run_id = ? AND role = ?",
+                        [session_id, run_id, final_answer.role],
+                    ).fetchone()
+                else:
+                    existing = cur.execute(
+                        "SELECT id FROM messages WHERE session_id = ? AND json_extract(metadata, '$.run_id') = ? AND role = ?",
+                        [session_id, run_id, final_answer.role],
+                    ).fetchone()
                 if existing is not None:
                     cur.execute("COMMIT")
                     return str(existing[0])
@@ -1226,6 +1290,12 @@ class MessageStore:
         last_msg_id: str | None = None
         fetch_size = limit * 5
 
+        # The open run is carried ACROSS batch boundaries: a run larger than
+        # the fetch window must never be flushed as two turns. It is only
+        # closed when a new run starts (split) or when data ends.
+        current_run_id: str | None = None
+        current_turn: list[Message] = []
+
         while len(turns) < limit:
             with self._core.db._connect() as cur:
                 rows_raw = cur.execute(
@@ -1252,9 +1322,6 @@ class MessageStore:
                 for r in rows_raw
             ]
 
-            current_run_id: str | None = None
-            current_turn: list[Message] = []
-
             for row in rows:
                 msg = self._stored_to_message(row)
                 run_id = None
@@ -1270,20 +1337,28 @@ class MessageStore:
                         should_split = True
 
                 if should_split:
+                    # The just-closed turn ends at the LAST message we appended
+                    # (the row before the split row).
+                    last_msg_id = current_turn[-1].id if current_turn else None
                     turns.append(self._build_turn(current_run_id, current_turn))
                     current_turn = []
+                    current_run_id = None
                     if len(turns) >= limit:
-                        last_msg_id = row.id
                         break
 
                 current_run_id = run_id
                 current_turn.append(msg)
-                last_msg_id = row.id
+                last_msg_id = msg.id
 
-            if current_turn and len(turns) < limit:
-                turns.append(self._build_turn(current_run_id, current_turn))
+            if len(turns) >= limit:
+                break
 
             if len(rows_raw) < fetch_size:
+                # End of data: flush the still-open run exactly once.
+                if current_turn:
+                    turns.append(self._build_turn(current_run_id, current_turn))
+                    current_turn = []
+                    current_run_id = None
                 break
 
             start_rowid = rows_raw[-1][0]

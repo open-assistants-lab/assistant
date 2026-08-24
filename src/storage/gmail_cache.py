@@ -9,8 +9,10 @@ Store path: data/users/{user_id}/gmail_cache/
 """
 
 import json
+import sqlite3
 import subprocess
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -86,6 +88,7 @@ class GmailCache:
         self.user_id = user_id
         base_path = get_paths(user_id).gmail_cache_dir()
         base_path.mkdir(parents=True, exist_ok=True)
+        self._base_path = base_path
 
         settings = get_settings()
         self.db = HybridDB(
@@ -114,7 +117,47 @@ class GmailCache:
         except Exception:
             pass  # already exists
 
+        # Audit P1: UNIQUE(message_id) + journal-aware bulk ops. A unique
+        # index (not CREATE TABLE IF NOT EXISTS, which never alters existing
+        # user DBs) makes upsert a single ON CONFLICT statement and keeps
+        # bulk sync from degrading to per-row selects.
+        self._migrate_unique_message_id()
+
     # -- CRUD --
+
+    def _migrate_unique_message_id(self) -> None:
+        """Rebuild legacy DBs so message_id is UNIQUE (audit P1).
+
+        CREATE TABLE IF NOT EXISTS never alters an existing user DB, so
+        legacy caches lack the UNIQUE index. Rebuild them here (dedupe +
+        unique index) so the ON CONFLICT upsert below can rely on it.
+        """
+        db_path = self._base_path / "app.db"
+        if not db_path.exists():
+            return
+        conn = None
+        try:
+            conn = sqlite3.connect(str(db_path))
+            has_index = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='index' "
+                "AND name='idx_emails_message_id'"
+            ).fetchone()
+            if has_index is None:
+                # Dedupe (keep the newest row per message_id), then index.
+                conn.execute(
+                    "DELETE FROM emails WHERE id NOT IN "
+                    "(SELECT MAX(id) FROM emails GROUP BY message_id)"
+                )
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_emails_message_id "
+                    "ON emails(message_id)"
+                )
+            conn.commit()
+        except Exception:
+            pass
+        finally:
+            if conn is not None:
+                conn.close()
 
     def upsert(self, email: dict[str, Any]) -> int | None:
         """Insert or update an email by Gmail message_id. Returns row id."""
@@ -122,8 +165,6 @@ class GmailCache:
         if not msg_id:
             logger.warning("gmail_upsert_no_id", {"reason": "missing message_id"})
             return None
-
-        existing = self.db.query(TABLE, where="message_id = ?", params=(msg_id,), limit=1)
 
         row = {
             "message_id": msg_id,
@@ -139,12 +180,43 @@ class GmailCache:
             "attachments": _serialize(email.get("attachments"), "attachments"),
         }
 
-        if existing:
-            row_id = cast(int, existing[0]["id"])
-            self.db.update(TABLE, row_id, row)
-            return row_id
-        else:
-            return cast(int, self.db.insert(TABLE, row))
+        cols = list(row.keys())
+        placeholders = ", ".join("?" * len(cols))
+        updates = ", ".join(f"{c} = excluded.{c}" for c in cols if c != "message_id")
+        with self.db._connect() as cur:
+            cur.execute(
+                f"INSERT INTO emails ({', '.join(cols)}) VALUES ({placeholders}) "
+                f"ON CONFLICT(message_id) DO UPDATE SET {updates}",
+                [row[c] for c in cols],
+            )
+            # lastrowid is 0 on the DO UPDATE branch with a fresh connection,
+            # so resolve the row by the unique message_id instead.
+            fetched = cur.execute(
+                "SELECT * FROM emails WHERE message_id = ?", (msg_id,)
+            ).fetchone()
+            if fetched is None:
+                raise RuntimeError(f"upserted row missing ({msg_id})")
+            full_row = dict(fetched)
+            internal_rowid = int(full_row["id"])  # INTEGER PK aliases rowid
+            # Raw SQL bypasses HybridDB's journal; write the same rows
+            # insert()/update() would so Chroma/DuckDB stay consistent.
+            now = datetime.now(UTC).isoformat()
+            metadata = self.db._row_to_metadata(TABLE, full_row)
+            for col in self.db._get_longtext_columns(TABLE, cur=cur):
+                cur.execute(
+                    "INSERT INTO _journal "
+                    "(app_table, row_id, column_name, op, data, metadata, created_at) "
+                    "VALUES (?, ?, ?, 'add', ?, ?, ?)",
+                    (TABLE, internal_rowid, col, full_row.get(col, ""),
+                     json.dumps(metadata), now),
+                )
+            cur.execute(
+                "INSERT INTO _journal (app_table, row_id, op, data, created_at) "
+                "VALUES (?, ?, 'row_add', ?, ?)",
+                (TABLE, internal_rowid, json.dumps(full_row, default=str), now),
+            )
+        self.db._process_journal()
+        return cast(int, full_row.get("id") or internal_rowid)
 
     def upsert_batch(self, emails: list[dict[str, Any]]) -> int:
         """Insert or update multiple emails. Returns count upserted."""
@@ -282,9 +354,24 @@ class GmailCache:
     # -- Helpers --
 
     def clear(self) -> None:
-        all_rows = self.db.query(TABLE, limit=100000)
-        for r in all_rows:
-            self.db.delete(TABLE, r["id"])
+        """Purge all cached emails (single bulk delete, journal-aware)."""
+        with self.db._connect() as cur:
+            cur.execute("DELETE FROM emails")
+            cur.execute("DELETE FROM _journal WHERE app_table = 'emails'")
+        # FTS stays in sync via triggers; Chroma vectors and the DuckDB
+        # mirror must be cleaned explicitly (raw DELETE bypasses journaling).
+        if self.db._chroma is not None:
+            try:
+                for col in self.db._get_longtext_columns(TABLE):
+                    coll = self.db._get_collection(f"{TABLE}_{col}")
+                    if coll is not None:
+                        coll.delete(where={})
+            except Exception:
+                pass
+        try:
+            self.db.sync_duckdb_table(TABLE)
+        except Exception:
+            pass
 
     def stats(self) -> dict[str, Any]:
         return {
