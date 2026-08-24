@@ -643,7 +643,7 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
             return MessageResponse(response="", error="Session already has an active run")
 
         response = result.response
-        reasoning_text = None
+        reasoning_text = result.reasoning
         usage_data = None
         if result.usage.agent.available:
             usage_data = {

@@ -1339,6 +1339,34 @@ class TestEditorIntegration:
         assert blocks[0]["surface_type"] == "canvas"
         assert blocks[1]["surface_type"] == "editor"
 
+    def test_rest_endpoint_populates_reasoning(self, client, monkeypatch):
+        """Audit E6: REST /message returns reasoning from the last assistant message."""
+
+        async def fake_execute(self, *, session_id, prompt, model=None, provider_keys=None, **kwargs):
+            from src.sdk.run_models import RunResult, RunStatus, RunUsage, VerificationOutcome
+            return RunResult(
+                run_id="r1",
+                session_id=session_id,
+                status=RunStatus.COMPLETED,
+                attempt=1,
+                model="x:y",
+                response="Done.",
+                reasoning="thinking step",
+                usage=RunUsage(),
+                verification=VerificationOutcome(),
+            )
+
+        import src.http.routers.conversation as conv_mod
+        monkeypatch.setattr(conv_mod.RunService, "execute", fake_execute)
+
+        r = client.post("/message", json={
+            "message": "think about it",
+            "verbose": False,
+        })
+        assert r.status_code == 200
+        data = r.json()
+        assert data["reasoning"] == "thinking step"
+
 
 class TestTitleModelFromSettings:
     @pytest.mark.asyncio

@@ -490,12 +490,31 @@ class RunService:
             )
 
             _t_persist = time.monotonic()
+            # Audit E6: persist the assistant's reasoning as a pre-message
+            # (mirroring _run_stream) so the stored transcript order matches
+            # what the client saw, and surface it on the RunResult.
+            pre_messages: list[StorageMessage] = []
+            reasoning_text: str | None = None
+            if loop.state is not None:
+                for msg in reversed(loop.state.messages):
+                    if msg.role == "assistant" and getattr(msg, "reasoning", None):
+                        reasoning_text = str(msg.reasoning or "")
+                        pre_messages.append(StorageMessage(
+                            id="",
+                            ts=datetime.now(UTC),
+                            role="reasoning",
+                            content=reasoning_text,
+                            metadata={"stream": False},
+                            session_id=session_id,
+                        ))
+                        break
             persisted_id = self._message_store.persist_run(
                 run_id=run_id,
                 session_id=session_id,
                 user_message_id=user_msg_id,
                 final_answer=_sdk_message_to_storage(Message.assistant(content=result.response), session_id),
                 audit_records=_tool_audit_records(loop, session_id),
+                pre_messages=pre_messages,
                 metadata={"model": result.model, "verification": _verification_metadata(result.verification)},
             )
             try:
@@ -520,6 +539,7 @@ class RunService:
                 attempt=result.attempt,
                 model=result.model,
                 response=result.response,
+                reasoning=reasoning_text,
                 final_message_id=persisted_id,
                 usage=result.usage,
                 verification=result.verification,

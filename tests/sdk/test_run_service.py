@@ -47,6 +47,7 @@ class InMemoryMessageStore:
             "metadata": {**metadata, "run_id": run_id},
             "session_id": session_id,
         })
+        self.last_pre_messages = list(pre_messages or [])
         return mid
 
 
@@ -86,6 +87,17 @@ class MultiStepUsageLoop(FakeLoop):
                 usage=Usage(input_tokens=10, output_tokens=5),
             ),
             Message.assistant(content="Final", usage=Usage(input_tokens=20, output_tokens=8)),
+        ]
+        return self.state.messages
+
+
+class ReasoningLoop(FakeLoop):
+    """FakeLoop whose final assistant message carries reasoning (audit E6)."""
+
+    async def run(self, messages):
+        self._reset_state()
+        self.state.messages = list(messages) + [
+            Message.assistant(content="Final", reasoning="thinking step")
         ]
         return self.state.messages
 
@@ -408,6 +420,32 @@ async def test_run_service_execute_returns_run_result(monkeypatch):
     assert result.session_id == "chat-1"
     assert result.status.value == "completed"
     assert result.response is not None
+
+
+@pytest.mark.asyncio
+async def test_run_service_execute_persists_reasoning_pre_messages(monkeypatch):
+    """Audit E6: non-streaming _run persists reasoning pre_messages like _run_stream."""
+    async def fake_get_sdk_loop(*args, **kwargs):
+        return ReasoningLoop()
+    monkeypatch.setattr("src.sdk.run_service.get_sdk_loop", fake_get_sdk_loop)
+    monkeypatch.setattr("src.sdk.run_service.register_user_loop", lambda *a, **k: None)
+    monkeypatch.setattr("src.sdk.run_service.unregister_user_loop", lambda *a, **k: None)
+    monkeypatch.setattr("src.sdk.middleware_rubric.load_rubric_middleware", _no_rubric)
+
+    registry = SessionWorkerRegistry()
+    store = InMemoryMessageStore()
+    service = RunService("test-user", registry, store)
+
+    result = await service.execute(
+        session_id="chat-1",
+        prompt="Hello",
+    )
+
+    assert result.reasoning == "thinking step"
+    assert len(store.last_pre_messages) == 1
+    pre = store.last_pre_messages[0]
+    assert pre.role == "reasoning"
+    assert pre.content == "thinking step"
 
 
 @pytest.mark.asyncio
