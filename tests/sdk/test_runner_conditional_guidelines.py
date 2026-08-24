@@ -53,9 +53,21 @@ def test_memory_context_absent_when_all_tools_disabled():
     assert "Memory Recall Strategy" not in prompt
 
 
-def test_file_ops_guideline_when_shell_without_file_search():
+def test_no_file_ops_guideline_when_any_dedicated_file_tool_enabled():
+    """T4: files_read enabled must suppress shell file-ops guidance even when
+    the dedicated SEARCH tools are off (persona round regression)."""
     prompt = _prompt(_disabled("files_glob_search", "files_grep_search"))
-    assert "Use shell_execute for file operations like ls, rg, find" in prompt
+    assert "Use shell_execute for file operations" not in prompt
+
+
+def test_file_ops_guideline_only_when_all_file_tools_disabled():
+    """Legacy path: guidance only appears when every dedicated file tool is
+    disabled and shell remains."""
+    caps = _disabled(
+        "files_read", "files_list", "files_glob_search", "files_grep_search"
+    )
+    prompt = _prompt(caps)
+    assert "Use shell_execute for file operations" in prompt
 
 
 def test_no_file_ops_guideline_when_file_search_enabled():
@@ -66,3 +78,10 @@ def test_no_file_ops_guideline_when_file_search_enabled():
 def test_no_file_ops_guideline_when_shell_disabled():
     prompt = _prompt(_disabled("shell_execute", "files_glob_search", "files_grep_search"))
     assert "Use shell_execute for file operations" not in prompt
+
+
+def test_preferences_include_inspection_priority_when_both_families_enabled():
+    """T4: with shell + files tools co-enabled, an explicit priority rule must
+    tell the model shell is never for file inspection."""
+    prefs = runner._build_tool_preferences({})
+    assert "never use shell_execute to read, list, or search files" in prefs

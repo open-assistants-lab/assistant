@@ -3,6 +3,13 @@
 # Tests: chat flow, screenshot diffing, keyboard, bridge, chat management,
 #        suggestions, settings, tools, cancel, search, model cycling, sidebar resize, unread dot
 # Usage: ./tests/frontend_suite.sh [--all|--record|--screenshot|--keyboard|--bridge|--chats|--suggestions|--settings|--tools|--cancel|--search|--model|--sidebar|--unread]
+#
+# AUTOMATE WIDGET IDS (2026-08-24 persona-round incident):
+# NEVER cache `native automate snapshot` widget ids across navigations.
+# Ids are pointer-derived and are invalidated by new-chat presses, view
+# switches, and app relaunches — a cached id silently targets a dead widget
+# (set_text/press no-op) or matches stale leftover nodes. Re-snapshot before
+# EVERY interaction and locate widgets by role+name each time.
 set -uo pipefail
 
 WORKDIR="$(cd "$(dirname "$0")/.." && pwd)"

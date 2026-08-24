@@ -220,18 +220,32 @@ def _get_memory_context(caps: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _has_dedicated_file_tools(caps: dict[str, Any]) -> bool:
+    """True when any dedicated file tool is enabled for this user."""
+    return any(
+        _resource_enabled(caps, "tools", name)
+        for name in (
+            "files_read",
+            "files_list",
+            "files_glob_search",
+            "files_grep_search",
+        )
+    )
+
+
 def _get_file_ops_guideline(caps: dict[str, Any]) -> str:
-    """Shell-based file-ops guideline, only when dedicated search tools are off.
+    """Shell-based file-ops guideline, only as a last resort.
 
     Audit drift fix: only commands actually in the shell allowlist may be
     named — advertising ls/rg/find when the allowlist rejects them steers the
     model into a guaranteed-fail loop.
+
+    T4 fix: suppressed whenever ANY dedicated file tool is enabled — shell
+    must never be advertised for file inspection while files_* exists
+    (persona-round regression: cat/ls attempts despite files_read on).
     """
     has_shell = _resource_enabled(caps, "tools", "shell_execute")
-    has_file_search = _resource_enabled(caps, "tools", "files_glob_search") or _resource_enabled(
-        caps, "tools", "files_grep_search"
-    )
-    if not (has_shell and not has_file_search):
+    if not (has_shell and not _has_dedicated_file_tools(caps)):
         return ""
     try:
         from src.sdk.tools_core.shell import _get_shell_config
@@ -272,6 +286,11 @@ def _build_tool_preferences(caps: dict[str, Any]) -> str:
         lines.append("- For searching file contents: use **files_grep_search**, NOT shell_execute with grep.")
     if on("shell_execute"):
         lines.append("- Use shell_execute only for commands that have no dedicated tool.")
+    if on("shell_execute") and _has_dedicated_file_tools(caps):
+        lines.append(
+            "- File inspection rule: never use shell_execute to read, list, or search "
+            "files while any files_* tool is enabled — use the dedicated tool."
+        )
     if not lines:
         return ""
     return "\n\n## Tool Preferences\n" + "\n".join(lines)
