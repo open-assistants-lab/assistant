@@ -278,6 +278,7 @@ Key facts:
 - Docker (see `docker/`): image must `COPY seeds/ seeds/`; `DEPLOYMENT_EA_ROOT`/`DEPLOYMENT_DATA_PATH` must point into the mounted volume or user data silently lands in `/root/Assistant` and is lost on recreation.
 - Client file caching (partial): `FileCache` in `http/workspace_cache.py` models `cloud_only` / `downloaded` / `pinned` statuses per path.
 - Known gaps: no OIDC/per-user tokens, teams are skeleton (`data/teams/` unused), no offline/bidirectional sync, no horizontal scaling per user.
+- Deferred follow-ups from the 2026-08-23 audit live in `docs/audits/2026-08-24-deferred-followups.md` — check it before touching `GmailCache` (batched upsert is trigger-gated P1), the WS approval tests (known hang), or summary-cache invalidation.
 
 ---
 
