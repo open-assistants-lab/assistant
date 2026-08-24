@@ -1988,6 +1988,26 @@ test "retry is a no-op while streaming" {
     try testing.expectEqual(before, fx.pendingFetchCount());
 }
 
+test "stream connect failure appends retryable error message" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "hello");
+    const chat = model.activeChat();
+
+    main.update(&model, .{ .stream_done = .{ .key = fk, .outcome = .connect_failed, .body = "" } }, &fx);
+
+    try testing.expect(!chat.streaming); // finalizeStream ran: Retry press is accepted
+    const last = &chat._messages[chat.msg_count - 1];
+    try testing.expectEqualStrings("system", last.role);
+    // Prefix is what buildView keys on to render the Retry affordance.
+    try testing.expectEqualStrings("Stream error: connect_failed", last.content);
+}
+
 test "tick shows elapsed seconds in the thinking indicator" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
