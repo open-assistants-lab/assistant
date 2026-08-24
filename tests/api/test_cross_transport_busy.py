@@ -11,6 +11,12 @@ left ChromaDB vectors + ``_journal`` rows behind (ghost recall).
 from __future__ import annotations
 
 import pytest
+
+def _astub(store):
+    """Async stand-in for aget_message_store (S4: call sites await it)."""
+    async def _get(user_id="default_user", workspace_id="personal"):
+        return store
+    return _get
 from fastapi import HTTPException
 
 from src.http.routers import conversation as conversation_router
@@ -99,9 +105,7 @@ async def test_delete_session_refuses_while_run_active(monkeypatch):
             calls.append(sid)
             return 3
 
-    monkeypatch.setattr(
-        conversation_router, "get_message_store", lambda uid: FakeStore()
-    )
+    monkeypatch.setattr(conversation_router, "aget_message_store", _astub(FakeStore()))
     try:
         with pytest.raises(HTTPException) as ei:
             await conversation_router.delete_session(

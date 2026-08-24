@@ -846,7 +846,10 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     deferred_control = None
                 else:
                     try:
-                        raw = await asyncio.wait_for(control_queue.get(), timeout=300)
+                        raw = await asyncio.wait_for(
+                            control_queue.get(),  # type: ignore[arg-type]
+                            timeout=300,
+                        )
                     except TimeoutError:
                         pending_container[0] = None
                         break

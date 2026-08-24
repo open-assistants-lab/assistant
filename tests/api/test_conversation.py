@@ -1,6 +1,13 @@
 """Contract tests for conversation endpoints."""
 
 import pytest
+from unittest.mock import AsyncMock
+
+def _astub(store):
+    """Async stand-in for aget_message_store (S4: call sites await it)."""
+    async def _get(user_id="default_user", workspace_id="personal"):
+        return store
+    return _get
 
 
 def _make_run_event_factory(chunk_gen):
@@ -144,7 +151,7 @@ class TestMessageSessionPropagation:
             captured.update(kwargs)
             yield StreamChunk.done()
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda user_id: FakeConversation())
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(FakeConversation()))
         monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream)
 
         await conversation_router.handle_message(
@@ -231,7 +238,7 @@ class TestTitleGeneration:
         async def fake_summarize(*args, **kwargs):
             return "Useful title"
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda user_id: Store())
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(Store()))
         monkeypatch.setattr(conversation_router, "_summarize_title", fake_summarize)
 
         result = await conversation_router.generate_title(
@@ -258,7 +265,7 @@ class TestTitleGeneration:
         async def fake_summarize(*args, **kwargs):
             raise AssertionError("must not call the LLM when a title exists")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda user_id: Store())
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(Store()))
         monkeypatch.setattr(conversation_router, "_summarize_title", fake_summarize)
 
         result = await conversation_router.generate_title(
@@ -299,7 +306,7 @@ class TestTitleGeneration:
             captured["existing_titles"] = kwargs.get("existing_titles")
             return "Useful title"
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda user_id: Store())
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(Store()))
         monkeypatch.setattr(conversation_router, "_summarize_title", fake_summarize)
 
         result = await conversation_router.generate_title(
@@ -374,7 +381,7 @@ class TestStreamEdgeCases:
                 **common,
             )
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *a, **kw: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(conversation_router.RunService, "execute_stream", fake_execute_stream)
 
         response = await conversation_router.message_stream(
@@ -419,7 +426,7 @@ class TestStreamEdgeCases:
         async def fake_stream(**kwargs):
             yield StreamChunk.error("boom")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
 
         result = await conversation_router.handle_message(
@@ -445,7 +452,7 @@ class TestStreamEdgeCases:
             yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
             yield StreamChunk.interrupt("files_delete", "call-2", {"path": "x"})
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(
             conversation_router.RunService, "execute_stream",
             _make_run_event_factory(fake_stream),
@@ -500,7 +507,7 @@ class TestStreamEdgeCases:
             captured_get_loop.update(kwargs)
             return FakeLoop()
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(
             conversation_router.RunService, "execute_stream",
             _make_run_event_factory(fake_initial_stream),
@@ -576,7 +583,7 @@ class TestStreamEdgeCases:
             captured_streams.append(kwargs)
             yield StreamChunk.done("approved")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(conversation_router, "get_sdk_loop", fake_get_sdk_loop)
         monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
 
@@ -641,7 +648,7 @@ class TestStreamEdgeCases:
             captured.update(kwargs)
             yield StreamChunk.done("approved")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args: Store())
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(Store()))
         monkeypatch.setattr(conversation_router, "get_sdk_loop", fake_get_loop)
         monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
 
@@ -671,7 +678,7 @@ class TestStreamEdgeCases:
             yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
             yield StreamChunk.error("boom")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(
             conversation_router.RunService, "execute_stream",
             _make_run_event_factory(fake_stream),
@@ -712,7 +719,7 @@ class TestStreamEdgeCases:
             conversation_router._cancel_flags["u:default"] = True
             yield StreamChunk.text_delta("ignored")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(
             conversation_router.RunService, "execute_stream",
             _make_run_event_factory(fake_stream),
@@ -750,7 +757,7 @@ class TestStreamEdgeCases:
             conversation_router._cancel_flags["u:default"] = True
             yield StreamChunk.text_delta("ignored")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(
             conversation_router.RunService, "execute_stream",
             _make_run_event_factory(fake_stream),
@@ -793,7 +800,7 @@ class TestStreamEdgeCases:
             yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
             yield StreamChunk.done()
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(conversation_router, "get_sdk_loop", fake_get_sdk_loop)
         monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
 
@@ -894,7 +901,7 @@ class TestStreamEdgeCases:
             yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
             yield StreamChunk.error("boom")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(conversation_router, "get_sdk_loop", fake_get_sdk_loop)
         monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
 
@@ -948,7 +955,7 @@ class TestStreamEdgeCases:
             conversation_router._cancel_flags["u:default"] = True
             yield StreamChunk.text_delta("ignored")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(conversation_router, "get_sdk_loop", fake_get_sdk_loop)
         monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
 
@@ -1000,7 +1007,7 @@ class TestStreamEdgeCases:
             yield StreamChunk.tool_result_event("time_get", "call-1", "noon")
             yield StreamChunk.text_delta("more")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(conversation_router, "get_sdk_loop", fake_get_sdk_loop)
         monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
 
@@ -1036,7 +1043,7 @@ class TestStreamEdgeCases:
         async def fake_stream(**kwargs):
             yield StreamChunk.text_delta("```html:canvas\n<div>hi</div>\n```\nDone")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(
             conversation_router.RunService, "execute_stream",
             _make_run_event_factory(fake_stream),
@@ -1085,7 +1092,7 @@ class TestStreamEdgeCases:
             # Raise so handle_message returns early without needing a full RunResult.
             raise ValueError("captured")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda user_id: FakeConversation())
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(FakeConversation()))
         monkeypatch.setattr(conversation_router.RunService, "execute", fake_execute)
 
         result = await conversation_router.handle_message(
@@ -1121,8 +1128,7 @@ class TestGetConversation:
             def get_messages_with_summary(self, **kwargs):
                 raise AssertionError("GET transcript must stay raw")
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda user_id: Store())
-
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(Store()))
         result = await conversation_router.get_conversation(
             user_id="u", session_id="session-a", limit=17
         )
@@ -1522,7 +1528,7 @@ async def test_failed_stream_not_double_persisted(monkeypatch):
         yield DoneEvent(data=DoneData(result=run_result), **common)
 
     monkeypatch.setattr(conversation_router, "_persist_collected_stream_state", fake_collect)
-    monkeypatch.setattr(conversation_router, "get_message_store", lambda *a, **kw: store)
+    monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
     monkeypatch.setattr(conversation_router.RunService, "execute_stream", fake_execute_stream)
 
     response = await conversation_router.message_stream(
@@ -1601,7 +1607,7 @@ class TestFailedRunSinglePersist:
         async def spy_persist(*args, **kwargs):
             calls.append(kwargs)
 
-        monkeypatch.setattr(conversation_router, "get_message_store", lambda *a, **kw: store)
+        monkeypatch.setattr(conversation_router, "aget_message_store", _astub(store))
         monkeypatch.setattr(conversation_router.RunService, "execute_stream", fake_execute_stream)
         monkeypatch.setattr(conversation_router, "_persist_collected_stream_state", spy_persist)
 
@@ -1627,7 +1633,7 @@ class TestImportSessionTargeting:
 
         store = FakeConversation()
 
-        monkeypatch.setattr("src.storage.messages.get_message_store", lambda *a, **kw: store)
+        monkeypatch.setattr("src.storage.messages.aget_message_store", AsyncMock(return_value=store))
 
         req = conversation_router.ConversationImportRequest(
             user_id="u",
@@ -1649,7 +1655,7 @@ class TestImportSessionTargeting:
 
         store = FakeConversation()
 
-        monkeypatch.setattr("src.storage.messages.get_message_store", lambda *a, **kw: store)
+        monkeypatch.setattr("src.storage.messages.aget_message_store", AsyncMock(return_value=store))
 
         req = conversation_router.ConversationImportRequest(
             user_id="u",
