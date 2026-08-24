@@ -1159,14 +1159,21 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
                 )
             )
 
-            async for chunk in run_sdk_agent_stream(
-                user_id=req.user_id,
-                messages=retry_msgs,
-                model=model,
-                provider_keys=provider_keys,
-                cancel_event=cancel_event,
-                session_id=session_id,
+            async for item in _sse_with_heartbeat(
+                run_sdk_agent_stream(
+                    user_id=req.user_id,
+                    messages=retry_msgs,
+                    model=model,
+                    provider_keys=provider_keys,
+                    cancel_event=cancel_event,
+                    session_id=session_id,
+                )
             ):
+                if isinstance(item, str):
+                    # Heartbeat keepalive comment — not a run event.
+                    yield item
+                    continue
+                chunk = item
                 if _cancel_flags.get(skey, False) or cancel_event.is_set():
                     _persist_collected_stream_state(
                         conversation,
@@ -1267,10 +1274,14 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
                     yield sse("error", {"code": "error", "message": event.content})
                     break
 
-                elif event.kind == "done" and event.content:
-                    if not ai_content_parts:
+                elif event.kind == "done":
+                    # Audit E-streaming: a resumed run may finish with empty
+                    # final content (e.g. tool-only turn or silent failure).
+                    # The done event must still reach the client or the stream
+                    # ends without a terminal event — never gate on content.
+                    if event.content and not ai_content_parts:
                         ai_content_parts.append(event.content)
-                        yield sse("done", {"result": {"response": event.content}})
+                    yield sse("done", {"result": {"response": event.content}})
 
             response = "".join(ai_content_parts) if ai_content_parts else ""
             if aborted:
@@ -1317,7 +1328,9 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
             raise
         except Exception as e:
             logger.error("approve_stream_error", {"error": str(e)}, user_id=req.user_id, channel="http")
-            yield sse("error", {"content": str(e)})
+            # Audit E-streaming: match the canonical error shape
+            # (code + message) used by the message/stream sibling branch.
+            yield sse("error", {"code": "error", "message": str(e)})
         finally:
             # Audit E26: hold the session lock for the whole resumed run;
             # release it when the resumed stream terminates.
