@@ -33,6 +33,7 @@ from src.http.routers import (
 from src.http.routers.connectors import router as connectors_router
 from src.http.routers.settings import router as settings_router
 from src.http.routers.ws import router as ws_router
+from src.storage.paths import DEFAULT_USER_ID
 
 load_dotenv(REPO_ROOT / ".env")
 
@@ -50,6 +51,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Start companion scheduler if enabled
     try:
         from src.app_logging import get_logger
+
         from src.config import get_settings
         settings = get_settings()
         if getattr(settings.companion, "enabled", False):
@@ -240,7 +242,13 @@ try:
     from connectkit.spec import ConnectorSpec
 
     def _vault_factory(user_id: str) -> Any:
-        bridge = ConnectKitBridge(user_id)
+        # Audit E24 fix-round: /auth/login is PUBLIC, so its client-supplied
+        # user_id has no authority — honouring it would let an attacker
+        # plant their provider token into an arbitrary user's credential
+        # vault (login-CSRF). This deployment model is one owner per process
+        # (container-per-user), so every OAuth-router vault operation binds
+        # to the deployment owner regardless of query parameters.
+        bridge = ConnectKitBridge(DEFAULT_USER_ID)
         return bridge.vault
 
     # Load specs once — shared between config provider and oauth router
@@ -289,6 +297,7 @@ try:
             )
             if error is not None:
                 return JSONResponse(status_code=400, content={"detail": error})
+
         return await call_next(request)
 
     oauth_router = create_oauth_router(

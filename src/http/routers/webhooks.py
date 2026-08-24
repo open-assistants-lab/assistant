@@ -122,12 +122,20 @@ class _WebhookSecretStore:
             return {}
 
     def register(self, trigger_id: str) -> str:
+        import os
+
         store = self._load()
         secret = _secrets_module.token_hex(32)
         store[trigger_id] = secret
         path = self._file()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(store, sort_keys=True))
+        # Atomic + owner-only permissions: secrets at rest must not be
+        # world-readable, and a partial write must never replace the store.
+        tmp = path.with_suffix(".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(store, f, sort_keys=True)
+        os.replace(tmp, path)
         logger.info(
             "webhook_secrets.registered",
             {"trigger_id": trigger_id},
@@ -167,8 +175,10 @@ def _webhook_secret_authorized(trigger_id: str, request: Request) -> bool:
     registered = _secret_store.get(trigger_id)
     provided = request.headers.get("X-Webhook-Secret", "")
     if registered is not None:
+        # compare_digest raises TypeError on non-ASCII str inputs — compare
+        # bytes so a crafted header gets 401, not a 500 (audit E24 fix-round).
         return bool(provided) and _secrets_module.compare_digest(
-            provided, registered
+            provided.encode("utf-8"), registered.encode("utf-8")
         )
     return not bool(get_settings().auth.api_key)
 

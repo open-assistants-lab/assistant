@@ -133,6 +133,7 @@ def test_auth_login_not_401_when_api_key_set(client, monkeypatch, api_key_mode):
     r = client.get(
         "/auth/login",
         params={"service": "acuity-scheduling", "user_id": "oauth_user"},
+        follow_redirects=False,
     )
     assert r.status_code != 401
 
@@ -140,3 +141,58 @@ def test_auth_login_not_401_when_api_key_set(client, monkeypatch, api_key_mode):
 def test_auth_callback_not_401_when_api_key_set(client, monkeypatch, api_key_mode):
     r = client.get("/auth/callback", params={"service": "acuity-scheduling"})
     assert r.status_code != 401
+
+
+def test_auth_login_binds_flow_to_deployment_owner(
+    client, monkeypatch, api_key_mode
+):
+    """Login-CSRF/token-planting guard (audit E24 fix round): the PUBLIC
+    /auth/login must not let an attacker bind the OAuth flow (and the
+    resulting provider tokens) into an arbitrary user's credential vault.
+    The client-supplied user_id is ignored; the flow binds to the
+    deployment owner (DEFAULT_USER_ID).
+    """
+    seen_users: list[str] = []
+
+    class _FakeVault:
+        def create_oauth_state(self, service, user_id):
+            seen_users.append(user_id)
+            return "stub-state"
+
+        def get_token(self, service):
+            # Configured connector so the in-app guard lets the request pass.
+            return {"client_id": "cid", "client_secret": "csecret"}
+
+    class _FakeBridge:
+        def __init__(self, user_id: str):
+            seen_users.append(f"bridge:{user_id}")
+
+        @property
+        def vault(self):
+            return _FakeVault()
+
+    monkeypatch.setattr("src.http.main.ConnectKitBridge", _FakeBridge)
+
+    r = client.get(
+        "/auth/login",
+        params={
+            "service": "acuity-scheduling",
+            "user_id": "attacker_chosen_user",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 302, r.text
+    assert "state=stub-state" in r.headers["location"]
+
+    from src.storage.paths import DEFAULT_USER_ID
+
+    # _oauth_config probes use ConnectKitBridge("") — filter to real flows.
+    flow_ids = [
+        u.removeprefix("bridge:")
+        for u in seen_users
+        if u.startswith("bridge:") and u != "bridge:"
+    ]
+    assert flow_ids and all(uid == DEFAULT_USER_ID for uid in flow_ids), (
+        f"OAuth flow must bind only to the deployment owner {DEFAULT_USER_ID!r}, "
+        f"got {flow_ids!r}"
+    )
