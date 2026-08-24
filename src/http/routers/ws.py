@@ -50,11 +50,7 @@ from src.sdk.runner import (
     _messages_from_conversation,
     get_sdk_loop,
 )
-from src.sdk.session_worker import (
-    SessionBusyError,
-    get_session_registry,
-    session_key,
-)
+from src.sdk.session_worker import SessionBusyError, get_session_registry
 from src.storage.messages import get_message_store
 
 logger = get_logger()

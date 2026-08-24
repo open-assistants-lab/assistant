@@ -1082,30 +1082,34 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
     model = pending.get("model")
     provider_keys = pending.get("provider_keys")
 
-    loop = await get_sdk_loop(
-        req.user_id,
-        model=model,
-        provider_keys=provider_keys,
-        session_id=session_id,
-    )
-    loop.approve_tool_call(
-        ToolCall(id=pending.get("call_id") or req.call_id, name=tool_name, arguments=pending.get("args") or {})
-    )
-
     conversation = get_message_store(req.user_id)
 
-    # Audit B12: same probe-before-mutate contract as /message/stream — the
-    # approve path had the identical clobber pattern (mutate dicts, fail busy,
-    # pop A's slot in its own finally).
-    # Audit E26 hazard 3: a race where a new run started must surface as a
-    # machine-actionable 409, not a 500 or an ambiguous SSE-in-200.
+    # Audit E26 hazard 3: acquire the session lock BEFORE mutating anything —
+    # a race where a new run started must surface as a machine-actionable 409
+    # with the pending interrupt RESTORED, never a consumed one.
     rkey = session_key(req.user_id, session_id)
     if _session_registry.holds(rkey):
+        _pending_interrupts[skey] = pending  # restore for the promised retry
         raise HTTPException(status_code=409, detail="Session has an active run; retry approval when idle")
     try:
         await _session_registry.acquire(rkey)  # held until generate() finally
     except SessionBusyError:
+        _pending_interrupts[skey] = pending  # restore for the promised retry
         raise HTTPException(status_code=409, detail="Session has an active run; retry approval when idle")
+    try:
+        loop = await get_sdk_loop(
+            req.user_id,
+            model=model,
+            provider_keys=provider_keys,
+            session_id=session_id,
+        )
+        loop.approve_tool_call(
+            ToolCall(id=pending.get("call_id") or req.call_id, name=tool_name, arguments=pending.get("args") or {})
+        )
+    except BaseException:
+        # F3: endpoint died post-acquire — never leak the session lock.
+        await _session_registry.release(rkey)
+        raise
 
     cancel_event = asyncio.Event()
     _cancel_flags[skey] = False

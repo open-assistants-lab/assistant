@@ -117,3 +117,42 @@ async def test_delete_session_refuses_while_run_active(monkeypatch):
         assert resp["status"] == "deleted" and calls == ["sess-del"]
     finally:
         reg._locks.pop(key, None)
+
+
+@pytest.mark.asyncio
+async def test_approve_busy_preserves_pending_and_does_not_approve(monkeypatch):
+    """F1: a 409 must not consume the pending interrupt nor mutate the loop."""
+    reg = get_session_registry()
+    key = session_key("title_user", "sess-busy2")
+    await reg.acquire(key)
+    skey = conversation_router._stream_key("title_user", "sess-busy2")
+    conversation_router._pending_interrupts[skey] = {
+        "tool": "files_delete",
+        "call_id": "c1",
+        "session_id": "sess-busy2",
+        "args": {"path": "/x"},
+    }
+    approved: list[object] = []
+
+    class FakeLoop:
+        def approve_tool_call(self, tc):
+            approved.append(tc)
+
+    async def fake_get_sdk_loop(*a, **kw):
+        return FakeLoop()
+
+    monkeypatch.setattr(conversation_router, "get_sdk_loop", fake_get_sdk_loop)
+    try:
+        req = conversation_router.ApproveRequest(
+            user_id="title_user", session_id="sess-busy2", call_id="c1"
+        )
+        with pytest.raises(HTTPException) as ei:
+            await conversation_router.approve_tool(req)
+        assert ei.value.status_code == 409
+        # Pending entry restored for the retry the 409 hint promises…
+        assert conversation_router._pending_interrupts[skey]["call_id"] == "c1"
+        # …and the cached loop was NOT told the tool was approved.
+        assert approved == []
+    finally:
+        conversation_router._pending_interrupts.pop(skey, None)
+        await reg.release(key)
