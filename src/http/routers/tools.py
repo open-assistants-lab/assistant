@@ -60,7 +60,7 @@ def _purge_tool_index_entry(user_id: str, workspace_id: str, name: str) -> None:
         from src.storage.paths import get_paths
 
         paths = get_paths(user_id=user_id, workspace_id=workspace_id)
-        idx = get_or_create_index(
+        idx, _commit = get_or_create_index(
             paths.user_tools_dir(),
             None,
             paths.user_mcp_config(),

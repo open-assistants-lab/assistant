@@ -4,6 +4,7 @@ import hashlib
 import json
 import shlex
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -109,8 +110,34 @@ class ToolIndex:
         namespace: str = "",
         reconstruct: dict[str, Any] | None = None,
     ) -> None:
+        """Bulk-index tools in a single upsert pass.
+
+        Reads the existing name set once, then inserts new rows via
+        insert_batch and updates existing rows in place (no duplicate
+        rows on UNIQUE name).
+        """
+        if not tools:
+            return
+        existing_names = {r["name"] for r in self.db.query("tools")}
+        new_rows: list[dict[str, Any]] = []
         for td in tools:
-            self.index_tool(td, tool_type, namespace, reconstruct)
+            row = {
+                "name": td.name,
+                "description": td.description,
+                "search_text": f"{td.name} {td.description}",
+                "namespace": namespace,
+                "tool_type": tool_type,
+                "definition_json": td.model_dump_json(exclude={"function"}),
+                "reconstruct": json.dumps(reconstruct or {}),
+            }
+            if td.name in existing_names:
+                rows = self.db.query("tools", where="name = ?", params=(td.name,))
+                if rows:
+                    self.db.update("tools", rows[0]["id"], row)
+            else:
+                new_rows.append(row)
+        if new_rows:
+            self.db.insert_batch("tools", new_rows)
 
     def remove_tool(self, name: str) -> None:
         existing = self.db.query("tools", where="name = ?", params=(name,))
@@ -152,10 +179,9 @@ class ToolIndex:
         return len(rows)
 
     def clear(self) -> None:
-        self.db.query("tools", where="1=1")
-        all_rows = self.db.query("tools")
-        for r in all_rows:
-            self.db.delete("tools", r["id"])
+        """Drop all indexed tools with a single table-level DELETE."""
+        with self.db.cursor() as cur:
+            cur.execute("DELETE FROM tools")
 
     def close(self) -> None:
         pass
@@ -225,11 +251,14 @@ def get_or_create_index(
     user_id: str = "default_user",
     workspace_id: str = "personal",
     index_dir: Path | None = None,
-) -> ToolIndex:
+) -> tuple[ToolIndex, Callable[[], None]]:
     """Get or create a ToolIndex. Rebuilds if source hashes changed.
 
-    Tools to index must be passed separately via index_tool()/index_tools() calls
-    by the caller after creation.
+    Returns (idx, commit_hashes): the caller indexes tools via
+    index_tool()/index_tools() and then calls commit_hashes() to persist
+    source hashes. Hashes are saved ONLY after the caller finishes, so a
+    crash mid-indexing leaves stale hashes in place and the next start
+    recomputes needs_reindex and self-heals.
     """
     from src.storage.paths import get_paths
 
@@ -244,6 +273,8 @@ def get_or_create_index(
 
     if needs_reindex:
         idx.clear()
+
+    def commit_hashes() -> None:
         save_source_hashes(hashes_path, current_hashes)
 
-    return idx
+    return idx, commit_hashes

@@ -44,7 +44,7 @@ def loop_factory(monkeypatch):
     monkeypatch.setattr(
         "src.config.user_settings_service.load_saved_user_settings", lambda user_id: None
     )
-    monkeypatch.setattr("src.sdk.tool_index.get_or_create_index", lambda *args, **kwargs: _FakeIndex())
+    monkeypatch.setattr("src.sdk.tool_index.get_or_create_index", lambda *args, **kwargs: (_FakeIndex(), lambda: None))
 
     async def create(
         session_id=None,
@@ -598,7 +598,7 @@ async def test_create_sdk_loop_does_not_import_item_scopes(monkeypatch):
         ),
         patch("src.sdk.runner._seed_default_workspace"),
         patch("src.sdk.runner._get_system_prompt", return_value="You are test assistant."),
-        patch("src.sdk.tool_index.get_or_create_index", return_value=FakeIndex()),
+        patch("src.sdk.tool_index.get_or_create_index", return_value=(FakeIndex(), lambda: None)),
     ):
         settings = mock_settings.return_value
         settings.memory.summarization.enabled = False
@@ -886,7 +886,7 @@ async def test_create_sdk_loop_excludes_disabled_tools_from_core_and_index(monke
         patch("src.sdk.runner._seed_default_workspace"),
         patch("src.sdk.runner._get_system_prompt", return_value="You are test assistant."),
         patch("src.storage.paths.get_paths", return_value=FakePaths()),
-        patch("src.sdk.tool_index.get_or_create_index", return_value=fake_index),
+        patch("src.sdk.tool_index.get_or_create_index", return_value=(fake_index, lambda: None)),
         patch(
             "src.sdk.tools_custom.scan_tools_dir",
             return_value=[ToolDefinition(name="custom_disabled", description="Custom", parameters={})],
@@ -960,7 +960,7 @@ async def test_create_sdk_loop_rebuilds_tool_index_when_capabilities_change(monk
         patch("src.sdk.runner._seed_default_workspace"),
         patch("src.sdk.runner._get_system_prompt", return_value="You are test assistant."),
         patch("src.storage.paths.get_paths", return_value=FakePaths()),
-        patch("src.sdk.tool_index.get_or_create_index", return_value=fake_index),
+        patch("src.sdk.tool_index.get_or_create_index", return_value=(fake_index, lambda: None)),
     ):
         settings = mock_settings.return_value
         settings.memory.summarization.enabled = False
@@ -1103,7 +1103,7 @@ async def test_create_sdk_loop_uses_saved_summarization_model(monkeypatch):
         "src.config.user_settings_service.load_saved_user_settings",
         lambda user_id: SavedUserSettings(summarization_model="anthropic:saved-summary"),
     )
-    monkeypatch.setattr("src.sdk.tool_index.get_or_create_index", lambda *args, **kwargs: _FakeIndex())
+    monkeypatch.setattr("src.sdk.tool_index.get_or_create_index", lambda *args, **kwargs: (_FakeIndex(), lambda: None))
 
     provider = AsyncMock()
     provider.provider_id = "openai"

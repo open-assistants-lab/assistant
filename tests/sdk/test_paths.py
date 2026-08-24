@@ -298,3 +298,39 @@ def test_deprecated_apps_dir_warns():
         assert len(w) >= 1
         assert "deprecated" in str(w[0].message).lower()
     assert str(result) == f"{USER_ROOT}/Apps"
+
+
+def test_get_paths_cache_key_includes_workspace_id():
+    from src.storage.paths import _paths_cache, get_paths
+
+    _paths_cache.clear()
+    try:
+        a = get_paths(user_id="cacheuser", workspace_id="ws_one")
+        b = get_paths(user_id="cacheuser", workspace_id="ws_one")
+        c = get_paths(user_id="cacheuser", workspace_id="ws_two")
+
+        # Same workspace_id -> same cached instance.
+        assert a is b
+        # Different workspace_id -> distinct instance (cache key includes it).
+        assert a is not c
+        assert a.workspace_id == "ws_one"
+        assert c.workspace_id == "ws_two"
+    finally:
+        _paths_cache.clear()
+
+
+def test_get_paths_cache_lru_cap(tmp_path, monkeypatch):
+    from src.storage.paths import _PATHS_CACHE_MAX, _paths_cache, get_paths
+
+    _paths_cache.clear()
+    monkeypatch.setattr("src.storage.paths._PATHS_CACHE_MAX", 3)
+    try:
+        for i in range(8):
+            get_paths(user_id="lruuser", workspace_id=f"ws{i}")
+        # LRU cap bounds the cache to the configured size.
+        assert len(_paths_cache) <= 3
+        # Oldest entry evicted; newest still cached.
+        assert ("lruuser", "", "ws0") not in _paths_cache
+        assert ("lruuser", "", "ws7") in _paths_cache
+    finally:
+        _paths_cache.clear()

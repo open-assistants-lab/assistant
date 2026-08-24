@@ -257,7 +257,7 @@ async def test_create_sdk_loop_uses_user_level_runtime_context(monkeypatch, tmp_
             side_effect=lambda user_id, workspace_id=None: seen_prompt_args.append((user_id, workspace_id)) or "prompt",
         ),
         patch("src.storage.paths.get_paths", return_value=FakePaths()),
-        patch("src.sdk.tool_index.get_or_create_index", return_value=FakeIndex()),
+        patch("src.sdk.tool_index.get_or_create_index", return_value=(FakeIndex(), lambda: None)),
         patch("src.sdk.tools_custom.scan_tools_dir", return_value=[]),
     ):
         settings = mock_settings.return_value

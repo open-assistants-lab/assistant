@@ -459,7 +459,7 @@ async def create_sdk_loop(
     workspace_tools_dir = None
     mcp_config = paths.user_mcp_config()
 
-    idx = get_or_create_index(
+    idx, commit_index_hashes = get_or_create_index(
         user_tools_dir, workspace_tools_dir, mcp_config,
         user_id=user_id, workspace_id=runtime_workspace_id,
     )
@@ -500,6 +500,9 @@ async def create_sdk_loop(
                 reconstruct = {"server_name": server_name, "mcp_tool_name": td.name}
                 idx.index_tool(td, tool_type="mcp", namespace=f"mcp__{server_name}",
                                reconstruct=reconstruct)
+
+        # Crash-safe: only now that indexing finished, persist source hashes.
+        commit_index_hashes()
 
     summary_config = settings.memory.summarization
 

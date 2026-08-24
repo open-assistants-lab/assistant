@@ -65,7 +65,7 @@ class TestMCPToolBridgeDiscover:
         bridge = MCPToolBridge(user_id="test")
         mock_manager = MagicMock()
         mock_manager._ensure_started = AsyncMock()
-        mock_manager._connections = {}
+        mock_manager.snapshot_connections = AsyncMock(return_value={})
         bridge._manager = mock_manager
 
         count = await bridge.discover()
@@ -91,7 +91,7 @@ class TestMCPToolBridgeDiscover:
 
         conn = MagicMock()
         conn.tools = [mcp_tool]
-        mock_manager._connections = {"math": conn}
+        mock_manager.snapshot_connections = AsyncMock(return_value={"math": conn})
         bridge._manager = mock_manager
 
         count = await bridge.discover()
@@ -127,7 +127,8 @@ class TestMCPToolBridgeDiscover:
         db_conn = MagicMock()
         db_conn.tools = [db_tool]
 
-        mock_manager._connections = {"math": math_conn, "db": db_conn}
+        mock_manager.snapshot_connections = AsyncMock(return_value={"math": math_conn, "db": db_conn})
+        mock_manager.get_connection = AsyncMock(side_effect=lambda name, _d={"math": math_conn, "db": db_conn}: _d.get(name))
         bridge._manager = mock_manager
 
         count = await bridge.discover()
@@ -164,7 +165,8 @@ class TestMCPToolInvocation:
         conn = MagicMock()
         conn.tools = [mcp_tool]
         conn.session = mock_session
-        mock_manager._connections = {"greeter": conn}
+        mock_manager.snapshot_connections = AsyncMock(return_value={"greeter": conn})
+        mock_manager.get_connection = AsyncMock(side_effect=lambda name, _d={"greeter": conn}: _d.get(name))
         bridge._manager = mock_manager
 
         await bridge.discover()
@@ -192,12 +194,14 @@ class TestMCPToolInvocation:
 
         conn = MagicMock()
         conn.tools = [mcp_tool]
-        mock_manager._connections = {"greeter": conn}
+        mock_manager.snapshot_connections = AsyncMock(return_value={"greeter": conn})
+        mock_manager.get_connection = AsyncMock(side_effect=lambda name, _d={"greeter": conn}: _d.get(name))
         bridge._manager = mock_manager
 
         await bridge.discover()
 
-        mock_manager._connections = {}
+        mock_manager.snapshot_connections = AsyncMock(return_value={})
+        mock_manager.get_connection = AsyncMock(return_value=None)
 
         tool_def = bridge._registry.get("mcp__greeter__greet")
         result = await tool_def.ainvoke({})
@@ -230,7 +234,8 @@ class TestMCPToolInvocation:
         conn = MagicMock()
         conn.tools = [mcp_tool]
         conn.session = mock_session
-        mock_manager._connections = {"breaker": conn}
+        mock_manager.snapshot_connections = AsyncMock(return_value={"breaker": conn})
+        mock_manager.get_connection = AsyncMock(side_effect=lambda name, _d={"breaker": conn}: _d.get(name))
         bridge._manager = mock_manager
 
         await bridge.discover()
@@ -257,7 +262,8 @@ class TestMCPToolInvocation:
         conn = MagicMock()
         conn.tools = [mcp_tool]
         conn.session = mock_session
-        mock_manager._connections = {"crasher": conn}
+        mock_manager.snapshot_connections = AsyncMock(return_value={"crasher": conn})
+        mock_manager.get_connection = AsyncMock(side_effect=lambda name, _d={"crasher": conn}: _d.get(name))
         bridge._manager = mock_manager
 
         await bridge.discover()
@@ -284,7 +290,7 @@ class TestMCPToolBridgeReload:
 
         conn = MagicMock()
         conn.tools = [mcp_tool]
-        mock_manager._connections = {"math": conn}
+        mock_manager.snapshot_connections = AsyncMock(return_value={"math": conn})
         bridge._manager = mock_manager
 
         await bridge.discover()
@@ -311,7 +317,7 @@ class TestMCPToolBridgeRemove:
 
         conn = MagicMock()
         conn.tools = [mcp_tool]
-        mock_manager._connections = {"math": conn}
+        mock_manager.snapshot_connections = AsyncMock(return_value={"math": conn})
         bridge._manager = mock_manager
 
         await bridge.discover()
@@ -458,7 +464,8 @@ class TestDegradedMode:
         bad_conn = MagicMock()
         bad_conn.tools = []
 
-        mock_manager._connections = {"math": good_conn, "broken": bad_conn}
+        mock_manager.snapshot_connections = AsyncMock(return_value={"math": good_conn, "broken": bad_conn})
+        mock_manager.get_connection = AsyncMock(side_effect=lambda name, _d={"math": good_conn, "broken": bad_conn}: _d.get(name))
         bridge._manager = mock_manager
 
         count = await bridge.discover()
@@ -471,7 +478,8 @@ class TestDegradedMode:
         bridge = MCPToolBridge(user_id="test")
         mock_manager = MagicMock()
         mock_manager._ensure_started = AsyncMock()
-        mock_manager._connections = {}
+        mock_manager.snapshot_connections = AsyncMock(return_value={})
+        mock_manager.get_connection = AsyncMock(return_value=None)
 
         bridge._manager = mock_manager
 
