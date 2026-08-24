@@ -507,7 +507,9 @@ class TestWebSocketPersistence:
         )
 
         tool_result_payloads = [m for m in websocket.sent if m.get("type") == "tool_result"]
-        assert [m["result_preview"] for m in tool_result_payloads] == ["canonical"]
+        # Canonical envelope (audit E-streaming): tool results travel as
+        # RunEvent envelopes with the payload under "data".
+        assert [m["data"]["content"] for m in tool_result_payloads] == ["canonical"]
         # The router forwards the canonical result but does not persist it on
         # success — RunService.persist_run owns the tool audit records.
         assert [args for args, kwargs in conversation.calls if args[0] == "tool"] == []

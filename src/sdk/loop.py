@@ -818,7 +818,7 @@ class AgentLoop:
                 Message.tool_result(tool_call_id=tc.id, content=blocked_result, name=tc.name)
             )
             yield StreamChunk.tool_result_event(
-                tool=tc.name, call_id=tc.id,                 result_preview=blocked_result[:2000]
+                tool=tc.name, call_id=tc.id,                 result_preview=blocked_result[:2000], is_error=True
             )
             yield StreamChunk.tool_end(
                 tool=tc.name, call_id=tc.id, result_preview=blocked_result[:2000]
@@ -867,7 +867,7 @@ class AgentLoop:
             )
         )
         preview = result_content[:2000] if result_content else ""
-        yield StreamChunk.tool_result_event(tool=tc.name, call_id=tc.id, result_preview=preview)
+        yield StreamChunk.tool_result_event(tool=tc.name, call_id=tc.id, result_preview=preview, is_error=result.is_error)
         yield StreamChunk.tool_end(tool=tc.name, call_id=tc.id, result_preview=preview)
 
     async def _execute_tool_batch_streaming(
@@ -884,11 +884,11 @@ class AgentLoop:
                 tool=tc.name, call_id=tc.id, args=tc.arguments
             )
 
-        async def _run_one(tc: ToolCall) -> tuple[ToolCall, str]:
+        async def _run_one(tc: ToolCall) -> tuple[ToolCall, str, bool]:
             try:
                 await self._check_tool_guardrails(tc, "input", tc.arguments)
             except GuardrailTripwire as e:
-                return tc, json.dumps({"error": f"Tool input blocked: {e.result.message}"})
+                return tc, json.dumps({"error": f"Tool input blocked: {e.result.message}"}), True
 
             tc_args = dict(tc.arguments)
             for mw in self.middlewares:
@@ -920,23 +920,27 @@ class AgentLoop:
                 await self._check_tool_guardrails(tc, "output", result_content)
             except GuardrailTripwire as e:
                 result_content = json.dumps({"error": f"Tool output blocked: {e.result.message}"})
+                return tc, result_content, True
 
-            return tc, result_content
+            return tc, result_content, result.is_error
 
         results = await asyncio.gather(*[_run_one(tc) for tc in tool_calls], return_exceptions=True)
 
         for i, result in enumerate(results):
             tc = tool_calls[i]
+            is_error = False
             if isinstance(result, Exception):
                 logger.error(f"parallel_tool_error tool={tc.name}: {result}")
                 result_content = json.dumps({"error": f"Tool execution failed: {result}"})
+                is_error = True
             elif isinstance(result, BaseException):
                 # CancelledError etc. from gather(return_exceptions=True):
                 # answer the id instead of crashing on tuple-unpack.
                 logger.error(f"parallel_base_exception tool={tc.name}: {result!r}")
                 result_content = json.dumps({"error": f"Tool execution failed: {result}"})
+                is_error = True
             else:
-                tc_r, result_content = result
+                tc_r, result_content, is_error = result
 
             state.add_message(
                 Message.tool_result(
@@ -946,7 +950,7 @@ class AgentLoop:
                 )
             )
             preview = result_content[:500] if result_content else ""
-            yield StreamChunk.tool_result_event(tool=tc.name, call_id=tc.id, result_preview=preview)
+            yield StreamChunk.tool_result_event(tool=tc.name, call_id=tc.id, result_preview=preview, is_error=is_error)
             yield StreamChunk.tool_end(tool=tc.name, call_id=tc.id, result_preview=preview)
 
     async def _run_hooks(self, hook_name: str, state: AgentState) -> None:

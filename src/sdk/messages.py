@@ -252,6 +252,7 @@ class StreamChunk(BaseModel):
     call_id: str | None = None
     args: dict[str, Any] | None = None
     result_preview: str | None = None
+    is_error: bool = False
     tool_calls: list[dict[str, Any]] | None = None
     usage: Usage | None = None
 
@@ -292,8 +293,8 @@ class StreamChunk(BaseModel):
         return cls(type="reasoning_end")
 
     @classmethod
-    def tool_result_event(cls, tool: str, call_id: str, result_preview: str = "") -> StreamChunk:
-        return cls(type="tool_result", tool=tool, call_id=call_id, result_preview=result_preview)
+    def tool_result_event(cls, tool: str, call_id: str, result_preview: str = "", is_error: bool = False) -> StreamChunk:
+        return cls(type="tool_result", tool=tool, call_id=call_id, result_preview=result_preview, is_error=is_error)
 
     @classmethod
     def ai_token(cls, content: str) -> StreamChunk:

@@ -410,3 +410,73 @@ def parse_server_message(
         return cast(_ServerMessage | None, msg_cls(**data))
     except Exception:
         return None
+
+
+def parse_server_envelope(data: dict[str, Any]) -> _ServerMessage | dict[str, Any] | None:
+    """Parse a canonical RunEvent envelope emitted by the routers.
+
+    The wire contract (audit E-streaming) is the canonical envelope:
+    {"type": ..., "data": {payload}}. This parser accepts that shape and maps
+    the RunEvent payload fields onto the flat protocol message classes. Returns
+    None for unknown/undecodable frames.
+    """
+    msg_type = data.get("type", "")
+    payload = data.get("data")
+    if not isinstance(payload, dict):
+        return parse_server_message(data)
+
+    def _flat(cls: type[BaseModel], **fields: Any) -> _ServerMessage | None:
+        try:
+            return cast(_ServerMessage, cls(**fields))
+        except Exception:
+            return None
+
+    if msg_type in ("text_start", "text_end", "reasoning_start", "reasoning_end"):
+        cls = SERVER_MESSAGE_TYPES[msg_type]
+        return _flat(cast(type[BaseModel], cls), session_id=data.get("session_id", ""))
+    if msg_type == "text_delta":
+        return _flat(TextDeltaMessage, content=payload.get("delta", ""), session_id=data.get("session_id", ""))
+    if msg_type == "reasoning_delta":
+        return _flat(ReasoningDeltaMessage, content=payload.get("delta", ""), session_id=data.get("session_id", ""))
+    if msg_type == "tool_input_start":
+        return _flat(
+            ToolInputStartMessage,
+            tool=payload.get("name", ""),
+            call_id=payload.get("tool_call_id", ""),
+            args=payload.get("arguments", {}) or {},
+        )
+    if msg_type == "tool_input_delta":
+        return _flat(ToolInputDeltaMessage, call_id=payload.get("tool_call_id", ""), content=payload.get("delta", ""))
+    if msg_type == "tool_input_end":
+        return _flat(ToolInputEndMessage, call_id=payload.get("tool_call_id", ""), tool=payload.get("name", ""))
+    if msg_type == "tool_result":
+        return _flat(
+            ToolResultMessage,
+            tool=payload.get("name", ""),
+            call_id=payload.get("tool_call_id", ""),
+            result_preview=str(payload.get("content", "")),
+        )
+    if msg_type == "interrupt":
+        return _flat(
+            InterruptMessage,
+            call_id=payload.get("call_id", ""),
+            tool=payload.get("tool", ""),
+            args=payload.get("args", {}),
+        )
+    if msg_type == "done":
+        result = payload.get("result", {})
+        return _flat(DoneMessage, response=str(result.get("response", "")), tool_calls=[])
+    if msg_type == "error":
+        return _flat(ErrorMessage, message=str(payload.get("message", "")), code=str(payload.get("code", "AGENT_ERROR")))
+    if msg_type == "skills_load":
+        return _flat(SkillsLoadMessage, name=str(payload.get("name", "")))
+    if msg_type == "canvas_update":
+        return _flat(
+            CanvasUpdateMessage,
+            surface_id=str(payload.get("surface_id", "")),
+            action=payload.get("action", "create"),
+            html=str(payload.get("html", "")),
+        )
+    if msg_type == "usage":
+        return data
+    return None

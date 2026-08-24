@@ -198,22 +198,21 @@ async def _run_agent_stream(
                 if call_id in emitted_tool_results:
                     continue
                 emitted_tool_results.add(call_id)
-                from src.http.ws_protocol import SkillsLoadMessage, ToolResultMessage
-
-                await websocket.send_json(
-                    ToolResultMessage(
-                        tool=tool_name,
-                        call_id=call_id,
-                        result_preview=str(content)[:500],
-                    ).model_dump() | {"workspace_id": workspace_id}
-                )
+                # Canonical envelope (E-streaming): forward the RunEvent
+                # envelope as-is; ToolResultData carries name/tool_call_id/
+                # status/content, so no flat re-wrap is needed.
+                await websocket.send_json(_with_workspace(data))
 
                 if tool_name == "skills_load":
                     skill_name = skill_load_names.pop(call_id, "unknown")
                     await websocket.send_json(
-                        SkillsLoadMessage(name=skill_name).model_dump()
-                        | {"workspace_id": workspace_id}
+                        {"type": "skills_load", "data": {"name": skill_name}, "workspace_id": workspace_id}
                     )
+
+            elif event_type == "usage":
+                # Forward usage events (canonical envelope) so WS clients
+                # see token accounting like SSE clients do.
+                await websocket.send_json(_with_workspace(data))
 
             elif event_type == "interrupt":
                 if pending_ref is not None:

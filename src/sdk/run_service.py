@@ -276,13 +276,13 @@ def _stream_chunk_to_event(
         accumulated_args = {}
     ct = chunk.canonical_type
     if ct == "text_start":
-        return emit(TextStartEvent, BlockData(block_id=chunk.call_id or str(uuid.uuid4())).model_dump(), attempt)
+        return emit(TextStartEvent, BlockData(block_id=chunk.call_id or "text").model_dump(), attempt)
     elif ct == "text_delta":
         return emit(TextDeltaEvent, BlockDeltaData(block_id="text", delta=chunk.content).model_dump(), attempt)
     elif ct == "text_end":
         return emit(TextEndEvent, BlockData(block_id="text").model_dump(), attempt)
     elif ct == "reasoning_start":
-        return emit(ReasoningStartEvent, BlockData(block_id=chunk.call_id or str(uuid.uuid4())).model_dump(), attempt)
+        return emit(ReasoningStartEvent, BlockData(block_id=chunk.call_id or "reasoning").model_dump(), attempt)
     elif ct == "reasoning_delta":
         return emit(ReasoningDeltaEvent, BlockDeltaData(block_id="reasoning", delta=chunk.content).model_dump(), attempt)
     elif ct == "reasoning_end":
@@ -316,7 +316,7 @@ def _stream_chunk_to_event(
             block_id=chunk.call_id or str(uuid.uuid4()),
             tool_call_id=chunk.call_id or "",
             name=chunk.tool or "unknown",
-            status="completed",
+            status="failed" if chunk.is_error else "completed",
             content=chunk.result_preview or "",
         ).model_dump(), attempt)
     elif ct == "interrupt":

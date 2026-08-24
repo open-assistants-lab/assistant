@@ -1609,7 +1609,10 @@ class TestFailedRunSinglePersist:
             MessageRequest(message="go", user_id="u")
         )
         output = "".join([c async for c in response.body_iterator])
-        assert '"type": "done"' in output
+        # Audit E-streaming: a failed run is surfaced as an error SSE event,
+        # not a done envelope (mirrors the WS path).
+        assert '"type": "error"' in output
+        assert '"type": "done"' not in output
         assert calls == [], "failed done must NOT re-persist already-persisted state"
 
 

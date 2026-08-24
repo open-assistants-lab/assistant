@@ -922,7 +922,13 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                         response = result.get("response", "")
                         if not ai_content_parts and response:
                             ai_content_parts.append(response)
-                        yield sse_raw(data)
+                        if run_failed:
+                            # Audit E-streaming: mirror the WS path — surface a
+                            # failed run as an error event (the done envelope
+                            # with status=failed is skipped for failed runs).
+                            yield sse("error", {"code": "AGENT_ERROR", "message": "Agent run failed"})
+                        else:
+                            yield sse_raw(data)
 
                 if aborted:
                     return
