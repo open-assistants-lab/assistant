@@ -734,10 +734,29 @@ async def get_sdk_loop(user_id: str, workspace_id: str = "personal", model: str 
                     user_id=user_id,
                 ) if cache_key in _loop_cache and _loop_cache[cache_key] is not None else None
                 _loop_cache.move_to_end(cache_key)
-                if len(_loop_cache) > _MAX_LOOP_CACHE:
-                    _loop_cache.popitem(last=False)
+                _evict_loop_cache_until_bounded()
                 return _loop_cache[cache_key]
     raise RuntimeError(f"get_sdk_loop: loop creation kept being superseded by resets ({user_id})")
+
+
+def _evict_loop_cache_until_bounded() -> None:
+    """Evict LRU entries while the cache exceeds _MAX_LOOP_CACHE.
+
+    Audit P6: eviction skips loops currently registered in _user_loops (a live
+    session must keep its loop cached); the starvation fallback evicts the LRU
+    anyway when every cached loop is active so the cache stays bounded instead
+    of growing forever (>50 live sessions).
+    """
+    while len(_loop_cache) > _MAX_LOOP_CACHE:
+        active_loops = set(id(loop) for loop in _user_loops.values())
+        victim = None
+        for key, loop in _loop_cache.items():
+            if id(loop) not in active_loops:
+                victim = key
+                break
+        if victim is None:
+            victim = next(iter(_loop_cache))
+        _loop_cache.pop(victim)
 
 
 def _messages_from_conversation(messages: list[Any]) -> list[Message]:

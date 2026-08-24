@@ -8,6 +8,7 @@ Routers do not write conversation records directly.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -265,6 +266,7 @@ def _stream_chunk_to_event(
     attempt: int,
     model_id: str = "",
     accumulated_args: dict[str, str] | None = None,
+    llm_call_index: int = 1,
 ) -> RunEvent | None:
     """Convert a StreamChunk to the corresponding RunEvent.
 
@@ -303,7 +305,6 @@ def _stream_chunk_to_event(
     elif ct == "tool_input_end":
         call_id = chunk.call_id or ""
         args_str = accumulated_args.pop(call_id, "")
-        import json
         try:
             args = json.loads(args_str) if args_str else {}
         except json.JSONDecodeError:
@@ -329,7 +330,7 @@ def _stream_chunk_to_event(
         return emit(UsageEvent, UsageEventData(
             category="agent",
             model=model_id,
-            llm_call_index=1,
+            llm_call_index=llm_call_index,
             usage={
                 "input_tokens": chunk.usage.input_tokens or 0,
                 "output_tokens": chunk.usage.output_tokens or 0,
@@ -342,7 +343,10 @@ def _stream_chunk_to_event(
         return None
     elif ct == "error":
         return None
-    return emit(TextDeltaEvent, BlockDeltaData(block_id="text", delta=chunk.content).model_dump(), attempt)
+    # Unknown/unmapped canonical types are dropped — never projected as
+    # empty text deltas (audit P6): a future event type must not regress
+    # into a silent no-op delta.
+    return None
 
 
 class RunService:
@@ -654,7 +658,7 @@ class RunService:
                         elif chunk.type == "error":
                             run_status = RunStatus.FAILED
                             break
-                        ev = _stream_chunk_to_event(chunk, _emit, item.attempt, loop.model_id, accumulated_args)
+                        ev = _stream_chunk_to_event(chunk, _emit, item.attempt, loop.model_id, accumulated_args, agent_usage.calls)
                         if ev is not None:
                             yield ev
                     elif isinstance(item, GradeStartItem):

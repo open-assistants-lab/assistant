@@ -298,3 +298,45 @@ def test_reset_user_sdk_loops_removes_all_workspaces_for_user(monkeypatch):
     assert removed == 2
     assert len(runner._loop_cache) == 1
     assert next(iter(runner._loop_cache)).startswith("other:")
+
+
+def test_loop_cache_eviction_skips_active_loops(monkeypatch):
+    """Eviction must not remove a loop that is currently registered in
+    _user_loops (running a session); the LRU fallback keeps the cache bounded
+    when every cached loop is active (audit P6 starvation fix)."""
+    runner._loop_cache.clear()
+    runner._user_loops.clear()
+
+    loops = {i: object() for i in range(runner._MAX_LOOP_CACHE + 3)}
+    for i, loop in loops.items():
+        runner._loop_cache[runner._loop_cache_key("u", "ws", f"model-{i}", None, f"session-{i}")] = loop
+        if i < 2:
+            # First two entries are "active" (registered in _user_loops).
+            runner._user_loops[runner._active_loop_key("u", f"session-{i}")] = loop
+
+    # Evict down to the cap. The two active loops must survive.
+    runner._evict_loop_cache_until_bounded()
+
+    active_loops = {id(loops[0]), id(loops[1])}
+    remaining_active = [
+        k for k, loop in runner._loop_cache.items() if id(loop) in active_loops
+    ]
+    assert len(runner._loop_cache) <= runner._MAX_LOOP_CACHE
+    assert len(remaining_active) == 2, "active loops must not be evicted"
+
+
+def test_loop_cache_eviction_starvation_fallback(monkeypatch):
+    """When EVERY cached loop is active, eviction still bounds the cache
+    (evicts the LRU) instead of hanging or growing unbounded (audit P6)."""
+    runner._loop_cache.clear()
+    runner._user_loops.clear()
+
+    loops = {i: object() for i in range(runner._MAX_LOOP_CACHE + 1)}
+    for i, loop in loops.items():
+        key = runner._loop_cache_key("u", "ws", f"model-{i}", None, f"session-{i}")
+        runner._loop_cache[key] = loop
+        runner._user_loops[runner._active_loop_key("u", f"session-{i}")] = loop
+
+    runner._evict_loop_cache_until_bounded()
+
+    assert len(runner._loop_cache) <= runner._MAX_LOOP_CACHE
