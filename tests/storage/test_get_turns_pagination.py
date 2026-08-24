@@ -62,6 +62,33 @@ def test_pagination_boundary_keeps_runs_intact_across_pages() -> None:
     assert cursor2 is None
 
 
+def test_exact_fetch_size_multiple_flushes_trailing_run() -> None:
+    """A session with exactly limit*5 rows must still return its turns.
+
+    Regression: when the last batch is EXACTLY fetch_size rows, the loop
+    advanced, the next fetch returned empty, and the `not rows_raw` break
+    exited without flushing the still-open run -> get_turns returned []
+    (or too few turns) silently.
+    """
+    store = _store()
+    # limit=2 -> fetch window = 10 rows; seed exactly 10 rows in ONE run.
+    _seed_run(store, "run-exact", n_steps=10)
+    turns, cursor = store.get_turns("a", limit=2)
+    assert len(turns) == 1
+    assert turns[0]["run_id"] == "run-exact"
+    assert len(turns[0]["messages"]) == 10
+    assert cursor is None
+
+    # 2 * limit * 5 = 20 rows in one run -> still one turn.
+    store2 = _store()
+    _seed_run(store2, "run-exact-2", n_steps=20)
+    turns2, cursor2 = store2.get_turns("a", limit=2)
+    assert len(turns2) == 1
+    assert turns2[0]["run_id"] == "run-exact-2"
+    assert len(turns2[0]["messages"]) == 20
+    assert cursor2 is None
+
+
 def test_small_pages_no_duplicate_runs() -> None:
     """Each run appears exactly once across many small pages."""
     store = _store()

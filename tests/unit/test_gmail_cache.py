@@ -71,6 +71,20 @@ def test_clear_is_single_bulk_delete(cache) -> None:
     assert cache.stats()["total"] == 0
 
 
+def test_clear_purges_chroma_vectors(cache) -> None:
+    """clear() must remove Chroma vectors (id-based delete; where={} is
+    rejected on chromadb >= 1.5)."""
+    for i in range(3):
+        cache.upsert(_email(f"c{i}", body=f"vector body {i}"))
+    cache.db.process_journal(limit=10000)
+    coll = cache.db._get_collection("emails_body")
+    if coll is not None:
+        assert coll.count() == 3
+    cache.clear()
+    if coll is not None:
+        assert coll.count() == 0
+
+
 def test_clear_purges_journal(cache) -> None:
     for i in range(3):
         cache.upsert(_email(f"j{i}"))

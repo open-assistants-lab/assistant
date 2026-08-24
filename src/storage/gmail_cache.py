@@ -365,7 +365,11 @@ class GmailCache:
                 for col in self.db._get_longtext_columns(TABLE):
                     coll = self.db._get_collection(f"{TABLE}_{col}")
                     if coll is not None:
-                        coll.delete(where={})
+                        # id-based delete: where={} is rejected on chromadb
+                        # >=1.5 ("Expected where to have exactly one operator").
+                        ids = [str(r) for r in coll.get()["ids"]]
+                        if ids:
+                            coll.delete(ids=ids)
             except Exception:
                 pass
         try:

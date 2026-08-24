@@ -1307,6 +1307,12 @@ class MessageStore:
                 ).fetchall()
 
             if not rows_raw:
+                # End of data (e.g. the previous batch was exactly fetch_size
+                # rows): flush the still-open run exactly once.
+                if current_turn:
+                    turns.append(self._build_turn(current_run_id, current_turn))
+                    current_turn = []
+                    current_run_id = None
                 break
 
             rows = [
