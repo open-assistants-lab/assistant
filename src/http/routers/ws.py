@@ -460,11 +460,28 @@ async def ws_conversation(websocket: WebSocket) -> None:
     current_provider_keys: dict[str, str] | None = None
     pending_container: list[Any] = [None]
 
-    try:
+    # Persistent reader (audit P6 part B): ONE task owns the socket and feeds
+    # an asyncio.Queue. Per-pass receive tasks raced the stream and cancelled a
+    # pending frame at stream end, losing it (a frame popped from the socket
+    # then discarded). The queue preserves every frame; consumers cancel a
+    # queue.get() safely because the frame stays queued.
+    control_queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    async def _ws_reader() -> None:
         while True:
             try:
-                raw_data = await websocket.receive_text()
+                raw = await websocket.receive_text()
             except WebSocketDisconnect:
+                await control_queue.put(None)
+                return
+            await control_queue.put(raw)
+
+    reader_task = asyncio.create_task(_ws_reader())
+
+    try:
+        while True:
+            raw_data = await control_queue.get()
+            if raw_data is None:
                 break
 
             try:
@@ -735,35 +752,33 @@ async def ws_conversation(websocket: WebSocket) -> None:
                 )
             )
             while not stream_task.done():
-                receive_task = asyncio.create_task(websocket.receive_text())
+                get_task = asyncio.create_task(control_queue.get())
                 done, pending = await asyncio.wait(
-                    {stream_task, receive_task}, return_when=asyncio.FIRST_COMPLETED
+                    {stream_task, get_task}, return_when=asyncio.FIRST_COMPLETED
                 )
                 if stream_task in done:
-                    if receive_task in done:
-                        try:
-                            deferred_control = receive_task.result()
-                        except WebSocketDisconnect:
+                    if get_task in done:
+                        deferred_control = get_task.result()
+                        if deferred_control is None:
                             cancel_event.set()
                             stream_task.cancel()
                             try:
                                 await stream_task
                             except asyncio.CancelledError:
                                 pass
-                            raise
+                            raise WebSocketDisconnect()
                     else:
-                        receive_task.cancel()
+                        get_task.cancel()
                     break
-                try:
-                    raw_control = receive_task.result()
-                except WebSocketDisconnect:
+                raw_control = get_task.result()
+                if raw_control is None:
                     cancel_event.set()
                     stream_task.cancel()
                     try:
                         await stream_task
                     except asyncio.CancelledError:
                         pass
-                    raise
+                    raise WebSocketDisconnect()
                 try:
                     control_data = json.loads(raw_control)
                 except json.JSONDecodeError:
@@ -831,8 +846,11 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     deferred_control = None
                 else:
                     try:
-                        raw = await asyncio.wait_for(websocket.receive_text(), timeout=300)
-                    except (TimeoutError, WebSocketDisconnect):
+                        raw = await asyncio.wait_for(control_queue.get(), timeout=300)
+                    except TimeoutError:
+                        pending_container[0] = None
+                        break
+                    if raw is None:
                         pending_container[0] = None
                         break
                 try:
@@ -1003,3 +1021,6 @@ async def ws_conversation(websocket: WebSocket) -> None:
             )
         except Exception:
             pass
+    finally:
+        if not reader_task.done():
+            reader_task.cancel()
