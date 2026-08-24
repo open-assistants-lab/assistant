@@ -264,6 +264,7 @@ class AgentLoop:
         workspace_id: str | None = None,
         cancel_event: asyncio.Event | None = None,
         model_id: CanonicalModel | None = None,
+        caps_check: Callable[[str], bool] | None = None,
         context_measurer: ContextMeasurer = build_context_snapshot,
         context_sink: ContextSink | None = None,
         compression_sink: CompressionObserver | None = None,
@@ -282,6 +283,11 @@ class AgentLoop:
         self.workspace_id = workspace_id
         self.subagent_ctx: SubagentContext | None = None
         self.cancel_event: asyncio.Event | None = cancel_event
+        # Capability gate (audit E24-tools): when provided, returns True iff
+        # the named tool is enabled for this loop's user. Checked at the
+        # execution boundary (registry hits AND lazy-loads) so a mid-session
+        # scope change cannot be bypassed via an already-registered tool.
+        self._caps_check = caps_check
         self.rubric: str | None = None
         # Steer queue (Pi-style): a message submitted while the agent works is
         # delivered after the current tool completes, cancelling remaining
@@ -546,6 +552,21 @@ class AgentLoop:
             merged[key]["max_tokens"] = DUPLICATE_TOOL_FINAL_MAX_TOKENS
         return merged
 
+    def _tool_allowed(self, name: str) -> bool:
+        """Capability gate for tool execution (audit E24-tools).
+
+        Fail-open on lookup errors to match resource_enabled's default
+        (unconfigured tools are enabled); a broken caps file must not brick
+        every tool — but any definitive `disabled` verdict is final.
+        """
+        if self._caps_check is None:
+            return True
+        try:
+            return bool(self._caps_check(name))
+        except Exception as e:
+            logger.warning(f"caps_check_error tool={name}: {e}")
+            return True
+
     async def _execute_tool(self, tc: ToolCall) -> ToolResult:
         """Execute a tool call, returning a ToolResult with structured content."""
         tool_def = self._registry.get(tc.name)
@@ -554,6 +575,9 @@ class AgentLoop:
             if result is not None:
                 return result
             return ToolResult(content=f"Unknown tool: {tc.name}", is_error=True)
+
+        if not self._tool_allowed(tc.name):
+            return ToolResult(content=f"Tool is disabled: {tc.name}", is_error=True)
 
         self._recently_used.add(tc.name)
         tc = self._with_runtime_context(tc)
@@ -572,6 +596,11 @@ class AgentLoop:
 
     async def _try_lazy_load(self, tc: ToolCall) -> ToolResult | None:
         """Try to lazy-load a tool from the index and reconstruct its function."""
+        # Audit E24-tools: check capabilities BEFORE consulting the index or
+        # the global registry — disabled tools are never advertised, resolved,
+        # or registered, regardless of what the persisted index contains.
+        if not self._tool_allowed(tc.name):
+            return ToolResult(content=f"Tool is disabled: {tc.name}", is_error=True)
         if self._tool_index is None:
             return None
         td = self._tool_index.get_definition(tc.name)

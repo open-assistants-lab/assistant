@@ -46,6 +46,11 @@ from src.storage.paths import DataPaths
 logger = get_logger()
 
 _MAX_LOOP_CACHE = 50
+# Bumped on every reset_user_sdk_loops call. get_sdk_loop snapshots it before
+# creating a loop and discards the result if it changed — closing the race
+# where an in-flight creation re-inserts a loop built from pre-reset caps
+# (audit E24 drift). Deterministic for both sync and async reset callers.
+_loop_generation = 0
 _loop_cache: collections.OrderedDict[str, AgentLoop] = collections.OrderedDict()
 _loop_lock = asyncio.Lock()
 
@@ -216,14 +221,60 @@ def _get_memory_context(caps: dict[str, Any]) -> str:
 
 
 def _get_file_ops_guideline(caps: dict[str, Any]) -> str:
-    """Shell-based file-ops guideline, only when dedicated search tools are off."""
+    """Shell-based file-ops guideline, only when dedicated search tools are off.
+
+    Audit drift fix: only commands actually in the shell allowlist may be
+    named — advertising ls/rg/find when the allowlist rejects them steers the
+    model into a guaranteed-fail loop.
+    """
     has_shell = _resource_enabled(caps, "tools", "shell_execute")
     has_file_search = _resource_enabled(caps, "tools", "files_glob_search") or _resource_enabled(
         caps, "tools", "files_grep_search"
     )
-    if has_shell and not has_file_search:
-        return "Use shell_execute for file operations like ls, rg, find"
-    return ""
+    if not (has_shell and not has_file_search):
+        return ""
+    try:
+        from src.sdk.tools_core.shell import _get_shell_config
+
+        allowed = set(_get_shell_config()["allowed_commands"])
+    except Exception:
+        allowed = set()
+    mentioned = [c for c in ("ls", "rg", "find", "cat", "grep") if c in allowed]
+    if mentioned:
+        return f"Use shell_execute for file operations like {', '.join(mentioned)}"
+    return (
+        "Use shell_execute for file operations via python3 "
+        "(e.g. os.listdir/open) — dedicated file tools are disabled for this session"
+    )
+
+
+def _build_tool_preferences(caps: dict[str, Any]) -> str:
+    """Tool preference hints built from ENABLED tools only (audit E24 drift):
+    a preference naming an unregistered tool actively pushes the model toward
+    a name that will fail (or bypass scoping)."""
+
+    def on(name: str) -> bool:
+        return _resource_enabled(caps, "tools", name)
+
+    lines: list[str] = []
+    if on("web_fetch"):
+        lines.append("- For fetching a URL or web page: use **web_fetch**, NOT shell_execute with curl.")
+    if on("web_search"):
+        lines.append("- For web search: use **web_search**, NOT shell_execute with curl.")
+    if on("files_read"):
+        lines.append("- For reading files: use **files_read**, NOT shell_execute with cat.")
+    if on("files_list") or on("files_glob_search"):
+        files_list = "**files_list** or **files_glob_search**" if on("files_list") else "**files_glob_search**"
+        lines.append(f"- For listing files: use {files_list}, NOT shell_execute with ls.")
+    if on("files_write"):
+        lines.append("- For writing files: use **files_write**, NOT shell_execute with echo/tee.")
+    if on("files_grep_search"):
+        lines.append("- For searching file contents: use **files_grep_search**, NOT shell_execute with grep.")
+    if on("shell_execute"):
+        lines.append("- Use shell_execute only for commands that have no dedicated tool.")
+    if not lines:
+        return ""
+    return "\n\n## Tool Preferences\n" + "\n".join(lines)
 
 
 def _get_workspace_context(workspace_id: str | None) -> str:
@@ -551,6 +602,10 @@ async def create_sdk_loop(
         user_id=user_id,
         workspace_id=runtime_workspace_id,
         model_id=model_id,
+        # Audit E24-tools: execution-boundary capability gate. `caps` is the
+        # same snapshot that filtered registration; PATCH scope changes reset
+        # loops (generation guard below), so per-creation freshness is sound.
+        caps_check=lambda name: _resource_enabled(caps, "tools", name),
     )
 
     # The flow identity (used by compression contexts and middleware reruns)
@@ -574,17 +629,10 @@ async def create_sdk_loop(
 
     # Tool preference hints: steer the model toward the right tool for common tasks
     # so it doesn't default to shell_execute for things that have dedicated tools.
-    tool_prefs = (
-        "\n\n## Tool Preferences\n"
-        "- For fetching a URL or web page: use **web_fetch**, NOT shell_execute with curl.\n"
-        "- For web search: use **web_search**, NOT shell_execute with curl.\n"
-        "- For reading files: use **files_read**, NOT shell_execute with cat.\n"
-        "- For listing files: use **files_list** or **files_glob_search**, NOT shell_execute with ls.\n"
-        "- For writing files: use **files_write**, NOT shell_execute with echo/tee.\n"
-        "- For searching file contents: use **files_grep_search**, NOT shell_execute with grep.\n"
-        "- Use shell_execute only for commands that have no dedicated tool."
-    )
-    loop.system_prompt = (loop.system_prompt or "") + tool_prefs
+    # Built from enabled tools only (audit E24 drift).
+    tool_prefs = _build_tool_preferences(caps)
+    if tool_prefs:
+        loop.system_prompt = (loop.system_prompt or "") + tool_prefs
 
     if mcp_bridge:
         loop._mcp_bridge = mcp_bridge  # type: ignore[attr-defined]
@@ -637,31 +685,56 @@ async def get_sdk_loop(user_id: str, workspace_id: str = "personal", model: str 
     cache_key = _loop_cache_key(
         user_id, workspace_id, model, provider_keys, runtime_session_id
     )
-    async with _loop_lock:
-        if cache_key not in _loop_cache:
-            _loop_cache[cache_key] = await create_sdk_loop(
-                user_id,
-                workspace_id,
-                model=model,
-                provider_keys=provider_keys,
-                session_id=runtime_session_id,
-            )
-            logger.info(
-                "sdk_runner.loop_created",
-                {
-                    "user_id": user_id,
-                    "workspace_id": workspace_id,
-                    "model": model,
-                    "session_id": runtime_session_id,
-                },
-                user_id=user_id,
-            )
-            _loop_cache.move_to_end(cache_key)
-            if len(_loop_cache) > _MAX_LOOP_CACHE:
-                _loop_cache.popitem(last=False)
-        else:
-            _loop_cache.move_to_end(cache_key)
-        return _loop_cache[cache_key]
+    # Retry-on-reset loop (audit E24 drift): a reset landing while creation is
+    # in flight invalidates the freshly created loop. We cannot recurse while
+    # holding _loop_lock (non-reentrant), so the whole acquire/create/check
+    # sequence sits in a bounded retry loop OUTSIDE the lock on retry.
+    for _attempt in range(3):
+        superseded = False
+        async with _loop_lock:
+            gen_before = _loop_generation
+            if cache_key not in _loop_cache:
+                new_loop = await create_sdk_loop(
+                    user_id,
+                    workspace_id,
+                    model=model,
+                    provider_keys=provider_keys,
+                    session_id=runtime_session_id,
+                )
+                if _loop_generation != gen_before:
+                    # A reset landed mid-creation — the fresh loop may carry
+                    # pre-change capabilities. Discard it and re-run against
+                    # the post-reset generation.
+                    superseded = True
+                    logger.info(
+                        "sdk_runner.loop_creation_superseded_by_reset",
+                        {"user_id": user_id, "session_id": runtime_session_id},
+                        user_id=user_id,
+                    )
+                    aclose = getattr(new_loop, "aclose", None)
+                    if aclose is not None:
+                        try:
+                            await aclose()
+                        except Exception:
+                            pass
+                else:
+                    _loop_cache[cache_key] = new_loop
+            if not superseded:
+                logger.info(
+                    "sdk_runner.loop_created",
+                    {
+                        "user_id": user_id,
+                        "workspace_id": workspace_id,
+                        "model": model,
+                        "session_id": runtime_session_id,
+                    },
+                    user_id=user_id,
+                ) if cache_key in _loop_cache and _loop_cache[cache_key] is not None else None
+                _loop_cache.move_to_end(cache_key)
+                if len(_loop_cache) > _MAX_LOOP_CACHE:
+                    _loop_cache.popitem(last=False)
+                return _loop_cache[cache_key]
+    raise RuntimeError(f"get_sdk_loop: loop creation kept being superseded by resets ({user_id})")
 
 
 def _messages_from_conversation(messages: list[Any]) -> list[Message]:
@@ -1492,12 +1565,14 @@ def reset_sdk_loop(
 
 def reset_user_sdk_loops(user_id: str, reason: str | None = None) -> int:
     """Reset all cached SDK agent loops for a user."""
+    global _loop_generation
     removed = 0
     cache_prefix = f"{user_id}:"
     for cache_key in list(_loop_cache):
         if cache_key.startswith(cache_prefix):
             del _loop_cache[cache_key]
             removed += 1
+    _loop_generation += 1
     logger.info(
         "sdk_runner.user_loops_reset",
         {"user_id": user_id, "reason": reason, "removed": removed},
