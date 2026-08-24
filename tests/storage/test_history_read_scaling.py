@@ -284,3 +284,22 @@ def test_cache_not_poisoned_by_malformed_newest_summary(query_counter) -> None:
         "valid",
         "new",
     ]
+
+
+def test_invalidate_summary_cache_helper() -> None:
+    """P2-5: _invalidate_summary_cache() is the single invalidation entry point."""
+    store = _store()
+    sid = "s-inv"
+    store.add_message(sid, "user", "q1")
+    store.get_messages_with_summary(sid, limit=50)  # warms cache (possibly None)
+    assert sid in store._summary_cache
+
+    # Targeted invalidation drops only that session.
+    store._summary_cache["other"] = None
+    store._invalidate_summary_cache(sid)
+    assert sid not in store._summary_cache
+    assert "other" in store._summary_cache
+
+    # Full invalidation clears everything.
+    store._invalidate_summary_cache()
+    assert not store._summary_cache

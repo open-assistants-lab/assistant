@@ -141,7 +141,8 @@ class ToolInputEndMessage(BaseModel):
 
     type: str = "tool_input_end"
     call_id: str
-    tool: str = ""
+    # P2-3: ToolEndData carries no tool name — None (absent), never "".
+    tool: str | None = None
 
 
 class ToolCallMessage(BaseModel):

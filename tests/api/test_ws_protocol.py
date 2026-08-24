@@ -1546,3 +1546,18 @@ class TestFailedRunSinglePersistWS:
         assert calls == [], "failed done must NOT re-persist already-persisted state"
         # The failure surfaces to the client even without the fallback write.
         assert any(p.get("code") == "AGENT_ERROR" for p in ws.sent)
+
+
+class TestToolInputEndHonestMapping:
+    """P2-3: tool_input_end flat projection must never fabricate an empty name."""
+
+    def test_parse_tool_input_end_has_no_fabricated_tool_name(self):
+        from src.http.ws_protocol import parse_server_envelope
+
+        parsed = parse_server_envelope(
+            {"type": "tool_input_end", "data": {"tool_call_id": "call-9"}}
+        )
+        assert parsed is not None
+        assert getattr(parsed, "call_id", None) == "call-9"
+        # ToolEndData carries no tool name; "" must never be fabricated.
+        assert parsed.tool != ""

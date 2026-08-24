@@ -990,19 +990,22 @@ async def ws_conversation(websocket: WebSocket) -> None:
             # so get_user_loop is always None here. _run_agent_stream captured
             # the live loop via execute_stream's on_stream_end callback.
             follow_loop = stream_loop_holder.get("loop")
-            if follow_loop is not None and follow_loop.has_pending_steer():
+            # P2-1: drain ALL pending steers — each queued steer gets its own
+            # follow-up turn, not just the first.
+            while follow_loop is not None and follow_loop.has_pending_steer():
                 follow_steer = follow_loop.pop_steer()
-                if follow_steer:
-                    follow_msgs = _messages_from_conversation(
-                        conversation.get_messages_with_summary(
-                            session_id=session_id, limit=50
-                        )
+                if not follow_steer:
+                    break
+                follow_msgs = _messages_from_conversation(
+                    conversation.get_messages_with_summary(
+                        session_id=session_id, limit=50
                     )
-                    await _run_agent_stream(
-                        websocket, user_id, follow_msgs, conversation, session_id,
-                        pending_ref=pending_container, workspace_id=workspace_id,
-                        model=msg_model, provider_keys=msg_provider_keys,
-                    )
+                )
+                await _run_agent_stream(
+                    websocket, user_id, follow_msgs, conversation, session_id,
+                    pending_ref=pending_container, workspace_id=workspace_id,
+                    model=msg_model, provider_keys=msg_provider_keys,
+                )
 
     except WebSocketDisconnect:
         logger.info(

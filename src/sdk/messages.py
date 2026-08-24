@@ -376,7 +376,7 @@ class StreamChunk(BaseModel):
             ).model_dump()
         if canonical == "tool_input_end":
             return ToolInputEndMessage(
-                call_id=self.call_id or "", tool=self.tool or ""
+                call_id=self.call_id or "", tool=self.tool or None
             ).model_dump()
         if canonical == "reasoning_delta":
             if self.type == "reasoning":

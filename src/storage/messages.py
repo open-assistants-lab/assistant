@@ -129,12 +129,31 @@ class MessageStore:
         # Audit P2: per-session cache of the newest valid summary
         # (rowid + provenance). Append-safe: plain add_message never
         # invalidates (a summary rowid is append-safe; provenance only
-        # references rows below it). Invalidated ONLY on summary-relevant
-        # writes: add_summary_message / delete_session /
+        # references rows below it). Invalidated ONLY via
+        # _invalidate_summary_cache() at summary-relevant writes:
+        # add_summary_message / delete_session /
         # delete_messages_for_workspace / clear().
+        #
+        # Staleness contract (P2-5): the cache is NOT invalidated by direct
+        # SQL writes to the `messages` table from outside this class (tests,
+        # migrations, manual edits). Any such path that adds/removes a summary
+        # row MUST call _invalidate_summary_cache() afterwards.
         self._summary_cache: dict[
             str, tuple[int, tuple[set[str], set[str]]] | None
         ] = {}
+
+    def _invalidate_summary_cache(self, session_id: str | None = None) -> None:
+        """Single entry point for summary-cache invalidation.
+
+        With session_id: drop only that session's entry. Without: clear all
+        (used by delete_session / delete_messages_for_workspace / clear(),
+        which affect many sessions). Direct out-of-band SQL writers must call
+        this too — see the staleness contract on _summary_cache.
+        """
+        if session_id is None:
+            self._summary_cache.clear()
+        else:
+            self._summary_cache.pop(session_id, None)
 
     @property
     def core(self) -> MemoryCore:
@@ -1080,7 +1099,7 @@ class MessageStore:
                     ],
                 )
                 cur.execute("COMMIT")
-                self._summary_cache.pop(session_id, None)
+                self._invalidate_summary_cache(session_id)
                 return mid
             except Exception:
                 cur.execute("ROLLBACK")
@@ -1149,7 +1168,7 @@ class MessageStore:
             self._core.db.sync_duckdb_table("messages")
         except Exception:
             pass
-        self._summary_cache.clear()
+        self._invalidate_summary_cache()
         return cast(int, count)
 
     def persist_run(
@@ -1262,7 +1281,7 @@ class MessageStore:
 
     def clear(self) -> None:
         self._core.clear()
-        self._summary_cache.clear()
+        self._invalidate_summary_cache()
 
     def get_turns(
         self, session_id: str, limit: int = 50, cursor: str | None = None
@@ -1430,7 +1449,7 @@ class MessageStore:
                 self._core.db.sync_duckdb_table("messages")
             except Exception:
                 pass
-            self._summary_cache.pop(session_id, None)
+            self._invalidate_summary_cache(session_id)
             return cast(int, count)
         except Exception:
             return 0

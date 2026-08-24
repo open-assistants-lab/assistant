@@ -1112,6 +1112,7 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
     if _session_registry.holds(rkey):
         _pending_interrupts[skey] = pending  # restore for the promised retry
         raise HTTPException(status_code=409, detail="Session has an active run; retry approval when idle")
+    approved = False
     try:
         await _session_registry.acquire(rkey)  # held until generate() finally
     except SessionBusyError:
@@ -1127,9 +1128,14 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
         loop.approve_tool_call(
             ToolCall(id=pending.get("call_id") or req.call_id, name=tool_name, arguments=pending.get("args") or {})
         )
+        approved = True
     except BaseException:
         # F3: endpoint died post-acquire — never leak the session lock.
         await _session_registry.release(rkey)
+        if not approved:
+            # P2-4: approval never landed — restore the pending interrupt so
+            # the promised retry doesn't 404 forever.
+            _pending_interrupts[skey] = pending
         raise
 
     cancel_event = asyncio.Event()
@@ -1273,6 +1279,18 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
                     aborted = True
                     yield sse("error", {"code": "error", "message": event.content})
                     break
+
+                elif event.kind == "usage":
+                    # P2-2: parity with the main SSE path — forward usage.
+                    u = chunk.usage
+                    if u is not None:
+                        yield sse("usage", {
+                            "input_tokens": u.input_tokens,
+                            "output_tokens": u.output_tokens,
+                            "reasoning_tokens": u.reasoning_tokens,
+                            "cache_read_tokens": u.cache_read_tokens,
+                            "cache_creation_tokens": u.cache_creation_tokens,
+                        })
 
                 elif event.kind == "done":
                     # Audit E-streaming: a resumed run may finish with empty
