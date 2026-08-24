@@ -97,8 +97,14 @@ async def _run_agent_stream(
     provider_keys: dict[str, str] | None = None,
     cancel_event: asyncio.Event | None = None,
     rubric: str | None = None,
+    stream_loop_out: dict[str, Any] | None = None,
 ) -> None:
-    """Run the agent streaming loop and handle all chunk types."""
+    """Run the agent streaming loop and handle all chunk types.
+
+    ``stream_loop_out`` (audit E25): when provided, the live loop is written
+    into the dict via execute_stream's on_stream_end callback so the caller
+    can run follow-up steers after RunService unregisters the loop.
+    """
     import uuid as _uuid
 
     def _with_workspace(payload: dict[str, Any]) -> dict[str, Any]:
@@ -120,6 +126,11 @@ async def _run_agent_stream(
             prompt=str(sdk_messages[-1].content) if sdk_messages else "",
             model=model,
             provider_keys=provider_keys,
+            on_stream_end=(
+                (lambda lp: stream_loop_out.__setitem__("loop", lp))
+                if stream_loop_out is not None
+                else None
+            ),
         ):
             if cancel_event is not None and cancel_event.is_set():
                 if not persisted:
@@ -707,6 +718,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
             if ws_verification and getattr(ws_verification, "enabled", False) and getattr(ws_verification, "default_rubric", ""):
                 ws_rubric = ws_verification.default_rubric
 
+            stream_loop_holder: dict[str, Any] = {}
             cancel_event = asyncio.Event()
             deferred_control: str | None = None
             stream_cancelled = False
@@ -717,6 +729,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     model=msg_model, provider_keys=msg_provider_keys,
                     cancel_event=cancel_event,
                     rubric=ws_rubric,
+                    stream_loop_out=stream_loop_holder,
                 )
             )
             while not stream_task.done():
@@ -952,9 +965,11 @@ async def ws_conversation(websocket: WebSocket) -> None:
             # was generating text (no tool boundary to inject at) is delivered
             # as the next turn. The steer was already persisted at receive
             # time, so the follow-up reloads history and runs it.
-            from src.sdk.runner import get_user_loop
-
-            follow_loop = get_user_loop(user_id, session_id)
+            #
+            # Audit E25: RunService unregisters the loop when the stream ends,
+            # so get_user_loop is always None here. _run_agent_stream captured
+            # the live loop via execute_stream's on_stream_end callback.
+            follow_loop = stream_loop_holder.get("loop")
             if follow_loop is not None and follow_loop.has_pending_steer():
                 follow_steer = follow_loop.pop_steer()
                 if follow_steer:

@@ -438,8 +438,14 @@ class RunService:
         provider_keys: dict[str, str] | None = None,
         rubric: str | None = None,
         mode: str | None = None,
+        on_stream_end: Callable[[AgentLoop], None] | None = None,
     ) -> AsyncIterator[RunEvent]:
-        """Streaming execution. Yields RunEvent envelopes."""
+        """Streaming execution. Yields RunEvent envelopes.
+
+        ``on_stream_end`` (audit E25) fires with the live loop right before
+        it is unregistered, letting callers capture it for post-done work
+        (e.g. the WS follow-up steer) that must survive unregistration.
+        """
         # Lock key is user-scoped: the registry is process-global, and two
         # users sharing a session id (e.g. both using "chat-1") must not
         # block each other.
@@ -447,7 +453,7 @@ class RunService:
         try:
             # Run-level trace root covering the whole stream (agent + grader).
             with LangfuseTracer.trace_run(self._user_id, session_id):
-                async for event in self._run_stream(session_id, prompt, model, provider_keys, lock, rubric, mode):
+                async for event in self._run_stream(session_id, prompt, model, provider_keys, lock, rubric, mode, on_stream_end=on_stream_end):
                     yield event
         finally:
             await self._registry.release(session_key(self._user_id, session_id))
@@ -532,6 +538,7 @@ class RunService:
         lock: SessionLock,
         rubric: str | None = None,
         mode: str | None = None,
+        on_stream_end: Callable[[AgentLoop], None] | None = None,
     ) -> AsyncIterator[RunEvent]:
         run_id = str(uuid.uuid4())
         sequence = 0
@@ -807,6 +814,17 @@ class RunService:
                 retryable=False,
             ).model_dump())
         finally:
+            # Audit E25: hand the live loop to the caller BEFORE unregistering
+            # so post-done work (WS follow-up steer) can still reach it.
+            if on_stream_end is not None:
+                try:
+                    on_stream_end(loop)
+                except Exception as exc:
+                    logger.warning(
+                        "run_service.on_stream_end_error",
+                        {"error": str(exc)},
+                        user_id=self._user_id,
+                    )
             unregister_user_loop(self._user_id, loop, session_id=session_id)
 
     async def _run_bounded_orchestration(
