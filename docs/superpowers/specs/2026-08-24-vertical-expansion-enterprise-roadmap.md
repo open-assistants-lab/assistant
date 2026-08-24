@@ -48,9 +48,9 @@ SMB owners (Motion B); privacy-conscious individuals / self-hosters
 | A2 | Key→identity auth: IdentityResolver seam + shared-secret ref impl
 (Phase 0); production per-user key table + body `user_id` validation
 (Phase 2, hosted tier) | Seam — **Phase 0**; production — **Phase 2** |
-| A3 | Audit trail export per user | **Build — Phase 0** |
+| A3 | Audit trail export per user | **Build — Phase 0** (shared event-capture layer, see note) |
 
-> **REVIEW:** Understated as an "export endpoint." Current JSONL logs are app logs, not an audit trail — HITL approvals and tool executions are not systematically captured. Compliance-grade audit needs complete, append-only coverage of *state-changing* actions first; the export endpoint is trivial once that data model exists. Scope the Phase 0 item as "audit-event data model + capture in agent loop/HITL paths + export," not just the endpoint.
+> **REVIEW:** Understated as an "export endpoint." Current JSONL logs are app logs, not an audit trail — HITL approvals and tool executions are not systematically captured. Compliance-grade audit needs complete, append-only coverage of *state-changing* actions first; the export endpoint is trivial once that data model exists. Scope the Phase 0 item as "audit-event data model + capture in agent loop/HITL paths + export," not just the endpoint. Design the capture layer **once, shared with telemetry** (§8a decision 1): one event stream at the loop/tool boundary with two sinks — audit store and aggregation sidecar.
 | A4 | Confidentiality posture (self-host / residency, no-training contracts) | Architecture native; business work |
 | A5 | Predictable pricing (per-seat; usage capped) | Metering — Phase 2 |
 | A6 | Exit ramp (full export + deletion API) | Data model ready; API needed |
@@ -228,7 +228,9 @@ in single-container mode.
   trusted-network with shared-secret
 - Audit-log export endpoint per user
 - `/v1` route aliasing
-- Publish TS SDK to npm; live-server integration smoke tests
+- Publish TS SDK to npm as **`0.1.0-preview`** (explicit non-frozen contract);
+  live-server integration smoke tests; stable release after a partner has
+  exercised both transports (SSE + WS) for ~a month
 - **Main-agent-from-profile bootstrap (K1, §4.5)**: `load_main_agent_profile()`
   composition layer — a user-level PROFILE.md instantiates the *main* loop.
   Foundational runtime for kits, Motion-C partners, and the pip package's
@@ -238,7 +240,13 @@ in single-container mode.
   pulls an audit export; a partner's checked-in PROFILE.md instantiates their
   agent.
 
-> **REVIEW:** Two concerns. (1) Publishing the TS SDK here freezes the SSE/WS wire contract weeks after E20/E25/E26 contract-defect fixes landed — move npm publish until a partner has exercised both transports for ~a month. (2) The auth seam is easy; enforcement is not — `user_id` arrives as query/body across ~15 routers, and "never trust past the resolver boundary" implies a sweep of every router, which is the real cost.
+> **REVIEW:** Two concerns, both resolved. (1) TS SDK publish no longer
+> freezes the wire contract — it ships as `0.1.0-preview` (non-frozen),
+> stable after partner exercise of both transports. (2) The auth seam is
+> easy; enforcement is not — `user_id` arrives as query/body across **19
+> routers** (verified), and "never trust past the resolver boundary" implies
+> a sweep of every router, which is the real Phase-0 cost and must be
+> reflected in the estimate.
 
 ### Phase 1 — Vertical value & the kit factory (weeks 3–9)
 - Knowledge-ingestion pipeline with source adapters (§4): P0 adapters first
@@ -327,12 +335,14 @@ Verdict: **strategy approved; sequencing revised before execution.**
   language discipline; decisive non-goals list.
 - **Re-cut:** Phase 0 (defer TS SDK publish; expand A3 to data model + capture,
   not just export) and Phase 2 (split money-path from habit-path).
-- **Decisions required before Phase 0 exit:**
-  1. Email-mining privacy posture per persona tier (blocks the Phase 1 email
-     P0 adapter)
-  2. Audit-trail data model (redefines the A3 deliverable)
-  3. Telemetry aggregation approach (before the Phase 2 metering schema
-     freezes)
+- **Decisions required, with due dates:**
+  1. Audit-trail data model — **Phase 0** (redefines the A3 deliverable; design
+     as a shared event-capture layer with telemetry — one capture at the
+     loop/tool boundary, two sinks: audit store + aggregation sidecar)
+  2. Email-mining privacy posture per persona tier — **before Phase 1** (blocks
+     the Phase 1 email P0 adapter)
+  3. Telemetry aggregation approach — **before the Phase 2 metering schema
+     freezes** (reuses the shared capture layer from decision 1)
 - Verified against the codebase during review: §4.5 composition claims and
   estimate, single-writer/shard-by-user consistency, trust-tier table matches
   AGENTS.md deployment reality.
@@ -368,7 +378,8 @@ Inline `> **REVIEW:**` annotations are placed at the relevant sections above.
   ("cost per seat", hours saved across staff) and Phase 3 RBAC admin views need
   centralized usage events, but usage lives in per-user SQLite/Chroma by design.
   Requires an opt-out sidecar aggregation store — plan before the Phase 2
-  metering schema freezes
+  metering schema freezes. Design with the A3 audit capture as **one shared
+  event-capture layer** (two sinks), not two pipelines.
 - **Capacity**: phases assume solo-plus-AI-agents pace; if behind schedule,
   cut order is: extra verticals → draft-delivery polish → RBAC depth
   (auth/quota/sandbox/ingestion gates are non-negotiable, never cut)
