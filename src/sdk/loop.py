@@ -1106,7 +1106,7 @@ class AgentLoop:
 
     async def _prepare_agent_call(
         self, state: AgentState
-    ) -> tuple[list[Message], list[ToolDefinition] | None]:
+    ) -> tuple[list[Message], list[ToolDefinition] | None, ContextSnapshot | None]:
         intended_index = self._agent_call_index + 1
         state.extra.pop("_compression_context", None)
         state.extra.pop("_compression_result", None)
@@ -1131,22 +1131,27 @@ class AgentLoop:
 
         prepared = self._prepare_messages(state)
         tools = self._registry.list_tools() or None
+        # Measure the final prepared context exactly once here and thread it
+        # into _record_agent_call so the post-hook snapshot isn't re-tokenized.
+        prepared_snapshot = self._measure_context(prepared, tools, intended_index)
         if isinstance(compression_result, CompressionResult):
             if compression_result.compressed:
-                after = self._measure_context(prepared, tools, intended_index)
                 telemetry = compression_result.telemetry.model_copy(
-                    update={"before_context": before, "after_context": after}
+                    update={"before_context": before, "after_context": prepared_snapshot}
                 )
                 compression_result = compression_result.model_copy(update={"telemetry": telemetry})
             self.last_compression = compression_result.telemetry
             await self._notify_compression(compression_result.telemetry)
-        return prepared, tools
+        return prepared, tools, prepared_snapshot
 
     async def _record_agent_call(
-        self, prepared: list[Message], tools: list[ToolDefinition] | None
+        self,
+        prepared: list[Message],
+        tools: list[ToolDefinition] | None,
+        prepared_snapshot: ContextSnapshot | None = None,
     ) -> int:
         self._agent_call_index += 1
-        snapshot = self._measure_context(prepared, tools, self._agent_call_index)
+        snapshot = prepared_snapshot
         self.last_call_context = snapshot
         if snapshot is not None:
             await self._notify_context(snapshot)
@@ -1305,11 +1310,11 @@ class AgentLoop:
             while overflow_retries < 3 and not llm_success:
                 await self._check_subagent_before_llm(state)
                 _t_ctx = time.monotonic()
-                prepared, tools = await self._prepare_agent_call(state)
+                prepared, tools, prepared_snapshot = await self._prepare_agent_call(state)
                 self.timings.record(
                     "context_assembly", (time.monotonic() - _t_ctx) * 1000.0
                 )
-                call_index = await self._record_agent_call(prepared, tools)
+                call_index = await self._record_agent_call(prepared, tools, prepared_snapshot)
                 # The post-nudge final response is capped (FR-9).
                 call_options = (
                     self._with_final_response_cap(self.run_config.provider_options)
@@ -1603,7 +1608,7 @@ class AgentLoop:
 
                 await self._check_subagent_before_llm(state)
                 _t_ctx = time.monotonic()
-                prepared, tools = await self._prepare_agent_call(state)
+                prepared, tools, prepared_snapshot = await self._prepare_agent_call(state)
                 self.timings.record(
                     "context_assembly", (time.monotonic() - _t_ctx) * 1000.0
                 )
@@ -1622,7 +1627,7 @@ class AgentLoop:
                 in_reasoning_block = False
                 stream_usage = Usage()
 
-                call_index = await self._record_agent_call(prepared, tools)
+                call_index = await self._record_agent_call(prepared, tools, prepared_snapshot)
                 try:
                     if self.trace_provider:
                         async with self.trace_provider.start_span(

@@ -20,7 +20,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
-from src.app_logging import get_logger
+from src.app_logging import LogLevel, get_logger
 from src.sdk.compression import (
     CompressionArtifact,
     CompressionContext,
@@ -358,8 +358,10 @@ class SummarizationMiddleware(Middleware):
 
     def before_model(self, state: AgentState) -> dict[str, Any] | None:
         """Sync version — not fully supported (providers are async)."""
-        # Our providers are async-only; sync before_model can't call the summary LLM.
-        # Just check if we would trigger and log.
+        # Our providers are async-only; sync before_model can't call the summary
+        # LLM. Skip the token count entirely unless debug logging is enabled.
+        if not logger._should_log(LogLevel.DEBUG):
+            return None
         messages = state.messages
         total_tokens = self.token_counter(messages)
         if not self._should_summarize(messages, total_tokens):
@@ -496,18 +498,18 @@ class SummarizationMiddleware(Middleware):
         if self.token_counter(messages) <= target:
             return 0
 
-        # Binary search for earliest index that keeps suffix within budget
-        left, right = 0, len(messages)
+        # Single reverse pass: per-message counts with running suffix sums
+        # (O(n) total tokenization instead of O(n log n) slice re-tokenization).
+        # Valid because _partial_token_counter is self.token_counter, which is
+        # additive over messages.
+        suffix = 0
         cutoff = len(messages)
-        for _ in range(len(messages).bit_length() + 1):
-            if left >= right:
-                break
-            mid = (left + right) // 2
-            if self._partial_token_counter(messages[mid:]) <= target:
-                cutoff = mid
-                right = mid
+        for i in range(len(messages) - 1, -1, -1):
+            suffix += self._partial_token_counter([messages[i]])
+            if suffix <= target:
+                cutoff = i
             else:
-                left = mid + 1
+                break
 
         if cutoff >= len(messages):
             cutoff = max(0, len(messages) - 1)

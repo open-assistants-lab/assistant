@@ -2224,3 +2224,42 @@ class TestDuplicateToolCallGuard:
         assert "c3" in starts, "the fresh call must be executed on the wire"
         assert any(c.type == "tool_result" and c.call_id == "c2" for c in chunks), \
             "the duplicate must be answered on the wire"
+
+
+class TestP3MeasurementReuse:
+    """Audit P3: prepared-snapshot token counts are measured once per call."""
+
+    async def test_prepared_context_measured_once_not_twice(self):
+        """_prepare_agent_call threads its snapshot; _record_agent_call must not re-tokenize."""
+        measured = []
+
+        def measurer(**kwargs):
+            measured.append((kwargs["llm_call_index"], kwargs["source"]))
+            return _measured_snapshot(**kwargs)
+
+        loop = AgentLoop(
+            provider=MockProvider([Message.assistant("ok")]),
+            tools=[echo],
+            context_measurer=measurer,
+        )
+        await loop.run([Message.user("go")])
+        # one call: before (pre-hook) + prepared snapshot (threaded) = exactly 2
+        prepared = [m for m in measured if m[1] is ContextSource.PREPARED_CONTEXT]
+        assert len(prepared) == 2
+        assert [idx for idx, _ in prepared] == [1, 1]
+
+    async def test_compressed_prepared_snapshot_is_after_context(self):
+        """Compressed path reuses the same prepared snapshot for telemetry + record."""
+        observed = []
+
+        def measurer(**kwargs):
+            return _measured_snapshot(**kwargs)
+
+        loop = AgentLoop(
+            provider=MockProvider([Message.assistant("done")]),
+            middlewares=[ScriptedCompressionMiddleware(automatic=True)],
+            compression_sink=observed.append,
+            context_measurer=measurer,
+        )
+        await loop.run([Message.user("history")])
+        assert observed[0].after_context is loop.last_call_context
