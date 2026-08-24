@@ -15,6 +15,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+from unittest.mock import AsyncMock
 import pytest
 from fastapi import WebSocketDisconnect
 
@@ -85,7 +86,7 @@ async def test_control_frame_survives_stream_completion(monkeypatch):
         lambda: SimpleNamespace(auth=SimpleNamespace(api_key="", solo_bypass=True)),
     )
     monkeypatch.setattr(
-        ws_router, "get_message_store", lambda *a, **k: FakeConversation()
+        ws_router, "aget_message_store", AsyncMock(return_value=FakeConversation())
     )
     monkeypatch.setattr(ws_router, "_run_agent_stream", recording_run_agent_stream)
     monkeypatch.setattr(

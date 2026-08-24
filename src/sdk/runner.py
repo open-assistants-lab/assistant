@@ -396,7 +396,9 @@ async def create_sdk_loop(
     t0 = time.monotonic()
     settings = get_settings()
 
-    provider = get_cached_model_provider(model, provider_keys=provider_keys, user_id=user_id)
+    provider = await asyncio.to_thread(
+        get_cached_model_provider, model, provider_keys=provider_keys, user_id=user_id
+    )
     provider_model: str = cast(
         str,
         getattr(provider, "model", None)

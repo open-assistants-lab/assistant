@@ -4,10 +4,12 @@ Thin adapter over MemoryCore, preserving the
 Message/SearchResult dataclasses and public API for callers.
 """
 
+import asyncio
 import base64
 import json
 import sqlite3
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -1434,17 +1436,54 @@ class MessageStore:
             return 0
 
 
-_stores: dict[str, MessageStore] = {}
+_stores: OrderedDict[str, MessageStore] = OrderedDict()
+_MESSAGE_STORE_CACHE_MAX = 64
+
+# Per-user asyncio locks for single-flight first construction (audit S4):
+# concurrent first access must construct MessageStore exactly once, off the
+# event loop, so SQLite migrations never block the async request handlers.
+_store_locks: dict[str, asyncio.Lock] = {}
+
+
+def _store_key(user_id: str) -> str:
+    return f"{user_id}:msgstore"
+
+
+def _cache_store(key: str, store: MessageStore) -> None:
+    _stores[key] = store
+    _stores.move_to_end(key)
+    while len(_stores) > _MESSAGE_STORE_CACHE_MAX:
+        _stores.popitem(last=False)
 
 
 def get_message_store(user_id: str = "default_user", workspace_id: str = "personal") -> MessageStore:
-    key = f"{user_id}:msgstore"
+    key = _store_key(user_id)
     if key not in _stores:
-        _stores[key] = MessageStore(user_id, workspace_id=workspace_id)
+        _cache_store(key, MessageStore(user_id, workspace_id=workspace_id))
+    else:
+        _stores.move_to_end(key)
     return _stores[key]
+
+
+async def aget_message_store(
+    user_id: str = "default_user", workspace_id: str = "personal"
+) -> MessageStore:
+    """Async get-or-create with single-flight off-thread construction (audit S4)."""
+    key = _store_key(user_id)
+    if key in _stores:
+        _stores.move_to_end(key)
+        return _stores[key]
+    lock = _store_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        if key in _stores:
+            return _stores[key]
+        store = await asyncio.to_thread(MessageStore, user_id, workspace_id=workspace_id)
+        _cache_store(key, store)
+        return store
 
 
 def clear_message_store(user_id: str, workspace_id: str) -> None:
     """Evict a MessageStore from the cache (e.g. after workspace deletion)."""
-    key = f"{user_id}:msgstore"
+    key = _store_key(user_id)
     _stores.pop(key, None)
+    _store_locks.pop(key, None)

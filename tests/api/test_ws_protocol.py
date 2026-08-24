@@ -2,6 +2,7 @@
 
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from starlette.websockets import WebSocketDisconnect
@@ -418,7 +419,7 @@ class TestWebSocketPersistence:
                 verification=SimpleNamespace(enabled=False),
             ),
         )
-        monkeypatch.setattr(ws_router, "get_message_store", lambda *args: Store())
+        monkeypatch.setattr(ws_router, "aget_message_store", AsyncMock(return_value=Store()))
         monkeypatch.setattr(ws_router, "_run_agent_stream", fake_run_agent_stream)
 
         await ws_router.ws_conversation(FakeWebSocket())
@@ -864,7 +865,7 @@ class TestWebSocketPersistence:
             "get_settings",
             lambda: SimpleNamespace(auth=SimpleNamespace(api_key="", solo_bypass=True)),
         )
-        monkeypatch.setattr(ws_router, "get_message_store", lambda *args, **kwargs: FakeConversation())
+        monkeypatch.setattr(ws_router, "aget_message_store", AsyncMock(return_value=FakeConversation()))
         monkeypatch.setattr(ws_router, "_run_agent_stream", fake_run_agent_stream)
         monkeypatch.setattr(ws_router, "get_sdk_loop", fake_get_sdk_loop)
 
@@ -922,7 +923,7 @@ class TestWebSocketPersistence:
             "get_settings",
             lambda: SimpleNamespace(auth=SimpleNamespace(api_key="", solo_bypass=True)),
         )
-        monkeypatch.setattr(ws_router, "get_message_store", lambda *args, **kwargs: FakeConversation())
+        monkeypatch.setattr(ws_router, "aget_message_store", AsyncMock(return_value=FakeConversation()))
         monkeypatch.setattr(ws_router, "_run_agent_stream", fake_run_agent_stream)
 
         websocket = FakeWebSocket()
@@ -982,7 +983,7 @@ class TestWebSocketPersistence:
             "get_settings",
             lambda: SimpleNamespace(auth=SimpleNamespace(api_key="", solo_bypass=True)),
         )
-        monkeypatch.setattr(ws_router, "get_message_store", lambda *args, **kwargs: FakeConversation())
+        monkeypatch.setattr(ws_router, "aget_message_store", AsyncMock(return_value=FakeConversation()))
         monkeypatch.setattr(ws_router, "_run_agent_stream", fake_run_agent_stream)
 
         websocket = FakeWebSocket()
@@ -1187,7 +1188,7 @@ class TestWebSocketPersistence:
             "get_settings",
             lambda: SimpleNamespace(auth=SimpleNamespace(api_key="", solo_bypass=True)),
         )
-        monkeypatch.setattr(ws_router, "get_message_store", lambda *args, **kwargs: FakeConversation())
+        monkeypatch.setattr(ws_router, "aget_message_store", AsyncMock(return_value=FakeConversation()))
         monkeypatch.setattr(ws_router, "_run_agent_stream", fake_run_agent_stream)
         monkeypatch.setattr(ws_router, "get_sdk_loop", fake_get_sdk_loop)
 
@@ -1253,7 +1254,7 @@ class TestWebSocketPersistence:
             "get_settings",
             lambda: SimpleNamespace(auth=SimpleNamespace(api_key="", solo_bypass=True)),
         )
-        monkeypatch.setattr(ws_router, "get_message_store", lambda *args, **kwargs: FakeConversation())
+        monkeypatch.setattr(ws_router, "aget_message_store", AsyncMock(return_value=FakeConversation()))
         monkeypatch.setattr(ws_router, "_run_agent_stream", fake_run_agent_stream)
         monkeypatch.setattr(ws_router, "get_sdk_loop", fake_get_sdk_loop)
 
@@ -1426,7 +1427,7 @@ class TestWebSocketPersistence:
             "get_settings",
             lambda: SimpleNamespace(auth=SimpleNamespace(api_key="", solo_bypass=True)),
         )
-        monkeypatch.setattr(ws_router, "get_message_store", lambda *args, **kwargs: FakeConversation())
+        monkeypatch.setattr(ws_router, "aget_message_store", AsyncMock(return_value=FakeConversation()))
         monkeypatch.setattr(ws_router, "_run_agent_stream", fake_run_agent_stream)
 
         await ws_router.ws_conversation(FakeWebSocket())
@@ -1533,7 +1534,7 @@ class TestFailedRunSinglePersistWS:
             async for ev in fake_execute_stream(None):
                 yield ev
 
-        monkeypatch.setattr(ws_router, "get_message_store", lambda *a, **kw: FakeConversation())
+        monkeypatch.setattr(ws_router, "aget_message_store", AsyncMock(return_value=FakeConversation()))
         monkeypatch.setattr(
             ws_router.RunService, "execute_stream", lambda self, **kwargs: fake_run_agent_stream()
         )

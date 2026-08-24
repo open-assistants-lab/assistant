@@ -51,7 +51,7 @@ from src.sdk.runner import (
     get_sdk_loop,
 )
 from src.sdk.session_worker import SessionBusyError, get_session_registry
-from src.storage.messages import get_message_store
+from src.storage.messages import aget_message_store
 
 logger = get_logger()
 
@@ -538,7 +538,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     approved_args = pending_container[0].get("args") or {}
                     approved_call_id = pending_container[0].get("call_id") or msg.call_id
                     pending_container[0] = None
-                    conversation = get_message_store(user_id, workspace_id)
+                    conversation = await aget_message_store(user_id, workspace_id)
                     retry_msgs = _messages_from_conversation(
                         conversation.get_messages_with_summary(
                             session_id=run_session_id, limit=50
@@ -626,7 +626,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                         )
                     )
                     pending_container[0] = None
-                    conversation = get_message_store(user_id, workspace_id)
+                    conversation = await aget_message_store(user_id, workspace_id)
                     retry_msgs = _messages_from_conversation(
                         conversation.get_messages_with_summary(
                             session_id=run_session_id, limit=50
@@ -675,7 +675,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                 continue
 
             content = msg.content
-            conversation = get_message_store(user_id, workspace_id)
+            conversation = await aget_message_store(user_id, workspace_id)
 
             # If user types "approve" while a tool is pending, trigger retry
             if pending_container[0] and content.strip().lower() in ("approve", "yes", "accept"):

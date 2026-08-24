@@ -44,7 +44,7 @@ from src.sdk.session_worker import (
     get_session_registry,
     session_key,
 )
-from src.storage.messages import get_message_store
+from src.storage.messages import aget_message_store, get_message_store
 
 _pending_interrupts: dict[str, dict[str, Any]] = {}
 _cancel_flags: dict[str, bool] = {}
@@ -303,7 +303,7 @@ async def get_conversation(
     user_id: str = "default_user", limit: int = 100, session_id: str | None = None
 ) -> dict[str, Any]:
     """Get conversation history, optionally filtered by session_id."""
-    conversation = get_message_store(user_id)
+    conversation = await aget_message_store(user_id)
     if session_id:
         messages = conversation.get_messages_by_session_id(session_id, limit)
     else:
@@ -331,7 +331,7 @@ async def get_conversation_turns(
     cursor: str | None = None,
 ) -> dict[str, Any]:
     """Get conversation turns grouped by run_id."""
-    conversation = get_message_store(user_id)
+    conversation = await aget_message_store(user_id)
     sid = session_id or "default"
     turns, next_cursor = conversation.get_turns(sid, limit=limit, cursor=cursor)
     return {
@@ -359,7 +359,7 @@ async def get_conversation_turns(
 @router.get("/conversation/sessions")
 async def list_sessions(user_id: str = "default_user") -> dict[str, Any]:
     """List all chat sessions with titles derived from first user message."""
-    conversation = get_message_store(user_id)
+    conversation = await aget_message_store(user_id)
     sessions = conversation.get_sessions()
     return {"sessions": sessions}
 
@@ -372,7 +372,7 @@ async def delete_session(user_id: str = "default_user", session_id: str = "") ->
     # Audit E26: never delete out from under an active run.
     if _session_registry.holds(session_key(user_id, session_id)):
         raise HTTPException(status_code=409, detail="Session has an active run; cancel it before deleting")
-    conversation = get_message_store(user_id)
+    conversation = await aget_message_store(user_id)
     conversation.delete_session(session_id)
     reset_sdk_loop(user_id, session_id=session_id)
     return {"status": "deleted", "session_id": session_id}
@@ -514,7 +514,7 @@ async def _summarize_title(
         if saved is not None and saved.title_model
         else (settings.agent.title_model or settings.agent.model)
     )
-    provider = get_cached_model_provider(model, user_id=user_id)
+    provider = await asyncio.to_thread(get_cached_model_provider, model, user_id=user_id)
 
     prompt = (
         "Summarize the following conversation in 3-5 words. "
@@ -562,7 +562,7 @@ async def _summarize_title(
 @router.post("/conversation/title")
 async def generate_title(req: TitleRequest, _: None = Depends(require_auth)) -> dict[str, str]:
     """Generate a short title for a chat session."""
-    conversation = get_message_store(req.user_id)
+    conversation = await aget_message_store(req.user_id)
 
     # Idempotent: a session that already has a stored title keeps it — the
     # LLM is only consulted once per session, and a lost response never
@@ -615,7 +615,7 @@ async def generate_title(req: TitleRequest, _: None = Depends(require_auth)) -> 
 @router.delete("/conversation")
 async def clear_conversation(user_id: str = "default_user") -> dict[str, Any]:
     """Clear conversation history."""
-    conversation = get_message_store(user_id)
+    conversation = await aget_message_store(user_id)
     conversation.clear()
     return {"status": "cleared", "user_id": user_id}
 
@@ -626,7 +626,7 @@ async def handle_message(req: MessageRequest, _: None = Depends(require_auth)) -
     try:
         user_id = req.user_id or "default_user"
 
-        conversation = get_message_store(user_id)
+        conversation = await aget_message_store(user_id)
         session_id = _normalized_session_id(req.session_id)
 
         try:
@@ -776,7 +776,7 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
         skey = _stream_key(user_id, session_id)
         cancel_event: asyncio.Event | None = None
 
-        conversation = get_message_store(user_id)
+        conversation = await aget_message_store(user_id)
 
         # Audit B12: probe BEFORE mutating cancel/slot dicts. A request that
         # is about to fail session-busy must not clobber the live stream's
@@ -1103,7 +1103,7 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
     model = pending.get("model")
     provider_keys = pending.get("provider_keys")
 
-    conversation = get_message_store(req.user_id)
+    conversation = await aget_message_store(req.user_id)
 
     # Audit E26 hazard 3: acquire the session lock BEFORE mutating anything —
     # a race where a new run started must surface as a machine-actionable 409
@@ -1390,9 +1390,9 @@ async def import_conversation(req: ConversationImportRequest, _: None = Depends(
     before asking a single question. Each message is added to the
     conversation store but NOT sent to the agent.
     """
-    from src.storage.messages import get_message_store
+    from src.storage.messages import aget_message_store
 
-    conversation = get_message_store(req.user_id)
+    conversation = await aget_message_store(req.user_id)
     for msg in req.messages:
         role = msg.get("role", "user")
         content = msg.get("content", "")
