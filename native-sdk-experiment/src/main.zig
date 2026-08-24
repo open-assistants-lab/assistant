@@ -1704,6 +1704,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             // Sort chats by created_at descending (newest first).
             // The initial chat (index 0) is included in the sort. The active chat
             // index is adjusted to follow the moved chat.
+            disambiguateChatTitles(model);
             const old_active_id = model.chats[model.active_chat_idx].id;
             sortChatsByCreatedAt(model);
             // Re-find the active chat by its id
@@ -3598,6 +3599,42 @@ fn chatCreatedAtCmp(a: Chat, b: Chat) bool {
 }
 
 /// Sort the chats array by created_at descending (newest first).
+/// E2E-round fix (T1): when several distinct sessions share the same title
+/// (e.g. repeated identical first-messages from automation), append a short
+/// created-at disambiguator so sidebar rows are distinguishable. Titles are
+/// re-fetched fresh on every sessions load, so suffixes never compound.
+pub fn disambiguateChatTitles(model: *Model) void {
+    if (model.chat_count < 2) return;
+    var counts = std.StringHashMap(usize).init(model.allocator);
+    defer counts.deinit();
+    for (model.chats[0..model.chat_count]) |*chat| {
+        const gop = counts.getOrPut(chat.title) catch return;
+        if (!gop.found_existing) gop.value_ptr.* = 0;
+        gop.value_ptr.* += 1;
+    }
+    for (model.chats[0..model.chat_count]) |*chat| {
+        if ((counts.get(chat.title) orelse 0) <= 1) continue;
+        // ISO timestamp "2026-08-24T12:34:56" -> "08-24 12:34"; fall back to
+        // the tail of the session id when created_at is missing.
+        var suffix: []const u8 = undefined;
+        if (chat.created_at.len >= 16 and chat.created_at[4] == '-') {
+            suffix = std.fmt.allocPrint(model.allocator, "{s} · {s}-{s} {s}", .{
+                chat.title,
+                chat.created_at[5..7],
+                chat.created_at[8..10],
+                chat.created_at[11..16],
+            }) catch continue;
+        } else if (chat.created_at.len > 0) {
+            suffix = std.fmt.allocPrint(model.allocator, "{s} · {s}", .{ chat.title, chat.created_at }) catch continue;
+        } else {
+            const sid_full = chat.session_id[0..chat.session_id_len];
+            const tail = if (sid_full.len > 8) sid_full[sid_full.len - 8 ..] else sid_full;
+            suffix = std.fmt.allocPrint(model.allocator, "{s} · …{s}", .{ chat.title, tail }) catch continue;
+        }
+        chat.title = suffix;
+    }
+}
+
 fn sortChatsByCreatedAt(model: *Model) void {
     var sort_i: usize = 1;
     while (sort_i < model.chat_count) : (sort_i += 1) {

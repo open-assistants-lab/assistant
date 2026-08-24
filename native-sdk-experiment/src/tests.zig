@@ -2194,3 +2194,51 @@ test "credential form node budget covers a 4-field connector" {
     try testing.expect(main.credential_form_nodes >= max_writes);
     try testing.expectEqual(12, main.credential_form_nodes);
 }
+
+test "disambiguateChatTitles suffixes duplicate titles with timestamps" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+
+    // Two chats sharing a title, one unique.
+    model.chats[0].title = "Connect Gmail account test@gmail.com";
+    model.chats[0].created_at = "2026-08-24T12:34:56";
+    model.chats[0].setSessionIdStr("chat-2");
+    model.chats[1].title = "Connect Gmail account test@gmail.com";
+    model.chats[1].created_at = "2026-08-24T09:00:00";
+    model.chats[1].setSessionIdStr("chat-3");
+    model.chats[2].title = "Unique chat";
+    model.chat_count = 3;
+
+    main.disambiguateChatTitles(&model);
+
+    // Duplicates gain a timestamp suffix; unique title untouched.
+    try testing.expect(std.mem.startsWith(u8, model.chats[0].title, "Connect Gmail account test@gmail.com · 08-24"));
+    try testing.expect(std.mem.startsWith(u8, model.chats[1].title, "Connect Gmail account test@gmail.com · 08-24"));
+    try testing.expectEqualStrings("Unique chat", model.chats[2].title);
+    // The two duplicates remain distinguishable from each other.
+    try testing.expect(!std.mem.eql(u8, model.chats[0].title, model.chats[1].title));
+}
+
+test "disambiguateChatTitles falls back to session-id tail without created_at" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+
+    model.chats[0].title = "Same title";
+    model.chats[0].setSessionIdStr("chat-7");
+    model.chats[1].title = "Same title";
+    model.chats[1].setSessionIdStr("chat-8");
+    model.chat_count = 2;
+
+    main.disambiguateChatTitles(&model);
+
+    try testing.expect(!std.mem.eql(u8, model.chats[0].title, model.chats[1].title));
+    try testing.expect(std.mem.endsWith(u8, model.chats[0].title, "…chat-7") or std.mem.endsWith(u8, model.chats[1].title, "…chat-7"));
+}

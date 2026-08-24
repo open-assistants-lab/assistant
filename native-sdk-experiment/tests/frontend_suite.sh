@@ -158,8 +158,19 @@ print(m.group(1) if m else '')
 }
 
 start_backend() {
-  lsof -ti:8080 | xargs kill -9 2>/dev/null || true
-  sleep 1
+  # E2E-round fix: never kill a backend we didn't spawn. If the port is held,
+  # fail loudly instead of nuking the operator's server. Set
+  # FRONTEND_SUITE_STEAL_PORT=1 to restore the old take-over behavior.
+  local holders="$(lsof -ti:8080 2>/dev/null | tr '\n' ' ')"
+  if [ -n "$holders" ] && [ "${FRONTEND_SUITE_STEAL_PORT:-0}" != "1" ]; then
+    echo "FATAL: port 8080 already held by PID(s): $holders" >&2
+    echo "Stop them manually, or re-run with FRONTEND_SUITE_STEAL_PORT=1 to allow takeover." >&2
+    exit 1
+  fi
+  if [ -n "$holders" ]; then
+    lsof -ti:8080 | xargs kill -9 2>/dev/null || true
+    sleep 1
+  fi
   uv run assistant http > /tmp/assistant_frontend_suite.log 2>&1 &
   BACKEND=$!
   # Poll health for up to 30s (startup can be slow after a busy run).
@@ -184,7 +195,11 @@ start_app() {
     # The app can crash at startup (Zig std ISCONN panic on concurrent
     # startup fetches) — kill any instance and relaunch once.
     kill $APP 2>/dev/null; wait $APP 2>/dev/null; true
-    pkill -f "\.native/build/.*/assistant" 2>/dev/null
+    # Scope to our own app instance's tree (see kill_tree in cleanup).
+    for kid in $(pgrep -P "$APP" 2>/dev/null); do
+      pkill -P "$kid" -f "\.native/build/.*/assistant" 2>/dev/null || true
+      kill -9 "$kid" 2>/dev/null || true
+    done
     sleep 1
     rm -rf .zig-cache/native-sdk-automation
     native dev -Dautomation=true > /tmp/native_frontend_suite.log 2>&1 &
@@ -197,11 +212,21 @@ start_app() {
 }
 
 cleanup() {
-  kill $APP $BACKEND 2>/dev/null; wait $APP $BACKEND 2>/dev/null; true
-  # Kill orphans: the wrappers' children (uv run / native dev spawn real
-  # processes that hold the port / automation dir) survive the wrapper kill.
-  lsof -ti:8080 | xargs kill -9 2>/dev/null || true
-  pkill -f "\.native/build/.*/assistant" 2>/dev/null || true
+  # Kill only the process trees we spawned (uv/native wrappers leave real
+  # children holding the port / automation dir). Recurse descendants so we
+  # never touch unrelated processes (e.g. an operator's standalone server).
+  kill_tree() {
+    local parent="$1"
+    [ -z "$parent" ] && return 0
+    local kid
+    for kid in $(pgrep -P "$parent" 2>/dev/null); do
+      kill_tree "$kid"
+    done
+    kill -9 "$parent" 2>/dev/null || true
+  }
+  kill_tree "${APP:-}"
+  kill_tree "${BACKEND:-}"
+  wait ${APP:-} ${BACKEND:-} 2>/dev/null; true
   sleep 1
 }
 
