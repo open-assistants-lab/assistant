@@ -141,6 +141,7 @@ async def _run_agent_stream(
                         reasoning_parts=reasoning_parts,
                         tool_metadata_list=tool_metadata_list,
                         tool_results=tool_results,
+                        run_id=event.run_id,
                     )
                     persisted = True
                 break
@@ -232,6 +233,7 @@ async def _run_agent_stream(
                     reasoning_parts=reasoning_parts,
                     tool_metadata_list=tool_metadata_list,
                     tool_results=tool_results,
+                    run_id=event.run_id,
                 )
                 persisted = True
                 break
@@ -294,6 +296,7 @@ async def _run_agent_stream(
                     reasoning_parts=reasoning_parts,
                     tool_metadata_list=tool_metadata_list,
                     tool_results=tool_results,
+                    run_id=event.run_id,
                 )
                 persisted = True
                 await websocket.send_json(

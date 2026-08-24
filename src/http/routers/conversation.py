@@ -173,7 +173,10 @@ def _strip_canvas_fences(text: str) -> str:
 
 
 def _persist_tool_messages(
-    conversation: Any, tool_events: list[dict[str, Any]], session_id: str
+    conversation: Any,
+    tool_events: list[dict[str, Any]],
+    session_id: str,
+    run_id: str | None = None,
 ) -> None:
     seen_call_ids: set[str] = set()
     for event in tool_events:
@@ -190,6 +193,7 @@ def _persist_tool_messages(
             session_id=session_id,
             tool_name=event.get("tool") or event.get("tool_name") or "unknown",
             tool_call_id=call_id,
+            metadata={"run_id": run_id} if run_id else None,
         )
 
 
@@ -201,7 +205,9 @@ def _persist_collected_stream_state(
     reasoning_parts: list[str],
     tool_metadata_list: list[dict[str, Any]],
     tool_results: dict[str, str],
+    run_id: str | None = None,
 ) -> None:
+    run_meta = {"run_id": run_id} if run_id else None
     for tm in tool_metadata_list:
         call_id = tm.get("tool_call_id", "")
         output = tool_results.get(call_id, "")
@@ -212,13 +218,19 @@ def _persist_collected_stream_state(
                 session_id=session_id,
                 tool_name=tm.get("tool_name", "unknown"),
                 tool_call_id=call_id,
+                metadata=run_meta,
             )
     if reasoning_parts:
-        persist_reasoning_message(conversation, "".join(reasoning_parts), session_id=session_id)
+        persist_reasoning_message(
+            conversation, "".join(reasoning_parts), session_id=session_id, metadata=run_meta
+        )
     response = "".join(ai_content_parts).strip()
     if response:
         persist_assistant_message(
-            conversation, response, metadata={"stream": True}, session_id=session_id
+            conversation,
+            response,
+            metadata={"stream": True, **(run_meta or {})},
+            session_id=session_id,
         )
 
 
@@ -816,6 +828,7 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                             reasoning_parts=reasoning_parts,
                             tool_metadata_list=tool_metadata_list,
                             tool_results=tool_results,
+                            run_id=event.run_id,
                         )
                         persisted = True
                         aborted = True
@@ -867,6 +880,7 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                             reasoning_parts=reasoning_parts,
                             tool_metadata_list=tool_metadata_list,
                             tool_results=tool_results,
+                            run_id=event.run_id,
                         )
                         persisted = True
                         aborted = True
@@ -880,6 +894,7 @@ async def message_stream(req: MessageRequest, _: None = Depends(require_auth)) -
                             reasoning_parts=reasoning_parts,
                             tool_metadata_list=tool_metadata_list,
                             tool_results=tool_results,
+                            run_id=event.run_id,
                         )
                         persisted = True
                         aborted = True
@@ -1344,6 +1359,7 @@ async def cancel_message(req: CancelRequest, _: None = Depends(require_auth)) ->
 
 class ConversationImportRequest(BaseModel):
     user_id: str = "default_user"
+    session_id: str = "default"
     messages: list[dict[str, Any]]  # [{"role": "user", "content": "..."}, ...]
 
 
@@ -1363,5 +1379,5 @@ async def import_conversation(req: ConversationImportRequest, _: None = Depends(
         content = msg.get("content", "")
         if content.strip():
             meta = msg.get("metadata")
-            conversation.add_message(role, content, metadata=meta)
+            conversation.add_message(role, content, metadata=meta, session_id=req.session_id)
     return {"imported": len(req.messages)}

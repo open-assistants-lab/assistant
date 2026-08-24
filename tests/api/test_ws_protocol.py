@@ -555,12 +555,15 @@ class TestWebSocketPersistence:
             (
                 ("tool", "noon"),
                 {
-                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1"},
+                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1", "run_id": "r1"},
                     "session_id": "chat-1",
                 },
             ),
-            (("reasoning", "thinking"), {"metadata": {}, "session_id": "chat-1"}),
-            (("assistant", "partial"), {"metadata": {"stream": True}, "session_id": "chat-1"}),
+            (("reasoning", "thinking"), {"metadata": {"run_id": "r1"}, "session_id": "chat-1"}),
+            (
+                ("assistant", "partial"),
+                {"metadata": {"stream": True, "run_id": "r1"}, "session_id": "chat-1"},
+            ),
         ]
 
     @pytest.mark.asyncio

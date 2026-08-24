@@ -460,12 +460,15 @@ class TestStreamEdgeCases:
             (
                 ("tool", "noon"),
                 {
-                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1"},
+                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1", "run_id": "r1"},
                     "session_id": "default",
                 },
             ),
-            (("reasoning", "thinking"), {"metadata": {}, "session_id": "default"}),
-            (("assistant", "partial"), {"metadata": {"stream": True}, "session_id": "default"}),
+            (("reasoning", "thinking"), {"metadata": {"run_id": "r1"}, "session_id": "default"}),
+            (
+                ("assistant", "partial"),
+                {"metadata": {"stream": True, "run_id": "r1"}, "session_id": "default"},
+            ),
         ]
 
     @pytest.mark.asyncio
@@ -682,12 +685,15 @@ class TestStreamEdgeCases:
             (
                 ("tool", "noon"),
                 {
-                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1"},
+                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1", "run_id": "r1"},
                     "session_id": "default",
                 },
             ),
-            (("reasoning", "thinking"), {"metadata": {}, "session_id": "default"}),
-            (("assistant", "partial"), {"metadata": {"stream": True}, "session_id": "default"}),
+            (("reasoning", "thinking"), {"metadata": {"run_id": "r1"}, "session_id": "default"}),
+            (
+                ("assistant", "partial"),
+                {"metadata": {"stream": True, "run_id": "r1"}, "session_id": "default"},
+            ),
         ]
 
     @pytest.mark.asyncio
@@ -720,12 +726,15 @@ class TestStreamEdgeCases:
             (
                 ("tool", "noon"),
                 {
-                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1"},
+                    "metadata": {"tool_name": "time_get", "tool_call_id": "call-1", "run_id": "r1"},
                     "session_id": "default",
                 },
             ),
-            (("reasoning", "thinking"), {"metadata": {}, "session_id": "default"}),
-            (("assistant", "partial"), {"metadata": {"stream": True}, "session_id": "default"}),
+            (("reasoning", "thinking"), {"metadata": {"run_id": "r1"}, "session_id": "default"}),
+            (
+                ("assistant", "partial"),
+                {"metadata": {"stream": True, "run_id": "r1"}, "session_id": "default"},
+            ),
         ]
 
     @pytest.mark.asyncio
@@ -1574,3 +1583,96 @@ class TestFailedRunSinglePersist:
         output = "".join([c async for c in response.body_iterator])
         assert '"type": "done"' in output
         assert calls == [], "failed done must NOT re-persist already-persisted state"
+
+
+class TestImportSessionTargeting:
+    """Audit E-lifecycle part A, sub-item 1: /conversation/import must target
+    the requested session so imported eval history is visible to the agent's
+    session-scoped queries."""
+
+    @pytest.mark.asyncio
+    async def test_import_passes_session_id_to_add_message(self, monkeypatch):
+        from src.http.routers import conversation as conversation_router
+
+        store = FakeConversation()
+
+        monkeypatch.setattr("src.storage.messages.get_message_store", lambda *a, **kw: store)
+
+        req = conversation_router.ConversationImportRequest(
+            user_id="u",
+            session_id="eval-session-1",
+            messages=[
+                {"role": "user", "content": "context line one"},
+                {"role": "assistant", "content": "context answer"},
+            ],
+        )
+        result = await conversation_router.import_conversation(req)
+
+        assert result == {"imported": 2}
+        assert all(kwargs.get("session_id") == "eval-session-1" for _, kwargs in store.messages)
+        assert [args[0] for args, _ in store.messages] == ["user", "assistant"]
+
+    @pytest.mark.asyncio
+    async def test_import_defaults_session_to_default(self, monkeypatch):
+        from src.http.routers import conversation as conversation_router
+
+        store = FakeConversation()
+
+        monkeypatch.setattr("src.storage.messages.get_message_store", lambda *a, **kw: store)
+
+        req = conversation_router.ConversationImportRequest(
+            user_id="u",
+            messages=[{"role": "user", "content": "hello"}],
+        )
+        await conversation_router.import_conversation(req)
+
+        assert store.messages[0][1].get("session_id") == "default"
+
+
+class TestInterruptedTurnRunId:
+    """Audit E-lifecycle part A, sub-item 2: fallback persist helpers must
+    thread run_id into metadata so get_turns does not fragment cancelled or
+    interrupted turns."""
+
+    def test_persist_collected_stream_state_threads_run_id(self):
+        from src.http.routers.conversation import _persist_collected_stream_state
+
+        calls = []
+
+        class FakeConversation:
+            def add_message(self, *args, **kwargs):
+                calls.append((args, kwargs))
+                return "m"
+
+        _persist_collected_stream_state(
+            FakeConversation(),
+            session_id="default",
+            ai_content_parts=["partial"],
+            reasoning_parts=["thinking"],
+            tool_metadata_list=[{"tool_name": "time_get", "tool_call_id": "c1"}],
+            tool_results={"c1": "noon"},
+            run_id="run-42",
+        )
+
+        assert calls, "expected persisted rows"
+        for args, kwargs in calls:
+            assert kwargs["metadata"].get("run_id") == "run-42", f"missing run_id in {args[0]} row"
+
+    def test_persist_tool_messages_threads_run_id(self):
+        from src.http.routers.conversation import _persist_tool_messages
+
+        calls = []
+
+        class FakeConversation:
+            def add_message(self, *args, **kwargs):
+                calls.append((args, kwargs))
+                return "m"
+
+        _persist_tool_messages(
+            FakeConversation(),
+            [{"tool": "message_search", "stage": "end", "call_id": "call-1", "output": "found"}],
+            session_id="chat-1",
+            run_id="run-7",
+        )
+
+        assert calls[0][1]["metadata"].get("run_id") == "run-7"
