@@ -146,7 +146,7 @@ def make_run_event_factory(chunk_gen):
                         block_id="b",
                         tool_call_id=ev.call_id or "c",
                         name=ev.tool,
-                        status="completed",
+                        status="failed" if ev.is_error else "completed",
                         content=content,
                     ),
                     **_common,

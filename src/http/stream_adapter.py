@@ -14,6 +14,7 @@ class StreamEvent:
     call_id: str | None = None
     args: dict[str, Any] | None = None
     result_preview: str | None = None
+    is_error: bool = False
 
 
 def adapt_stream_chunk(chunk: StreamChunk) -> StreamEvent:
@@ -25,4 +26,5 @@ def adapt_stream_chunk(chunk: StreamChunk) -> StreamEvent:
         call_id=chunk.call_id,
         args=chunk.args,
         result_preview=chunk.result_preview,
+        is_error=chunk.is_error,
     )

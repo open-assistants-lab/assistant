@@ -202,6 +202,126 @@ class TestParseServerMessage:
         assert msg is None
 
 
+class TestParseServerEnvelope:
+    """Canonical-envelope parsing (audit E-streaming).
+
+    Every frame emitted by the routers (via make_run_event_factory) must
+    parse through parse_server_envelope — the wire contract test F1.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "sequence",
+        [
+            [("text_start",)] + [("text_delta", f"t{i}") for i in range(2)] + [("text_end",)],
+            [("reasoning_start",)] + [("reasoning_delta", f"r{i}") for i in range(2)] + [("reasoning_end",)],
+            [("tool_input_start",)],
+            [("tool_result",)],
+            [("interrupt",)],
+            [("done",)],
+            [("error",)],
+        ],
+        ids=["text_block", "reasoning_block", "tool_input", "tool_result", "interrupt", "done", "error"],
+    )
+    async def test_every_emitted_frame_parses(self, monkeypatch, sequence):
+        """Contract: every emitted server frame parses via the protocol parser."""
+        from src.http.ws_protocol import parse_server_envelope
+        from src.sdk.messages import StreamChunk
+
+        def _chunk(spec):
+            if isinstance(spec, str):
+                if spec == "tool_result":
+                    return StreamChunk.tool_result_event("email_list", "call-1", "rows")
+                if spec == "interrupt":
+                    return StreamChunk.interrupt("files_delete", "call-2", {"path": "x"})
+                if spec == "done":
+                    return StreamChunk.done("final")
+                if spec == "error":
+                    return StreamChunk.error("boom")
+            kind, payload = spec
+            if kind == "text_start":
+                return StreamChunk.text_start()
+            if kind == "text_delta":
+                return StreamChunk.text_delta(payload)
+            if kind == "text_end":
+                return StreamChunk.text_end()
+            if kind == "reasoning_start":
+                return StreamChunk.reasoning_start()
+            if kind == "reasoning_delta":
+                return StreamChunk.reasoning_delta(payload)
+            if kind == "reasoning_end":
+                return StreamChunk.reasoning_end()
+            if kind == "tool_input_start":
+                return StreamChunk.tool_input_start("email_list", "call-1")
+            raise AssertionError(f"unhandled spec {spec}")
+
+        async def fake_run_sdk_agent_stream(**kwargs):
+            for spec in sequence:
+                yield _chunk(spec)
+
+        monkeypatch.setattr(
+            ws_router.RunService,
+            "execute_stream",
+            make_run_event_factory(fake_run_sdk_agent_stream),
+        )
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.sent = []
+
+            async def send_json(self, payload):
+                self.sent.append(payload)
+
+        websocket = FakeWebSocket()
+        await ws_router._run_agent_stream(
+            websocket, "test_user", [], object(), session_id="chat-1"
+        )
+
+        assert websocket.sent, "no frames emitted"
+        for frame in websocket.sent:
+            parsed = parse_server_envelope(frame)
+            assert parsed is not None, f"frame did not parse: {frame.get('type')}"
+
+    @pytest.mark.asyncio
+    async def test_failed_tool_chunk_renders_status_failed_end_to_end(self, monkeypatch):
+        """Audit F2: is_error=True on a tool_result chunk must surface as
+        status='failed' in the emitted ToolResultData envelope."""
+        from src.sdk.messages import StreamChunk
+
+        class FakeConversation:
+            def add_message(self, *args, **kwargs):
+                return "msg-1"
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.sent = []
+
+            async def send_json(self, payload):
+                self.sent.append(payload)
+
+        async def fake_run_sdk_agent_stream(**kwargs):
+            yield StreamChunk.tool_input_start("email_list", "call-1")
+            yield StreamChunk.tool_result_event("email_list", "call-1", "boom", is_error=True)
+            yield StreamChunk.done()
+
+        monkeypatch.setattr(
+            ws_router.RunService,
+            "execute_stream",
+            make_run_event_factory(fake_run_sdk_agent_stream),
+        )
+
+        websocket = FakeWebSocket()
+        await ws_router._run_agent_stream(
+            websocket, "test_user", [], FakeConversation(), session_id="chat-1"
+        )
+
+        tool_results = [m for m in websocket.sent if m.get("type") == "tool_result"]
+        assert tool_results
+        assert tool_results[0]["data"]["status"] == "failed"
+        assert tool_results[0]["data"]["name"] == "email_list"
+        assert tool_results[0]["data"]["content"] == "boom"
+
+
 class TestMessageSerialization:
     """Tests for JSON round-trip of messages."""
 

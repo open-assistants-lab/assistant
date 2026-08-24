@@ -448,8 +448,15 @@ def parse_server_envelope(data: dict[str, Any]) -> _ServerMessage | dict[str, An
     if msg_type == "tool_input_delta":
         return _flat(ToolInputDeltaMessage, call_id=payload.get("tool_call_id", ""), content=payload.get("delta", ""))
     if msg_type == "tool_input_end":
-        return _flat(ToolInputEndMessage, call_id=payload.get("tool_call_id", ""), tool=payload.get("name", ""))
+        # ToolEndData carries no tool name (only tool_call_id + arguments) —
+        # the flat ToolInputEndMessage.tool stays "" (legacy default). The
+        # canonical envelope remains the authoritative wire shape.
+        return _flat(ToolInputEndMessage, call_id=payload.get("tool_call_id", ""))
     if msg_type == "tool_result":
+        # ToolResultData carries status (completed/failed) but the legacy flat
+        # ToolResultMessage has no status field; the canonical envelope (with
+        # data.status) is the authoritative wire shape, so this projection is
+        # deliberately lossy on status only.
         return _flat(
             ToolResultMessage,
             tool=payload.get("name", ""),
