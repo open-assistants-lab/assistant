@@ -1,7 +1,6 @@
 """Async store access: to_thread offload, single-flight, bounded cache (audit S4)."""
 
 import asyncio
-import threading
 
 import pytest
 
@@ -41,40 +40,25 @@ async def test_aget_message_store_offloads_construction_to_thread(monkeypatch, t
 
 async def test_aget_message_store_single_flight(monkeypatch, tmp_path):
     """Concurrent first-access must construct the store exactly once."""
-    import src.storage.messages as messages_mod
+    from src import storage
 
-    construction_count = 0
-    first_entered = threading.Event()
-    release = threading.Event()
+    to_thread_calls: list[type] = []
+    orig_to_thread = asyncio.to_thread
 
-    orig_init = messages_mod.MessageStore.__init__
+    def spy_to_thread(func, *args, **kwargs):
+        to_thread_calls.append(func)
+        return orig_to_thread(func, *args, **kwargs)
 
-    def slow_init(self, user_id, base_dir=None, workspace_id="personal"):
-        nonlocal construction_count
-        construction_count += 1
-        if construction_count == 1:
-            # Block the worker thread until the second caller is also waiting,
-            # then release. If the second caller were constructing (no single
-            # flight), construction_count would exceed 1.
-            first_entered.set()
-            release.wait(timeout=5)
-        orig_init(self, user_id, base_dir=base_dir, workspace_id=workspace_id)
-
-    monkeypatch.setattr(messages_mod.MessageStore, "__init__", slow_init)
+    monkeypatch.setattr(storage.messages.asyncio, "to_thread", spy_to_thread)
 
     async def _get():
         return await aget_message_store("single-user", workspace_id="personal")
 
-    task1 = asyncio.create_task(_get())
-    await asyncio.sleep(0)  # let task1 schedule its to_thread construction
-    assert first_entered.wait(timeout=5), "first construction never started"
-    task2 = asyncio.create_task(_get())
-    await asyncio.sleep(0.05)  # give task2 time to (wrongly) construct
-    release.set()
-    s1, s2 = await asyncio.gather(task1, task2)
+    s1, s2 = await asyncio.gather(_get(), _get())
 
     assert s1 is s2
-    assert construction_count == 1
+    # Single-flight: both concurrent callers share ONE off-thread construction.
+    assert to_thread_calls.count(MessageStore) == 1
 
 
 async def test_message_store_cache_is_bounded():
