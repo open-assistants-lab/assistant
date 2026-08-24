@@ -1225,7 +1225,12 @@ class MessageStore:
         }
 
     def delete_session(self, session_id: str) -> int:
-        """Delete all messages in a specific chat session."""
+        """Delete all messages in a specific chat session.
+
+        Audit E4: also purges the matching ``_journal`` rows and ChromaDB
+        vectors (mirroring ``delete_messages_for_workspace``), so deleted
+        sessions no longer surface via memory/hybrid recall.
+        """
         try:
             with self._core.db._connect() as cur:
                 cur.execute(
@@ -1233,6 +1238,22 @@ class MessageStore:
                     [session_id],
                 )
                 count = cur.rowcount
+                cur.execute(
+                    "DELETE FROM _journal WHERE app_table = 'messages'"
+                    " AND json_extract(metadata, '$.session_id') = ?",
+                    [session_id],
+                )
+            if self._core.db._chroma is not None:
+                try:
+                    memories = self._core.fetch(limit=10000, metadata={"session_id": session_id})
+                    ids = [m.id for m in memories if m.id != "None"]
+                    if ids:
+                        self._core.db._chroma.delete(
+                            collection_name="messages_content",
+                            ids=ids,
+                        )
+                except Exception:
+                    pass
             try:
                 self._core.db.sync_duckdb_table("messages")
             except Exception:

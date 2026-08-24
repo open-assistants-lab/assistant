@@ -66,7 +66,12 @@ from src.sdk.run_models import (
     VerificationOutcome,
 )
 from src.sdk.runner import get_sdk_loop, register_user_loop, unregister_user_loop
-from src.sdk.session_worker import SessionBusyError, SessionLock, SessionWorkerRegistry
+from src.sdk.session_worker import (
+    SessionBusyError,
+    SessionLock,
+    SessionWorkerRegistry,
+    session_key,
+)
 from src.storage.messages import Message as StorageMessage
 from src.storage.messages import MessageStore
 
@@ -399,7 +404,7 @@ class RunService:
         fail fast BEFORE touching cancel-flag/slot dicts, so a request that is
         about to be rejected cannot clobber the live stream's registration.
         """
-        return self._registry.holds(f"{self._user_id}::{session_id}")
+        return self._registry.holds(session_key(self._user_id, session_id))
 
     async def execute(
         self,
@@ -414,7 +419,7 @@ class RunService:
         # Lock key is user-scoped: the registry is process-global, and two
         # users sharing a session id (e.g. both using "chat-1") must not
         # block each other.
-        lock = await self._registry.acquire(f"{self._user_id}::{session_id}")
+        lock = await self._registry.acquire(session_key(self._user_id, session_id))
         try:
             # Run-level trace root: the loop's agent_run span and the rubric
             # grader both nest under it (no-op when Langfuse is disabled).
@@ -423,7 +428,7 @@ class RunService:
         except SessionBusyError:
             raise
         finally:
-            await self._registry.release(f"{self._user_id}::{session_id}")
+            await self._registry.release(session_key(self._user_id, session_id))
 
     async def execute_stream(
         self,
@@ -438,14 +443,14 @@ class RunService:
         # Lock key is user-scoped: the registry is process-global, and two
         # users sharing a session id (e.g. both using "chat-1") must not
         # block each other.
-        lock = await self._registry.acquire(f"{self._user_id}::{session_id}")
+        lock = await self._registry.acquire(session_key(self._user_id, session_id))
         try:
             # Run-level trace root covering the whole stream (agent + grader).
             with LangfuseTracer.trace_run(self._user_id, session_id):
                 async for event in self._run_stream(session_id, prompt, model, provider_keys, lock, rubric, mode):
                     yield event
         finally:
-            await self._registry.release(f"{self._user_id}::{session_id}")
+            await self._registry.release(session_key(self._user_id, session_id))
 
     async def _run(
         self,

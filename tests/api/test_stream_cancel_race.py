@@ -17,6 +17,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from src.http.models import MessageRequest
 from src.http.routers import conversation as cr
@@ -106,14 +107,15 @@ class TestApproveSlotSafety:
 
     @pytest.mark.asyncio
     async def test_approve_busy_request_leaves_live_registration_intact(self, monkeypatch):
-        """Approve path has the same mutate-before-probe pattern — same guard."""
+        """Approve during an active run → 409 (audit E26 hazard 3), and the
+        live registration stays intact (audit B12 guard)."""
         skey, event_a = _seed_live_stream(monkeypatch, user_id="u5")
         self._seed_pending(monkeypatch, user_id="u5")
 
-        resp = await cr.approve_tool(ApproveRequest(user_id="u5", call_id="c1"))
-        out = await _collect(resp)
+        with pytest.raises(HTTPException) as ei:
+            await cr.approve_tool(ApproveRequest(user_id="u5", call_id="c1"))
+        assert ei.value.status_code == 409
 
-        assert '"session_busy"' in out
         assert cr._active_streams[skey] is event_a
         assert cr._cancel_flags[skey] is False
 

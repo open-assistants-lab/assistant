@@ -50,14 +50,18 @@ from src.sdk.runner import (
     _messages_from_conversation,
     get_sdk_loop,
 )
-from src.sdk.session_worker import SessionBusyError, SessionWorkerRegistry
+from src.sdk.session_worker import (
+    SessionBusyError,
+    get_session_registry,
+    session_key,
+)
 from src.storage.messages import get_message_store
 
 logger = get_logger()
 
 router = APIRouter(tags=["websocket"])
 
-_session_registry = SessionWorkerRegistry()
+_session_registry = get_session_registry()
 
 
 def _persist_ws_conversation_message(

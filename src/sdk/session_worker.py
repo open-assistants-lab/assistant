@@ -8,6 +8,33 @@ from __future__ import annotations
 import asyncio
 
 
+def session_key(user_id: str, session_id: str | None) -> str:
+    """Canonical registry key shared by ALL callers (audit E26 hazard #2).
+
+    RunService and both routers previously formatted divergent keys
+    ("user::session" vs "user:session-or-default"), so registry.stop() from a
+    router silently missed the RunService-registered lock. Use this builder
+    for every acquire/release/holds/stop call.
+    """
+    return f"{user_id}::{session_id or 'default'}"
+
+
+_registry: SessionWorkerRegistry | None = None
+
+
+def get_session_registry() -> SessionWorkerRegistry:
+    """Process-global registry (audit E26).
+
+    A module-level singleton so REST/SSE and WS serialize the same session
+    on the same lock. The class stays public for tests that want isolated
+    instances.
+    """
+    global _registry
+    if _registry is None:
+        _registry = SessionWorkerRegistry()
+    return _registry
+
+
 class SessionLock:
     """Exclusive session lock with cancellation support."""
 

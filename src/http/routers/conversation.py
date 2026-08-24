@@ -39,13 +39,17 @@ from src.sdk.runner import (
     reset_sdk_loop,
     run_sdk_agent_stream,
 )
-from src.sdk.session_worker import SessionBusyError, SessionWorkerRegistry
+from src.sdk.session_worker import (
+    SessionBusyError,
+    get_session_registry,
+    session_key,
+)
 from src.storage.messages import get_message_store
 
 _pending_interrupts: dict[str, dict[str, Any]] = {}
 _cancel_flags: dict[str, bool] = {}
 _active_streams: dict[str, asyncio.Event] = {}
-_session_registry = SessionWorkerRegistry()
+_session_registry = get_session_registry()
 
 router = APIRouter(tags=["conversation"])
 logger = get_logger()
@@ -353,6 +357,9 @@ async def delete_session(user_id: str = "default_user", session_id: str = "") ->
     """Delete all messages in a specific chat session."""
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id required")
+    # Audit E26: never delete out from under an active run.
+    if _session_registry.holds(session_key(user_id, session_id)):
+        raise HTTPException(status_code=409, detail="Session has an active run; cancel it before deleting")
     conversation = get_message_store(user_id)
     conversation.delete_session(session_id)
     reset_sdk_loop(user_id, session_id=session_id)
@@ -1090,10 +1097,15 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
     # Audit B12: same probe-before-mutate contract as /message/stream — the
     # approve path had the identical clobber pattern (mutate dicts, fail busy,
     # pop A's slot in its own finally).
-    if _session_registry.holds(f"{req.user_id}::{session_id}"):
-        async def busy_stream() -> AsyncGenerator[str, None]:
-            yield sse("error", {"code": "session_busy", "message": "Session already has an active run"})
-        return StreamingResponse(busy_stream(), media_type="text/event-stream")
+    # Audit E26 hazard 3: a race where a new run started must surface as a
+    # machine-actionable 409, not a 500 or an ambiguous SSE-in-200.
+    rkey = session_key(req.user_id, session_id)
+    if _session_registry.holds(rkey):
+        raise HTTPException(status_code=409, detail="Session has an active run; retry approval when idle")
+    try:
+        await _session_registry.acquire(rkey)  # held until generate() finally
+    except SessionBusyError:
+        raise HTTPException(status_code=409, detail="Session has an active run; retry approval when idle")
 
     cancel_event = asyncio.Event()
     _cancel_flags[skey] = False
@@ -1282,6 +1294,9 @@ async def approve_tool(req: ApproveRequest, _: None = Depends(require_auth)) -> 
             logger.error("approve_stream_error", {"error": str(e)}, user_id=req.user_id, channel="http")
             yield sse("error", {"content": str(e)})
         finally:
+            # Audit E26: hold the session lock for the whole resumed run;
+            # release it when the resumed stream terminates.
+            await _session_registry.release(rkey)
             # Identity-checked pop (audit B12): never evict a concurrent owner.
             if _active_streams.get(skey) is cancel_event:
                 _cancel_flags.pop(skey, None)
@@ -1316,6 +1331,9 @@ async def cancel_message(req: CancelRequest, _: None = Depends(require_auth)) ->
     event = _active_streams.get(skey)
     if event:
         event.set()
+    # E26: signal the registry lock too — NON-STREAMING runs only observe
+    # cancellation via the registry's SessionLock.
+    await _session_registry.stop(session_key(req.user_id, session_id))
     reset_sdk_loop(req.user_id, session_id=session_id)
     return {"status": "cancelled"}
 
