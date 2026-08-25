@@ -20,6 +20,13 @@ climbs toward enterprise readiness (§5).
 | **B. Owned product** | SMB owners via our own AI-agency product (extract brand → design system → deliverables) | Low-ticket self-serve subscriptions |
 | **C. Platform partners** | Vertical AI startups building "AI-driven X" businesses | Platform fee + usage margin |
 
+**Motion sequencing:** Tier 1 (partners) is the strategic priority, but its
+commercial enablers (metering, multi-tenancy) land in Phases 2–3. Commercial
+sequencing: **Motion A (direct firms) and B (SMB product) first; Motion C
+opens when metering ships** — if a partner knocks early, onboard on the
+existing runtime with a pilot agreement and defer platform-fee billing until
+Phase 2 metering exists.
+
 ## 2. Persona tiers
 
 ### Tier 1 — Platform partners (highest leverage)
@@ -125,7 +132,7 @@ loop creation. All underlying machinery exists; this is composition only
 | Persona wiring | Profile body → `_get_system_prompt()` user-prompt slot |
 | Limits | `max_llm_calls` / `cost_limit_usd` / `timeout_seconds` → `RunConfig` (fields already exist) |
 | Skills | Catalog injection unchanged; `profile.skills` validated against registry |
-| Lifecycle | Re-validate + `reset_sdk_loop(user_id)` on profile change |
+| Lifecycle | Re-validate + `reset_sdk_loop(user_id)` on profile change; must also detach active WS streams (session registry, E26) so a mid-session profile swap never leaves a stale loop serving an approved turn |
 
 **Precedence rules (the one real design decision):**
 1. Capabilities/scopes always win over `profile.tools` — governance outranks
@@ -237,8 +244,8 @@ in single-container mode.
   `create_agent(profile)` entry point
 - **Rungs:** Identity (seam), Governance
 - **Gate:** external partner authenticates (shared-secret), streams a response,
-  pulls an audit export; a partner's checked-in PROFILE.md instantiates their
-  agent.
+  pulls an audit export (from the new event-capture layer, A3); a partner's
+  checked-in PROFILE.md instantiates their agent.
 
 > **REVIEW:** Two concerns, both resolved. (1) TS SDK publish no longer
 > freezes the wire contract — it ships as `0.1.0-preview` (non-frozen),
@@ -246,7 +253,8 @@ in single-container mode.
 > easy; enforcement is not — `user_id` arrives as query/body across **19
 > routers** (verified), and "never trust past the resolver boundary" implies
 > a sweep of every router, which is the real Phase-0 cost and must be
-> reflected in the estimate.
+> reflected in the estimate. Gate wording aligned with the re-scoped A3
+> deliverable (data model + capture, then export).
 
 ### Phase 1 — Vertical value & the kit factory (weeks 3–9)
 - Knowledge-ingestion pipeline with source adapters (§4): P0 adapters first
