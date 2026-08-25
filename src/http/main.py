@@ -20,6 +20,7 @@ from src.http.routers import (
     health_router,
     improvements_router,
     memories_router,
+    profile_router,
     scheduler_router,
     skills_router,
     subagents_router,
@@ -238,6 +239,7 @@ app.include_router(ws_router)
 app.include_router(settings_router)
 app.include_router(webhooks_router)
 app.include_router(improvements_router)
+app.include_router(profile_router)
 
 # ConnectKit OAuth + catalog routers (safe if connectkit not installed)
 try:

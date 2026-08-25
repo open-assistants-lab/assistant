@@ -4,6 +4,7 @@ from src.http.routers.email import router as email_router
 from src.http.routers.health import router as health_router
 from src.http.routers.improvements import router as improvements_router
 from src.http.routers.memories import router as memories_router
+from src.http.routers.profile import router as profile_router
 from src.http.routers.scheduler import router as scheduler_router
 from src.http.routers.settings import router as settings_router
 from src.http.routers.skills import router as skills_router
@@ -22,6 +23,7 @@ __all__ = [
     "conversation_router",
     "email_router",
     "memories_router",
+    "profile_router",
     "todos_router",
     "workspace_router",
     "workspaces_router",
