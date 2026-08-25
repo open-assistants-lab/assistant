@@ -152,6 +152,15 @@ class DataPaths:
     def user_settings_path(self) -> Path:
         return self.user_dir / "settings.json"
 
+    @property
+    def main_agent_profile_path(self) -> Path:
+        """User-level PROFILE.md bootstrapping the MAIN agent loop (roadmap K1).
+
+        User-global (cross-workspace), mirroring the subagent convention of
+        PROFILE.md per agent dir — but one per user, at the user root.
+        """
+        return self.user_dir / "PROFILE.md"
+
     def user_grader_prompt_path(self) -> Path:
         return self.user_dir / "grader_prompt.md"
 

@@ -39,6 +39,7 @@ from src.sdk.messages import Message, StreamChunk
 from src.sdk.middleware_summarization import SummarizationMiddleware
 from src.sdk.native_tools import get_native_tools
 from src.sdk.providers.factory import get_cached_model_provider
+from src.sdk import profile_loader as _profile_loader
 from src.sdk.tools import ToolDefinition
 from src.sdk.user_prompt import load_user_prompt
 from src.storage.paths import DataPaths
@@ -415,6 +416,38 @@ async def create_sdk_loop(
     t0 = time.monotonic()
     settings = get_settings()
 
+    # Roadmap P0-T7 (K1): a user-level PROFILE.md bootstraps the main loop.
+    # Precedence: request-scoped `model` arg wins; then profile.model; then
+    # settings default. No PROFILE.md => behavior identical to pre-K1.
+    main_profile = None
+    try:
+        main_profile = _profile_loader.load_main_agent_profile(user_id)
+        if main_profile is not None:
+            spec = _profile_loader.build_loop_from_profile(
+                user_id,
+                main_profile,
+                provider_keys=provider_keys,
+                requested_model=model,
+            )
+            if model is None:
+                model = spec.model
+            if not model:
+                model = None
+            persona = spec.persona
+            run_config_kwargs = dict(spec.run_config_kwargs)
+            profile_timeout = spec.timeout_seconds
+            logger.info(
+                "sdk_runner.profile_bootstrap",
+                {"model": spec.model, "persona": bool(spec.persona)},
+                user_id=user_id,
+            )
+        else:
+            persona = None
+            run_config_kwargs = {}
+            profile_timeout = None
+    except _profile_loader.ProfileError as exc:
+        raise RuntimeError(f"PROFILE.md bootstrap failed: {exc}") from exc
+
     provider = await asyncio.to_thread(
         get_cached_model_provider, model, provider_keys=provider_keys, user_id=user_id
     )
@@ -618,11 +651,14 @@ async def create_sdk_loop(
 
     t4 = time.monotonic()
 
+    from src.sdk.loop import RunConfig as _RunConfig
+
     loop = AgentLoop(
         provider=provider,
         tools=core_tool_defs,
         system_prompt=_get_system_prompt(user_id),
         middlewares=middlewares,
+        run_config=_RunConfig(**run_config_kwargs) if run_config_kwargs else None,
         user_id=user_id,
         workspace_id=runtime_workspace_id,
         model_id=model_id,
@@ -641,6 +677,14 @@ async def create_sdk_loop(
     loop._flow_session_id = runtime_session_id  # type: ignore[attr-defined]
     loop._flow_model = model_id  # type: ignore[attr-defined]
     loop._flow_attempt = 1  # type: ignore[attr-defined]
+
+    if persona:
+        loop.system_prompt = _profile_loader.apply_persona(
+            loop.system_prompt or "", persona
+        )
+
+    if profile_timeout is not None:
+        loop.profile_timeout_seconds = profile_timeout
 
     loop._tool_index = idx
     total_in_index = idx.count()

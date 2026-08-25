@@ -66,6 +66,15 @@ SMB owners (Motion B); privacy-conscious individuals / self-hosters
 | D1 | Owner dashboard (hours saved, throughput, cost/seat) | Phase 2 |
 | K1 | Main-agent-from-profile bootstrap: a user-level PROFILE.md
 (AgentProfile) instantiates the *main* loop, not just subagents | **Build — Phase 0** (see §4.5) |
+| R-SB1 | **SandboxBackend seam** (dsh-inspired): one interface; *all*
+process-spawning tools (shell, code_execute, CLI adapters, future terminal)
+route through it; backends = soft / hard / microVM; per-agent selection | Seam + soft — **Phase 2**; hard — **Phase 3** |
+| R-SL1 | **Event-sourced session log**: append-only; *model-visible ⟺ logged*
+invariant; model history derived from log; no checkpoints (round-time
+preserved); fork/resume/replay derive from the stream | Schema + capture — **Phase 1**; fork/resume — **Phase 3** |
+| R-PL1 | **Selective pluggability**: strategic seams at package boundaries
+(sandbox, session log, providers, tools, skills, persistence); agent loop
+stays concrete | Seams formalized at SDK extraction — **Phase 2/3** |
 
 ## 4. Knowledge ingestion (Phase 1 core)
 
@@ -196,18 +205,25 @@ default) → trusted network (shared-secret, today's `API_KEY` model) →
 untrusted network (per-user key→identity mapping, commercial tier). The
 mechanism ships in all cases; deployment config decides.
 
-### 6.3 Sandbox strategy (make-vs-buy)
+### 6.3 Sandbox strategy (make-vs-buy + seam)
 
 Never build the sandbox itself — build the integration layer. A sandbox is
 security-critical commodity; our value is the `code_execute` *wrapper*
 (agent-facing tool, workspace path policy, env scrub, limits, file-lifecycle
 wiring into files_read/versions), which is also our OSS artifact.
 
-| Sandbox | What it is | Threat model | When |
+**Adopt dsh's sandbox seam (R-SB1):** define a `SandboxBackend` interface
+(Service Definition / Provider / Consumer split) and route **every
+process-spawning tool** through it — `shell_execute`, `code_execute`, CLI
+adapters, future terminal — so no tool can forget to sandbox. Backends are
+implementations behind the seam, swappable per deployment and per agent
+(`isolate` realm concept):
+
+| Backend | What it is | Threat model | When |
 |---|---|---|---|
 | **Soft** (subprocess + cwd/env/timeout caps) | Guardrails, not isolation | Trusted user, untrusted code | Phase 2 |
 | **Hard** (bubblewrap / runc / nsjail per task) | OS-level isolation per execution | Untrusted tenants in single container | Phase 3 |
-| **MicroVM** (Firecracker / Kata) | Separate kernel per task — strongest practical isolation | Untrusted at scale; snapshot/resume for agent sessions | Commercial tier |
+| **MicroVM** (Firecracker / Kata / remote E2B) | Separate kernel per task — strongest practical isolation | Untrusted at scale; snapshot/resume for agent sessions | Commercial tier |
 
 Decision matrix — when container-per-user is required:
 
@@ -225,6 +241,45 @@ the enterprise isolation product tier, not the default. Scaling rule: shard
 by user (consistent hashing), never replicas of the same user (single-writer
 stores + in-memory caches). Loop-cache eviction (LRU, idle-only) bounds memory
 in single-container mode.
+
+### 6.4 Event-sourced session log (R-SL1)
+
+Adopt dsh's session-log pattern **without checkpoints** — the loop stays
+stateless-ish and model history is *derived* from an append-only event log,
+so round time is preserved (append-only writes, no per-step state
+serialization). This extends the existing message store rather than replacing
+it.
+
+- **Invariant:** *model-visible ⟺ logged* — everything that reaches a model
+  request (system-prompt assembly, injections, steering, reasoning, tool
+  calls/results) must be reconstructable from the log; enforced by a runtime
+  assert in dev/tests
+- **Derivation:** `deriveMessages()` projects model history from the log
+  (replaces/augments current history reconstruction)
+- **Derived features:** fork, resume, replay, telemetry, persistence all
+  derive from the same stream (Phase 3+)
+- **Shared capture layer:** the session log is the natural home of the A3
+  audit + telemetry capture (one event stream, two sinks) — design together
+  with §8a decision 1
+
+### 6.5 Selective pluggability (R-PL1)
+
+Adopt the *philosophy* selectively, not the full plugin-everything refactor.
+Strategic seams at package boundaries; the agent loop stays concrete.
+
+| Seam | Status | Formalize at |
+|---|---|---|
+| LLM provider | ✅ exists | SDK extraction |
+| Tool registry | ✅ exists | SDK extraction |
+| Skills | ✅ exists | SDK extraction |
+| MCP bridge | ✅ exists | SDK extraction |
+| Sandbox backend | 🔴 new (R-SB1) | Phase 2 |
+| Session log | 🔴 new (R-SL1) | Phase 1 |
+| Session persistence | 🟡 partial | SDK extraction |
+
+Decision: interfaces defined now (cheap), implementations later; full
+plugin-everything deferred until a partner demands it or a Python-native
+composability framework (e.g. Ouroboros) matures.
 
 ## 7. Phased roadmap
 
@@ -274,10 +329,17 @@ in single-container mode.
 - Usage metering per user/tenant → queryable usage/billing API
 - Owner dashboard: drafts produced, hours saved, cost per seat
 - Draft-delivery UX (email-draft pattern first)
-- **`code_execute` soft sandbox**: guarded subprocess — cwd = user workspace,
-  scrubbed env, timeout/output/memory caps, write-path validation. Unlocks
+- **`code_execute` via SandboxBackend seam (R-SB1)**: define the
+  `SandboxBackend` interface; ship `SoftSandboxBackend` (cwd = user workspace,
+  scrubbed env, timeout/output/memory caps, write-path validation). Unlocks
   file-producing scripts (charts, PDFs, reports) for **trusted users in
-  single-container mode**
+  single-container mode**; `shell_execute` + CLI adapters routed through the
+  seam for uniform coverage
+- **Session-log schema + capture begins (R-SL1)**: `SessionEvent` schema,
+  append-only log extending the message store; log system-prompt assembly,
+  injections, steering, reasoning, tool calls/results; `deriveMessages()`
+  projection; *model-visible ⟺ logged* invariant in dev/tests. Doubles as the
+  A3 audit + telemetry capture layer
 - Pricing live: seats (firms) / subscriptions (SMB) / platform fee (partners)
 - **Production per-user key→identity auth** (hosted tier opens): key table,
   server-side key→user mapping, body `user_id` validated against caller's key
@@ -295,9 +357,12 @@ in single-container mode.
 - Org-level tenancy schema (org → sub-tenant → user)
 - RBAC (owner/staff/admin views)
 - SSO via OIDC
-- **Hard sandbox (bubblewrap/runc)** for `code_execute` — untrusted tenants in
-  single container; **container-per-user offered as the enterprise tier** for
-  untrusted tenants
+- **Hard sandbox as SandboxBackend backend (R-SB1)**: `BwrapSandboxBackend`
+  (bubblewrap) / `RuncSandboxBackend` (container per task) — untrusted tenants
+  in single container; **container-per-user offered as the enterprise tier**;
+  per-agent sandbox selection (`isolate` realm)
+- **Fork / resume / replay from the session log (R-SL1)**: product features
+  derived from the event stream
 - Partner program formalized: Vertical Starter Kit repo, kit versioning &
   distribution (seed-hash refresh pattern generalized)
 - **SDK extraction completes**: PyPI `assistant` core + `assistant[server]`
@@ -354,6 +419,10 @@ Verdict: **strategy approved; sequencing revised before execution.**
 - Verified against the codebase during review: §4.5 composition claims and
   estimate, single-writer/shard-by-user consistency, trust-tier table matches
   AGENTS.md deployment reality.
+- **Incorporated (dsh/Cordis design intelligence, 2026-08-24):** SandboxBackend
+  seam (§6.3), event-sourced session log without checkpoints (§6.4), selective
+  pluggability (§6.5) — requirements R-SB1/R-SL1/R-PL1; actionable items in
+  `docs/superpowers/plans/2026-08-24-dsh-learnings-todos.md`.
 
 Inline `> **REVIEW:**` annotations are placed at the relevant sections above.
 

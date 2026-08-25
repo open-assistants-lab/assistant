@@ -94,3 +94,20 @@ class SessionWorkerRegistry:
     @property
     def active_sessions(self) -> frozenset[str]:
         return frozenset(self._locks)
+
+    async def stop_user_sessions(self, user_id: str) -> list[str]:
+        """Cancel every active run belonging to user_id (E26 detach).
+
+        Used by profile-change lifecycle (roadmap P0-T7): a mid-session profile
+        swap must never leave a stale loop serving an approved turn.
+        Returns the canonical keys that were cancelled.
+        """
+        prefix = f"{user_id}::"
+        async with self._mutex:
+            keys = [k for k in self._locks if k.startswith(prefix)]
+            locks = [(k, self._locks[k]) for k in keys]
+        cancelled = []
+        for k, lock in locks:
+            lock.request_cancel()
+            cancelled.append(k)
+        return cancelled
