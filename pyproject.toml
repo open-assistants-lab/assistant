@@ -30,7 +30,7 @@ dependencies = [
     "sqlalchemy>=2.0.0",
     "coremem>=0.13.1",
     "agentprofile",
-    "hybriddb>=0.5.6",
+    "hybriddb>=0.5.8",
     "connectkit==0.1.4",
     "mistune>=3.2.1",
     "langfuse>=4.0",
