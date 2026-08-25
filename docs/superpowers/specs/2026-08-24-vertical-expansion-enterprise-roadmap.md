@@ -1,6 +1,7 @@
 # Assistant Platform — Vertical Expansion & Enterprise Roadmap
 
-**Status:** Reviewed — strategy approved; Phases 0/2 need re-cutting; two decisions required before Phase 0 exit (see §8a Review Notes)
+**Status:** Reviewed — strategy approved; Phases 0/2 re-cut; one decision due at
+Phase 0 exit (audit data model), two more before Phase 1/2 (see §8a Review Notes)
 **Date:** 2026-08-24
 **Scope:** Product strategy consolidating persona tiers, go-to-market motions,
 requirements matrix, knowledge-ingestion architecture, market evidence, and the
@@ -71,7 +72,7 @@ process-spawning tools (shell, code_execute, CLI adapters, future terminal)
 route through it; backends = soft / hard / microVM; per-agent selection | Seam + soft — **Phase 2**; hard — **Phase 3** |
 | R-SL1 | **Event-sourced session log**: append-only; *model-visible ⟺ logged*
 invariant; model history derived from log; no checkpoints (round-time
-preserved); fork/resume/replay derive from the stream | Schema + capture — **Phase 1**; fork/resume — **Phase 3** |
+preserved); fork/resume/replay derive from the stream | Schema — **Phase 0** (P0-T9); capture/derivation — **Phase 1** (P1-T10..T12); fork/resume — **Phase 3** |
 | R-PL1 | **Selective pluggability**: strategic seams at package boundaries
 (sandbox, session log, providers, tools, skills, persistence); agent loop
 stays concrete | Seams formalized at SDK extraction — **Phase 2/3** |
@@ -274,7 +275,7 @@ Strategic seams at package boundaries; the agent loop stays concrete.
 | Skills | ✅ exists | SDK extraction |
 | MCP bridge | ✅ exists | SDK extraction |
 | Sandbox backend | 🔴 new (R-SB1) | Phase 2 |
-| Session log | 🔴 new (R-SL1) | Phase 1 |
+| Session log | 🔴 new (R-SL1) | Phase 0/1 (schema P0-T9; derivation P1-T10..T12) |
 | Session persistence | 🟡 partial | SDK extraction |
 
 Decision: interfaces defined now (cheap), implementations later; full
@@ -297,6 +298,9 @@ composability framework (e.g. Ouroboros) matures.
   composition layer — a user-level PROFILE.md instantiates the *main* loop.
   Foundational runtime for kits, Motion-C partners, and the pip package's
   `create_agent(profile)` entry point
+- **Session-event schema (R-SL1 foundation, P0-T9)**: `SessionEvent` schema as
+  the CaptureBus substrate — audit (A3), metering (P2), and model-context
+  derivation (P1) all read one stream; no checkpoints
 - **Rungs:** Identity (seam), Governance
 - **Gate:** external partner authenticates (shared-secret), streams a response,
   pulls an audit export (from the new event-capture layer, A3); a partner's
@@ -335,11 +339,6 @@ composability framework (e.g. Ouroboros) matures.
   file-producing scripts (charts, PDFs, reports) for **trusted users in
   single-container mode**; `shell_execute` + CLI adapters routed through the
   seam for uniform coverage
-- **Session-log schema + capture begins (R-SL1)**: `SessionEvent` schema,
-  append-only log extending the message store; log system-prompt assembly,
-  injections, steering, reasoning, tool calls/results; `deriveMessages()`
-  projection; *model-visible ⟺ logged* invariant in dev/tests. Doubles as the
-  A3 audit + telemetry capture layer
 - Pricing live: seats (firms) / subscriptions (SMB) / platform fee (partners)
 - **Production per-user key→identity auth** (hosted tier opens): key table,
   server-side key→user mapping, body `user_id` validated against caller's key
