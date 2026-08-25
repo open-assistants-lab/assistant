@@ -1,6 +1,6 @@
 """Auth exemption tests for webhook + OAuth routes (audit E24-auth).
 
-With EA_API_KEY set, external webhook callers have no Bearer token and
+With API_KEY set, external webhook callers have no Bearer token and
 browser OAuth redirects can't carry one — both previously 401'd, killing
 the features in exactly the WAN deployments they exist for.
 
@@ -25,12 +25,12 @@ def api_key_mode(client, monkeypatch):
     """Configure the app as a Solo-WAN deployment: API key set, bypass off."""
     from src.config import reload_settings
 
-    monkeypatch.setenv("EA_API_KEY", "secret")
-    monkeypatch.setenv("EA_SOLO_BYPASS", "false")
+    monkeypatch.setenv("API_KEY", "secret")
+    monkeypatch.setenv("SOLO_BYPASS", "false")
     reload_settings()
     yield "secret"
-    monkeypatch.delenv("EA_API_KEY", raising=False)
-    monkeypatch.delenv("EA_SOLO_BYPASS", raising=False)
+    monkeypatch.delenv("API_KEY", raising=False)
+    monkeypatch.delenv("SOLO_BYPASS", raising=False)
     reload_settings()
 
 
@@ -118,7 +118,7 @@ def test_secret_registration_requires_bearer(client, monkeypatch, api_key_mode):
 
 
 def test_local_mode_allows_unregistered_webhook(client, fake_agent_run):
-    """No EA_API_KEY → localhost behaviour unchanged (no secret needed)."""
+    """No API_KEY → localhost behaviour unchanged (no secret needed)."""
     r = client.post(
         "/webhooks/wh_local",
         json={"user_id": "hook_user", "message": "ping"},

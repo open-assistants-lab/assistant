@@ -15,12 +15,12 @@ import shutil
 import warnings
 from pathlib import Path
 
-EA_ROOT = Path.home() / "Assistant"
+DATA_ROOT = Path.home() / "Assistant"
 DATA_PATH = Path("data")
 MIGRATED_MARKER = Path.home() / ".ea_migrated"
 
 FILE_MAP = [
-    # (source relative to data/users/{user_id}/, destination relative to EA_ROOT)
+    # (source relative to data/users/{user_id}/, destination relative to DATA_ROOT)
     ("config/prompt.txt", "AGENTS.md"),
     ("skills", "Skills"),
     ("subagents", "Subagents"),
@@ -38,7 +38,7 @@ FILE_MAP = [
 ]
 
 RESEARCH_SOURCE = DATA_PATH / "private" / "research"
-RESEARCH_DEST = EA_ROOT / "Research" / "default_user" / "personal"
+RESEARCH_DEST = DATA_ROOT / "Research" / "default_user" / "personal"
 
 WS_SUBDIR_MAP = [
     ("skills", "Skills"),
@@ -70,7 +70,7 @@ def migrate_user(user_id, is_dry_run):
         src = user_dir / rel_src
         if not src.exists():
             continue
-        dst = EA_ROOT / rel_dst
+        dst = DATA_ROOT / rel_dst
         if not dst.exists():
             do_move(src, dst, is_dry_run)
             continue
@@ -122,7 +122,7 @@ def migrate_research(is_dry_run):
 
 
 def migrate_workspace_subdirs(is_dry_run):
-    ws_base = EA_ROOT / "Workspaces"
+    ws_base = DATA_ROOT / "Workspaces"
     if not ws_base.exists():
         return
     for ws_dir in ws_base.iterdir():
@@ -141,7 +141,7 @@ def migrate_workspace_subdirs(is_dry_run):
             tmp = ws_dir / f"{old_name}.ea-migrate-tmp"
             shutil.move(str(old_path), str(tmp))
             shutil.move(str(tmp), str(new_path))
-            print(f"  ✓ {old_path.relative_to(EA_ROOT)} → {new_path.relative_to(EA_ROOT)}")
+            print(f"  ✓ {old_path.relative_to(DATA_ROOT)} → {new_path.relative_to(DATA_ROOT)}")
 
 
 def main():

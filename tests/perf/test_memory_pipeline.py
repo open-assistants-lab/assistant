@@ -211,7 +211,7 @@ def run_component_benchmarks(num_runs: int) -> dict:
 
 
 async def run_ws_benchmark(num_runs: int) -> dict:
-    ws_url = os.environ.get("EA_WS_URL", "ws://localhost:8080/ws/conversation")
+    ws_url = os.environ.get("WS_URL", "ws://localhost:8080/ws/conversation")
     results: dict[str, Any] = {}
 
     async def send_and_wait(ws: Any, message: str) -> float:

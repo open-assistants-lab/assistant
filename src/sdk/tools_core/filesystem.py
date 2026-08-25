@@ -43,16 +43,16 @@ def _resolve_path(path: str | None, user_id: str, workspace_id: str = "personal"
     if get_settings().filesystem.workspace_root:
         if path.startswith("/"):
             resolved = Path(path).resolve()
-            ea_root = paths.root.resolve()
-            if resolved.is_relative_to(ea_root) or str(resolved) == str(ea_root):
+            data_root = paths.root.resolve()
+            if resolved.is_relative_to(data_root) or str(resolved) == str(data_root):
                 return resolved
             raise ValueError(f"Absolute path outside EA root: {path}")
         return (root_path / path).resolve()
 
     if path.startswith("/"):
         resolved = Path(path).resolve()
-        ea_root = paths.root.resolve()
-        if resolved.is_relative_to(ea_root) or str(resolved) == str(ea_root):
+        data_root = paths.root.resolve()
+        if resolved.is_relative_to(data_root) or str(resolved) == str(data_root):
             return resolved
         raise ValueError(f"Absolute path outside EA root: {path}")
 

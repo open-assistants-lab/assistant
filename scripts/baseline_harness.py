@@ -83,7 +83,7 @@ def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="harness_baseline_"))
     env = {
         **os.environ,
-        "DEPLOYMENT_EA_ROOT": str(tmp / "ea_root"),
+        "DEPLOYMENT_DATA_ROOT": str(tmp / "data_root"),
         "DEPLOYMENT_DATA_PATH": str(tmp / "data"),
     }
     # NB: config.yaml init-kwargs beat env vars in pydantic-settings, so the

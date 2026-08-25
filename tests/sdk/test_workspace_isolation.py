@@ -90,7 +90,7 @@ def test_memory_stores_are_per_user(tmp_path, monkeypatch):
     from src.storage.paths import DataPaths
 
     messages_storage._stores.clear()
-    paths = DataPaths(ea_root=str(tmp_path), user_id="test_user")
+    paths = DataPaths(data_root=str(tmp_path), user_id="test_user")
     monkeypatch.setattr(messages_storage, "get_paths", lambda user_id, workspace_id=None: paths)
 
     store_a = get_message_store("test_user", workspace_id="ws-a")
@@ -129,8 +129,8 @@ async def test_subagents_are_user_level_across_workspaces():
     from src.storage.paths import DataPaths
 
     with tempfile.TemporaryDirectory() as d:
-        mock_a = DataPaths(ea_root=d, user_id="test_user", workspace_id="ws-a")
-        mock_b = DataPaths(ea_root=d, user_id="test_user", workspace_id="ws-b")
+        mock_a = DataPaths(data_root=d, user_id="test_user", workspace_id="ws-a")
+        mock_b = DataPaths(data_root=d, user_id="test_user", workspace_id="ws-b")
 
         mock_a.subagents_dir = mock_a.workspace_subagents_dir
         mock_b.subagents_dir = mock_b.workspace_subagents_dir
@@ -140,7 +140,7 @@ async def test_subagents_are_user_level_across_workspaces():
                 return mock_a
             if workspace_id == "ws-b":
                 return mock_b
-            return DataPaths(ea_root=d, user_id=user_id, workspace_id=workspace_id)
+            return DataPaths(data_root=d, user_id=user_id, workspace_id=workspace_id)
 
         with patch("src.storage.paths.get_paths", side_effect=_make_path):
             coord_a = SubagentCoordinator("test_user", workspace_id="ws-a")
@@ -172,8 +172,8 @@ async def test_same_name_subagent_across_workspaces_updates_user_level_definitio
     from src.storage.paths import DataPaths
 
     with tempfile.TemporaryDirectory() as d:
-        mock_a = DataPaths(ea_root=d, user_id="test_user", workspace_id="ws-a")
-        mock_b = DataPaths(ea_root=d, user_id="test_user", workspace_id="ws-b")
+        mock_a = DataPaths(data_root=d, user_id="test_user", workspace_id="ws-a")
+        mock_b = DataPaths(data_root=d, user_id="test_user", workspace_id="ws-b")
 
         mock_a.subagents_dir = mock_a.workspace_subagents_dir
         mock_b.subagents_dir = mock_b.workspace_subagents_dir
@@ -183,7 +183,7 @@ async def test_same_name_subagent_across_workspaces_updates_user_level_definitio
                 return mock_a
             if workspace_id == "ws-b":
                 return mock_b
-            return DataPaths(ea_root=d, user_id=user_id, workspace_id=workspace_id)
+            return DataPaths(data_root=d, user_id=user_id, workspace_id=workspace_id)
 
         with patch("src.storage.paths.get_paths", side_effect=_make_path):
             coord_a = SubagentCoordinator("test_user", workspace_id="ws-a")
@@ -228,8 +228,8 @@ async def test_subagent_delete_through_one_workspace_removes_user_level_definiti
     from src.storage.paths import DataPaths
 
     with tempfile.TemporaryDirectory() as d:
-        mock_a = DataPaths(ea_root=d, user_id="test_user", workspace_id="ws-a")
-        mock_b = DataPaths(ea_root=d, user_id="test_user", workspace_id="ws-b")
+        mock_a = DataPaths(data_root=d, user_id="test_user", workspace_id="ws-a")
+        mock_b = DataPaths(data_root=d, user_id="test_user", workspace_id="ws-b")
 
         mock_a.subagents_dir = mock_a.workspace_subagents_dir
         mock_b.subagents_dir = mock_b.workspace_subagents_dir
@@ -239,7 +239,7 @@ async def test_subagent_delete_through_one_workspace_removes_user_level_definiti
                 return mock_a
             if workspace_id == "ws-b":
                 return mock_b
-            return DataPaths(ea_root=d, user_id=user_id, workspace_id=workspace_id)
+            return DataPaths(data_root=d, user_id=user_id, workspace_id=workspace_id)
 
         with patch("src.storage.paths.get_paths", side_effect=_make_path):
             coord_a = SubagentCoordinator("test_user", workspace_id="ws-a")

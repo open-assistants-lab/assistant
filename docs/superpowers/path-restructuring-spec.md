@@ -16,7 +16,7 @@ The conversation that shaped it:
 | Decision | Why |
 |---|---|
 | **Single root at `~/Assistant/`** | Consolidates all user data under one tree, one `.git` |
-| **Configurable via `ea_root`** | Multi-tenant containers can set a different root per tenant |
+| **Configurable via `data_root`** | Multi-tenant containers can set a different root per tenant |
 | **UUID workspaces** | Eliminates name collision between user and team workspaces; rename doesn't change directory path |
 | **Lowercase → uppercase subdirs** | Skills, Subagents, Files, Memory for consistency across scopes |
 | **Team volume at `{ea_team_root}/{id}/` or `~/EA/Teams/{id}/`** | Configurable for server-side, client-side fallback |
@@ -53,7 +53,7 @@ target architecture; Stage 1 builds the solo subset only.
 *What gets built now.* Everything a single-user desktop app needs.
 
 - Single root `~/Assistant/` with one `.git`
-- `DataPaths` with `root` property + `ea_root` config
+- `DataPaths` with `root` property + `data_root` config
 - User-scoped and workspace-scoped methods only (no team methods)
 - Workspace subdirs renamed lowercase → uppercase
 - Migration script: `data/users/{id}/` → `~/Assistant/`
@@ -272,7 +272,7 @@ class DataPaths:
         team_id=None,
         workspace_id=None,
         data_path=None,        # kept for backward compat (cache, logs)
-        ea_root=None,          # ~/Assistant/ by default
+        data_root=None,          # ~/Assistant/ by default
         ea_team_root=None,     # team volume root, None for solo
     ):
 ```
@@ -284,8 +284,8 @@ class DataPaths:
 def root(self) -> Path:
     """Primary user data root."""
     return Path(
-        self._ea_root
-        or settings.ea_root
+        self._data_root
+        or settings.data_root
         or Path.home() / "Assistant"
     )
 
@@ -487,7 +487,7 @@ remove.
 
 ### Stage 1 (Solo Mode)
 
-1. Add `ea_root` to settings (default: `~/Assistant/`)
+1. Add `data_root` to settings (default: `~/Assistant/`)
 2. Update `DataPaths` — add `root` property, new user-scoped methods, old-method deprecation wrappers
 3. Consolidate 3 hardcoded `Workspaces/` path references into `DataPaths.root / "Workspaces"`
 4. Write migration script with dry-run, manifest, resume marker guards

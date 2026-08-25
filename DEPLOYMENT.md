@@ -16,7 +16,7 @@ basics (data layout, backups, secrets, observability) that apply to all of them.
 - **Clients are thin viewers** — they pull history and stream events
   (REST/SSE/WebSocket). Multi-device sync is a property of having one server,
   not of any client-side sync engine.
-- **User data is isolated per user** under `ea_root` (default `~/Assistant/`),
+- **User data is isolated per user** under `data_root` (default `~/Assistant/`),
   e.g. `~/Assistant/Conversation/messages.db`, `~/Assistant/Files/`,
   `~/Assistant/Memory/`. Project data (cache, logs, jobs) lives under
   `data/`.
@@ -79,8 +79,8 @@ there is nothing to "sync".
 2. Generate an API key and start the server:
 
 ```bash
-export EA_API_KEY=$(openssl rand -hex 32)
-echo "Your API key: $EA_API_KEY"   # save this!
+export API_KEY=$(openssl rand -hex 32)
+echo "Your API key: $API_KEY"   # save this!
 uv run assistant http              # binds 0.0.0.0:8000 by default
 ```
 
@@ -88,7 +88,7 @@ uv run assistant http              # binds 0.0.0.0:8000 by default
    `http://<server-tailscale-ip>:8000`, enter the API key.
 
 **How it works:** Tailscale provides an encrypted mesh network between your
-devices. `EA_API_KEY` protects remote connections; `EA_SOLO_BYPASS=true`
+devices. `API_KEY` protects remote connections; `SOLO_BYPASS=true`
 (default) keeps `localhost` requests on the server itself unauthenticated.
 
 ### Steps B: Public VPS with Docker
@@ -96,7 +96,7 @@ devices. `EA_API_KEY` protects remote connections; `EA_SOLO_BYPASS=true`
 1. Deploy the container image on a small VPS (see Mode 3 for the compose
    file; use a single `app` service).
 2. Put Caddy (or your reverse proxy) in front for TLS.
-3. Point all devices at `https://your.domain` with the same `EA_API_KEY`.
+3. Point all devices at `https://your.domain` with the same `API_KEY`.
 
 ---
 
@@ -153,8 +153,8 @@ services:
     build: { context: .., dockerfile: docker/Dockerfile }
     command: ["uv", "run", "assistant", "http"]
     environment:
-      - EA_API_KEY=${ALICE_KEY}
-      - DEPLOYMENT_EA_ROOT=/app/data        # user data → volume
+      - API_KEY=${ALICE_KEY}
+      - DEPLOYMENT_DATA_ROOT=/app/data        # user data → volume
       - DEPLOYMENT_DATA_PATH=/app/data      # project data → volume
       - API_PORT=8000
     volumes:
@@ -164,8 +164,8 @@ services:
     build: { context: .., dockerfile: docker/Dockerfile }
     command: ["uv", "run", "assistant", "http"]
     environment:
-      - EA_API_KEY=${BOB_KEY}
-      - DEPLOYMENT_EA_ROOT=/app/data
+      - API_KEY=${BOB_KEY}
+      - DEPLOYMENT_DATA_ROOT=/app/data
       - DEPLOYMENT_DATA_PATH=/app/data
       - API_PORT=8000
     volumes:
@@ -176,7 +176,7 @@ volumes:
   bob_data:
 ```
 
-> **Important**: set `DEPLOYMENT_EA_ROOT` — without it user data lands in
+> **Important**: set `DEPLOYMENT_DATA_ROOT` — without it user data lands in
 > `/root/Assistant` *inside* the container and is lost on recreation.
 
 ### 5. Start and add users
@@ -194,18 +194,18 @@ one new service block + one Caddy entry + one volume.
 
 | What | Where | Back up |
 |---|---|---|
-| User data (conversation, files, memory, email, todos, contacts, skills, subagents) | `ea_root` (`~/Assistant/`, or `DEPLOYMENT_EA_ROOT`) | **Yes** |
+| User data (conversation, files, memory, email, todos, contacts, skills, subagents) | `data_root` (`~/Assistant/`, or `DEPLOYMENT_DATA_ROOT`) | **Yes** |
 | Project data (cache, logs, jobs.db, templates, traces) | `data/` (`DEPLOYMENT_DATA_PATH`) | Optional (regenerable) |
-| Per-user DBs | `ea_root/Conversation/messages.db`, `Memory/…`, `Email/emails.db`, `Contacts/contacts.db`, `Todos/todos.db`, `Subagents/work_queue.db` | **Yes** |
-| Vector index | `ea_root/Memory/` (ChromaDB dirs) | Yes — but see below |
-| File versions | `ea_root/.versions/`, `ea_root/Files/` | **Yes** |
+| Per-user DBs | `data_root/Conversation/messages.db`, `Memory/…`, `Email/emails.db`, `Contacts/contacts.db`, `Todos/todos.db`, `Subagents/work_queue.db` | **Yes** |
+| Vector index | `data_root/Memory/` (ChromaDB dirs) | Yes — but see below |
+| File versions | `data_root/.versions/`, `data_root/Files/` | **Yes** |
 
 The server is the single copy of truth — **backups are not optional**.
 
 ### SQLite databases (WAL-safe online backup)
 
 ```bash
-sqlite3 "$EA_ROOT/Conversation/messages.db" ".backup '$BACKUP_DIR/messages-$(date +%F).db'"
+sqlite3 "$DATA_ROOT/Conversation/messages.db" ".backup '$BACKUP_DIR/messages-$(date +%F).db'"
 ```
 
 Repeat for each `*.db` you want to protect. `.backup` is consistent even
@@ -217,15 +217,15 @@ Chroma's HNSW index files and the `Files/` tree are not transactionally safe
 to copy live. Either:
 
 - **Quick path**: stop the container (`docker compose stop app`), copy
-  `ea_root/`, start it again.
+  `data_root/`, start it again.
 - **Continuous**: stream the SQLite DBs with [Litestream](https://litestream.io)
   (WAL-to-S3) for near-real-time DB backups, plus periodic stopped-server
   snapshots of the index + files.
 
 ### Restore
 
-Replace the DB files / `ea_root` tree with the backup, then start the
-server. Keep the whole `ea_root` consistent — mixing DBs from different
+Replace the DB files / `data_root` tree with the backup, then start the
+server. Keep the whole `data_root` consistent — mixing DBs from different
 backup points produces a valid but inconsistent assistant.
 
 ---
@@ -237,8 +237,8 @@ image.
 
 | Env var | Purpose |
 |---|---|
-| `EA_API_KEY` | API key for non-localhost connections (multi-device / multi-tenant) |
-| `EA_SOLO_BYPASS` | `true` (default): skip auth for localhost requests |
+| `API_KEY` | API key for non-localhost connections (multi-device / multi-tenant) |
+| `SOLO_BYPASS` | `true` (default): skip auth for localhost requests |
 | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` | LLM provider keys |
 | `OLLAMA_API_KEY`, `OLLAMA_BASE_URL` | Ollama cloud/local |
 | `FIRECRAWL_API_KEY`, `FIRECRAWL_BASE_URL` | Web search/scraping (self-hosted base URL needs no key) |
@@ -259,7 +259,7 @@ host) for a local model server.
 
 ## Production hardening checklist
 
-- [ ] `EA_API_KEY` set on any server reachable beyond localhost
+- [ ] `API_KEY` set on any server reachable beyond localhost
 - [ ] TLS terminated by Caddy/ingress (never plain HTTP on a public IP)
 - [ ] Per-user container/volume isolation (Mode 3)
 - [ ] Run containers as non-root; rootfs read-only where possible
@@ -270,7 +270,7 @@ host) for a local model server.
 ## Known gaps (as of this document)
 
 - **No per-user authentication yet.** `user_id` is supplied by the client
-  (default `default_user`); `EA_API_KEY` authenticates the *connection*, not
+  (default `default_user`); `API_KEY` authenticates the *connection*, not
   the *user*. Multi-tenant deployments must therefore be container-per-user
   and/or trusted-network only. Public multi-user hosting needs an identity
   layer (per-user tokens or OIDC) before `user_id` can be trusted from auth.
@@ -289,7 +289,7 @@ host) for a local model server.
 - **Container won't start** → check the command is `uv run assistant http`
   (older docs/image references said `ea`, which was never the entry point).
 - **Port mismatch** → the server listens on **8000** (not 8080).
-- **Data "disappears" after container recreation** → `DEPLOYMENT_EA_ROOT`
+- **Data "disappears" after container recreation** → `DEPLOYMENT_DATA_ROOT`
   must point into the mounted volume (see Mode 3).
 - **Health check fails** → `curl` is not installed in the slim image; use the
   healthcheck in `docker/docker-compose.yaml` (python `urllib`).

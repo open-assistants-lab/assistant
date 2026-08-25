@@ -29,7 +29,7 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     def _fake_get_paths(user_id, workspace_id="personal"):
         return DataPaths(
-            ea_root=str(tmp_path),
+            data_root=str(tmp_path),
             data_path=str(tmp_path / "data"),
             user_id=user_id,
             workspace_id=workspace_id,

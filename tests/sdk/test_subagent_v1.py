@@ -36,7 +36,7 @@ def mock_paths(tmp_dir):
     """Patch get_paths to use a temp directory."""
     from src.storage.paths import DataPaths
 
-    mock = DataPaths(data_path=tmp_dir, user_id="test_user", ea_root=tmp_dir)
+    mock = DataPaths(data_path=tmp_dir, user_id="test_user", data_root=tmp_dir)
     # Alias old user-level paths to workspace-scoped for backwards test compat
     def temp_workspace_dir(name: str):
         path = Path(tmp_dir) / "workspaces" / "personal" / name

@@ -221,7 +221,7 @@ The codebase has a **custom agent SDK** (`src/sdk/`) as its core runtime.
 2. **Scope model (All / Selected / None)**: Replaces old per-workspace capabilities.yaml. `item_scopes` SQLite table governs tool/skill/subagent availability per workspace. Unconfigured items default to `scope=all` (available everywhere).
 3. **Skills directory**: Injected into system prompt as `Skills directory: {paths.user_skills_dir()}`. Agent uses `files_write` with absolute path to create SKILL.md files.
 4. **Subagents directory**: Injected as `Subagents directory: {paths.user_subagents_dir()}`.
-5. **files_write absolute paths**: Accepts absolute paths anywhere under `ea_root`, not just workspace files dir.
+5. **files_write absolute paths**: Accepts absolute paths anywhere under `data_root`, not just workspace files dir.
 6. **Skill catalog injection**: Skill names + descriptions injected into system prompt as `<available_skills>` block. `skills_load` / `skills_reload` are the only skill tools. `skill_create` removed.
 7. **Tool availability**: Unconfigured tools default to available (`scope=all`). Destructive annotation no longer enforces disabled-by-default.
 8. **Block-structured streaming**: `text_start/delta/end`, `tool_input_start/delta/end`, `reasoning_start/delta/end`, `tool_result`, `interrupt`, `done`, `error`. Backward-compat aliases: `ai_token→text_delta`, `tool_start→tool_input_start`, `reasoning→reasoning_delta`.
@@ -261,7 +261,7 @@ Both SSE and WS routers now handle block-structured events (`text_start/delta/en
 
 Per-user storage is split across **two trees** (both must be backed up):
 
-1. **`ea_root`** (default `~/Assistant/`, env `DEPLOYMENT_EA_ROOT`) — bulk user data via `DataPaths`: `Conversation/messages.db`, `Memory/` (ChromaDB), `Files/`, `Email/emails.db`, `Contacts/contacts.db`, `Todos/todos.db`, `Skills/`, `Subagents/`. Non-default users under `ea_root/Users/{user_id}/`; `default_user` uses the root.
+1. **`data_root`** (default `~/Assistant/`, env `DEPLOYMENT_DATA_ROOT`) — bulk user data via `DataPaths`: `Conversation/messages.db`, `Memory/` (ChromaDB), `Files/`, `Email/emails.db`, `Contacts/contacts.db`, `Todos/todos.db`, `Skills/`, `Subagents/`. Non-default users under `data_root/Users/{user_id}/`; `default_user` uses the root.
 2. **`data/users/{user_id}/`** (via `data_path`, env `DEPLOYMENT_DATA_PATH`) — per-user settings/capabilities/vault: `capabilities.yaml`, `item_scopes.db`, `settings.json`, `connectkit/`, seeded prompts (`summarisation_prompt.md`).
 3. **`data/` root** — project-level: `cache/`, `logs/`, `jobs.db`, `templates/`, `traces/`.
 
@@ -269,13 +269,13 @@ Decision: **SQLite + ChromaDB per-user even for team/enterprise** (not shared DB
 
 ### Deployment
 
-Three supported modes (see `DEPLOYMENT.md`): **Local** (localhost, auth off), **Solo WAN** (one user, many devices — one server = sessions *and* files in sync; `EA_API_KEY` + Tailscale or VPS), **Multi-tenant** (container per user + Caddy subdomains).
+Three supported modes (see `DEPLOYMENT.md`): **Local** (localhost, auth off), **Solo WAN** (one user, many devices — one server = sessions *and* files in sync; `API_KEY` + Tailscale or VPS), **Multi-tenant** (container per user + Caddy subdomains).
 
 Key facts:
 - Entry point is `uv run assistant http` (console script `assistant` — `ea` was never valid). Listens on `0.0.0.0:8000` by default (`API_HOST`/`API_PORT`).
-- Auth: `EA_API_KEY` authenticates the *connection* only; `EA_SOLO_BYPASS` (default true) skips auth for localhost. **There is no per-user authentication** — `user_id` is client-supplied (query/body param, default `default_user`). Multi-user deployments are container-per-user and/or trusted-network only.
+- Auth: `API_KEY` authenticates the *connection* only; `SOLO_BYPASS` (default true) skips auth for localhost. **There is no per-user authentication** — `user_id` is client-supplied (query/body param, default `default_user`). Multi-user deployments are container-per-user and/or trusted-network only.
 - **One process per user store**: in-memory per-user caches (MessageStore, AgentLoop, session registry) + single-writer SQLite/ChromaDB mean replicas serving the same user are unsupported. Multi-tenant = N isolated containers, each one user.
-- Docker (see `docker/`): image must `COPY seeds/ seeds/`; `DEPLOYMENT_EA_ROOT`/`DEPLOYMENT_DATA_PATH` must point into the mounted volume or user data silently lands in `/root/Assistant` and is lost on recreation.
+- Docker (see `docker/`): image must `COPY seeds/ seeds/`; `DEPLOYMENT_DATA_ROOT`/`DEPLOYMENT_DATA_PATH` must point into the mounted volume or user data silently lands in `/root/Assistant` and is lost on recreation.
 - Client file caching (partial): `FileCache` in `http/workspace_cache.py` models `cloud_only` / `downloaded` / `pinned` statuses per path.
 - Known gaps: no OIDC/per-user tokens, teams are skeleton (`data/teams/` unused), no offline/bidirectional sync, no horizontal scaling per user.
 - Deferred follow-ups from the 2026-08-23 audit live in `docs/audits/2026-08-24-deferred-followups.md` — check it before touching `GmailCache` (batched upsert is trigger-gated P1), the WS approval tests (known hang), or summary-cache invalidation.
@@ -340,8 +340,8 @@ Auto-detection happens in `create_model_from_config()`: if `OLLAMA_BASE_URL` poi
 ### Watch out: Use module-level imports for patchable functions
 Tests that use `unittest.mock.patch` need a module-level attribute to target. `from X import Y` creates a local binding that patches can't reach. Use `import src.module as _m` and call `_m.func()` instead. Example: coordinator.py's `_paths.get_paths()` allows `patch("src.storage.paths.get_paths")` to work.
 
-### Watch out: DataPaths.ea_root vs data_path
-Workspace-scoped methods (`workspace_subagents_dir`, `user_subagents_dir`) use `self.root` (= `_ea_root`), NOT `self.base` (= `data_path`). Tests that need filesystem isolation MUST pass `ea_root=tmp_path`, not just `data_path=tmp_path`. `data_path` alone only affects template/legacy paths.
+### Watch out: DataPaths.data_root vs data_path
+Workspace-scoped methods (`workspace_subagents_dir`, `user_subagents_dir`) use `self.root` (= `_data_root`), NOT `self.base` (= `data_path`). Tests that need filesystem isolation MUST pass `data_root=tmp_path`, not just `data_path=tmp_path`. `data_path` alone only affects template/legacy paths.
 
 ### Watch out: AgentLoop constructor changed
 The `AgentLoop` now takes `run_config: RunConfig | None = None` instead of just `max_iterations`. If creating loops manually, use:
@@ -355,11 +355,11 @@ loop = AgentLoop(
 )
 ```
 
-### CRITICAL: user data in containers — DEPLOYMENT_EA_ROOT
-Without `DEPLOYMENT_EA_ROOT` pointing into the mounted volume, all bulk user data (conversation, files, memory, email) goes to `/root/Assistant` inside the container and is **silently lost on recreation**. `DEPLOYMENT_DATA_PATH` alone does NOT cover `ea_root`. Same split matters in tests: `ea_root=tmp_path` for user-data isolation, `data_path=tmp_path` for settings/templates.
+### CRITICAL: user data in containers — DEPLOYMENT_DATA_ROOT
+Without `DEPLOYMENT_DATA_ROOT` pointing into the mounted volume, all bulk user data (conversation, files, memory, email) goes to `/root/Assistant` inside the container and is **silently lost on recreation**. `DEPLOYMENT_DATA_PATH` alone does NOT cover `data_root`. Same split matters in tests: `data_root=tmp_path` for user-data isolation, `data_path=tmp_path` for settings/templates.
 
 ### CRITICAL: no per-user auth (trust model)
-`EA_API_KEY` authenticates the connection, not the user. `user_id` comes from the request payload and is trusted as-is. Never claim per-user security boundaries in multi-user deployments; container-per-user (or a trusted network) is the only isolation today. Adding OIDC/per-user tokens is a prerequisite for public multi-user hosting.
+`API_KEY` authenticates the connection, not the user. `user_id` comes from the request payload and is trusted as-is. Never claim per-user security boundaries in multi-user deployments; container-per-user (or a trusted network) is the only isolation today. Adding OIDC/per-user tokens is a prerequisite for public multi-user hosting.
 
 ### Watch out: one process per user store
 MessageStore/AgentLoop caches and SQLite/ChromaDB writes are per-user and single-writer. Do not run multiple replicas serving the same user_id (sticky sessions do not fix Chroma or in-memory state). Horizontal scaling = a new user's own process, not another replica of an existing user.
@@ -420,7 +420,7 @@ assistant/
 │   │   ├── user.py             # User management
 │   │   ├── memory.py           # memory_profile tool (recall-based digest)
 │   │   ├── messages.py         # MessageStore (CoreMem wrapper)
-│   │   └── paths.py            # DataPaths (ea_root, workspace scoping)
+│   │   └── paths.py            # DataPaths (data_root, workspace scoping)
 │   ├── sdk/                     # ★ Custom Agent SDK (THE CORE)
 │   │   ├── __init__.py          # Public API exports (re-exports HybridDB, SearchMode)
 │   │   ├── messages.py          # Message, ToolCall, StreamChunk
@@ -502,7 +502,7 @@ assistant/
 ### Environment Variables
 - Use `.env` for local development
 - Use `.env.example` as template
-- All config via `src/config/settings.py`; env prefixes: `EA_` (auth: `EA_API_KEY`, `EA_SOLO_BYPASS`), `DEPLOYMENT_` (`DEPLOYMENT_MODE`, `DEPLOYMENT_DATA_PATH`, `DEPLOYMENT_EA_ROOT`), `API_` (`API_HOST`, `API_PORT`), `LOGGING_` (`LOGGING_LEVEL`, `LOGGING_JSON_DIR`), `AGENT_`, `SUMMARY_`, `LANGFUSE_`, `TOOLS_` (Firecrawl), `OLLAMA_`, `MESSAGES_`
+- All config via `src/config/settings.py`; env prefixes: `EA_` (auth: `API_KEY`, `SOLO_BYPASS`), `DEPLOYMENT_` (`DEPLOYMENT_MODE`, `DEPLOYMENT_DATA_PATH`, `DEPLOYMENT_DATA_ROOT`), `API_` (`API_HOST`, `API_PORT`), `LOGGING_` (`LOGGING_LEVEL`, `LOGGING_JSON_DIR`), `AGENT_`, `SUMMARY_`, `LANGFUSE_`, `TOOLS_` (Firecrawl), `OLLAMA_`, `MESSAGES_`
 
 ### Config Priority
 1. Environment variables (highest)

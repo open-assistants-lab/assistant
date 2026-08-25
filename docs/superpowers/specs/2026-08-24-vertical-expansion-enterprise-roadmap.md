@@ -192,7 +192,7 @@ operator chooses the trust boundary.
 | **T5 — Untrusted at scale** | MicroVM (Firecracker/Kata) per task | Commercial/hosted tier |
 
 Auth is not binary — it scales with trust domains: solo/localhost (none,
-default) → trusted network (shared-secret, today's `EA_API_KEY` model) →
+default) → trusted network (shared-secret, today's `API_KEY` model) →
 untrusted network (per-user key→identity mapping, commercial tier). The
 mechanism ships in all cases; deployment config decides.
 

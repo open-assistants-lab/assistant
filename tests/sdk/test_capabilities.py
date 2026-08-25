@@ -157,7 +157,7 @@ def test_load_user_capabilities_does_not_mark_migrated_when_item_scopes_unreadab
     class Settings:
         data_path = str(tmp_path / "data")
 
-        deployment = type("Deployment", (), {"ea_root": str(tmp_path / "ea")})()
+        deployment = type("Deployment", (), {"data_root": str(tmp_path / "ea")})()
 
     monkeypatch.setattr("src.sdk.capabilities.get_settings", lambda: Settings())
 
@@ -180,7 +180,7 @@ def test_load_user_capabilities_marks_migrated_when_item_scopes_table_missing(
     class Settings:
         data_path = str(tmp_path / "data")
 
-        deployment = type("Deployment", (), {"ea_root": str(tmp_path / "ea")})()
+        deployment = type("Deployment", (), {"data_root": str(tmp_path / "ea")})()
 
     monkeypatch.setattr("src.sdk.capabilities.get_settings", lambda: Settings())
 
@@ -218,7 +218,7 @@ def test_load_user_capabilities_migrates_legacy_capabilities_false_values(
     class Settings:
         data_path = str(tmp_path / "data")
 
-        deployment = type("Deployment", (), {"ea_root": str(legacy_root)})()
+        deployment = type("Deployment", (), {"data_root": str(legacy_root)})()
 
     monkeypatch.setattr("src.sdk.capabilities.get_settings", lambda: Settings())
 
@@ -245,7 +245,7 @@ def test_load_user_capabilities_legacy_migration_runs_once(monkeypatch, tmp_path
     class Settings:
         data_path = str(tmp_path / "data")
 
-        deployment = type("Deployment", (), {"ea_root": str(legacy_root)})()
+        deployment = type("Deployment", (), {"data_root": str(legacy_root)})()
 
     monkeypatch.setattr("src.sdk.capabilities.get_settings", lambda: Settings())
 
@@ -278,7 +278,7 @@ def test_load_user_capabilities_migrates_default_home_assistant_root(
     class Settings:
         data_path = str(tmp_path / "data")
 
-        deployment = type("Deployment", (), {"ea_root": ""})()
+        deployment = type("Deployment", (), {"data_root": ""})()
 
     monkeypatch.setattr("src.sdk.capabilities.get_settings", lambda: Settings())
     monkeypatch.setattr("pathlib.Path.home", lambda: home)

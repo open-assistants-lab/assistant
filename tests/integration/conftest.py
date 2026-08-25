@@ -22,8 +22,8 @@ def fake_provider():
 
 @pytest.fixture(autouse=True)
 def _isolated_paths(tmp_path, monkeypatch):
-    """Redirect ea_root to tmp_path so filesystem tools use an isolated temp dir."""
-    monkeypatch.setenv("DEPLOYMENT_EA_ROOT", str(tmp_path))
+    """Redirect data_root to tmp_path so filesystem tools use an isolated temp dir."""
+    monkeypatch.setenv("DEPLOYMENT_DATA_ROOT", str(tmp_path))
     reload_settings()
     _paths_cache.clear()
     yield

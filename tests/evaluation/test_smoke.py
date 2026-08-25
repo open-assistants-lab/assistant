@@ -9,8 +9,8 @@ import aiohttp
 import pytest
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("EA_RUN_HTTP_EVALS") != "1",
-    reason="set EA_RUN_HTTP_EVALS=1 to run live HTTP evaluation tests",
+    os.environ.get("RUN_HTTP_EVALS") != "1",
+    reason="set RUN_HTTP_EVALS=1 to run live HTTP evaluation tests",
 )
 
 HTTP_BASE_URL = "http://localhost:8080"

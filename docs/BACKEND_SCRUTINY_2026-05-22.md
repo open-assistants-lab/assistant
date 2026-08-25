@@ -102,7 +102,7 @@ There is no global dependency in `src/http/main.py:73-136`, and other routers ar
 
 Runtime impact:
 
-- When `EA_API_KEY` is configured, most REST endpoints still allow unauthenticated reads/writes/deletes.
+- When `API_KEY` is configured, most REST endpoints still allow unauthenticated reads/writes/deletes.
 - This includes conversation history, workspace files, memories, emails, connector credentials, skills, and subagents depending on router.
 
 Test evidence:

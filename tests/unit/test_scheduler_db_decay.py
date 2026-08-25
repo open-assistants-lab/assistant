@@ -29,7 +29,7 @@ def _fake_get_paths(user_id: str, **_: Any):
     from src.storage.paths import DataPaths
 
     return DataPaths(
-        ea_root=str(_TMP_ROOT),
+        data_root=str(_TMP_ROOT),
         data_path=str(Path(_TMP_ROOT) / "data"),
         user_id=user_id,
     )
@@ -47,7 +47,7 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         from src.storage.paths import DataPaths
 
         return DataPaths(
-            ea_root=str(tmp_path),
+            data_root=str(tmp_path),
             data_path=str(tmp_path / "data"),
             user_id=user_id,
         )

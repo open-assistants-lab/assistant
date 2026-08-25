@@ -28,7 +28,7 @@ class DeploymentConfig(_BaseSettings):
 
     mode: str = Field(default="solo")
     data_path: str = Field(default="data")
-    ea_root: str = Field(
+    data_root: str = Field(
         default="",
         description="Root for user data directory. Empty string means Path.home() / 'Assistant'.",
     )
@@ -196,8 +196,8 @@ class AuthConfig(_BaseSettings):
     """API key authentication for remote connections.
 
     Solo (localhost): auth disabled if api_key is empty. Localhost bypass enabled by default.
-    Multi-device WAN: set EA_API_KEY to require auth on non-localhost connections.
-    Multi-tenant: each container has its own EA_API_KEY.
+    Multi-device WAN: set API_KEY to require auth on non-localhost connections.
+    Multi-tenant: each container has its own API_KEY.
     """
 
     api_key: str = Field(default="")
@@ -208,7 +208,7 @@ class AuthConfig(_BaseSettings):
         default="", description="Comma-separated trusted CORS origins"
     )
 
-    model_config = SettingsConfigDict(env_prefix="EA_")
+    model_config = SettingsConfigDict(env_prefix="")
 
 
 class ApiConfig(_BaseSettings):

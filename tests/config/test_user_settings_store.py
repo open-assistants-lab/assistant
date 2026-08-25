@@ -37,7 +37,7 @@ def _paths(tmp_path: Path, user_id: str = "alice") -> DataPaths:
     return DataPaths(
         deployment="solo",
         data_path=str(tmp_path / "project"),
-        ea_root=str(tmp_path / "home"),
+        data_root=str(tmp_path / "home"),
         user_id=user_id,
     )
 

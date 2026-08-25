@@ -1,8 +1,8 @@
 """API key authentication for HTTP and WebSocket endpoints.
 
 Solo (localhost): auth disabled by default. No configuration needed.
-Multi-device WAN: set EA_API_KEY env var, localhost still bypasses.
-Multi-tenant: each container has its own EA_API_KEY, Caddy routes subdomains.
+Multi-device WAN: set API_KEY env var, localhost still bypasses.
+Multi-tenant: each container has its own API_KEY, Caddy routes subdomains.
 """
 
 from __future__ import annotations
@@ -41,9 +41,9 @@ async def require_auth(request: Request) -> None:
     """FastAPI dependency. Require valid Bearer token unless auth is disabled.
 
     Flow:
-      1. If EA_API_KEY is empty → allow all (solo mode, auth disabled)
+      1. If API_KEY is empty → allow all (solo mode, auth disabled)
       2. If request is from localhost and solo_bypass is True → allow
-      3. Otherwise → validate Bearer token against EA_API_KEY
+      3. Otherwise → validate Bearer token against API_KEY
     """
     from src.config.settings import get_settings
 

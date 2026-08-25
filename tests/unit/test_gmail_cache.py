@@ -22,7 +22,7 @@ def cache(tmp_path: Any, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(gc_module, "_stores", {})
 
     def fake_get_paths(user_id: str = "default_user"):
-        return DataPaths(ea_root=tmp_path, user_id=user_id)
+        return DataPaths(data_root=tmp_path, user_id=user_id)
 
     monkeypatch.setattr(gc_module, "get_paths", fake_get_paths)
     return GmailCache("cache_user")

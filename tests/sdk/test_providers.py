@@ -68,7 +68,7 @@ def _user_settings_store(tmp_path: Path, user_id: str = "alice") -> UserSettings
     paths = DataPaths(
         deployment="solo",
         data_path=str(tmp_path / "project"),
-        ea_root=str(tmp_path / "home"),
+        data_root=str(tmp_path / "home"),
         user_id=user_id,
     )
     return UserSettingsStore(user_id, paths=paths)
@@ -1326,7 +1326,7 @@ class TestProviderFactory:
                 "os.environ",
                 {
                     "DEPLOYMENT_DATA_PATH": str(tmp_path / "project"),
-                    "DEPLOYMENT_EA_ROOT": str(tmp_path / "home"),
+                    "DEPLOYMENT_DATA_ROOT": str(tmp_path / "home"),
                 },
             ),
         ):

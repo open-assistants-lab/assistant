@@ -31,7 +31,21 @@ def test_workspace_id_rejects_aliasing_and_separators(tmp_path, monkeypatch, wor
 
 
 def test_workspace_dir_accepts_normal_workspace_ids(monkeypatch, tmp_path):
+    # Hermetic against suite order: tests/api's session fixture may leave
+    # DEPLOYMENT_DATA_ROOT set (its teardown runs only at session end), and
+    # the settings singleton may hold that value. Stub get_settings so the
+    # Path.home() default is what's actually under test.
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    class _Deployment:
+        data_root = ""
+
+    class _Settings:
+        deployment = _Deployment()
+        data_path = "data"
+
+    import src.storage.paths as _paths_mod
+    monkeypatch.setattr(_paths_mod, "get_settings", lambda: _Settings())
 
     for workspace_id in ("personal", "project-x"):
         paths = DataPaths(workspace_id=workspace_id)
@@ -43,7 +57,7 @@ def test_workspace_dir_accepts_normal_workspace_ids(monkeypatch, tmp_path):
 
 
 def test_workspace_path_helpers_are_user_level_aliases(tmp_path):
-    paths = DataPaths(ea_root=str(tmp_path / "data"), workspace_id="project-x")
+    paths = DataPaths(data_root=str(tmp_path / "data"), workspace_id="project-x")
 
     assert paths.workspace_files_dir() == paths.files_dir()
     assert paths.workspace_skills_dir() == paths.user_skills_dir()
@@ -55,14 +69,14 @@ def test_workspace_path_helpers_are_user_level_aliases(tmp_path):
 
 def test_user_dir_rejects_traversal_user_id(tmp_path):
     with pytest.raises(ValueError, match="Invalid user_id"):
-        DataPaths(ea_root=str(tmp_path / "data"), user_id="../../escaped")
+        DataPaths(data_root=str(tmp_path / "data"), user_id="../../escaped")
 
     assert not (tmp_path / "escaped").exists()
 
 
 def test_user_dir_accepts_normal_user_ids(tmp_path):
     for user_id in ("default_user", "alice_test"):
-        paths = DataPaths(ea_root=str(tmp_path / "data"), user_id=user_id)
+        paths = DataPaths(data_root=str(tmp_path / "data"), user_id=user_id)
 
         user_dir = paths.user_dir
 
@@ -74,8 +88,8 @@ def test_user_dir_accepts_normal_user_ids(tmp_path):
 
 
 def test_user_scoped_dirs_are_distinct_per_user(tmp_path):
-    alice = DataPaths(ea_root=str(tmp_path / "data"), user_id="alice_test")
-    bob = DataPaths(ea_root=str(tmp_path / "data"), user_id="bob_test")
+    alice = DataPaths(data_root=str(tmp_path / "data"), user_id="alice_test")
+    bob = DataPaths(data_root=str(tmp_path / "data"), user_id="bob_test")
 
     assert alice.files_dir() != bob.files_dir()
     assert alice.user_skills_dir() != bob.user_skills_dir()
@@ -87,26 +101,26 @@ def test_user_scoped_dirs_are_distinct_per_user(tmp_path):
 
 
 def test_named_user_settings_paths_are_user_scoped(tmp_path):
-    ea_root = tmp_path / "data"
-    alice = DataPaths(ea_root=str(ea_root), user_id="alice")
-    bob = DataPaths(ea_root=str(ea_root), user_id="bob")
+    data_root = tmp_path / "data"
+    alice = DataPaths(data_root=str(data_root), user_id="alice")
+    bob = DataPaths(data_root=str(data_root), user_id="bob")
 
-    assert alice.user_settings_path() == ea_root / "Users" / "alice" / "settings.json"
-    assert alice.user_grader_prompt_path() == ea_root / "Users" / "alice" / "grader_prompt.md"
+    assert alice.user_settings_path() == data_root / "Users" / "alice" / "settings.json"
+    assert alice.user_grader_prompt_path() == data_root / "Users" / "alice" / "grader_prompt.md"
     assert alice.user_settings_path() != bob.user_settings_path()
     assert alice.user_grader_prompt_path() != bob.user_grader_prompt_path()
 
 
-def test_default_user_settings_paths_are_under_ea_root(tmp_path):
-    ea_root = tmp_path / "data"
-    paths = DataPaths(ea_root=str(ea_root))
+def test_default_user_settings_paths_are_under_data_root(tmp_path):
+    data_root = tmp_path / "data"
+    paths = DataPaths(data_root=str(data_root))
 
-    assert paths.user_settings_path() == ea_root / "settings.json"
-    assert paths.user_grader_prompt_path() == ea_root / "grader_prompt.md"
+    assert paths.user_settings_path() == data_root / "settings.json"
+    assert paths.user_grader_prompt_path() == data_root / "grader_prompt.md"
 
 
 def test_user_settings_path_helpers_do_not_create_files(tmp_path):
-    paths = DataPaths(ea_root=str(tmp_path / "data"), user_id="alice")
+    paths = DataPaths(data_root=str(tmp_path / "data"), user_id="alice")
 
     settings_path = paths.user_settings_path()
     grader_prompt_path = paths.user_grader_prompt_path()

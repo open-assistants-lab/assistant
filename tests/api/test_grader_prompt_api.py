@@ -32,7 +32,7 @@ def grader_prompt_api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[s
             paths = DataPaths(
                 user_id=user_id,
                 data_path=str(tmp_path / "data"),
-                ea_root=str(tmp_path / "root"),
+                data_root=str(tmp_path / "root"),
             )
             stores[user_id] = UserSettingsStore(
                 user_id,
@@ -358,7 +358,7 @@ def test_missing_seed_uses_injected_host_default(client, monkeypatch, tmp_path, 
     paths = DataPaths(
         user_id=test_user_id,
         data_path=str(tmp_path / "data"),
-        ea_root=str(tmp_path / "root"),
+        data_root=str(tmp_path / "root"),
     )
     store = UserSettingsStore(
         test_user_id,
@@ -378,7 +378,7 @@ def test_missing_seed_and_host_default_is_controlled(client, monkeypatch, tmp_pa
     paths = DataPaths(
         user_id=test_user_id,
         data_path=str(tmp_path / "data"),
-        ea_root=str(tmp_path / "root"),
+        data_root=str(tmp_path / "root"),
     )
     store = UserSettingsStore(
         test_user_id,

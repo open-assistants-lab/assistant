@@ -3,9 +3,9 @@
 Two deployment modes:
 - solo: Single user on desktop (.dmg) or server. user_id defaults to "default_user".
   data/ contains project-level data (cache, templates, logs, traces, jobs).
-- team: Multiple users on one server. Each user gets per-user data under ea_root.
+- team: Multiple users on one server. Each user gets per-user data under data_root.
 
-User data lives under ea_root (defaults to ~/Assistant/).
+User data lives under data_root (defaults to ~/Assistant/).
 Project data lives under data/ (cache, templates, logs, traces, jobs).
 """
 
@@ -51,7 +51,7 @@ Conversation/
 class DataPaths:
     """Resolves data paths based on deployment mode and user identity.
 
-    User data lives under ea_root (defaults to ~/Assistant/).
+    User data lives under data_root (defaults to ~/Assistant/).
     Project data lives under data/ (cache, templates, logs, traces, jobs).
 
     In solo mode: user_id defaults to "default_user", team_id is None.
@@ -68,7 +68,7 @@ class DataPaths:
         user_id: str | None = None,
         team_id: str | None = None,
         workspace_id: str | None = None,
-        ea_root: str | None = None,
+        data_root: str | None = None,
     ):
         settings = get_settings()
         self.deployment = deployment or settings.deployment
@@ -78,31 +78,31 @@ class DataPaths:
         self.workspace_id = _validate_path_id(workspace_id or "personal", "workspace_id")
         self.base.mkdir(parents=True, exist_ok=True)
 
-        if ea_root:
-            self._ea_root = Path(ea_root)
+        if data_root:
+            self._data_root = Path(data_root)
         else:
-            configured = settings.deployment.ea_root
+            configured = settings.deployment.data_root
             if configured:
-                self._ea_root = Path(configured)
+                self._data_root = Path(configured)
             else:
-                self._ea_root = Path.home() / "Assistant"
+                self._data_root = Path.home() / "Assistant"
 
-        self._ea_root.mkdir(parents=True, exist_ok=True)
+        self._data_root.mkdir(parents=True, exist_ok=True)
         self._git_ensured = False
 
     # -- Root properties --
 
     def _ensure_git(self) -> None:
         """Init a git repo at the root directory if not already present."""
-        git_dir = self._ea_root / ".git"
-        gitignore = self._ea_root / ".gitignore"
+        git_dir = self._data_root / ".git"
+        gitignore = self._data_root / ".gitignore"
         if git_dir.exists():
             return
         try:
             import subprocess
             subprocess.run(
                 ["git", "init"],
-                cwd=self._ea_root,
+                cwd=self._data_root,
                 capture_output=True,
                 timeout=10,
             )
@@ -113,11 +113,11 @@ class DataPaths:
 
     @property
     def root(self) -> Path:
-        """Root of all user data under ea_root."""
+        """Root of all user data under data_root."""
         if not self._git_ensured:
             self._git_ensured = True
             self._ensure_git()
-        return self._ea_root
+        return self._data_root
 
     @property
     def team_root(self) -> None:

@@ -94,8 +94,8 @@ def _migrate_legacy_capabilities(caps: dict[str, Any]) -> bool:
     """Copy explicit legacy false values into user-level capabilities."""
     changed = False
     settings = get_settings()
-    ea_root = getattr(getattr(settings, "deployment", None), "ea_root", None)
-    root = Path(ea_root) if ea_root else Path.home() / "Assistant"
+    data_root = getattr(getattr(settings, "deployment", None), "data_root", None)
+    root = Path(data_root) if data_root else Path.home() / "Assistant"
     candidates = [root / "capabilities.yaml"]
     workspaces_dir = root / "Workspaces"
     if workspaces_dir.exists():

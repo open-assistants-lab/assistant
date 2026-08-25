@@ -183,7 +183,7 @@ class TestWorkspaceDataPaths:
 
     def test_global_subagents_dir(self):
         from src.storage.paths import DataPaths
-        dp = DataPaths(user_id="test_user", ea_root="/tmp/ea-test-root")
+        dp = DataPaths(user_id="test_user", data_root="/tmp/ea-test-root")
         d = dp.global_subagents_dir()
         assert "Subagents" in str(d)
 
@@ -195,7 +195,7 @@ class TestWorkspaceDataPaths:
 
     def test_user_prompt_path(self):
         from src.storage.paths import DataPaths
-        dp = DataPaths(user_id="test_user", ea_root="/tmp/ea-test-root")
+        dp = DataPaths(user_id="test_user", data_root="/tmp/ea-test-root")
         d = dp.user_prompt_path()
         assert "AGENTS.md" in str(d)
 

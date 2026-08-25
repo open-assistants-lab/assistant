@@ -22,7 +22,7 @@ def tmp_dir():
 def mock_paths(tmp_dir):
     from src.storage.paths import DataPaths
 
-    mock_dp = DataPaths(data_path=tmp_dir, user_id="test_user", ea_root=tmp_dir)
+    mock_dp = DataPaths(data_path=tmp_dir, user_id="test_user", data_root=tmp_dir)
     with patch("src.sdk.tools_core.agent_scheduler_db.get_paths", return_value=mock_dp):
         yield mock_dp
 
@@ -220,7 +220,7 @@ class TestAgentScheduler:
     async def test_next_interval_default(self, tmp_dir):
         from src.storage.paths import DataPaths
 
-        mock_dp = DataPaths(data_path=tmp_dir, user_id="test_user", ea_root=tmp_dir)
+        mock_dp = DataPaths(data_path=tmp_dir, user_id="test_user", data_root=tmp_dir)
         with patch("src.sdk.tools_core.agent_scheduler_db.get_paths", return_value=mock_dp):
             from src.sdk.agent_scheduler import AgentScheduler
 

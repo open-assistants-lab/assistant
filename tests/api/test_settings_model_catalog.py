@@ -26,7 +26,7 @@ def settings_api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, A
             paths = DataPaths(
                 user_id=user_id,
                 data_path=str(tmp_path / "data"),
-                ea_root=str(tmp_path / "root"),
+                data_root=str(tmp_path / "root"),
             )
             stores[user_id] = UserSettingsStore(
                 user_id,

@@ -624,7 +624,7 @@ def test_message_store_initializes_when_duckdb_unavailable() -> None:
 
 def test_get_message_store_ignores_workspace_id_for_storage(monkeypatch, tmp_path) -> None:
     messages_storage._stores.clear()
-    paths = DataPaths(ea_root=str(tmp_path / "assistant"))
+    paths = DataPaths(data_root=str(tmp_path / "assistant"))
     monkeypatch.setattr(messages_storage, "get_paths", lambda user_id, workspace_id=None: paths)
 
     first = get_message_store("test_user", workspace_id="personal")
@@ -712,7 +712,7 @@ def test_message_store_imports_legacy_workspace_conversation_db(monkeypatch, tmp
         root, "project-x", "legacy-1", "legacy workspace message", "legacy-session"
     )
 
-    paths = DataPaths(ea_root=str(root), user_id="test_user")
+    paths = DataPaths(data_root=str(root), user_id="test_user")
     monkeypatch.setattr(messages_storage, "get_paths", lambda user_id, workspace_id=None: paths)
 
     store = MessageStore("test_user")
@@ -729,7 +729,7 @@ def test_message_store_imports_only_matching_legacy_user_rows(monkeypatch, tmp_p
     _create_legacy_workspace_db(root, "project-x", "alice-1", "alice message", user_id="alice")
     _create_legacy_workspace_db(root, "project-y", "bob-1", "bob message", user_id="bob")
 
-    paths = DataPaths(ea_root=str(root), user_id="alice")
+    paths = DataPaths(data_root=str(root), user_id="alice")
     monkeypatch.setattr(messages_storage, "get_paths", lambda user_id, workspace_id=None: paths)
 
     store = MessageStore("alice")
@@ -744,12 +744,12 @@ def test_message_store_imports_anonymous_legacy_rows_only_for_default_user(
     root = tmp_path / "assistant"
     _create_legacy_workspace_db(root, "project-x", "anon-1", "anonymous message", user_id=None)
 
-    alice_paths = DataPaths(ea_root=str(root), user_id="alice")
+    alice_paths = DataPaths(data_root=str(root), user_id="alice")
     monkeypatch.setattr(messages_storage, "get_paths", lambda user_id, workspace_id=None: alice_paths)
     alice_store = MessageStore("alice")
     assert alice_store.count_messages() == 0
 
-    default_paths = DataPaths(ea_root=str(root), user_id="default_user")
+    default_paths = DataPaths(data_root=str(root), user_id="default_user")
     monkeypatch.setattr(messages_storage, "get_paths", lambda user_id, workspace_id=None: default_paths)
     default_store = MessageStore("default_user")
     assert [m.content for m in default_store.get_recent_messages(count=10)] == ["anonymous message"]
@@ -763,7 +763,7 @@ def test_message_store_imports_overlapping_legacy_ids_without_collapsing_session
     _create_legacy_workspace_db(root, "alpha", "1", "alpha message")
     _create_legacy_workspace_db(root, "beta", "1", "beta message")
 
-    paths = DataPaths(ea_root=str(root), user_id="test_user")
+    paths = DataPaths(data_root=str(root), user_id="test_user")
     monkeypatch.setattr(messages_storage, "get_paths", lambda user_id, workspace_id=None: paths)
 
     store = MessageStore("test_user")

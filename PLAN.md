@@ -119,7 +119,7 @@ All tools migrated from LangChain `@tool` to SDK `@tool` in `src/sdk/tools_core/
 | **Method** | Bearer token (API key) | Simplest auth that works for all connection modes. No token refresh, no OIDC flow, no session management. |
 | **Why not JWT** | JWT adds issuance, rotation, expiry, revocation infrastructure. EA is per-user (one container = one user). A static API key per container is sufficient — JWT solves multi-user single-process auth which we don't have. |
 | **Why not OAuth** | OAuth requires an authorization server, redirect flows, and scope management. Overkill for a single-user agent API. |
-| **Storage** | `EA_API_KEY` env var or `api_key` in `config.yaml`. Hashed with SHA-256 for comparison. | Same pattern as DEPLOYMENT.md team mode (`EA_AUTH_JWT_SECRET`). |
+| **Storage** | `API_KEY` env var or `api_key` in `config.yaml`. Hashed with SHA-256 for comparison. | Same pattern as DEPLOYMENT.md team mode (`AUTH_JWT_SECRET`). |
 | **Solo bypass** | Requests from 127.0.0.1 or ::1 skip auth. | Zero-config for localhost. No API key needed for `assistant http` on your own machine. |
 | **Client** | API key sent as `Authorization: Bearer <key>` header (REST) and `{"type": "auth", "api_key": "<key>"}` first WS message. | Matches DEPLOYMENT.md connection modes. |
 
@@ -131,7 +131,7 @@ All tools migrated from LangChain `@tool` to SDK `@tool` in `src/sdk/tools_core/
 | 2 | Create `src/http/auth.py` | `verify_api_key(key: str) -> bool` — SHA-256 compare against configured key. `get_api_key_hash() -> str` — hash for storage. `is_localhost(request: Request) -> bool` — check client IP. |
 | 3 | Create `src/http/middleware.py` | FastAPI `Depends` dependency. If `auth_config.api_key` is empty → allow all. If `auth_config.solo_bypass` and `is_localhost(request)` → allow. Otherwise → validate `Authorization: Bearer <key>` header. Returns 401 on failure. |
 | 4 | Add auth dependency to all REST routers | `conversation_router`, `memories_router`, `workspace_router`, `skills_router`, `subagents_router` — all get `Depends(auth_middleware)`. Health endpoints remain unauthenticated. |
-| 5 | Add auth to WebSocket handshake | On `ws/conversation` connect, client must send `{"type": "auth", "api_key": "<key>"}` as first message. Server validates and responds with `{"type": "auth_ok"}` or `{"type": "error", "code": "AUTH_FAILED"}` and closes. If `EA_API_KEY` is empty and client connects from localhost → skip auth. |
+| 5 | Add auth to WebSocket handshake | On `ws/conversation` connect, client must send `{"type": "auth", "api_key": "<key>"}` as first message. Server validates and responds with `{"type": "auth_ok"}` or `{"type": "error", "code": "AUTH_FAILED"}` and closes. If `API_KEY` is empty and client connects from localhost → skip auth. |
 | 6 | Add auth message type to `ws_protocol.py` | `AuthMessage(api_key: str)` → client-to-server. `AuthOkMessage()` → server-to-client. |
 | 7 | Document WS auth flow | Client sends `AuthMessage` as first message if key is non-empty. Handle `auth_ok` and `auth_failed` responses. |
 | 8 | Document REST auth flow | Add `Authorization: Bearer <key>` header to all requests if key is non-empty. |
@@ -143,14 +143,14 @@ All tools migrated from LangChain `@tool` to SDK `@tool` in `src/sdk/tools_core/
 
 ```
 Solo (localhost):
-  Client connects → no EA_API_KEY → no auth required → proceeds
-  Client connects → EA_API_KEY set → localhost bypass → proceeds
+  Client connects → no API_KEY → no auth required → proceeds
+  Client connects → API_KEY set → localhost bypass → proceeds
 
 Remote (LAN/Tailscale/Cloud):
-  Client connects → EA_API_KEY is set → auth required
+  Client connects → API_KEY is set → auth required
   REST: Authorization: Bearer <key> → middleware validates → 401 or proceed
   WS: {"type": "auth", "api_key": "<key>"} → server validates → auth_ok or close
-  Client connects → EA_API_KEY empty → 401/forbidden (remote without key = unsafe)
+  Client connects → API_KEY empty → 401/forbidden (remote without key = unsafe)
 ```
 
 ---

@@ -514,7 +514,7 @@ If a `subagent_start` call arrives after cancel request but before `rmtree`, the
 | SDK coordinator + work queue | ~60 tests in `test_subagent_v1.py` | Good coverage of happy path + cancel races. Includes `mark_stale_running_failed` test but the method is not called from production code. |
 | Tool registration | ~11 tests in `test_subagent_tools_async.py` | JSON field parsing, validation |
 | HTTP endpoints | ~12 tests in `test_api_subagents.py` | CRUD lifecycle, 404s, invalid IDs |
-| Interaction evaluations | 12 tests in `test_subagent_skills.py` | **Skipped by default** — requires `EA_RUN_HTTP_EVALS=1` + running server |
+| Interaction evaluations | 12 tests in `test_subagent_skills.py` | **Skipped by default** — requires `RUN_HTTP_EVALS=1` + running server |
 | Flutter panel widget | 0 dedicated tests (2 existing Flutter test files reference subagents only tangentially: `agent_provider_test.dart`, `workspace_panel_test.dart`) | **Severely insufficient** — no dialog, provider, or error tests |
 | Flutter provider | 0 dedicated tests | **None** |
 | Security/permissions | 0 | **None** — no test verifies tool restrictions |

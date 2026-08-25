@@ -9,9 +9,9 @@ services:
       - "8000:8000"
     command: ["uv", "run", "assistant", "http"]
     environment:
-      # Auth — set EA_API_KEY to require auth on non-localhost connections
-      EA_API_KEY: ${EA_API_KEY:-}
-      # EA_SOLO_BYPASS defaults to true: localhost requests skip auth
+      # Auth — set API_KEY to require auth on non-localhost connections
+      API_KEY: ${API_KEY:-}
+      # SOLO_BYPASS defaults to true: localhost requests skip auth
 
       # Ollama LLM (use your local or cloud instance)
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
@@ -25,9 +25,9 @@ services:
 
       # Storage — both must point into the mounted volume, otherwise user
       # data lands in /root/Assistant inside the container and is lost on
-      # recreation. DEPLOYMENT_EA_ROOT holds user data (conversation, files,
+      # recreation. DEPLOYMENT_DATA_ROOT holds user data (conversation, files,
       # memory, email); DEPLOYMENT_DATA_PATH holds project data (logs, cache).
-      DEPLOYMENT_EA_ROOT: /app/data
+      DEPLOYMENT_DATA_ROOT: /app/data
       DEPLOYMENT_DATA_PATH: /app/data
 
       # Server (API_* envs, see src/config/settings.py)

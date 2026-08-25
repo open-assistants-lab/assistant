@@ -15,10 +15,10 @@ os.environ.setdefault("USER_ID", "test_api_user")
 def isolated_data_path():
     """Keep API contract tests from reading or deleting local app data."""
     orig_data_path = os.environ.get("DEPLOYMENT_DATA_PATH")
-    orig_ea_root = os.environ.get("DEPLOYMENT_EA_ROOT")
+    orig_data_root = os.environ.get("DEPLOYMENT_DATA_ROOT")
     with tempfile.TemporaryDirectory() as data_path:
         os.environ["DEPLOYMENT_DATA_PATH"] = data_path
-        os.environ["DEPLOYMENT_EA_ROOT"] = str(Path(data_path) / "ea_root")
+        os.environ["DEPLOYMENT_DATA_ROOT"] = str(Path(data_path) / "data_root")
 
         from src.config import reload_settings
         from src.storage.messages import _stores
@@ -28,13 +28,18 @@ def isolated_data_path():
         _stores.clear()
         _paths_cache.clear()
         yield data_path
-        del os.environ["DEPLOYMENT_EA_ROOT"]
+        del os.environ["DEPLOYMENT_DATA_ROOT"]
         del os.environ["DEPLOYMENT_DATA_PATH"]
         if orig_data_path is not None:
             os.environ["DEPLOYMENT_DATA_PATH"] = orig_data_path
-        if orig_ea_root is not None:
-            os.environ["DEPLOYMENT_EA_ROOT"] = orig_ea_root
+        if orig_data_root is not None:
+            os.environ["DEPLOYMENT_DATA_ROOT"] = orig_data_root
         reload_settings()
+        # Teardown must ALSO drop caches populated during the api session,
+        # else later suites (tests/storage) hit DataPaths cached against the
+        # deleted temp root (found 2026-08-25 via api→storage combined run).
+        _stores.clear()
+        _paths_cache.clear()
 
 
 @pytest.fixture(scope="session")

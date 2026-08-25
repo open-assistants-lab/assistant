@@ -196,7 +196,7 @@ transition:
 | Team data | N/A | **Admin** — team contacts, skills, memory, files. Users read-only |
 | Personal skills/subagents | User — creates their own | **User** — creates personal ones. Admin provides team-shared |
 | Personal prompt (AGENTS.md) | User | **User** — per-user volume |
-| API key to connect | N/A (localhost bypass) | **Admin** — sets `EA_API_KEY` per container |
+| API key to connect | N/A (localhost bypass) | **Admin** — sets `API_KEY` per container |
 | Billing | User pays their own LLM bills | **Admin** — usage tracking, cost allocation |
 
 ### Admin needs (not yet planned)
@@ -230,7 +230,7 @@ file. Multi-tenant needs three layers:
    - `deployment.mode`
 
 2. **Per-container env vars (admin sets per user at spawn)**
-   - `EA_API_KEY` — the user's auth key
+   - `API_KEY` — the user's auth key
    - `AGENT_MODEL` — default model (user can change within allowlist)
    - `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` — admin-provisioned
    - `FIRECRAWL_API_KEY`
@@ -263,7 +263,7 @@ a blank slate.
 │ Alice       │       │ Bob         │
 │ Container   │       │ Container   │
 │             │       │             │
-│ EA_API_KEY= │       │ EA_API_KEY= │
+│ API_KEY= │       │ API_KEY= │
 │   abc123    │       │   xyz789    │
 │ AGENT_MODEL=│       │ AGENT_MODEL=│
 │  claude-sonnet      │  gpt-4o     │

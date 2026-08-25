@@ -12,7 +12,7 @@ class TestMCPConfig:
         from src.storage.paths import DataPaths
 
         with patch("src.sdk.tools_core.mcp_config.get_paths") as mock_get_paths:
-            dp = DataPaths(ea_root=str(tmp_path), user_id="test_user")
+            dp = DataPaths(data_root=str(tmp_path), user_id="test_user")
             mock_get_paths.return_value = dp
             result = load_mcp_config("test_user")
             assert result is None
@@ -23,7 +23,7 @@ class TestMCPConfig:
         from src.storage.paths import DataPaths
 
         with patch("src.sdk.tools_core.mcp_config.get_paths") as mock_get_paths:
-            dp = DataPaths(ea_root=str(tmp_path), user_id="test_user")
+            dp = DataPaths(data_root=str(tmp_path), user_id="test_user")
             config_path = dp.user_mcp_config()
             config_path.parent.mkdir(parents=True, exist_ok=True)
             config_path.write_text("invalid json{")
@@ -37,7 +37,7 @@ class TestMCPConfig:
         from src.storage.paths import DataPaths
 
         with patch("src.sdk.tools_core.mcp_config.get_paths") as mock_get_paths:
-            dp = DataPaths(ea_root=str(tmp_path), user_id="test_user")
+            dp = DataPaths(data_root=str(tmp_path), user_id="test_user")
             mock_get_paths.return_value = dp
             result = get_config_mtime("test_user")
             assert result == 0.0

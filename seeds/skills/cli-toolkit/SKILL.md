@@ -54,7 +54,7 @@ If the tool is generally useful (not a one-off task), register it as a custom to
 3. Write a `TOOL.md` file:
 
 ```
-files_write(path="{ea_root}/Tools/{name}/TOOL.md", content="""---
+files_write(path="{data_root}/Tools/{name}/TOOL.md", content="""---
 name: pdf_extract_text
 description: Extract text from PDF files using ocrmypdf + pdftotext. Use when the user needs text content from a PDF document.
 command: ocrmypdf "{{input}}" /tmp/_ocr_output.pdf && pdftotext /tmp/_ocr_output.pdf "{{output}}"
@@ -85,7 +85,7 @@ The `{{param}}` placeholders in `command` become the tool parameters. The descri
 **Important:** Always include the OS detection result (`uname -s`, `uname -m`) in the TOOL.md as `os` and if applicable `python_version` fields. This makes the tool portable and helps debug platform-specific issues:
 
 ```
-files_write(path="{ea_root}/Tools/{name}/TOOL.md", content="""---
+files_write(path="{data_root}/Tools/{name}/TOOL.md", content="""---
 name: pdf_extract_text
 description: Extract text from PDF files using ocrmypdf + pdftotext
 command: ocrmypdf "{{input}}" /tmp/_ocr_output.pdf && pdftotext /tmp/_ocr_output.pdf "{{output}}"
