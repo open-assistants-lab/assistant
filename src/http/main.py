@@ -197,21 +197,25 @@ def _is_webhook_fire_path(path: str) -> bool:
 
 @app.middleware("http")
 async def api_key_auth_middleware(request: Request, call_next: Any) -> Any:
-    """Apply API-key auth consistently across HTTP routes."""
+    """Apply API-key auth consistently across HTTP routes.
+
+    Roadmap P0-T1: the IdentityResolver seam is the single enforcement
+    point — the middleware resolves the request and 401s when the resolver
+    returns None. Default resolver = SharedSecretResolver (behavior
+    identical to the pre-seam inline verify_key flow).
+    """
     if request.url.path in _PUBLIC_PATHS or _is_webhook_fire_path(request.url.path):
         return await call_next(request)
 
-    from src.config.settings import get_settings
-    from src.http.auth import is_localhost, verify_key
+    import inspect
 
-    settings = get_settings()
-    if settings.auth.api_key:
-        if not (settings.auth.solo_bypass and is_localhost(request)):
-            auth_header = request.headers.get("Authorization", "")
-            if not auth_header.startswith("Bearer "):
-                return JSONResponse({"detail": "Missing Bearer token"}, status_code=401)
-            if not verify_key(auth_header[7:]):
-                return JSONResponse({"detail": "Invalid API key"}, status_code=401)
+    from src.http.auth import get_resolver
+
+    result = get_resolver().resolve(request)
+    if inspect.isawaitable(result):
+        result = await result
+    if result is None:
+        return JSONResponse({"detail": "Invalid API key"}, status_code=401)
 
     return await call_next(request)
 

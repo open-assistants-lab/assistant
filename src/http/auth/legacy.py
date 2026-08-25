@@ -1,8 +1,8 @@
-"""API key authentication for HTTP and WebSocket endpoints.
+"""Legacy auth helpers, moved from the former `src/http/auth.py` module.
 
-Solo (localhost): auth disabled by default. No configuration needed.
-Multi-device WAN: set API_KEY env var, localhost still bypasses.
-Multi-tenant: each container has its own API_KEY, Caddy routes subdomains.
+Kept as the shared-secret implementation primitives and re-exported from
+the package `__init__` so existing callers (`require_auth`, `verify_key`,
+`is_localhost`) keep working unchanged (migration hook, roadmap P0-T1).
 """
 
 from __future__ import annotations
