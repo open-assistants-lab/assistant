@@ -1,5 +1,5 @@
 [project]
-name = "assistant"
+name = "assistant-sdk"
 version = "0.3.0"
 description = "AI assistant agent with custom SDK runtime"
 requires-python = ">=3.11,<3.14"
@@ -29,15 +29,12 @@ dependencies = [
     "aiohttp>=3.9.0",
     "sqlalchemy>=2.0.0",
     "coremem>=0.13.1",
-    "agentprofile",
+    "agentprofile>=0.2.0",
     "hybriddb>=0.5.8",
     "connectkit==0.1.4",
     "mistune>=3.2.1",
     "langfuse>=4.0",
 ]
-
-[tool.uv.sources]
-agentprofile = { path = "/Users/eddy/Developer/Python/AgentProfile", editable = true }
 
 [project.optional-dependencies]
 http = [
@@ -66,7 +63,7 @@ benchmark = [
 ]
 
 [project.scripts]
-assistant = "src.__main__:main"
+assistant-sdk = "src.__main__:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -10,20 +10,15 @@ resolution-markers = [
 [[package]]
 name = "agentprofile"
 version = "0.2.0"
-source = { editable = "../AgentProfile" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "pydantic", specifier = ">=2.0.0,<3.0.0" },
-    { name = "pyyaml", specifier = ">=6.0,<7.0" },
+sdist = { url = "https://files.pythonhosted.org/packages/6d/8e/661b7cbcfd959d99ce550deb7a71949c26f4c5062dd6e1f087a74a19cdf9/agentprofile-0.2.0.tar.gz", hash = "sha256:9fae73c27d340f6a26ca6d7a99a76541a2082a5328e95d10a8f17ccc5dc91ed1", size = 19944, upload-time = "2026-08-25T12:18:11.786Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b9/c7/8bf292a1ad25058d1320e77935afc9e95f56e23b851b0f3fa1da7076dc25/agentprofile-0.2.0-py3-none-any.whl", hash = "sha256:b1ba1a7f97960f88002ee412049cae2d42677a082ca8c90d0ff40183aac87e33", size = 4339, upload-time = "2026-08-25T12:18:10.215Z" },
 ]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=9.0.3" }]
 
 [[package]]
 name = "aiohappyeyeballs"
@@ -177,7 +172,7 @@ wheels = [
 ]
 
 [[package]]
-name = "assistant"
+name = "assistant-sdk"
 version = "0.3.0"
 source = { editable = "." }
 dependencies = [
@@ -249,7 +244,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agentprofile", editable = "../AgentProfile" },
+    { name = "agentprofile", specifier = ">=0.2.0" },
     { name = "aiohttp", specifier = ">=3.9.0" },
     { name = "aiosqlite", specifier = ">=0.20.0" },
     { name = "apscheduler", specifier = ">=3.11.2" },
