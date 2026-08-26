@@ -35,6 +35,7 @@ from src.http.routers import (
 from src.http.routers.connectors import router as connectors_router
 from src.http.routers.dev import router as dev_router
 from src.http.routers.settings import router as settings_router
+from src.http.routers.v1 import include_v1_aliases
 from src.http.routers.ws import router as ws_router
 from src.storage.paths import DEFAULT_USER_ID
 
@@ -328,6 +329,10 @@ except Exception:
 
 app.include_router(connectors_router)
 app.include_router(dev_router)
+
+# P0-T5: /v1 aliases for the stable partner surface (same handlers, no
+# redirect; auth middleware is path-agnostic and applies identically).
+include_v1_aliases(app)
 
 
 def run() -> None:

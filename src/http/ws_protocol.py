@@ -4,6 +4,11 @@ This module defines the bidirectional message protocol for the
 /ws/conversation endpoint. It serves as the contract between
 the frontend (web client, HTML test harness) and the backend.
 
+URL prefixes (roadmap P0-T5): the endpoint is reachable at both
+`/ws/conversation` (legacy) and `/v1/ws/conversation` (stable partner
+surface). Both serve the same protocol; the /v1 prefix is the
+recommended target for new clients.
+
 The protocol is designed to be:
 - Simple: JSON messages, typed, no binary frames
 - Bidirectional: client sends messages, server streams responses
