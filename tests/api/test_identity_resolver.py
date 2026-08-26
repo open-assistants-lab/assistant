@@ -21,6 +21,17 @@ def _reload_with(monkeypatch, api_key: str | None, solo_bypass: str | None):
     reload_settings()
 
 
+@pytest.fixture(autouse=True)
+def _restore_settings_after_each():
+    """Reload settings on teardown so the process-global singleton never keeps
+    a monkeypatched API_KEY past the test (order-dependent 401s downstream,
+    e.g. test_memories — found 2026-08-25)."""
+    yield
+    from src.config import reload_settings
+
+    reload_settings()
+
+
 def _make_request(headers: dict[str, str] | None = None, host: str = "127.0.0.1"):
     from starlette.requests import Request
     from starlette.types import Scope
