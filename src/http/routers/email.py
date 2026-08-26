@@ -18,6 +18,8 @@ from src.storage.email_db import (
     mark_read,
     search_emails,
 )
+from src.storage.gmail_cache import sync_emails
+from src.storage.gmail_client import GmailClient, GmailNotConnectedError
 
 router = APIRouter(prefix="/emails", tags=["emails"])
 
@@ -59,19 +61,32 @@ async def handle_get(email_id: str, user_id: str = "default_user") -> dict[str, 
 
 @router.post("/sync")
 async def handle_sync(user_id: str = "default_user", provider: str = "gmail") -> dict[str, Any]:
-    """Trigger a manual email sync. Returns immediately, sync runs in background."""
-    import asyncio
+    """Trigger a manual email sync. Returns immediately, sync runs in background.
 
-    from src.config.settings import get_settings
-
-    settings = get_settings()
+    Gmail sync now runs through GmailClient (ConnectKit OAuth token) instead of
+    the gws CLI subprocess (roadmap G3/G4). When the connector has no stored
+    token the response is a frontend-friendly not-connected error (HTTP 200,
+    body `{"error": "not_connected", ...}`) so the UI can prompt Sign-in.
+    """
 
     if provider in ("gmail", "google"):
-        if not settings.email.gws_client_id:
-            return {"error": "gws_client_id not configured"}
-        # Schedule background sync
-        asyncio.create_task(_sync_gmail(user_id, settings))
+        try:
+            client = GmailClient(user_id)
+            if not client.is_connected():
+                return {
+                    "error": "not_connected",
+                    "detail": "Gmail is not connected — Sign in with Google first.",
+                    "provider": "gmail",
+                }
+        except GmailNotConnectedError as exc:
+            return {"error": "not_connected", "detail": str(exc), "provider": "gmail"}
+
+        # Background sync via the G3 sync facade (GmailClient + HybridDB).
+        asyncio.create_task(asyncio.to_thread(sync_emails, user_id))
     elif provider in ("outlook", "m365"):
+        from src.config.settings import get_settings
+
+        settings = get_settings()
         if not settings.email.m365_client_id:
             return {"error": "m365_client_id not configured"}
         asyncio.create_task(_sync_outlook(user_id, settings))
@@ -79,70 +94,7 @@ async def handle_sync(user_id: str = "default_user", provider: str = "gmail") ->
     return {"status": "sync_started", "provider": provider}
 
 
-async def _sync_gmail(user_id: str, settings: Any) -> None:
-    """Background Gmail sync via gws CLI."""
-    import json
-
-    from src.app_logging import get_logger
-
-    logger = get_logger()
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "gws", "gmail", "messages", "list",
-            "--filter", "is:unread OR newer_than:1d",
-            "--format", "json",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env={
-                **__import__("os").environ,
-                "GOOGLE_WORKSPACE_CLI_CLIENT_ID": settings.email.gws_client_id,
-                "GOOGLE_WORKSPACE_CLI_CLIENT_SECRET": settings.email.gws_client_secret,
-            },
-        )
-        stdout, stderr = await proc.communicate()
-
-        if proc.returncode != 0:
-            logger.warning("gws_sync_failed", {"stderr": stderr.decode()[:200]}, user_id=user_id)
-            return
-
-        data = json.loads(stdout)
-        messages = data if isinstance(data, list) else data.get("messages", [])
-
-        emails = []
-        for msg in messages:
-            emails.append({
-                "id": msg.get("id", "") or msg.get("threadId", ""),
-                "from": _extract_header(msg, "From"),
-                "to": _extract_header(msg, "To"),
-                "subject": _extract_header(msg, "Subject"),
-                "snippet": msg.get("snippet", ""),
-                "body": msg.get("snippet", ""),
-                "received_at": _extract_header(msg, "Date"),
-                "is_read": "UNREAD" not in (msg.get("labelIds", [])),
-                "labels": msg.get("labelIds", []),
-                "thread_id": msg.get("threadId", ""),
-                "provider": "gmail",
-            })
-
-        stored = store_emails(user_id, emails)
-        logger.info("gws_sync_done", {"stored": stored, "total": len(emails)}, user_id=user_id)
-    except Exception as e:
-        logger.error("gws_sync_error", {"error": str(e)[:200]}, user_id=user_id)
-
-
 async def _sync_outlook(user_id: str, settings: Any) -> None:
     """Background Outlook sync via m365 CLI."""
-    # Deferred: requires m365 CLI setup. Same pattern as _sync_gmail.
+    # Deferred: requires m365 CLI setup. Same pattern as gmail's GmailClient.
     pass
-
-
-def _extract_header(msg: dict[str, Any], name: str) -> str:
-    headers = msg.get("payload", {}).get("headers", [])
-    for h in headers:
-        if h.get("name", "").lower() == name.lower():
-            return str(h.get("value", ""))
-    return ""
-
-
-from src.storage.email_db import store_emails  # noqa: E402

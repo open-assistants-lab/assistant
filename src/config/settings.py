@@ -264,7 +264,14 @@ class FilesystemConfig(_BaseSettings):
 
 
 class EmailConfig(_BaseSettings):
-    """Email configuration for Gmail/Outlook via gws/m365 CLI."""
+    """Email configuration for Gmail/Outlook via the GmailClient OAuth path.
+
+    Gmail OAuth client credentials (EMAIL_GWS_CLIENT_ID / EMAIL_GWS_CLIENT_SECRET)
+    are reused as the Google OAuth client creds for the gmail connector
+    (roadmap G4) — the same values the old gws CLI used. The OAuth flow stores
+    them in the ConnectKit vault; EMAIL_GWS_* remains the deployment config
+    source of truth.
+    """
 
     enabled: bool = True
     gws_client_id: str = Field(default="")
@@ -273,6 +280,21 @@ class EmailConfig(_BaseSettings):
     sync_interval_minutes: int = Field(default=15)
 
     model_config = SettingsConfigDict(env_prefix="EMAIL_")
+
+
+class ConnectKitConfig(_BaseSettings):
+    """ConnectKit OAuth vault configuration.
+
+    CONNECTKIT_VAULT_KEY is the Fernet key used to encrypt the credential vault
+    (data/private/connectkit/). If unset, connectkit falls back to an ephemeral
+    in-memory key — credentials are NOT persisted across restarts. Production
+    must set it (see docs/RELEASE.md, README index "CONNECTKIT_VAULT_KEY is a
+    production config requirement").
+    """
+
+    vault_key: str = Field(default="", description="Fernet key for the ConnectKit credential vault")
+
+    model_config = SettingsConfigDict(env_prefix="CONNECTKIT_")
 
 
 class ShellToolConfig(_BaseSettings):
@@ -336,6 +358,7 @@ class AppConfig(_BaseSettings):
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     companion: SchedulerConfig = Field(default_factory=SchedulerConfig)
     email: EmailConfig = Field(default_factory=EmailConfig)
+    connectkit: ConnectKitConfig = Field(default_factory=ConnectKitConfig)
     auth: AuthConfig = Field(default_factory=AuthConfig)
 
     model_config = SettingsConfigDict(
