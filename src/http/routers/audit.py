@@ -5,6 +5,7 @@ read from the per-user AuditStore that the CaptureBus writes to (P0-T3).
 Read-only: this router never records, only exports.
 """
 
+import asyncio
 import json
 from datetime import datetime
 from typing import Any
@@ -44,7 +45,7 @@ async def get_audit_export(
             raise HTTPException(status_code=400, detail=f"invalid since: {exc}") from exc
 
     store = ensure_audit_store_subscribed(user_id)
-    events = store.export(user_id=user_id, since=since_ts)
+    events = await asyncio.to_thread(store.export, user_id=user_id, since=since_ts)
 
     def _lines() -> Any:
         for event in events:

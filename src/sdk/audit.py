@@ -157,6 +157,7 @@ default_capture_bus = CaptureBus()
 # user_id so a shared store would also work, but per-user keeps export and
 # future retention/purge per-user without cross-user scans.
 _audit_stores: dict[str, AuditStore] = {}
+_subscribe_lock = threading.Lock()
 
 
 def ensure_audit_store_subscribed(user_id: str) -> AuditStore:
@@ -169,7 +170,11 @@ def ensure_audit_store_subscribed(user_id: str) -> AuditStore:
     if store is not None:
         return store
 
-    store = AuditStore(str(DataPaths(user_id=user_id).audit_db()))
-    _audit_stores[user_id] = store
-    default_capture_bus.subscribe(store.record)
-    return store
+    with _subscribe_lock:
+        store = _audit_stores.get(user_id)
+        if store is not None:
+            return store
+        store = AuditStore(str(DataPaths(user_id=user_id).audit_db()))
+        _audit_stores[user_id] = store
+        default_capture_bus.subscribe(store.record)
+        return store
