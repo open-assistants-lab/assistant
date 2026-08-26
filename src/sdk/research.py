@@ -84,6 +84,11 @@ class PromptTarget(ResearchTarget):
             from src.sdk.providers.factory import get_cached_model_provider
 
             provider = get_cached_model_provider()
+            # Roadmap P0-T3 follow-up: loops built directly (bypassing
+            # create_sdk_loop) must still wire the per-user audit store.
+            from src.sdk.audit import ensure_audit_store_subscribed
+
+            ensure_audit_store_subscribed(self.user_id)
             loop = AgentLoop(
                 provider=provider,
                 tools=self._tools,

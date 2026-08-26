@@ -198,6 +198,12 @@ You have access to tools and skills as configured.
         else:
             sdk_tools = list(all_native)
 
+        # Roadmap P0-T3 follow-up: loops built directly (bypassing
+        # create_sdk_loop) must still wire the per-user audit store.
+        from src.sdk.audit import ensure_audit_store_subscribed
+
+        ensure_audit_store_subscribed(self.user_id)
+
         loop = AgentLoop(
             provider=provider,
             tools=sdk_tools,

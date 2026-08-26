@@ -302,3 +302,61 @@ async def test_wiring_persists_loop_roundtrip_through_default_bus(tmp_path, monk
     kinds = [e.kind for e in store.export(user_id="wire_user3")]
     assert "tool_call" in kinds
     assert "tool_result" in kinds
+
+
+@pytest.mark.asyncio
+async def test_direct_loop_construction_sites_wire_audit_store(tmp_path, monkeypatch):
+    """Coordinator _run_loop (bypassing create_sdk_loop) wires the audit store.
+
+    Roadmap P0-T3 follow-up: loops built directly must still subscribe the
+    per-user audit store so subagent/research runs persist audit rows.
+    """
+    from src.sdk import audit as audit_mod
+    from src.sdk import coordinator as coord_mod
+    from src.sdk.subagent_context import SubagentContext
+
+    calls: list[str] = []
+    _original_ensure = audit_mod.ensure_audit_store_subscribed
+
+    def _recorder(user_id: str):
+        calls.append(user_id)
+        monkeypatch.setattr(audit_mod, "DataPaths", lambda **kw: _FakePaths(tmp_path))
+        return _original_ensure(user_id)
+
+    monkeypatch.setattr(audit_mod, "ensure_audit_store_subscribed", _recorder)
+
+    class _FakeProvider:
+        async def complete(self, *a, **k):  # pragma: no cover - unused
+            raise AssertionError("provider should not be called")
+
+    class _FakeLoop:
+        def __init__(self, *a, **k):
+            pass
+
+        async def run(self, messages):  # noqa: ARG002
+            return []
+
+    def _fake_create_model_from_config(*a, **k):
+        return _FakeProvider()
+
+    monkeypatch.setattr(
+        "src.sdk.providers.factory.create_model_from_config",
+        _fake_create_model_from_config,
+    )
+    monkeypatch.setattr("src.sdk.loop.AgentLoop", _FakeLoop)
+    monkeypatch.setattr(coord_mod, "_build_tools_for_subagent", lambda *a, **k: [])
+    monkeypatch.setattr(coord_mod, "_build_system_prompt", lambda *a, **k: "prompt")
+
+    from agentprofile.models import AgentProfile
+
+    coord = coord_mod.SubagentCoordinator(user_id="direct_loop_user")
+    result = await coord._run_loop(
+        task_id="t1",
+        profile=AgentProfile(name="p", description="d", model="ollama:m"),
+        task="hello",
+        db=None,  # not touched on this path
+        ctx=SubagentContext(),
+    )
+
+    assert calls == ["direct_loop_user"], calls
+    assert result.success is True
