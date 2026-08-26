@@ -1,0 +1,237 @@
+"""CaptureBus / AuditStore / loop-boundary audit capture tests (roadmap P0-T3).
+
+RED phase: these assert the audit contract before the implementation exists.
+"""
+
+
+import pytest
+
+from src.sdk.audit import AuditEvent, AuditStore, CaptureBus, default_capture_bus
+from src.sdk.messages import Message, ToolCall
+from src.sdk.tools import ToolAnnotations, tool
+
+# ── CaptureBus ────────────────────────────────────────────────────────────────
+
+
+class _Sink:
+    def __init__(self) -> None:
+        self.events: list[AuditEvent] = []
+
+    def __call__(self, event: AuditEvent) -> None:
+        self.events.append(event)
+
+
+def test_capture_bus_delivers_to_subscribers():
+    bus = CaptureBus()
+    sink_a, sink_b = _Sink(), _Sink()
+    bus.subscribe(sink_a)
+    bus.subscribe(sink_b)
+    event = AuditEvent(kind="tool_call", tool="echo", call_id="c1")
+    bus.emit(event)
+    assert sink_a.events == [event]
+    assert sink_b.events == [event]
+
+
+def test_capture_bus_swallows_sink_errors():
+    """emit() must never break control flow (emit-only by contract)."""
+
+    def bad_sink(_event):
+        raise RuntimeError("boom")
+
+    bus = CaptureBus()
+    bus.subscribe(bad_sink)
+    ok = _Sink()
+    bus.subscribe(ok)
+    bus.emit(AuditEvent(kind="tool_call", tool="echo", call_id="c1"))
+    assert len(ok.events) == 1
+
+
+def test_default_bus_is_singleton():
+    assert default_capture_bus is default_capture_bus
+
+
+# ── AuditEvent ────────────────────────────────────────────────────────────────
+
+
+def test_audit_event_fields():
+    ev = AuditEvent(
+        kind="approve",
+        tool="email_send",
+        call_id="call_9",
+        user_id="u1",
+        session_id="s1",
+        approved=True,
+        detail="ok",
+    )
+    assert ev.kind == "approve"
+    assert ev.tool == "email_send"
+    assert ev.call_id == "call_9"
+    assert ev.approved is True
+    assert ev.event_id
+    assert ev.ts is not None
+
+
+def test_audit_event_kind_validated():
+    with pytest.raises(ValueError):
+        AuditEvent(kind="nope", tool="echo")  # type: ignore[arg-type]
+
+
+# ── AuditStore (append-only SQLite) ───────────────────────────────────────────
+
+
+def test_audit_store_record_and_export(tmp_path):
+    store = AuditStore(str(tmp_path / "audit.db"))
+    ev = AuditEvent(kind="tool_call", tool="echo", call_id="c1", user_id="u1", session_id="s1")
+    store.record(ev)
+    rows = store.export(user_id="u1")
+    assert len(rows) == 1
+    assert rows[0].kind == "tool_call"
+    assert rows[0].tool == "echo"
+    assert rows[0].call_id == "c1"
+
+
+def test_audit_store_is_append_only(tmp_path):
+    store = AuditStore(str(tmp_path / "audit.db"))
+    ev = AuditEvent(kind="tool_result", tool="echo", call_id="c1", user_id="u1")
+    store.record(ev)
+    store.record(ev)  # same id twice → append-only means no-op overwrite
+    assert len(store.export(user_id="u1")) == 1
+
+
+def test_audit_store_no_update_path(tmp_path):
+    store = AuditStore(str(tmp_path / "audit.db"))
+    assert not hasattr(store, "update")
+    assert not hasattr(store, "delete")
+    assert not hasattr(store, "upsert")
+
+
+def test_audit_store_export_filters_user_and_since(tmp_path):
+    store = AuditStore(str(tmp_path / "audit.db"))
+    store.record(AuditEvent(kind="tool_call", tool="a", call_id="c1", user_id="u1"))
+    store.record(AuditEvent(kind="tool_call", tool="b", call_id="c2", user_id="u2"))
+    assert [r.tool for r in store.export(user_id="u1")] == ["a"]
+    since = store.export(user_id="u1")[0].ts
+    assert store.export(user_id="u1", since=since)  # includes >= since
+
+
+def test_audit_store_subscribes_to_bus(tmp_path):
+    store = AuditStore(str(tmp_path / "audit.db"))
+    bus = CaptureBus()
+    bus.subscribe(store.record)
+    bus.emit(AuditEvent(kind="tool_call", tool="echo", call_id="c1", user_id="u1"))
+    assert len(store.export(user_id="u1")) == 1
+
+
+# ── Loop boundary emission ────────────────────────────────────────────────────
+
+
+class _FakeProvider:
+    """Minimal provider that returns canned responses."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self._i = 0
+
+    async def chat(self, messages, tools=None, model=None, **kwargs):
+        resp = self.responses[self._i]
+        self._i += 1
+        return resp
+
+    async def chat_stream_impl(self, messages, tools, model, **kwargs):
+        yield Message.assistant(content="done")
+
+    @property
+    def model(self):
+        return "fake:model"
+
+    @property
+    def provider_id(self):
+        return "fake"
+
+
+@tool
+def echo(text: str = "hello") -> str:
+    return f"echo:{text}"
+
+
+@pytest.mark.asyncio
+async def test_loop_emits_tool_call_and_result(tmp_path):
+    from src.sdk.loop import AgentLoop
+
+    store = AuditStore(str(tmp_path / "audit.db"))
+    bus = CaptureBus()
+    bus.subscribe(store.record)
+
+    provider = _FakeProvider(
+        responses=[
+            Message.assistant(
+                content="",
+                tool_calls=[ToolCall(id="call_1", name="echo", arguments={"text": "x"})],
+            ),
+            Message.assistant(content="done"),
+        ]
+    )
+    loop = AgentLoop(provider=provider, tools=[echo], capture_bus=bus, user_id="audit_user")
+    await loop.run([Message.user("go")])
+
+    kinds = [e.kind for e in store.export(user_id="audit_user")]
+    assert "tool_call" in kinds
+    assert "tool_result" in kinds
+    call_row = [e for e in store.export(user_id="audit_user") if e.kind == "tool_call"][0]
+    assert call_row.tool == "echo"
+    assert call_row.call_id == "call_1"
+
+
+@pytest.mark.asyncio
+async def test_loop_approve_emits_row(tmp_path):
+    from src.sdk.loop import AgentLoop
+
+    store = AuditStore(str(tmp_path / "audit.db"))
+    bus = CaptureBus()
+    bus.subscribe(store.record)
+
+    loop = AgentLoop(
+        provider=_FakeProvider([]), tools=[echo], capture_bus=bus, user_id="audit_user"
+    )
+    loop.approve_tool_call(ToolCall(id="call_2", name="echo", arguments={"text": "y"}))
+    rows = store.export(user_id="audit_user")
+    assert len(rows) == 1
+    assert rows[0].kind == "approve"
+    assert rows[0].approved is True
+    assert rows[0].call_id == "call_2"
+
+
+@pytest.mark.asyncio
+async def test_loop_interrupt_emits_row(tmp_path):
+    from src.sdk.loop import AgentLoop
+
+    store = AuditStore(str(tmp_path / "audit.db"))
+    bus = CaptureBus()
+    bus.subscribe(store.record)
+
+    @tool
+    def dangerous(cmd: str = "rm -rf /") -> str:
+        return f"ran:{cmd}"
+
+    dangerous.annotations = ToolAnnotations(destructive=True, read_only=False)
+
+    provider = _FakeProvider(
+        responses=[
+            Message.assistant(
+                content="",
+                tool_calls=[ToolCall(id="call_3", name="dangerous", arguments={"cmd": "x"})],
+            ),
+            Message.assistant(content="done"),
+        ]
+    )
+    loop = AgentLoop(provider=provider, tools=[dangerous], capture_bus=bus, user_id="audit_user")
+    # HITL is dormant for ship (_should_interrupt returns False); patch the
+    # gate to exercise the interrupt emission path itself.
+    loop._should_interrupt = lambda tc: tc.name == "dangerous"  # type: ignore[method-assign]
+    await loop.run([Message.user("go")])
+
+    rows = store.export(user_id="audit_user")
+    interrupt_rows = [r for r in rows if r.kind == "interrupt"]
+    assert interrupt_rows, f"expected interrupt rows, got {[r.kind for r in rows]}"
+    assert interrupt_rows[0].tool == "dangerous"
+    assert interrupt_rows[0].approved is False

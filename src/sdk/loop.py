@@ -34,6 +34,8 @@ from typing import Any
 
 from pydantic import TypeAdapter
 
+from src.sdk import audit as _audit
+from src.sdk.audit import AuditEvent, CaptureBus
 from src.sdk.compression import (
     CompressionContext,
     CompressionObserver,
@@ -268,6 +270,7 @@ class AgentLoop:
         context_measurer: ContextMeasurer = build_context_snapshot,
         context_sink: ContextSink | None = None,
         compression_sink: CompressionObserver | None = None,
+        capture_bus: CaptureBus | None = None,
     ) -> None:
         self.provider = provider
         self.system_prompt = system_prompt
@@ -281,6 +284,9 @@ class AgentLoop:
         self.run_config = run_config or RunConfig(max_iterations=max_iterations)
         self.user_id = user_id
         self.workspace_id = workspace_id
+        # Audit capture bus (P0-T3): emit-only boundary. Sinks (audit store,
+        # later metering) never affect control flow.
+        self.capture_bus = capture_bus or _audit.default_capture_bus
         self.subagent_ctx: SubagentContext | None = None
         self.cancel_event: asyncio.Event | None = cancel_event
         # Capability gate (audit E24-tools): when provided, returns True iff
@@ -337,6 +343,7 @@ class AgentLoop:
     def approve_tool_call(self, tc: ToolCall) -> None:
         self._approved_tool_calls.add((tc.id, tc.name, self._tool_args_key(tc)))
         self._approved_tools.add((tc.name, self._tool_args_key(tc)))
+        self._emit_audit(kind="approve", tool=tc.name, call_id=tc.id, approved=True)
 
     # -- Steering (Pi-style) --
 
@@ -567,6 +574,20 @@ class AgentLoop:
             logger.warning(f"caps_check_error tool={name}: {e}")
             return True
 
+    def _emit_audit(self, **kwargs: Any) -> None:
+        """Emit one audit event via the capture bus (emit-only, P0-T3)."""
+        try:
+            self.capture_bus.emit(
+                AuditEvent(
+                    user_id=self.user_id or "default",
+                    session_id=getattr(self, "_flow_session_id", None),
+                    **kwargs,
+                )
+            )
+        except Exception:
+            # Emit-only by contract — never break the loop on audit failure.
+            pass
+
     async def _execute_tool(self, tc: ToolCall) -> ToolResult:
         """Execute a tool call, returning a ToolResult with structured content."""
         tool_def = self._registry.get(tc.name)
@@ -581,6 +602,7 @@ class AgentLoop:
 
         self._recently_used.add(tc.name)
         tc = self._with_runtime_context(tc)
+        self._emit_audit(kind="tool_call", tool=tc.name, call_id=tc.id)
 
         try:
             # Always route through ainvoke: sync tool bodies are offloaded to
@@ -589,9 +611,16 @@ class AgentLoop:
             logger.info(
                 f"sdk.tool_executed tool={tc.name} source={tool_def.function.__module__ if tool_def.function else 'unknown'}"
             )
+            self._emit_audit(
+                kind="tool_result",
+                tool=tc.name,
+                call_id=tc.id,
+                detail=(result.content[:200] if hasattr(result, "content") and isinstance(result.content, str) else None),
+            )
             return ToolResult.from_raw(result)
         except Exception as e:
             logger.error(f"tool_execution_error tool={tc.name}: {e}")
+            self._emit_audit(kind="error", tool=tc.name, call_id=tc.id, detail=str(e))
             return ToolResult(content=str(e), is_error=True)
 
     async def _try_lazy_load(self, tc: ToolCall) -> ToolResult | None:
@@ -1464,6 +1493,7 @@ class AgentLoop:
 
             # Handle interrupts: add interrupt tool_result messages (not executed)
             for tc in interrupts:
+                self._emit_audit(kind="interrupt", tool=tc.name, call_id=tc.id, approved=False)
                 state.add_message(
                     Message.tool_result(
                         tool_call_id=tc.id,
@@ -1970,6 +2000,7 @@ class AgentLoop:
 
                 # Handle interrupts: yield interrupt events, add tool_result messages
                 for tc in interrupts:
+                    self._emit_audit(kind="interrupt", tool=tc.name, call_id=tc.id, approved=False)
                     yield StreamChunk.interrupt(tool=tc.name, call_id=tc.id, args=tc.arguments)
                     interrupt_result = json.dumps(
                         {
