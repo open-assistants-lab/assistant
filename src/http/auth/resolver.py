@@ -21,7 +21,7 @@ class UserIdentity:
       untrusted (per-user keys, Phase 2).
     """
 
-    user_id: str
+    user_id: str | None
     key_id: str | None
     trust_domain: TrustDomain
 

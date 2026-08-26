@@ -23,7 +23,7 @@ from src.storage.gmail_client import GmailClient, GmailNotConnectedError
 
 router = APIRouter(prefix="/emails", tags=["emails"])
 
-_SYNC_TASKS: dict[str, asyncio.Task] = {}
+_SYNC_TASKS: dict[str, 'asyncio.Task[Any]'] = {}
 
 
 @router.get("")

@@ -104,7 +104,9 @@ testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
     "benchmark: tests requiring pytest-benchmark (optional)",
+    "phase0: Phase-0 integration gate (opt-in; run with -m phase0)",
 ]
+addopts = "-m 'not phase0'"
 norecursedirs = ["tests/hybriddb/benchmarks"]
 
 [tool.mypy]
