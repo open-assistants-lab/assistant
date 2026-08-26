@@ -19,6 +19,16 @@ class StoredMessage:
     metadata: dict | None = None
 
 
+
+class _AsyncStoreFactory:
+    """Return a fixed store from the awaited aget_message_store call."""
+
+    def __init__(self, store):
+        self._store = store
+
+    async def __call__(self, *args, **kwargs):
+        return self._store
+
 class FakeConversation:
     def __init__(self) -> None:
         self.messages: list[StoredMessage] = []
@@ -73,7 +83,7 @@ async def test_rest_runner_uses_only_session_scoped_summary_history(monkeypatch)
     async def fake_get_sdk_loop(*args, **kwargs):
         return DummyLoop()
 
-    async def fake_orchestrate(self, loop, messages, run_id, session_id, lock, rubric=None):
+    async def fake_orchestrate(self, loop, messages, run_id, session_id, lock, rubric=None, mode=None):
         captured["messages"] = messages
         return RunResult(
             run_id=run_id,
@@ -86,7 +96,7 @@ async def test_rest_runner_uses_only_session_scoped_summary_history(monkeypatch)
             verification=VerificationOutcome(),
         )
 
-    monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+    monkeypatch.setattr(conversation_router, "aget_message_store", _AsyncStoreFactory(store))
     monkeypatch.setattr(conversation_router.RunService, "_run_bounded_orchestration", fake_orchestrate)
     monkeypatch.setattr("src.sdk.run_service.get_sdk_loop", fake_get_sdk_loop)
 
@@ -118,7 +128,7 @@ async def test_sse_runner_uses_only_session_scoped_summary_history(monkeypatch) 
     async def fake_get_sdk_loop(*args, **kwargs):
         return DummyLoop()
 
-    monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+    monkeypatch.setattr(conversation_router, "aget_message_store", _AsyncStoreFactory(store))
     monkeypatch.setattr(conversation_router.RunService, "_load_rubric_middleware", lambda self, loop, rubric=None: None)
     monkeypatch.setattr("src.sdk.run_service.get_sdk_loop", fake_get_sdk_loop)
 
@@ -163,7 +173,7 @@ async def test_verbose_message_persists_tool_results(monkeypatch) -> None:
         yield StreamChunk.tool_input_start("email_list", "call_1")
         yield StreamChunk.tool_result_event("email_list", "call_1", "5 unread emails")
 
-    monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+    monkeypatch.setattr(conversation_router, "aget_message_store", _AsyncStoreFactory(store))
     monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
 
     await conversation_router.handle_message(
@@ -198,7 +208,7 @@ async def test_verbose_message_dedupes_alias_text_and_tool_end(monkeypatch) -> N
         yield StreamChunk.tool_end("email_list", "call_1", "legacy result")
         yield StreamChunk.tool_result_event("email_list", "call_1", "canonical result")
 
-    monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+    monkeypatch.setattr(conversation_router, "aget_message_store", _AsyncStoreFactory(store))
     monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
 
     result = await conversation_router.handle_message(
@@ -225,7 +235,7 @@ async def test_verbose_message_reports_tool_call_when_start_name_arrives_late(mo
     async def fake_get_sdk_loop(*args, **kwargs):
         return DummyLoop()
 
-    async def fake_orchestrate(self, loop, messages, run_id, session_id, lock, rubric=None):
+    async def fake_orchestrate(self, loop, messages, run_id, session_id, lock, rubric=None, mode=None):
         return RunResult(
             run_id=run_id,
             session_id=session_id,
@@ -238,7 +248,7 @@ async def test_verbose_message_reports_tool_call_when_start_name_arrives_late(mo
             tool_calls=[{"name": "message_search", "tool_call_id": "call_1"}],
         )
 
-    monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+    monkeypatch.setattr(conversation_router, "aget_message_store", _AsyncStoreFactory(store))
     monkeypatch.setattr(conversation_router.RunService, "_run_bounded_orchestration", fake_orchestrate)
     monkeypatch.setattr("src.sdk.run_service.get_sdk_loop", fake_get_sdk_loop)
 
@@ -259,7 +269,7 @@ async def test_stream_message_persists_tool_result_content(monkeypatch) -> None:
         yield StreamChunk.tool_input_start("email_list", "call_1")
         yield StreamChunk.tool_result_event("email_list", "call_1", "5 unread emails")
 
-    monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+    monkeypatch.setattr(conversation_router, "aget_message_store", _AsyncStoreFactory(store))
     monkeypatch.setattr(conversation_router.RunService, "execute_stream", make_run_event_factory(fake_stream))
 
     response = await conversation_router.message_stream(
@@ -290,7 +300,7 @@ async def test_stream_message_dedupes_alias_text_and_tool_end(monkeypatch) -> No
         yield StreamChunk.tool_end("email_list", "call_1", "legacy result")
         yield StreamChunk.tool_result_event("email_list", "call_1", "canonical result")
 
-    monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+    monkeypatch.setattr(conversation_router, "aget_message_store", _AsyncStoreFactory(store))
     monkeypatch.setattr(conversation_router.RunService, "execute_stream", make_run_event_factory(fake_stream))
 
     response = await conversation_router.message_stream(
@@ -319,7 +329,7 @@ async def test_stream_error_does_not_persist_success_fallback(monkeypatch) -> No
     async def fake_stream(**kwargs):
         yield StreamChunk.error("boom")
 
-    monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+    monkeypatch.setattr(conversation_router, "aget_message_store", _AsyncStoreFactory(store))
     monkeypatch.setattr(conversation_router.RunService, "execute_stream", make_run_event_factory(fake_stream))
 
     response = await conversation_router.message_stream(MessageRequest(message="fail", user_id="u"))
@@ -339,7 +349,7 @@ async def test_stream_cancel_does_not_persist_success_fallback(monkeypatch) -> N
         conversation_router._cancel_flags["u:default"] = True
         yield StreamChunk.text_delta("ignored")
 
-    monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+    monkeypatch.setattr(conversation_router, "aget_message_store", _AsyncStoreFactory(store))
     monkeypatch.setattr(conversation_router.RunService, "execute_stream", make_run_event_factory(fake_stream))
 
     response = await conversation_router.message_stream(MessageRequest(message="cancel", user_id="u"))
@@ -388,7 +398,7 @@ async def test_stream_done_failed_does_not_persist_success_fallback(monkeypatch)
             **common,
         )
 
-    monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+    monkeypatch.setattr(conversation_router, "aget_message_store", _AsyncStoreFactory(store))
     monkeypatch.setattr(conversation_router.RunService, "execute_stream", fake_execute_stream)
 
     response = await conversation_router.message_stream(MessageRequest(message="fail", user_id="u"))
@@ -419,7 +429,7 @@ async def test_verbose_empty_stream_does_not_run_agent_twice(monkeypatch) -> Non
         run_calls += 1
         return [Message.assistant("fallback")]
 
-    monkeypatch.setattr(conversation_router, "get_message_store", lambda *args, **kwargs: store)
+    monkeypatch.setattr(conversation_router, "aget_message_store", _AsyncStoreFactory(store))
     monkeypatch.setattr(conversation_router, "run_sdk_agent_stream", fake_stream)
     monkeypatch.setattr(conversation_router, "run_sdk_agent", fake_run)
 

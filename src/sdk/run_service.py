@@ -499,7 +499,7 @@ class RunService:
             # what the client saw, and surface it on the RunResult.
             pre_messages: list[StorageMessage] = []
             reasoning_text: str | None = None
-            if loop.state is not None:
+            if getattr(loop, "state", None) is not None:
                 for msg in reversed(loop.state.messages):
                     if msg.role == "assistant" and getattr(msg, "reasoning", None):
                         reasoning_text = str(msg.reasoning or "")
@@ -731,7 +731,7 @@ class RunService:
             # what the client saw (otherwise the reasoning would land below
             # the answer after a history reload).
             pre_messages: list[StorageMessage] = []
-            if loop.state is not None:
+            if getattr(loop, "state", None) is not None:
                 for msg in reversed(loop.state.messages):
                     if msg.role == "assistant" and getattr(msg, "reasoning", None):
                         pre_messages.append(StorageMessage(
