@@ -46,5 +46,5 @@ class SharedSecretResolver:
         if not verify_key(auth_header[7:]):
             return None
         return UserIdentity(
-            user_id="default_user", key_id="shared-secret", trust_domain="trusted-network"
+            user_id=None, key_id="shared-secret", trust_domain="trusted-network"
         )

@@ -40,6 +40,11 @@ def enforce_user_id(request_user_id: str, resolved: UserIdentity | None) -> None
     """
     if resolved is None or resolved.trust_domain == "solo":
         return
+    if resolved.user_id is None:
+        # Authenticated but the resolver can't scope to a user (e.g. the
+        # shared-secret reference impl — one key per deployment). Enforcement
+        # activates when a per-user resolver (Phase 2 keys) is plugged in.
+        return
     if resolved.user_id != request_user_id:
         raise HTTPException(
             status_code=403,

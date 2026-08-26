@@ -452,10 +452,13 @@ async def ws_conversation(websocket: WebSocket) -> None:
         await websocket.send_json(AuthOkMessage().model_dump())
     # ── End auth ──────────────────────────────────────────────────────────
 
-    # P0-T2: when the connection is authenticated (shared secret), the
-    # resolved identity is `default_user` — client-supplied user_id must
-    # match, or the request is a spoof attempt.
-    resolved_user_id = "default_user" if needs_auth else None
+    # P0-T2: an authenticated connection is user-scoped only when the resolver
+    # actually knows the caller's identity. The shared-secret resolver returns
+    # user_id=None (one key per deployment; key→user mapping is Phase 2's
+    # per-user keys) — so no user_id enforcement applies yet, and a non-default
+    # user_id is NOT treated as spoofing. When a per-user resolver is plugged
+    # in, resolved_user_id carries the identity and enforcement activates.
+    resolved_user_id = None  # shared-secret cannot scope to a user
 
     session_id = str(uuid.uuid4())[:8]
     user_id = "default_user"

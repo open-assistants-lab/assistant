@@ -193,8 +193,24 @@ class TestUserEnforcement:
         ],
     )
     def test_mismatched_user_id_403(self, client, monkeypatch, method, path, params, body):
-        """Authenticated (trusted-network) identity + mismatched user_id -> 403."""
+        """Per-user resolver identity + mismatched user_id -> 403.
+
+        Uses an injected per-user resolver (Phase-2 shape): the shared-secret
+        resolver returns user_id=None (one key per deployment) and therefore
+        correctly does NOT enforce — enforcement activates only when a
+        resolver knows the caller.
+        """
         _reload_with(monkeypatch, api_key="secret", solo_bypass="false")
+
+        class _PerUserResolver:
+            def resolve(self, request):
+                from src.http.auth.resolver import UserIdentity
+
+                return UserIdentity(
+                    user_id="charlie", key_id="k1", trust_domain="trusted-network"
+                )
+
+        monkeypatch.setattr("src.http.auth.get_resolver", lambda: _PerUserResolver())
         kw = {}
         if params:
             kw["params"] = params
@@ -216,8 +232,18 @@ class TestUserEnforcement:
         ],
     )
     def test_matching_user_id_allowed(self, client, monkeypatch, path, params, body):
-        """Authenticated identity + matching user_id -> not a 403 (200 or 401/4xx otherwise)."""
+        """Per-user resolver + matching user_id -> not a 403."""
         _reload_with(monkeypatch, api_key="secret", solo_bypass="false")
+
+        class _PerUserResolver:
+            def resolve(self, request):
+                from src.http.auth.resolver import UserIdentity
+
+                return UserIdentity(
+                    user_id="default_user", key_id="k1", trust_domain="trusted-network"
+                )
+
+        monkeypatch.setattr("src.http.auth.get_resolver", lambda: _PerUserResolver())
         kw = {"params": params}
         if body is not None:
             kw["json"] = body
