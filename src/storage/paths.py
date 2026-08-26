@@ -273,6 +273,14 @@ class DataPaths:
     def work_queue_db(self) -> Path:
         return self.user_subagents_dir() / "work_queue.db"
 
+    def audit_dir(self) -> Path:
+        p = self.user_dir / "Audit"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def audit_db(self) -> Path:
+        return self.audit_dir() / "audit.db"
+
     # -- Deprecated wrappers (redirect to new methods with warnings) --
 
     def workspace_dir(self) -> Path:

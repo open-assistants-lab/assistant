@@ -19,6 +19,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from src.storage.paths import DataPaths
+
 AuditKind = Literal[
     "tool_call", "tool_result", "approve", "interrupt", "error"
 ]
@@ -71,6 +73,10 @@ class AuditStore:
 
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
+        # check_same_thread=True (default): safe only while emission happens on
+        # the event-loop thread, which is the case today (loop emits, WS emits,
+        # runner wires — all on the loop). If a background sink thread is ever
+        # added, pass check_same_thread=False + a per-connection lock.
         self._conn = sqlite3.connect(db_path)
         self._conn.execute(
             """
@@ -141,3 +147,26 @@ class AuditStore:
 
 # One bus for the process: loop emits, WS approve sites emit, sinks subscribe.
 default_capture_bus = CaptureBus()
+
+# Production wiring (P0-T3 fix round): lazily-created per-user AuditStore,
+# subscribed once to default_capture_bus. Per-user matches the codebase's
+# single-writer per-user store pattern (work_queue.db etc.); events carry
+# user_id so a shared store would also work, but per-user keeps export and
+# future retention/purge per-user without cross-user scans.
+_audit_stores: dict[str, AuditStore] = {}
+
+
+def ensure_audit_store_subscribed(user_id: str) -> AuditStore:
+    """Return the per-user AuditStore, subscribing it to default_capture_bus once.
+
+    Idempotent per user. Called from create_sdk_loop so every production loop
+    (REST + SSE + WS paths) flows through it.
+    """
+    store = _audit_stores.get(user_id)
+    if store is not None:
+        return store
+
+    store = AuditStore(str(DataPaths(user_id=user_id).audit_db()))
+    _audit_stores[user_id] = store
+    default_capture_bus.subscribe(store.record)
+    return store

@@ -235,3 +235,70 @@ async def test_loop_interrupt_emits_row(tmp_path):
     assert interrupt_rows, f"expected interrupt rows, got {[r.kind for r in rows]}"
     assert interrupt_rows[0].tool == "dangerous"
     assert interrupt_rows[0].approved is False
+
+
+# ── Production wiring (P0-T3 fix round) ───────────────────────────────────────
+
+
+class _FakePaths:
+    def __init__(self, root):
+        self._root = root
+
+    def audit_dir(self):
+        p = self._root / "Audit"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def audit_db(self):
+        return self.audit_dir() / "audit.db"
+
+
+def test_wiring_subscribes_default_bus_store(tmp_path, monkeypatch):
+    """ensure_audit_store_subscribed wires a store that persists bus events."""
+    from src.sdk import audit as audit_mod
+
+    monkeypatch.setattr(audit_mod, "DataPaths", lambda **kw: _FakePaths(tmp_path))
+    store = audit_mod.ensure_audit_store_subscribed("wire_user")
+    audit_mod.default_capture_bus.emit(
+        AuditEvent(kind="tool_call", tool="echo", call_id="w1", user_id="wire_user")
+    )
+    rows = store.export(user_id="wire_user")
+    assert len(rows) == 1
+    assert rows[0].call_id == "w1"
+    assert (tmp_path / "Audit" / "audit.db").exists()
+
+
+def test_wiring_is_idempotent_per_user(tmp_path, monkeypatch):
+    from src.sdk import audit as audit_mod
+
+    monkeypatch.setattr(audit_mod, "DataPaths", lambda **kw: _FakePaths(tmp_path))
+    s1 = audit_mod.ensure_audit_store_subscribed("wire_user2")
+    s2 = audit_mod.ensure_audit_store_subscribed("wire_user2")
+    assert s1 is s2
+
+
+@pytest.mark.asyncio
+async def test_wiring_persists_loop_roundtrip_through_default_bus(tmp_path, monkeypatch):
+    """A loop using the default bus persists rows through the wired store."""
+    from src.sdk import audit as audit_mod
+    from src.sdk.loop import AgentLoop
+
+    monkeypatch.setattr(audit_mod, "DataPaths", lambda **kw: _FakePaths(tmp_path))
+    store = audit_mod.ensure_audit_store_subscribed("wire_user3")
+
+    provider = _FakeProvider(
+        responses=[
+            Message.assistant(
+                content="",
+                tool_calls=[ToolCall(id="call_9", name="echo", arguments={"text": "z"})],
+            ),
+            Message.assistant(content="done"),
+        ]
+    )
+    # No explicit capture_bus: production default is default_capture_bus.
+    loop = AgentLoop(provider=provider, tools=[echo], user_id="wire_user3")
+    await loop.run([Message.user("go")])
+
+    kinds = [e.kind for e in store.export(user_id="wire_user3")]
+    assert "tool_call" in kinds
+    assert "tool_result" in kinds

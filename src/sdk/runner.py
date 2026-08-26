@@ -27,6 +27,7 @@ from typing import Any, cast
 
 from src.app_logging import get_logger
 from src.config import get_settings
+from src.sdk import profile_loader as _profile_loader
 from src.sdk.capabilities import load_user_capabilities, resource_enabled
 from src.sdk.compression import (
     CompressionArtifact,
@@ -39,7 +40,6 @@ from src.sdk.messages import Message, StreamChunk
 from src.sdk.middleware_summarization import SummarizationMiddleware
 from src.sdk.native_tools import get_native_tools
 from src.sdk.providers.factory import get_cached_model_provider
-from src.sdk import profile_loader as _profile_loader
 from src.sdk.tools import ToolDefinition
 from src.sdk.user_prompt import load_user_prompt
 from src.storage.paths import DataPaths
@@ -415,6 +415,12 @@ async def create_sdk_loop(
     _seed_default_workspace()
     t0 = time.monotonic()
     settings = get_settings()
+
+    # Roadmap P0-T3: wire the per-user audit store to the capture bus once,
+    # so every production loop (REST + SSE + WS) persists audit rows.
+    from src.sdk.audit import ensure_audit_store_subscribed
+
+    ensure_audit_store_subscribed(user_id)
 
     # Roadmap P0-T7 (K1): a user-level PROFILE.md bootstraps the main loop.
     # Precedence: request-scoped `model` arg wins; then profile.model; then
