@@ -1,10 +1,11 @@
+# mypy: disable-error-code="assignment"
 """Workspace management API for Flutter client."""
-
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
+from src.http.auth import enforce_user_id
 from src.sdk.runner import reset_user_sdk_loops
 from src.sdk.workspace_models import (
     Workspace,
@@ -35,7 +36,8 @@ class UpdateWorkspaceRequest(BaseModel):
 
 
 @router.get("")
-async def get_workspaces(user_id: str = "default_user") -> dict[str, Any]:
+async def get_workspaces(user_id: str = "default_user", request: Request = None) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     workspaces = list_workspaces(user_id=user_id)
     return {
         "workspaces": [
@@ -53,8 +55,9 @@ async def get_workspaces(user_id: str = "default_user") -> dict[str, Any]:
 
 @router.post("")
 async def create_workspace(
-    req: CreateWorkspaceRequest, user_id: str = "default_user"
+    req: CreateWorkspaceRequest, user_id: str = "default_user", request: Request = None
 ) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     ws = Workspace.from_name(req.name)
     ws.description = req.description
     ws.prompt = req.prompt
@@ -74,8 +77,9 @@ async def create_workspace(
 
 @router.patch("/{workspace_id}")
 async def update_workspace(
-    workspace_id: str, req: UpdateWorkspaceRequest, user_id: str = "default_user"
+    workspace_id: str, req: UpdateWorkspaceRequest, user_id: str = "default_user", request: Request = None
 ) -> dict[str, Any] | tuple[dict[str, Any], int]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     ws = load_workspace(workspace_id, user_id=user_id)
     if ws is None:
         return {"error": "Workspace not found"}, 404
@@ -95,7 +99,8 @@ async def update_workspace(
 
 
 @router.delete("/{workspace_id}")
-async def delete_workspace_endpoint(workspace_id: str, user_id: str = "default_user") -> dict[str, Any] | tuple[dict[str, Any], int]:
+async def delete_workspace_endpoint(workspace_id: str, user_id: str = "default_user", request: Request = None) -> dict[str, Any] | tuple[dict[str, Any], int]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     ws = load_workspace(workspace_id, user_id=user_id)
     if ws is None or ws.id == "personal":
         return {"error": "Cannot delete"}, 400

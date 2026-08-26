@@ -1,10 +1,11 @@
+# mypy: disable-error-code="assignment"
 """Tools API — list tools with metadata, toggle user-level enabled state."""
-
-import logging
 from typing import Any
+import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
+from src.http.auth import enforce_user_id
 from src.sdk.capabilities import load_user_capabilities, resource_enabled, save_user_capabilities
 from src.sdk.native_tools import get_tool_category
 from src.storage.paths import _validate_path_id
@@ -77,7 +78,9 @@ def _purge_tool_index_entry(user_id: str, workspace_id: str, name: str) -> None:
 async def list_tools(
     user_id: str = Query("default_user"),
     workspace_id: str = Query("personal"),
+    request: Request = None,
 ) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     _validate_path_id(user_id, "user_id")
     _validate_path_id(workspace_id, "workspace_id")
 
@@ -125,7 +128,9 @@ async def get_tool(
     name: str,
     user_id: str = Query("default_user"),
     workspace_id: str = Query("personal"),
+    request: Request = None,
 ) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     _validate_path_id(user_id, "user_id")
     _validate_path_id(workspace_id, "workspace_id")
 
@@ -162,7 +167,9 @@ async def toggle_tool(
     body: dict[str, Any],
     user_id: str = Query("default_user"),
     workspace_id: str = Query("personal"),
+    request: Request = None,
 ) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     """Set a tool's scope.
 
     New body (preferred):

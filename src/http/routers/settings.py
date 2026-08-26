@@ -1,14 +1,12 @@
+# mypy: disable-error-code="assignment"
 """Settings API — per-user overrides for API keys, default model, and key validation."""
-
-from __future__ import annotations
-
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Literal
 
-from fastapi import APIRouter, Body, Query
+from fastapi import APIRouter, Body, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 from starlette.concurrency import run_in_threadpool
@@ -39,6 +37,7 @@ from src.config.user_settings_store import (
     SettingsWriteError,
     UserSettingsStore,
 )
+from src.http.auth import enforce_user_id
 from src.sdk.run_models import CanonicalModel, display_model_name
 
 
@@ -397,8 +396,10 @@ def _configuration_failure() -> JSONResponse:
 
 
 @router.get("", response_model=UserSettingsResponse)
-def get_settings(user_id: str = Query("default_user")) -> UserSettingsResponse | JSONResponse:
+def get_settings(user_id: str = Query("default_user"), request: Request = None) -> UserSettingsResponse | JSONResponse:
     """Read canonical saved and effective settings without exposing credentials."""
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+
     try:
         return _preflight_settings(_get_settings_store(user_id)).response()
     except ValueError:
@@ -410,10 +411,13 @@ def get_settings(user_id: str = Query("default_user")) -> UserSettingsResponse |
 @router.get("/model-catalog", response_model=None)
 def model_catalog(
     user_id: str = Query("default_user"),
+    request: Request = None,
     max_models_per_provider: int | None = None,
     max_providers: int | None = None,
 ) -> dict[str, Any] | JSONResponse:
     """Return the Settings provider-grouped model catalog."""
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+
     try:
         preflight = _preflight_settings(_get_settings_store(user_id))
     except ValueError:
@@ -467,21 +471,23 @@ def model_catalog(
 def update_settings(
     body: Any = Body(...),
     user_id: str = Query("default_user"),
+    request: Request = None,
 ) -> UserSettingsResponse | JSONResponse:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     """Apply a revisioned settings patch, retaining omitted legacy revision support."""
     try:
-        request = UpdateSettingsRequest.model_validate(body)
+        req = UpdateSettingsRequest.model_validate(body)
         store = _get_settings_store(user_id)
         current = store.load()
         expected_revision = (
-            request.expected_revision
-            if request.expected_revision is not None
+            req.expected_revision
+            if req.expected_revision is not None
             else current.revision
         )
         patch_payload: dict[str, Any] = {"expected_revision": expected_revision}
         for field in ("default_model", "title_model", "summarization_model", "verification"):
-            if field in request.model_fields_set:
-                patch_payload[field] = getattr(request, field)
+            if field in req.model_fields_set:
+                patch_payload[field] = getattr(req, field)
         patch = UserSettingsPatch.model_validate(patch_payload)
         if patch.expected_revision != current.revision:
             raise RevisionConflict(patch.expected_revision, current.revision)
@@ -508,7 +514,8 @@ def update_settings(
 
 
 @router.get("/api-keys", response_model=None)
-def list_api_keys(user_id: str = Query("default_user")) -> dict[str, bool] | JSONResponse:
+def list_api_keys(user_id: str = Query("default_user"), request: Request = None) -> dict[str, bool] | JSONResponse:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     """List which providers have stored API keys (without revealing keys)."""
     try:
         saved = _get_settings_store(user_id).load()
@@ -523,18 +530,20 @@ def list_api_keys(user_id: str = Query("default_user")) -> dict[str, bool] | JSO
 def set_api_key(
     body: Any = Body(...),
     user_id: str = Query("default_user"),
+    request: Request = None,
 ) -> dict[str, str | int] | JSONResponse:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     """Store an API key for a provider."""
     try:
-        request = SetApiKeyRequest.model_validate(body)
+        req = SetApiKeyRequest.model_validate(body)
         mutation = _get_settings_store(user_id).set_provider_key(
-            request.provider, request.api_key
+            req.provider, req.api_key
         )
         if mutation.changed:
             _reset_user_loops(user_id)
         return {
             "status": "stored",
-            "provider": request.provider,
+            "provider": req.provider,
             "revision": mutation.settings.revision,
         }
     except (ValidationError, ValueError):

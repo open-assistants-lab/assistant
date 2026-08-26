@@ -160,6 +160,17 @@ class TestUserEnforcement:
             ("POST", "/message/reject", None, {"user_id": "alice", "call_id": "c1"}),
             ("POST", "/message/cancel", None, {"user_id": "alice", "session_id": "s1"}),
             ("POST", "/conversation/import", None, {"user_id": "alice", "session_id": "s1", "messages": []}),
+            # Batch B+C2
+            ("GET", "/workspace/json", {"user_id": "alice"}, None),
+            ("GET", "/workspaces", {"user_id": "alice"}, None),
+            ("POST", "/workspaces", {"user_id": "alice"}, {"name": "ws1"}),
+            ("GET", "/skills", {"user_id": "alice"}, None),
+            ("GET", "/capabilities", {"user_id": "alice"}, None),
+            ("PUT", "/capabilities", {"user_id": "alice"}, {"tools": {"x": "all"}}),
+            ("GET", "/tools", {"user_id": "alice"}, None),
+            ("GET", "/settings", {"user_id": "alice"}, None),
+            ("PATCH", "/settings", {"user_id": "alice"}, {"expected_revision": 1}),
+            ("GET", "/settings/api-keys", {"user_id": "alice"}, None),
         ],
     )
     def test_mismatched_user_id_403(self, client, monkeypatch, method, path, params, body):

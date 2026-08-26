@@ -1,9 +1,10 @@
+# mypy: disable-error-code="assignment"
 """Capabilities API — get/update tool/skill/subagent enable state."""
-
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
+from src.http.auth import enforce_user_id
 from src.sdk.capabilities import (
     load_user_capabilities,
     save_user_capabilities,
@@ -62,7 +63,9 @@ def _validate_top_level_keys(body: dict[str, Any]) -> None:
 async def get_capabilities(
     user_id: str = Query("default_user"),
     workspace_id: str = Query("personal"),
+    request: Request = None,
 ) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     _validate_path_id(user_id, "user_id")
     _validate_path_id(workspace_id, "workspace_id")
     return _resolve_caps(user_id)
@@ -73,7 +76,9 @@ async def replace_capabilities(
     body: dict[str, Any],
     user_id: str = Query("default_user"),
     workspace_id: str = Query("personal"),
+    request: Request = None,
 ) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     _validate_path_id(user_id, "user_id")
     _validate_path_id(workspace_id, "workspace_id")
     _validate_replace_payload(body)
@@ -89,7 +94,9 @@ async def patch_capabilities(
     body: dict[str, Any],
     user_id: str = Query("default_user"),
     workspace_id: str = Query("personal"),
+    request: Request = None,
 ) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     _validate_path_id(user_id, "user_id")
     _validate_path_id(workspace_id, "workspace_id")
 

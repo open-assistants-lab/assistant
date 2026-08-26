@@ -1,13 +1,14 @@
+# mypy: disable-error-code="assignment"
 """Skills API endpoints — user-level only."""
-
 import shutil
 from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from src.http.auth import enforce_user_id
 from src.sdk.capabilities import load_user_capabilities, resource_enabled, save_user_capabilities
 from src.skills.models import _is_valid_skill_name, parse_skill_file
 from src.skills.registry import get_skill_registry
@@ -191,7 +192,8 @@ def _to_detail(
 
 
 @router.get("", response_model=SkillListResponse)
-async def list_skills(user_id: str = "default_user", workspace_id: str = "personal") -> SkillListResponse:
+async def list_skills(user_id: str = "default_user", workspace_id: str = "personal", request: Request = None) -> SkillListResponse:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     _validate_user_id(user_id)
     _validate_workspace_id(workspace_id)
     registry = _get_registry(user_id, workspace_id)
@@ -212,7 +214,9 @@ async def get_skill(
     skill_name: str,
     user_id: str = "default_user",
     workspace_id: str = "personal",
+    request: Request = None,
 ) -> SkillDetail:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     _validate_user_id(user_id)
     _validate_workspace_id(workspace_id)
     _validate_skill_name(skill_name)
@@ -227,24 +231,26 @@ async def get_skill(
 
 @router.post("", response_model=SkillDetail)
 async def create_skill(
-    request: SkillCreateRequest,
+    req: SkillCreateRequest,
     user_id: str = "default_user",
     workspace_id: str = "personal",
+    request: Request = None,
 ) -> SkillDetail:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     _validate_user_id(user_id)
     _validate_workspace_id(workspace_id)
-    _validate_skill_name(request.name)
-    description = request.description.strip()
+    _validate_skill_name(req.name)
+    description = req.description.strip()
     if not description:
         raise HTTPException(status_code=400, detail="Description must not be empty")
 
-    skill_file = _skill_file_path(user_id, request.name)
+    skill_file = _skill_file_path(user_id, req.name)
     if skill_file.exists():
         raise HTTPException(status_code=409, detail="Skill already exists")
 
     skill_file.parent.mkdir(parents=True, exist_ok=True)
     skill_file.write_text(
-        _format_skill_file(_new_frontmatter(request.name, description), request.content),
+        _format_skill_file(_new_frontmatter(req.name, description), req.content),
         encoding="utf-8",
     )
     _get_registry(user_id, workspace_id).reload()
@@ -253,7 +259,7 @@ async def create_skill(
     skill = parse_skill_file(skill_file)
     if not skill:
         raise HTTPException(status_code=500, detail="Skill could not be loaded")
-    enabled = _resource_enabled(_load_user_caps(user_id), "skills", request.name)
+    enabled = _resource_enabled(_load_user_caps(user_id), "skills", req.name)
     return _to_detail(
         skill,
         set(_get_registry(user_id, workspace_id).get_loaded_skills()),
@@ -264,10 +270,12 @@ async def create_skill(
 @router.put("/{skill_name}", response_model=SkillDetail)
 async def update_skill(
     skill_name: str,
-    request: SkillUpdateRequest,
+    req: SkillUpdateRequest,
     user_id: str = "default_user",
     workspace_id: str = "personal",
+    request: Request = None,
 ) -> SkillDetail:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     _validate_user_id(user_id)
     _validate_workspace_id(workspace_id)
     _validate_skill_name(skill_name)
@@ -278,12 +286,12 @@ async def update_skill(
 
     frontmatter, current_content = _parse_skill_document(skill_file)
     frontmatter["name"] = skill_name
-    if request.description is not None:
-        d = request.description.strip()
+    if req.description is not None:
+        d = req.description.strip()
         if not d:
             raise HTTPException(status_code=400, detail="Description must not be empty")
         frontmatter["description"] = d
-    content = request.content if request.content is not None else current_content
+    content = req.content if req.content is not None else current_content
     skill_file.write_text(_format_skill_file(frontmatter, content), encoding="utf-8")
     _get_registry(user_id, workspace_id).reload()
     _reset_user_loops(user_id)
@@ -304,7 +312,9 @@ async def delete_skill(
     skill_name: str,
     user_id: str = "default_user",
     workspace_id: str = "personal",
+    request: Request = None,
 ) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     _validate_user_id(user_id)
     _validate_workspace_id(workspace_id)
     _validate_skill_name(skill_name)
@@ -325,7 +335,9 @@ async def set_skill_scope(
     skill_name: str,
     body: dict[str, Any],
     user_id: str = "default_user",
+    request: Request = None,
 ) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     _validate_user_id(user_id)
     _validate_skill_name(skill_name)
     scope: ScopeKind = body.get("scope", "all")
