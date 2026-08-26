@@ -23,6 +23,8 @@ from src.storage.gmail_client import GmailClient, GmailNotConnectedError
 
 router = APIRouter(prefix="/emails", tags=["emails"])
 
+_SYNC_TASKS: dict[str, asyncio.Task] = {}
+
 
 @router.get("")
 async def handle_list(
@@ -82,7 +84,10 @@ async def handle_sync(user_id: str = "default_user", provider: str = "gmail") ->
             return {"error": "not_connected", "detail": str(exc), "provider": "gmail"}
 
         # Background sync via the G3 sync facade (GmailClient + HybridDB).
-        asyncio.create_task(asyncio.to_thread(sync_emails, user_id))
+        # Hold a module-level reference so the task is never GC'd mid-flight
+        # (asyncio "Task was destroyed" warning); set is bounded to 1 per user.
+        task = asyncio.create_task(asyncio.to_thread(sync_emails, user_id))
+        _SYNC_TASKS[user_id] = task
     elif provider in ("outlook", "m365"):
         from src.config.settings import get_settings
 

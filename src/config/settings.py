@@ -266,11 +266,12 @@ class FilesystemConfig(_BaseSettings):
 class EmailConfig(_BaseSettings):
     """Email configuration for Gmail/Outlook via the GmailClient OAuth path.
 
-    Gmail OAuth client credentials (EMAIL_GWS_CLIENT_ID / EMAIL_GWS_CLIENT_SECRET)
-    are reused as the Google OAuth client creds for the gmail connector
-    (roadmap G4) — the same values the old gws CLI used. The OAuth flow stores
-    them in the ConnectKit vault; EMAIL_GWS_* remains the deployment config
-    source of truth.
+    Gmail OAuth client credentials are entered via the ConnectKit connect form
+    (gmail.yaml required_fields client_id/client_secret) and stored in the
+    vault. EMAIL_GWS_CLIENT_ID / EMAIL_GWS_CLIENT_SECRET are retained for
+    backward compatibility (legacy gws config) but are NOT consumed by the
+    GmailClient path — a deployment that sets only these env vars and skips
+    the connect form will have empty OAuth client creds (roadmap G4).
     """
 
     enabled: bool = True
