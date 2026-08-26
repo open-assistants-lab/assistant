@@ -57,6 +57,22 @@ uv run ruff check src/
 uv run mypy src/
 ```
 
+### Published package
+
+The same engine ships on PyPI as `assistant-sdk` — a deployable server, not an
+importable library:
+
+```bash
+pip install assistant-sdk          # light base (no heavy vector deps)
+pip install "assistant-sdk[memory-vector]"  # + ChromaDB + sentence-transformers (semantic memory/embeddings)
+pip install "assistant-sdk[analytics]"      # + DuckDB analytics mirror
+assistant-sdk http                  # zero-config first run
+```
+
+Heavy optional features (vector search, semantic embeddings, analytics) live in
+extras so the base install stays light; lazy-import sites log an install hint
+when the matching extra is missing.
+
 ### Build
 
 The backend is the API server — run with `uv run assistant http`.

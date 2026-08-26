@@ -8,21 +8,17 @@ dependencies = [
     "pydantic-settings>=2.7.0",
     "python-dotenv>=1.0.0",
     "aiosqlite>=0.20.0",
-    "chromadb>=1.5.0",
     "httpx>=0.28.0",
     "sse-starlette>=2.0.0",
     "fastapi>=0.129.0",
     "uvicorn>=0.41.0",
     "rich>=13.0.0",
     "prompt-toolkit>=3.0.0",
-    "tiktoken>=0.9.0",
-    "duckdb>=1.0.0",
     "sqlite-vec>=0.1.6",
     "cryptography>=41.0.0",
     "imap-tools>=1.0.0",
     "mcp>=1.0.0",
     "apscheduler>=3.11.2",
-    "sentence-transformers>=5.2.3",
     "pyyaml>=6.0",
     "html2text>=2025.4.15",
     "openai>=1.0.0",
@@ -41,6 +37,13 @@ http = [
     "fastapi>=0.129.0",
     "uvicorn>=0.41.0",
     "sse-starlette>=2.0.0",
+]
+memory-vector = [
+    "chromadb>=1.5.0",
+    "sentence-transformers>=5.2.3",
+]
+analytics = [
+    "duckdb>=1.0.0",
 ]
 graph = [
     "networkx>=3.0",
