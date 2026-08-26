@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from src.config import get_settings
 from src.config.settings import REPO_ROOT
 from src.http.routers import (
+    audit_router,
     capabilities,
     contacts_router,
     conversation_router,
@@ -227,6 +228,7 @@ async def api_key_auth_middleware(request: Request, call_next: Any) -> Any:
     return await call_next(request)
 
 app.include_router(health_router)
+app.include_router(audit_router)
 app.include_router(scheduler_router)
 app.include_router(conversation_router)
 app.include_router(email_router)

@@ -14,6 +14,7 @@ from src.http.routers.tools import router as tools_router
 from src.http.routers.user_prompt import router as user_prompt_router
 from src.http.routers.webhooks import router as webhooks_router
 from src.http.routers.workspace import router as workspace_router
+from src.http.routers.audit import router as audit_router
 from src.http.routers.workspaces import router as workspaces_router
 
 __all__ = [

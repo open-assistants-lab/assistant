@@ -12,6 +12,7 @@ Contract: emission is emit-only — sinks can never alter control flow.
 from __future__ import annotations
 
 import sqlite3
+import threading
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -73,11 +74,11 @@ class AuditStore:
 
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
-        # check_same_thread=True (default): safe only while emission happens on
-        # the event-loop thread, which is the case today (loop emits, WS emits,
-        # runner wires — all on the loop). If a background sink thread is ever
-        # added, pass check_same_thread=False + a per-connection lock.
-        self._conn = sqlite3.connect(db_path)
+        # check_same_thread=False + a lock: safe across the loop thread AND
+        # sync test/threadpool callers (export endpoint can run on a threadpool
+        # worker under some ASGI servers). The lock serializes record/export.
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._lock = threading.Lock()
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS audit_events (
@@ -97,38 +98,40 @@ class AuditStore:
 
     def record(self, event: AuditEvent) -> None:
         """Append one event. Duplicate event_id is a no-op (append-only)."""
-        self._conn.execute(
-            """
-            INSERT OR IGNORE INTO audit_events
-                (event_id, ts, user_id, session_id, kind, tool, call_id, approved, detail)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                event.event_id,
-                event.ts.isoformat(),
-                event.user_id,
-                event.session_id,
-                event.kind,
-                event.tool,
-                event.call_id,
-                int(event.approved) if event.approved is not None else None,
-                event.detail,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO audit_events
+                    (event_id, ts, user_id, session_id, kind, tool, call_id, approved, detail)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.event_id,
+                    event.ts.isoformat(),
+                    event.user_id,
+                    event.session_id,
+                    event.kind,
+                    event.tool,
+                    event.call_id,
+                    int(event.approved) if event.approved is not None else None,
+                    event.detail,
+                ),
+            )
+            self._conn.commit()
 
     def export(self, user_id: str, since: datetime | None = None) -> list[AuditEvent]:
         """Read-only export of one user's events, newest-last."""
-        params: list[object] = [user_id]
-        clause = "WHERE user_id = ?"
-        if since is not None:
-            clause += " AND ts >= ?"
-            params.append(since.isoformat())
-        rows = self._conn.execute(
-            f"SELECT event_id, ts, user_id, session_id, kind, tool, call_id, approved, detail "
-            f"FROM audit_events {clause} ORDER BY ts",
-            params,
-        ).fetchall()
+        with self._lock:
+            params: list[object] = [user_id]
+            clause = "WHERE user_id = ?"
+            if since is not None:
+                clause += " AND ts >= ?"
+                params.append(since.isoformat())
+            rows = self._conn.execute(
+                f"SELECT event_id, ts, user_id, session_id, kind, tool, call_id, approved, detail "
+                f"FROM audit_events {clause} ORDER BY ts",
+                params,
+            ).fetchall()
         return [
             AuditEvent(
                 event_id=r[0],
