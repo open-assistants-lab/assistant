@@ -103,7 +103,6 @@ def test_resolve_localhost_bypass(monkeypatch):
 
 def test_middleware_uses_resolver(client, monkeypatch):
     """Middleware 401s when the resolver returns None; passes otherwise."""
-    from src.http.auth import get_resolver
 
     _reload_with(monkeypatch, api_key="secret", solo_bypass="false")
 
@@ -124,8 +123,12 @@ def test_middleware_uses_resolver(client, monkeypatch):
             )
 
     monkeypatch.setattr("src.http.auth.get_resolver", lambda: _AllowResolver())
-    r = client.get("/conversation", params={"user_id": "auth_user"})
+    # P0-T2: the router now enforces user_id against the resolved identity,
+    # so the allowed request must carry the identity's user_id.
+    r = client.get("/conversation", params={"user_id": "default_user"})
     assert r.status_code == 200
+    r = client.get("/conversation", params={"user_id": "auth_user"})
+    assert r.status_code == 403
 
 
 def test_resolver_protocol_shape():
@@ -137,3 +140,58 @@ def test_resolver_protocol_shape():
     assert u.user_id == "u1"
     assert u.key_id == "k1"
     assert u.trust_domain == "trusted-network"
+
+
+class TestUserEnforcement:
+    """P0-T2: authenticated requests cannot spoof another user_id (Batch A)."""
+
+    @pytest.mark.parametrize(
+        "method,path,params,body",
+        [
+            ("GET", "/context-info", {"user_id": "alice"}, None),
+            ("GET", "/conversation", {"user_id": "alice"}, None),
+            ("GET", "/conversation/turns", {"user_id": "alice"}, None),
+            ("GET", "/conversation/sessions", {"user_id": "alice"}, None),
+            ("DELETE", "/conversation/session", {"user_id": "alice", "session_id": "s1"}, None),
+            ("GET", "/models", {"user_id": "alice"}, None),
+            ("DELETE", "/conversation", {"user_id": "alice"}, None),
+            ("POST", "/conversation/title", None, {"user_id": "alice", "session_id": "s1"}),
+            ("POST", "/message", None, {"user_id": "alice", "message": "hi"}),
+            ("POST", "/message/reject", None, {"user_id": "alice", "call_id": "c1"}),
+            ("POST", "/message/cancel", None, {"user_id": "alice", "session_id": "s1"}),
+            ("POST", "/conversation/import", None, {"user_id": "alice", "session_id": "s1", "messages": []}),
+        ],
+    )
+    def test_mismatched_user_id_403(self, client, monkeypatch, method, path, params, body):
+        """Authenticated (trusted-network) identity + mismatched user_id -> 403."""
+        _reload_with(monkeypatch, api_key="secret", solo_bypass="false")
+        kw = {}
+        if params:
+            kw["params"] = params
+        if body is not None:
+            kw["json"] = body
+        r = client.request(
+            method, path, headers={"Authorization": "Bearer secret"}, **kw
+        )
+        assert r.status_code == 403
+
+    @pytest.mark.parametrize(
+        "path,params,body",
+        [
+            ("/conversation", {"user_id": "default_user"}, None),
+            ("/context-info", {"user_id": "default_user"}, None),
+            ("/conversation/turns", {"user_id": "default_user"}, None),
+            ("/conversation/sessions", {"user_id": "default_user"}, None),
+            ("/models", {"user_id": "default_user"}, None),
+        ],
+    )
+    def test_matching_user_id_allowed(self, client, monkeypatch, path, params, body):
+        """Authenticated identity + matching user_id -> not a 403 (200 or 401/4xx otherwise)."""
+        _reload_with(monkeypatch, api_key="secret", solo_bypass="false")
+        kw = {"params": params}
+        if body is not None:
+            kw["json"] = body
+        r = client.request(
+            "GET", path, headers={"Authorization": "Bearer secret"}, **kw
+        )
+        assert r.status_code != 403

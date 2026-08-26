@@ -12,7 +12,7 @@ here so existing callers keep working unchanged.
 
 from __future__ import annotations
 
-from fastapi import Request
+from fastapi import HTTPException
 
 from src.http.auth.legacy import is_localhost, require_auth, verify_key
 from src.http.auth.resolver import IdentityResolver, UserIdentity
@@ -22,11 +22,30 @@ __all__ = [
     "IdentityResolver",
     "UserIdentity",
     "SharedSecretResolver",
+    "enforce_user_id",
     "get_resolver",
     "is_localhost",
     "require_auth",
     "verify_key",
 ]
+
+def enforce_user_id(request_user_id: str, resolved: UserIdentity | None) -> None:
+    """Raise 403 when an authenticated request targets a different user.
+
+    Roadmap P0-T2: every router keeps accepting `user_id` for backward-compat
+    (solo mode), but when a resolver is active (trusted/untrusted domain) the
+    request's `user_id` must match the resolved identity's `user_id`. Solo
+    identities are exempt (no auth configured / localhost bypass) — behavior
+    unchanged there.
+    """
+    if resolved is None or resolved.trust_domain == "solo":
+        return
+    if resolved.user_id != request_user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="user_id does not match authenticated identity",
+        )
+
 
 _DEFAULT_RESOLVER: IdentityResolver | None = None
 

@@ -452,6 +452,11 @@ async def ws_conversation(websocket: WebSocket) -> None:
         await websocket.send_json(AuthOkMessage().model_dump())
     # ── End auth ──────────────────────────────────────────────────────────
 
+    # P0-T2: when the connection is authenticated (shared secret), the
+    # resolved identity is `default_user` — client-supplied user_id must
+    # match, or the request is a spoof attempt.
+    resolved_user_id = "default_user" if needs_auth else None
+
     session_id = str(uuid.uuid4())[:8]
     user_id = "default_user"
     workspace_id = "personal"
@@ -663,6 +668,16 @@ async def ws_conversation(websocket: WebSocket) -> None:
                 break
 
             user_id = getattr(msg, "user_id", user_id) or user_id
+            if resolved_user_id is not None and user_id != resolved_user_id:
+                # P0-T2: authenticated connections cannot spoof another user.
+                await websocket.send_json(
+                    ErrorMessage(
+                        message="user_id does not match authenticated identity",
+                        code="AUTH_FAILED",
+                    ).model_dump()
+                )
+                await websocket.close()
+                return
             workspace_id = getattr(msg, "workspace_id", workspace_id) or workspace_id
             session_id = _resolve_ws_session_id(msg, session_id)
             verbose = getattr(msg, "verbose", verbose)

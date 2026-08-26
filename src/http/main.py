@@ -52,7 +52,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Start companion scheduler if enabled
     try:
         from src.app_logging import get_logger
-
         from src.config import get_settings
         settings = get_settings()
         if getattr(settings.companion, "enabled", False):
@@ -217,6 +216,10 @@ async def api_key_auth_middleware(request: Request, call_next: Any) -> Any:
         result = await result
     if result is None:
         return JSONResponse({"detail": "Invalid API key"}, status_code=401)
+
+    # P0-T2: stash the resolved identity so routers can enforce user_id
+    # without resolving twice.
+    request.state.identity = result
 
     return await call_next(request)
 
