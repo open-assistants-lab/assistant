@@ -132,14 +132,14 @@ def test_auth_login_not_401_when_api_key_set(client, monkeypatch, api_key_mode):
     in-app connector guard (400 for unconfigured), not the auth middleware."""
     r = client.get(
         "/auth/login",
-        params={"service": "acuity-scheduling", "user_id": "oauth_user"},
+        params={"service": "gmail", "user_id": "oauth_user"},
         follow_redirects=False,
     )
     assert r.status_code != 401
 
 
 def test_auth_callback_not_401_when_api_key_set(client, monkeypatch, api_key_mode):
-    r = client.get("/auth/callback", params={"service": "acuity-scheduling"})
+    r = client.get("/auth/callback", params={"service": "gmail"})
     assert r.status_code != 401
 
 
@@ -176,7 +176,7 @@ def test_auth_login_binds_flow_to_deployment_owner(
     r = client.get(
         "/auth/login",
         params={
-            "service": "acuity-scheduling",
+            "service": "gmail",
             "user_id": "attacker_chosen_user",
         },
         follow_redirects=False,

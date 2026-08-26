@@ -1,16 +1,16 @@
 """Gmail email cache using HybridDB.
 
-Fetches from Gmail API (via gws CLI), stores in HybridDB for
-keyed-by-message-id access + keyword/semantic/hybrid search.
+Fetches from Gmail API (via GmailClient + ConnectKit OAuth), stores in
+HybridDB for keyed-by-message-id access + keyword/semantic/hybrid search.
 
 Store path: data/users/{user_id}/gmail_cache/
   app.db     — SQLite + FTS5 + journal
   vectors/   — ChromaDB for semantic search
 """
 
+import asyncio
 import json
 import sqlite3
-import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +20,7 @@ from hybriddb import HybridDB, SearchMode
 
 from src.app_logging import get_logger
 from src.config import get_settings
+from src.storage.gmail_client import GmailClient, GmailNotConnectedError
 from src.storage.paths import get_paths
 
 logger = get_logger()
@@ -305,9 +306,9 @@ class GmailCache:
     # -- Attachments --
 
     def download_attachment(
-        self, message_id: str, filename: str, output_dir: str | None = None
+        self, message_id: str, filename: str, output_dir: str | None = None, client: GmailClient | None = None
     ) -> str | None:
-        """Download a specific attachment from a Gmail message via gws CLI.
+        """Download a specific attachment via GmailClient (ConnectKit OAuth).
 
         Returns the path to the downloaded file, or None on failure.
         """
@@ -320,8 +321,11 @@ class GmailCache:
                     break
 
         if not attachment_id:
-            # Try fetching fresh
-            email_dict = _fetch_one_email(message_id, message_id, fetch_body=True)
+            # Try fetching fresh (async fetch via the injected-or-new client).
+            client = client or GmailClient(self.user_id)
+            email_dict = _run_async(
+                lambda: _fetch_one_email_async(client, message_id, message_id, fetch_body=True)
+            )
             if email_dict:
                 for a in email_dict.get("attachments", []):
                     if a.get("filename") == filename:
@@ -329,26 +333,28 @@ class GmailCache:
                         break
 
         if not attachment_id:
-            logger.warning("gmail_attachment_not_found", {"message_id": message_id, "filename": filename})
+            logger.warning(
+                "gmail_attachment_not_found", {"message_id": message_id, "filename": filename}
+            )
             return None
 
-        out_dir = Path(output_dir) if output_dir else get_paths(self.user_id).gmail_cache_dir() / "attachments" / message_id
+        out_dir = (
+            Path(output_dir)
+            if output_dir
+            else get_paths(self.user_id).gmail_cache_dir() / "attachments" / message_id
+        )
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / filename
 
-        cmd = [
-            "gws", "gmail", "users", "messages", "attachments", "get",
-            "--params", json.dumps({"userId": "me", "messageId": message_id, "id": attachment_id}),
-            "--output", str(out_path),
-        ]
-
+        client = client or GmailClient(self.user_id)
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            if result.returncode == 0 and out_path.exists():
-                return str(out_path)
+            data = _run_async(lambda: client.get_attachment(message_id, attachment_id))
         except Exception as e:
-            logger.error("gmail_attachment_download_error", {"error": str(e)})
-
+            logger.error("gmail_attachment_download_error", {"error": str(e)[:200]})
+            return None
+        if data:
+            out_path.write_bytes(data)
+            return str(out_path)
         return None
 
     # -- Helpers --
@@ -414,11 +420,24 @@ def get_gmail_cache(user_id: str = "default_user") -> GmailCache:
     return _stores[user_id]
 
 
-# -- Sync from Gmail API via gws CLI --
+# -- Sync from Gmail API via GmailClient (OAuth, replaces gws CLI) --
 
-_GSW_FETCH_TIMEOUT = 30
 _LIST_PAGE_SIZE = 500
 _UPSERT_FLUSH = 25
+
+
+def _run_async(factory: Any) -> Any:
+    """Run an async coroutine from a sync context (running-loop safe)."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None and loop.is_running():
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(lambda: asyncio.run(factory())).result(timeout=240)
+    return asyncio.run(factory())
 
 
 def sync_emails(
@@ -428,41 +447,71 @@ def sync_emails(
     fetch_body: bool = True,
     progress: bool = True,
 ) -> dict[str, Any]:
-    """Sync emails from Gmail API into the cache.
+    """Sync emails from Gmail API into the cache (sync facade).
 
-    Uses the gws CLI (must be installed and authenticated).
-    Auto-paginates through all matching results.
+    Uses GmailClient (ConnectKit OAuth token) instead of the gws CLI.
 
-    Returns dict with counts: {listed, fetched, upserted, errors}
+    Returns dict with counts: {listed, fetched, upserted, errors[, error]}
     """
     cache = get_gmail_cache(user_id)
+    client = GmailClient(user_id)
+    return cast(
+        dict[str, Any],
+        _run_async(
+            lambda: _sync_emails_async(
+                user_id,
+                cache,
+                client,
+                max_results=max_results,
+                query=query,
+                fetch_body=fetch_body,
+                progress=progress,
+            )
+        ),
+    )
 
-    # -- Step 1: Paginate through all matching message IDs --
+
+async def _sync_emails_async(
+    user_id: str,
+    cache: GmailCache,
+    client: GmailClient,
+    max_results: int = 50,
+    query: str | None = None,
+    fetch_body: bool = True,
+    progress: bool = False,
+) -> dict[str, Any]:
+    """Async core: paginate message ids, fetch details, upsert into HybridDB."""
+    try:
+        return await _sync_emails_core(cache, client, max_results, query, fetch_body, progress)
+    except GmailNotConnectedError as e:
+        logger.warning("gmail_sync_not_connected", {"error": str(e)}, user_id=user_id)
+        return {"listed": 0, "fetched": 0, "upserted": 0, "errors": 1, "error": str(e)}
+
+
+async def _sync_emails_core(
+    cache: GmailCache,
+    client: GmailClient,
+    max_results: int,
+    query: str | None,
+    fetch_body: bool,
+    progress: bool,
+) -> dict[str, Any]:
+    """Paginate message ids, fetch details, upsert in batches."""
     all_messages: list[dict[str, Any]] = []
     page_token: str | None = None
     pages = 0
-
     page_size = min(max_results, _LIST_PAGE_SIZE) if max_results > 0 else _LIST_PAGE_SIZE
 
     while True:
-        params: dict[str, Any] = {"userId": "me", "maxResults": min(page_size, _LIST_PAGE_SIZE)}
-        if query:
-            params["q"] = query
-        if page_token:
-            params["pageToken"] = page_token
-
-        list_json = _run_gws("gmail", "users", "messages", "list", params)
+        list_json = await client.list_messages(max_results=page_size, query=query, page_token=page_token)
         pages += 1
-
         if list_json is None:
-            # Retry once if not the first page
             if pages == 1:
                 return {"listed": 0, "fetched": 0, "upserted": 0, "errors": 1}
             break
 
         messages = list_json.get("messages", [])
         all_messages.extend(messages)
-
         page_token = list_json.get("nextPageToken")
         if not page_token or len(all_messages) >= max_results:
             break
@@ -473,7 +522,6 @@ def sync_emails(
     total = len(all_messages)
     logger.info("gmail_sync_listed", {"total": total, "pages": pages})
 
-    # -- Step 2: Fetch details and upsert in batches --
     fetched = 0
     upserted = 0
     errors = 0
@@ -482,7 +530,7 @@ def sync_emails(
     for i, msg in enumerate(all_messages):
         msg_id = msg["id"]
         thread_id = msg.get("threadId", msg_id)
-        email_data = _fetch_one_email(msg_id, thread_id, fetch_body)
+        email_data = await _fetch_one_email_async(client, msg_id, thread_id, fetch_body)
 
         if email_data:
             batch.append(email_data)
@@ -490,7 +538,6 @@ def sync_emails(
         else:
             errors += 1
 
-        # Flush batch periodically
         if len(batch) >= _UPSERT_FLUSH:
             upserted += cache.upsert_batch(batch)
             batch.clear()
@@ -498,35 +545,27 @@ def sync_emails(
         if progress and (i + 1) % 10 == 0:
             print(f"  {i + 1}/{total} ...", end="\r", flush=True)
 
-    # Flush remaining
     if batch:
         upserted += cache.upsert_batch(batch)
-
     if progress:
         print(f"  {total}/{total} done.             ")
 
     cache.db.process_journal(limit=10000)
-
     return {"listed": total, "fetched": fetched, "upserted": upserted, "errors": errors}
 
 
-def _fetch_one_email(
+async def _fetch_one_email_async(
+    client: GmailClient,
     message_id: str,
     thread_id: str,
     fetch_body: bool = True,
 ) -> dict[str, Any] | None:
-    """Fetch a single email's metadata (and optionally body) via gws."""
-    meta_headers = ["From", "To", "Date", "Subject", "List-Unsubscribe", "List-Unsubscribe-Post"]
-
-    params: dict[str, Any] = {
-        "userId": "me",
-        "id": message_id,
-        "format": "full" if fetch_body else "metadata",
-    }
-    if not fetch_body:
-        params["metadataHeaders"] = meta_headers
-
-    data = _run_gws("gmail", "users", "messages", "get", params)
+    """Fetch a single email's metadata (and optionally body) via GmailClient."""
+    try:
+        data = await client.get_message(message_id, fmt="full" if fetch_body else "metadata")
+    except Exception as e:
+        logger.error("gmail_fetch_error", {"message_id": message_id, "error": str(e)[:200]})
+        return None
     if data is None:
         return None
 
@@ -574,6 +613,7 @@ def _fetch_one_email(
         "headers": important_headers,
         "attachments": attachments,
     }
+
 
 
 def _extract_body(payload: dict[str, Any]) -> str:
@@ -671,47 +711,3 @@ def _parse_address_list(raw: str) -> list[str]:
         return [addr for name, addr in getaddresses([raw]) if addr]
     except Exception:
         return [a.strip() for a in raw.split(",") if a.strip()]
-
-
-def _run_gws(
-    service: str,
-    resource: str,
-    sub_resource: str,
-    method: str,
-    params: dict[str, Any],
-) -> dict[str, Any] | None:
-    """Run a gws CLI command and return JSON output."""
-    cmd = [
-        "gws",
-        service,
-        resource,
-        sub_resource,
-        method,
-        "--params",
-        json.dumps(params),
-        "--format",
-        "json",
-    ]
-
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if result.returncode != 0:
-            logger.error("gws_failed", {"exit": result.returncode, "stderr": result.stderr[:200]})
-            return None
-
-        # stderr contains "Using keyring backend: ...", stdout is JSON
-        return cast(dict[str, Any], json.loads(result.stdout))
-    except subprocess.TimeoutExpired:
-        logger.error("gws_timeout", {"reason": "subprocess timeout"})
-        return None
-    except json.JSONDecodeError as e:
-        logger.error("gws_json_error", {"error": str(e)})
-        return None
-    except Exception as e:
-        logger.error("gws_error", {"error": str(e)})
-        return None

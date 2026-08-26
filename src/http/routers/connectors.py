@@ -5,6 +5,8 @@ Connector catalog API — lists available SaaS connectors and their setup detail
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -14,6 +16,15 @@ from src.http.auth import enforce_user_id
 
 logger = get_logger()
 router = APIRouter(prefix="/connectors", tags=["connectors"])
+
+# Repo-owned connector specs (e.g. gmail.yaml) ship under packages/. When
+# running from source and no explicit CONNECTKIT_SPEC_DIR is set, prefer the
+# repo dir so the catalog includes repo connectors out of the box. Production
+# sets the env var explicitly (packaged specs or a mounted spec dir).
+if not os.environ.get("CONNECTKIT_SPEC_DIR"):
+    _repo_spec_dir = Path(__file__).resolve().parents[3] / "packages" / "connectkit" / "connectors"
+    if _repo_spec_dir.exists():
+        os.environ["CONNECTKIT_SPEC_DIR"] = str(_repo_spec_dir)
 
 
 def _get_catalog(user_id: str) -> list[dict[str, Any]]:

@@ -32,6 +32,7 @@ from src.http.routers import (
     workspaces_router,
 )
 from src.http.routers.connectors import router as connectors_router
+from src.http.routers.dev import router as dev_router
 from src.http.routers.settings import router as settings_router
 from src.http.routers.ws import router as ws_router
 from src.storage.paths import DEFAULT_USER_ID
@@ -180,6 +181,8 @@ _PUBLIC_PATHS = {
     # unconfigured services with 400.
     "/auth/login",
     "/auth/callback",
+    # Dev demo page — static HTML, no Bearer token from the browser.
+    "/dev/gmail-demo",
 }
 
 
@@ -322,6 +325,7 @@ except Exception:
     traceback.print_exc()
 
 app.include_router(connectors_router)
+app.include_router(dev_router)
 
 
 def run() -> None:
