@@ -1,7 +1,7 @@
 # mypy: disable-error-code="assignment"
 """Tools API — list tools with metadata, toggle user-level enabled state."""
-from typing import Any
 import logging
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
