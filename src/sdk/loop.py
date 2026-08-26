@@ -579,7 +579,7 @@ class AgentLoop:
         try:
             self.capture_bus.emit(
                 AuditEvent(
-                    user_id=self.user_id or "default",
+                    user_id=self.user_id or "default_user",
                     session_id=getattr(self, "_flow_session_id", None),
                     **kwargs,
                 )

@@ -69,9 +69,23 @@ def test_gate_shared_secret_auth(client, monkeypatch):
 
 
 def test_gate_streams_response_via_v1(client, monkeypatch):
-    """POST /v1/message/stream returns SSE text events (agent path stubbed)."""
+    """POST /v1/message/stream returns SSE text events.
+
+    The router consumes RunEvents from `RunService.execute_stream`; this stubs
+    that seam (the established pattern in tests/api/test_conversation.py) so the
+    gate runs WITHOUT a live model. The assertion is structural against the real
+    SSE contract (text_delta + done frames).
+    """
+    from datetime import UTC, datetime
+
     from src.http.routers import conversation as conversation_router
-    from src.sdk.messages import StreamChunk
+    from src.sdk.run_events import (
+        BlockDeltaData,
+        DoneData,
+        DoneEvent,
+        TextDeltaEvent,
+    )
+    from src.sdk.run_models import RunResult, RunStatus, RunUsage, VerificationOutcome
 
     async def _astub(value):
         return value
@@ -84,22 +98,46 @@ def test_gate_streams_response_via_v1(client, monkeypatch):
             return []
 
         def add_message(self, *a, **kw):
-            return None
+            return "m1"
 
         def persist_run(self, **kw):
             return None
 
-    async def fake_run_sdk_agent_stream(**kwargs):
-        yield StreamChunk.text_start()
-        yield StreamChunk.text_delta(content="gate-ok")
-        yield StreamChunk.text_end()
-        yield StreamChunk.done(content="gate-ok")
+    _common = dict(
+        event_id="e1",
+        sequence=1,
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        session_id="gate-1",
+        run_id="r1",
+        attempt=1,
+    )
+
+    async def fake_execute_stream(self, **kwargs):
+        yield TextDeltaEvent(
+            data=BlockDeltaData(block_id="b", delta="gate-ok"), **_common
+        )
+        yield DoneEvent(
+            data=DoneData(
+                result=RunResult(
+                    run_id="r1",
+                    session_id="gate-1",
+                    status=RunStatus.COMPLETED,
+                    attempt=1,
+                    model="fake:model",
+                    response="gate-ok",
+                    usage=RunUsage(),
+                    verification=VerificationOutcome(),
+                    persisted_at=datetime(2026, 1, 1, tzinfo=UTC),
+                )
+            ),
+            **_common,
+        )
 
     monkeypatch.setattr(
         conversation_router, "aget_message_store", lambda *a, **kw: _astub(_FakeConv())
     )
     monkeypatch.setattr(
-        conversation_router, "run_sdk_agent_stream", fake_run_sdk_agent_stream
+        conversation_router.RunService, "execute_stream", fake_execute_stream
     )
 
     with client.stream(
@@ -109,8 +147,7 @@ def test_gate_streams_response_via_v1(client, monkeypatch):
     ) as resp:
         assert resp.status_code == 200, resp.text
         body = "".join(resp.iter_text())
-    # Real SSE frames must be present and the run must reach `done`.
-    assert body.count("data:") >= 1, body
+    assert "gate-ok" in body, body
     assert '"type": "done"' in body, body
 
 
