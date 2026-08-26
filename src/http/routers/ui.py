@@ -1,10 +1,12 @@
+# mypy: disable-error-code="assignment"
 """UI interaction tracking router — track and query user UI state."""
 
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel
 
+from src.http.auth import enforce_user_id
 from src.sdk.ui_state import get_state, track_event
 
 router = APIRouter(prefix="/ui", tags=["ui"])
@@ -20,7 +22,9 @@ class TrackEventBody(BaseModel):
 async def track_ui_event(
     body: TrackEventBody,
     user_id: str = Query("default_user"),
+    request: Request = None,
 ) -> dict[str, str]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     event_dict = dict(body.event)
     if body.timestamp:
         event_dict["timestamp"] = body.timestamp
@@ -32,5 +36,7 @@ async def track_ui_event(
 @router.get("/state")
 async def get_ui_state(
     user_id: str = Query("default_user"),
+    request: Request = None,
 ) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     return get_state(user_id).to_dict()

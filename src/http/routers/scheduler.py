@@ -1,10 +1,12 @@
+# mypy: disable-error-code="assignment"
 """Scheduler HTTP endpoints for managing the agent scheduler and notifications."""
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from src.app_logging import get_logger
+from src.http.auth import enforce_user_id
 from src.sdk.agent_scheduler import get_agent_scheduler
 from src.sdk.tools_core.agent_scheduler_db import SchedulerMemoryDB, SchedulerNotificationDB
 
@@ -17,7 +19,9 @@ async def list_notifications(
     user_id: str = Query("default_user"),
     limit: int = Query(50, ge=1, le=200),
     include_dismissed: bool = Query(False),
+    request: Request = None,
 ) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     db = SchedulerNotificationDB(user_id)
     try:
         notifs = await db.list(limit=limit, include_dismissed=include_dismissed)
@@ -30,7 +34,9 @@ async def list_notifications(
 async def dismiss_notification(
     notif_id: str,
     user_id: str = Query("default_user"),
+    request: Request = None,
 ) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     db = SchedulerNotificationDB(user_id)
     try:
         ok = await db.dismiss(notif_id)
@@ -42,21 +48,24 @@ async def dismiss_notification(
 
 
 @router.post("/pause")
-async def pause_scheduler(user_id: str = Query("default_user")) -> dict[str, Any]:
+async def pause_scheduler(user_id: str = Query("default_user"), request: Request = None) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     scheduler = get_agent_scheduler(user_id)
     await scheduler.pause()
     return {"status": "paused"}
 
 
 @router.post("/resume")
-async def resume_scheduler(user_id: str = Query("default_user")) -> dict[str, Any]:
+async def resume_scheduler(user_id: str = Query("default_user"), request: Request = None) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     scheduler = get_agent_scheduler(user_id)
     await scheduler.resume()
     return {"status": "resumed"}
 
 
 @router.get("/status")
-async def scheduler_status(user_id: str = Query("default_user")) -> dict[str, Any]:
+async def scheduler_status(user_id: str = Query("default_user"), request: Request = None) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     scheduler = get_agent_scheduler(user_id)
     return {
         "running": scheduler.is_running,
@@ -66,7 +75,8 @@ async def scheduler_status(user_id: str = Query("default_user")) -> dict[str, An
 
 
 @router.get("/memory")
-async def list_scheduler_memory(user_id: str = Query("default_user")) -> dict[str, Any]:
+async def list_scheduler_memory(user_id: str = Query("default_user"), request: Request = None) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     db = SchedulerMemoryDB(user_id)
     try:
         facts = await db.list_all()
@@ -79,7 +89,9 @@ async def list_scheduler_memory(user_id: str = Query("default_user")) -> dict[st
 async def delete_scheduler_memory(
     mem_id: int,
     user_id: str = Query("default_user"),
+    request: Request = None,
 ) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     db = SchedulerMemoryDB(user_id)
     try:
         ok = await db.delete(mem_id)

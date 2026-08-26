@@ -1,3 +1,4 @@
+# mypy: disable-error-code="assignment"
 """User prompt API endpoints."""
 
 from json import JSONDecodeError
@@ -23,6 +24,7 @@ from src.config.user_settings_store import (
     SettingsWriteError,
     UserSettingsStore,
 )
+from src.http.auth import enforce_user_id
 from src.sdk.user_prompt import load_user_prompt, save_user_prompt
 
 router = APIRouter(prefix="/user", tags=["user"])
@@ -95,15 +97,17 @@ def _grader_prompt_configuration_failure() -> JSONResponse:
 
 
 @router.get("/prompt", response_model=UserPromptResponse)
-async def get_user_prompt(user_id: str = "default_user") -> UserPromptResponse:
+async def get_user_prompt(user_id: str = "default_user", request: Request = None) -> UserPromptResponse:
     """Get the user's custom prompt."""
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     prompt = load_user_prompt(user_id)
     return UserPromptResponse(prompt=prompt)
 
 
 @router.put("/prompt", response_model=UserPromptResponse)
-async def set_user_prompt(req: UserPromptRequest, user_id: str = "default_user") -> UserPromptResponse:
+async def set_user_prompt(req: UserPromptRequest, user_id: str = "default_user", request: Request = None) -> UserPromptResponse:
     """Set the user's custom prompt."""
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     save_user_prompt(user_id, req.prompt)
     return UserPromptResponse(prompt=req.prompt)
 
@@ -111,8 +115,10 @@ async def set_user_prompt(req: UserPromptRequest, user_id: str = "default_user")
 @router.get("/grader-prompt", response_model=GraderPromptResponse)
 def get_grader_prompt(
     user_id: str = Query("default_user"),
+    request: Request = None,
 ) -> GraderPromptResponse | JSONResponse:
     """Get the user's revisioned grader prompt."""
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     try:
         return _get_grader_prompt_store(user_id).load_grader_prompt()
     except ValueError:
@@ -127,6 +133,7 @@ async def set_grader_prompt(
     user_id: str = Query("default_user"),
 ) -> GraderPromptResponse | JSONResponse:
     """Replace the user's grader prompt when its revision is current."""
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     try:
         payload = await request.json()
         update = GraderPromptUpdate.model_validate(payload)
@@ -156,6 +163,7 @@ async def reset_grader_prompt(
     user_id: str = Query("default_user"),
 ) -> GraderPromptResponse | JSONResponse:
     """Restore the packaged grader prompt when its revision is current."""
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     try:
         payload = await request.json()
         revision = RevisionRequest.model_validate(payload)

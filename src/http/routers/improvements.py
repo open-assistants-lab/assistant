@@ -1,12 +1,14 @@
+# mypy: disable-error-code="assignment"
 """Improvement and run-outcome API endpoints for loop 4."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel
 
+from src.http.auth import enforce_user_id
 from src.sdk.loops.storage import LoopEngineeringDB, get_loop_engineering_db_path
 
 router = APIRouter(tags=["improvements"])
@@ -38,7 +40,9 @@ class OutcomeResponse(BaseModel):
 async def list_improvements(
     user_id: str = Query("default_user"),
     status: str | None = Query(None),
+    request: Request = None,
 ) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     db = LoopEngineeringDB(get_loop_engineering_db_path(user_id))
     await db.init()
     suggestions = await db.list_suggestions(status=status)
@@ -49,7 +53,9 @@ async def list_improvements(
 async def approve_suggestion(
     suggestion_id: str,
     user_id: str = Query("default_user"),
+    request: Request = None,
 ) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     db = LoopEngineeringDB(get_loop_engineering_db_path(user_id))
     await db.init()
     import time
@@ -62,7 +68,9 @@ async def approve_suggestion(
 async def reject_suggestion(
     suggestion_id: str,
     user_id: str = Query("default_user"),
+    request: Request = None,
 ) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     db = LoopEngineeringDB(get_loop_engineering_db_path(user_id))
     await db.init()
     success = await db.update_suggestion_status(suggestion_id, "rejected")
@@ -72,8 +80,10 @@ async def reject_suggestion(
 @router.post("/improvements/analyze")
 async def analyze_outcomes(
     user_id: str = Query("default_user"),
+    request: Request = None,
 ) -> dict[str, Any]:
     """Trigger analysis job manually to propose improvements."""
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     from src.config import get_settings
     from src.sdk.loops.improvement import AnalysisJob
     from src.sdk.providers.factory import get_cached_model_provider
@@ -99,7 +109,9 @@ async def analyze_outcomes(
 async def list_run_outcomes(
     user_id: str = Query("default_user"),
     limit: int = Query(50),
+    request: Request = None,
 ) -> dict[str, Any]:
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     db = LoopEngineeringDB(get_loop_engineering_db_path(user_id))
     await db.init()
     outcomes = await db.list_run_outcomes(user_id, limit=limit)

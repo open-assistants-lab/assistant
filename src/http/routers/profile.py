@@ -1,3 +1,4 @@
+# mypy: disable-error-code="assignment"
 """Profile reload API — main-agent PROFILE.md lifecycle (roadmap P0-T7 fix).
 
 POST /profile/reload re-validates the user's main-agent PROFILE.md and, on
@@ -5,9 +6,10 @@ success, resets cached loops + detaches active WS sessions so no stale loop
 serves an approved turn after a mid-session profile swap (E26 detach).
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
+from src.http.auth import enforce_user_id
 from src.sdk import profile_loader
 from src.sdk.session_worker import get_session_registry
 
@@ -15,13 +17,14 @@ router = APIRouter(prefix="/profile", tags=["profile"])
 
 
 @router.post("/reload")
-async def reload_profile(user_id: str = Query(default="default_user")) -> JSONResponse:
+async def reload_profile(user_id: str = Query(default="default_user"), request: Request = None) -> JSONResponse:
     """Re-validate PROFILE.md and reset loops + detach active sessions.
 
     - Invalid PROFILE.md (parse/validation error) -> 400, loops untouched.
     - Valid or absent profile -> loops reset, active WS sessions cancelled,
       200 with a summary of the new state.
     """
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     try:
         profile = profile_loader.load_main_agent_profile(user_id)
     except profile_loader.ProfileError as exc:
