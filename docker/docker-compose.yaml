@@ -26,6 +26,14 @@ services:
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       TOGETHER_API_KEY: ${TOGETHER_API_KEY:-}
       AGNES_API_KEY: ${AGNES_API_KEY:-}
+      # Admin knobs — grader (rubric verification), summarisation, title model
+      VERIFICATION_ENABLED: ${VERIFICATION_ENABLED:-}
+      VERIFICATION_GRADER_MODEL: ${VERIFICATION_GRADER_MODEL:-}
+      VERIFICATION_DEFAULT_RUBRIC: ${VERIFICATION_DEFAULT_RUBRIC:-}
+      VERIFICATION_MAX_ITERATIONS: ${VERIFICATION_MAX_ITERATIONS:-}
+      SUMMARY_ENABLED: ${SUMMARY_ENABLED:-}
+      SUMMARY_MODEL: ${SUMMARY_MODEL:-}
+      AGENT_TITLE_MODEL: ${AGENT_TITLE_MODEL:-}
 
       # Firecrawl for web search/scraping (self-hosted or cloud)
       # Self-hosted: set FIRECRAWL_BASE_URL (no key needed)
@@ -48,6 +56,9 @@ services:
       LOGGING_LEVEL: ${LOGGING_LEVEL:-info}
     volumes:
       - ./data:/app/data
+      # Admin-editable settings: edit ./config.yaml + `docker compose restart app`
+      # (no rebuild). Remove this mount to bake config into the image instead.
+      - ./config.yaml:/app/config.yaml
     restart: unless-stopped
     healthcheck:
       # python:3.13-slim has no curl — use urllib
