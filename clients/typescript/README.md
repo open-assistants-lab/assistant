@@ -45,8 +45,8 @@ import { ConversationSocket } from "@open-assistants-lab/assistant-sdk";
 
 const socket = new ConversationSocket({ baseUrl: "http://localhost:8080", apiKey: "..." });
 await socket.connect(); // resolves after auth_ok
-socket.sendUserMessage("hello");
-socket.onEvent((event) => console.log(event));
+socket.say("hello");
+socket.on((msg) => console.log(msg));
 ```
 
 ## API surface

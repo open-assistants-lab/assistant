@@ -22,9 +22,11 @@ model, persona, skills. **Never touches engine code.**
 |---|---|---|---|
 | `name` | str (1–64 chars, required) | — | Agent identifier |
 | `description` | str | `""` | What this agent is for |
-| `model` | str | `""` | Default model as `provider:model` (e.g. `anthropic:claude-sonnet-4`); validated against the registry **and provider-key availability** at bootstrap |
+| `model` | str | `""` | Default model as `provider:model` (e.g. `anthropic:claude-sonnet-4`); provider type + key availability fail fast at bootstrap (registry existence is non-fatal — unknown model names log a warning, custom local pulls are legitimate) |
 | `tools` | list[str] | `[]` | Requested tools — **advisory only, see precedence** |
 | `skills` | list[str] | `[]` | Skills this agent uses (validated against the skills registry) |
+| `max_llm_calls` / `cost_limit_usd` / `timeout_seconds` | int/float/int | 50 / 1.0 / 300 | Run limits (threaded into `RunConfig`) |
+| `name` charset | — | — | must match `^[a-zA-Z0-9_-]+$`, 1–64 chars |
 
 Body (everything after the frontmatter) = the **persona / system prompt**.
 
@@ -66,7 +68,8 @@ curl -X POST "http://localhost:8080/profile/reload?user_id=alice"
 # valid -> cached loop reset + active sessions detached (no stale turns)
 ```
 
-**How to verify:** `POST /profile/reload` returns 200 with the new model/persona in
+**How to verify:** `POST /profile/reload` returns 200 with the new `model` and a
+`persona_present` flag in
 the body; `GET /models?user_id=…` reflects the profile model in the catalog view.
 
 ---
@@ -110,6 +113,7 @@ Admin knobs (`.env` or `config.yaml verification:` — env wins):
 | `VERIFICATION_GRADER_SYSTEM_PROMPT` | `grader_system_prompt` | `""` |
 | `VERIFICATION_GRADER_TOOLS` | `grader_tools` | `[]` (deliberately none) |
 | `VERIFICATION_MAX_ITERATIONS` | `max_iterations` | `3` |
+| `VERIFICATION_SKIP_MAX_RESPONSE_CHARS` / `VERIFY_MIN_HISTORY_TOKENS` / `VERIFY_MIN_RESPONSE_CHARS` / `RISK_KEYWORDS` | selective-verify thresholds | 200 / 4000 / 800 / — (govern `mode: auto` skip behavior) |
 | `VERIFICATION_MODE` | `mode` (`off`/`on`/`auto`) | `off` |
 
 **Per-run rubric** — an author/client may pass a rubric for one request:
@@ -153,12 +157,14 @@ personas × queries × success metrics.
 
 The model registry is powered by **models.dev** (fetched, cached ~5-min TTL,
 offline fallback): **4172+ models across 110+ providers**. `provider:model` strings
-are validated against it — a typo fails at bootstrap, not at first call.
+are checked against it — provider type and key availability fail fast at
+bootstrap; an unknown model name logs a warning (custom/local pulls are
+legitimate) rather than failing.
 
 - **Per-user model picker**: users set a default model via the Settings API /
   native app (stored as their `default_model`; wins over deployment config)
-- **Provider keys** resolve per-request (`provider_keys`) → env
-  (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, …) → saved per-user settings
+- **Provider keys** resolve per-request (`provider_keys`) → saved per-user
+  settings → env (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, … — last-resort fallback)
 - **How to verify:** `GET /models?user_id=…` — the catalog the picker renders
 
 ---
