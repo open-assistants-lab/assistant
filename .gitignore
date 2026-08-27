@@ -66,3 +66,8 @@ data/evaluations/
 results/
 *.superpowers/
 .gstack/
+
+# TypeScript client build artifacts
+clients/typescript/node_modules/
+clients/typescript/dist/
+.DS_Store

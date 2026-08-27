@@ -1,0 +1,39 @@
+{
+  "name": "assistant-client",
+  "version": "0.1.0",
+  "description": "Typed TypeScript client SDK for the Assistant HTTP/WebSocket API (REST, SSE streaming, WS conversation protocol).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node --test dist/test/sse.test.js",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "assistant",
+    "agent",
+    "client",
+    "sdk",
+    "sse",
+    "websocket"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2"
+  }
+}
