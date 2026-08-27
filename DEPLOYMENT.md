@@ -151,7 +151,7 @@ services:
 
   alice:
     build: { context: .., dockerfile: docker/Dockerfile }
-    command: ["uv", "run", "assistant", "http"]
+    command: ["uv", "run", "assistant-sdk", "http"]
     environment:
       - API_KEY=${ALICE_KEY}
       - DEPLOYMENT_DATA_ROOT=/app/data        # user data → volume
@@ -162,7 +162,7 @@ services:
 
   bob:
     build: { context: .., dockerfile: docker/Dockerfile }
-    command: ["uv", "run", "assistant", "http"]
+    command: ["uv", "run", "assistant-sdk", "http"]
     environment:
       - API_KEY=${BOB_KEY}
       - DEPLOYMENT_DATA_ROOT=/app/data

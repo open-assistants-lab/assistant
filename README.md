@@ -47,7 +47,7 @@ Everything runs locally on your machine. Your data lives at `~/Assistant/` — n
 uv sync --extra dev
 
 # Run the server
-uv run assistant http
+uv run assistant-sdk http
 
 # Tests
 uv run pytest
@@ -75,7 +75,7 @@ when the matching extra is missing.
 
 ### Build
 
-The backend is the API server — run with `uv run assistant http`.
+The backend is the API server — run with `uv run assistant-sdk http`.
 
 The **native desktop app** lives in `native-sdk-experiment/` (Zig + Native SDK):
 
