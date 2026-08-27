@@ -1,114 +1,94 @@
-# assistant-client
+# @open-assistants-lab/assistant-sdk (TypeScript)
 
-Typed TypeScript client SDK for the [Assistant](../../) server — REST, SSE streaming,
-and the WebSocket conversation protocol. Zero runtime dependencies.
+Typed TypeScript client SDK for the Assistant API — REST, SSE streaming, and the
+WebSocket conversation protocol. Zero runtime dependencies; works in Node 18+ and
+browsers.
 
-Works in Node 18+ and browsers.
+> ⚠️ **Preview — non-frozen contract.** This is `0.1.0-preview.1`: the event
+> envelopes and routes follow the current server wire contract and may change
+> before a stable `1.0` release. Pin the version; read the changelog.
 
 ## Install
 
 ```bash
-npm install assistant-client   # once published
-# or from this repo:
-npm install /path/to/assistant/clients/typescript
+npm install @open-assistants-lab/assistant-sdk@preview
 ```
 
 ## Quick start
 
-```typescript
-import { AssistantClient } from "assistant-client";
+```ts
+import { AssistantClient } from "@open-assistants-lab/assistant-sdk";
 
 const client = new AssistantClient({
-  baseUrl: "http://localhost:8000",
-  apiKey: process.env.EA_API_KEY, // optional — auth is off for localhost by default
+  baseUrl: "http://localhost:8080", // your deployed assistant
+  apiKey: process.env.ASSISTANT_API_KEY, // omit when auth is disabled
+  userId: "alice", // per-user data namespace (see server docs)
 });
 
-// Blocking request
-const reply = await client.send("What's on my calendar today?");
-console.log(reply.response);
+// Blocking round-trip
+const res = await client.send("What is 2+2?");
+console.log(res.response);
 
-// Streaming (SSE)
-for await (const event of client.stream("Write a haiku about databases")) {
+// SSE streaming — every server event, in order
+for await (const event of client.stream("draft a plan")) {
   if (event.type === "text_delta") process.stdout.write(event.data.delta);
-  if (event.type === "tool_input_start") console.log("→ tool:", event.data.name);
-  if (event.type === "interrupt") console.log("needs approval:", event.data.tool);
 }
 
-// Or collect the full answer in one call
-const { text, events } = await client.collect("Summarize my todos");
+// Or collect the full run
+const { text, events } = await client.collect("draft a plan");
 ```
 
-## Human-in-the-loop (tool approvals)
+## WebSocket conversation
 
-```typescript
-for await (const event of client.stream("Delete the old drafts")) {
-  if (event.type === "interrupt") {
-    // Ask your user, then approve or reject
-    const ok = await askUser(event.data);
-    if (ok) {
-      const res = await client.approve(event.data.call_id!); // returns an SSE stream
-    } else {
-      await client.reject(event.data.call_id!, "not today");
-    }
-  }
-}
-```
+```ts
+import { ConversationSocket } from "@open-assistants-lab/assistant-sdk";
 
-## WebSocket (bidirectional + mid-turn steering)
-
-Requires a global `WebSocket` (browsers and Node 22+ have one; on older Node pass
-`wsImpl: require("ws")`).
-
-```typescript
-const socket = client.socket({ session_id: "my-session" });
-await socket.connect(); // resolves after auth_ok when apiKey is set
-
-socket.on((msg) => {
-  switch (msg.type) {
-    case "text_delta":     process.stdout.write(msg.content); break;
-    case "done":           console.log("\ncost:", msg.cost_usd); break;
-    case "steer_ack":      console.log("steer queued"); break;
-    case "error":          console.error(msg.message); break;
-  }
-});
-
-socket.say("Start a long research task");
-socket.steer("Actually focus on TypeScript only");
-socket.cancel();
-socket.close();
-```
-
-## Conversation history & models
-
-```typescript
-await client.listSessions();
-await client.getConversation({ sessionId: "my-session", limit: 50 });
-await client.deleteSession("my-session");
-await client.clearConversation();
-await client.listModels();
+const socket = new ConversationSocket({ baseUrl: "http://localhost:8080", apiKey: "..." });
+await socket.connect(); // resolves after auth_ok
+socket.sendUserMessage("hello");
+socket.onEvent((event) => console.log(event));
 ```
 
 ## API surface
 
-| Method | Endpoint | Notes |
+| Method | Endpoint (via `/v1`) | Purpose |
 |---|---|---|
-| `send()` | `POST /message` | blocking |
-| `stream()` / `collect()` | `POST /message/stream` | SSE with heartbeat filtering |
-| `approve()` / `reject()` / `cancel()` | `/message/approve`, `/reject`, `/cancel` | HITL |
-| `getConversation()` / `listSessions()` / `deleteSession()` / `clearConversation()` | `/conversation*` | history |
-| `listModels()` | `GET /models` | provider catalog |
-| `socket()` | `WS /ws/conversation` | typed WS protocol |
+| `client.send()` | `POST /v1/message` | blocking round-trip |
+| `client.stream()` | `POST /v1/message/stream` | SSE async iterable of events |
+| `client.collect()` | same | full run: text + all events |
+| `client.approve()/reject()/cancel()` | `POST /v1/message/*` | HITL interrupts |
+| `client.getConversation()/listSessions()` | `GET /v1/...` | history |
+| `client.socket()` | `/v1/ws/conversation` | WS protocol |
 
-All server message types are exported as discriminated unions
-(`StreamEvent`, `ServerMessage`), so unknown future event types never crash your code —
-they just arrive as `{ type: string; data }`.
+All routes sit under the **`/v1`** API prefix (default; pass `basePath: ""` for
+legacy unprefixed servers).
 
-## Development
+## Events
+
+Stream events mirror the server envelope `{"type", "data"}` — see
+`src/types.ts` for the typed shapes (block events `text_start`/`text_delta`/
+`text_end`, `tool_call`/`tool_result`, `reasoning_*`, `usage`, `done`, `error`,
+HITL `interrupt`). Unknown fields are preserved (forward-compatible).
+
+## Tests
 
 ```bash
-npm install        # dev deps (typescript, @types/node)
-npm test           # typecheck + unit tests (no server needed)
-npm run build      # emit dist/
+npm install && npm test     # mock-based, no server needed
+ASSISTANT_URL=http://localhost:8080 npm test   # + live integration test
 ```
 
-Integration tests against a running server (`uv run assistant http`) are planned.
+## Preview caveat
+
+The wire contract (event envelopes, route shapes) is stable **in practice** but
+explicitly non-frozen until a partner has exercised both transports. Breaking
+changes may land in `0.1.0-preview.*` releases. Stable `1.0.0` follows the
+server contract freeze.
+
+## Publish (maintainers)
+
+```bash
+npm run build && npm test
+npm publish --tag preview   # never `latest` until the contract freezes
+```
+
+Requires npm credentials (npmjs.com) for the `@open-assistants-lab` scope.

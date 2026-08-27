@@ -22,6 +22,8 @@ export interface ConversationSocketOptions {
   session_id?: string | null;
   /** Custom WebSocket implementation (e.g. the `ws` package on old Node). */
   wsImpl?: typeof WebSocket;
+  /** API path prefix. Defaults to "/v1" (roadmap P0-T5). Pass "" for legacy. */
+  basePath?: string;
   /** Milliseconds before connect/auth gives up. Default: 10_000. */
   connectTimeoutMs?: number;
 }
@@ -59,7 +61,7 @@ export class ConversationSocket {
     }
 
     const url = new URL(this.opts.baseUrl.replace(/^http/, "ws"));
-    url.pathname = joinPath(url.pathname, "/ws/conversation");
+    url.pathname = joinPath(url.pathname, (this.opts.basePath ?? "/v1") + "/ws/conversation");
 
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(

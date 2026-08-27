@@ -1,7 +1,7 @@
 {
-  "name": "assistant-client",
-  "version": "0.1.0",
-  "description": "Typed TypeScript client SDK for the Assistant HTTP/WebSocket API (REST, SSE streaming, WS conversation protocol).",
+  "name": "@open-assistants-lab/assistant-sdk",
+  "version": "0.1.0-preview.1",
+  "description": "Typed TypeScript client SDK for the Assistant API (REST, SSE streaming, WS conversation protocol). Preview \u2014 non-frozen contract.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -17,8 +17,9 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "tsc -p tsconfig.json && node --test dist/test/sse.test.js",
-    "prepublishOnly": "npm run build"
+    "test": "tsc -p tsconfig.json && node --test \"dist/test/*.test.js\"",
+    "prepublishOnly": "npm run build",
+    "publish:preview": "npm publish --tag preview"
   },
   "engines": {
     "node": ">=18"
@@ -35,5 +36,8 @@
   "devDependencies": {
     "@types/node": "^26.2.0",
     "typescript": "^7.0.2"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

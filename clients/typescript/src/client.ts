@@ -31,6 +31,9 @@ export interface AssistantClientOptions {
   userId?: string;
   /** Custom fetch implementation. Defaults to globalThis.fetch. */
   fetch?: typeof fetch;
+  /** API path prefix. Defaults to "/v1" (stable surface, roadmap P0-T5).
+   *  Pass "" for the legacy unprefixed routes. */
+  basePath?: string;
 }
 
 export class AssistantApiError extends Error {
@@ -56,15 +59,22 @@ export class AssistantClient {
   private apiKey?: string;
   private defaultUserId: string;
   private fetchImpl: typeof fetch;
+  private basePath: string;
 
   constructor(options: AssistantClientOptions) {
     if (!options.baseUrl) throw new Error("baseUrl is required");
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
+    this.basePath = options.basePath ?? "/v1";
     this.apiKey = options.apiKey;
     this.defaultUserId = options.userId ?? "default_user";
     const impl = options.fetch ?? globalThis.fetch;
     if (!impl) throw new Error("No fetch implementation available");
     this.fetchImpl = impl.bind(globalThis);
+  }
+
+  /** Route under the API prefix (default "/v1" — roadmap P0-T5). */
+  private route(p: string): string {
+    return `${this.baseUrl}${this.basePath}${p}`;
   }
 
   // ─── Core conversation ────────────────────────────────────────────────────
@@ -94,7 +104,7 @@ export class AssistantClient {
       user_id: options.userId ?? this.defaultUserId,
       ...stripKeys(options, ["userId"]),
     });
-    const res = await this.fetchImpl(`${this.baseUrl}/message/stream`, {
+    const res = await this.fetchImpl(this.route("/message/stream"), {
       method: "POST",
       headers: this.headers(),
       body,
@@ -187,7 +197,7 @@ export class AssistantClient {
       user_id: userId ?? this.defaultUserId,
       session_id: sessionId,
     });
-    await this.fetchImpl(`${this.baseUrl}/conversation/session?${qs}`, {
+    await this.fetchImpl(this.route(`/conversation/session?${qs}`), {
       method: "DELETE",
       headers: this.headers(),
     });
@@ -195,7 +205,7 @@ export class AssistantClient {
 
   async clearConversation(userId?: string): Promise<void> {
     const qs = new URLSearchParams({ user_id: userId ?? this.defaultUserId });
-    await this.fetchImpl(`${this.baseUrl}/conversation?${qs}`, {
+    await this.fetchImpl(this.route(`/conversation?${qs}`), {
       method: "DELETE",
       headers: this.headers(),
     });
@@ -229,7 +239,7 @@ export class AssistantClient {
   }
 
   private async raw(method: string, path: string, body?: unknown): Promise<Response> {
-    return this.fetchImpl(`${this.baseUrl}${path}`, {
+    return this.fetchImpl(this.route(path), {
       method,
       headers: this.headers(),
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -243,7 +253,7 @@ export class AssistantClient {
   }
 
   private async getJson<T>(pathWithQuery: string): Promise<T> {
-    const res = await this.fetchImpl(`${this.baseUrl}${pathWithQuery}`, {
+    const res = await this.fetchImpl(this.route(pathWithQuery), {
       headers: this.headers(),
     });
     if (!res.ok) throw new AssistantApiError(res.status, await safeJson(res));
