@@ -9,6 +9,10 @@ basics (data layout, backups, secrets, observability) that apply to all of them.
 - **Mode 3 — Multi-tenant**: one container per user behind a reverse proxy.
   The current safe path for hosting several users on one machine.
 
+> **Docker deployment source of truth:** [`docker/DEPLOYMENT.md`](docker/DEPLOYMENT.md)
+> (multi-user trusted deployment). This file covers the three deployment modes and
+> host/VPS specifics.
+
 ## Architecture in 30 seconds
 
 - The **server is the single source of truth**: conversation history, memory,
@@ -187,6 +191,31 @@ ALICE_KEY=abc123 BOB_KEY=xyz789 CF_TOKEN=... docker compose up -d
 
 Each user connects to their subdomain with their API key. Adding a user =
 one new service block + one Caddy entry + one volume.
+
+---
+
+## Verification & the grader (rubric checks)
+
+Responses can be auto-verified against a **rubric** by a separate **grader
+loop** before they reach the user. Ownership model:
+
+- **The admin owns the grader** — model, tools, iterations, and the default
+  rubric are deployment policy (`VERIFICATION_*` in `.env` / config.yaml
+  `verification:`), not per-user preferences. The worker serves the user;
+  the grader serves the deployment — same party owning both would be
+  self-grading.
+- **The grader prompt is hash-pinned**: each user's settings record the
+  sha256 of the grading prompt actually used, so verification results are
+  auditable ("this output passed rubric X against prompt hash Y").
+- **Per-run rubrics** are allowed (pass `verification.rubric` in a request)
+  and recorded in the audit trail — transparent variation.
+- **Off by default** — enable with `VERIFICATION_ENABLED=true`; the grader
+  model defaults to the agent model. Grader prompt is seeded per user and
+  editable via the Settings API; the prompt hash is pinned when a user
+  enables verification.
+
+Kits may ship rubrics (admin-curated at install) — that is the sanctioned
+per-vertical variation, not user-defined ad-hoc bars.
 
 ---
 
