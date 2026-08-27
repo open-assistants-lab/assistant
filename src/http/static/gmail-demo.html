@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Assistant — Gmail Demo</title>
+<style>
+  :root { --ink:#1a1d21; --muted:#6b7280; --line:#e5e7eb; --brand:#4285f4; }
+  * { box-sizing: border-box; }
+  body { font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--ink);
+         max-width: 720px; margin: 0 auto; padding: 24px; background:#fff; }
+  header { display:flex; align-items:baseline; gap:12px; padding-bottom:16px;
+           border-bottom:1px solid var(--line); margin-bottom:24px; }
+  header h1 { font-size:18px; margin:0; }
+  header span { color:var(--muted); font-size:13px; }
+  h2 { font-size:15px; margin:0 0 12px; }
+  .card { border:1px solid var(--line); border-radius:10px; padding:20px; margin-bottom:20px; }
+  .muted { color:var(--muted); font-size:13px; }
+  button { background:var(--brand); color:#fff; border:0; border-radius:6px;
+           padding:10px 18px; font-size:14px; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  input { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:6px;
+          font-size:14px; margin-bottom:12px; }
+  ul { list-style:none; padding:0; margin:0; }
+  li { padding:12px 0; border-bottom:1px solid var(--line); }
+  li:last-child { border-bottom:0; }
+  .from { font-weight:600; font-size:14px; }
+  .subj { font-size:14px; margin:2px 0; }
+  .meta { color:var(--muted); font-size:12px; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px;
+           background:#ecfdf5; color:#047857; border:1px solid #a7f3d0; }
+  .badge.off { background:#fef2f2; color:#b91c1c; border-color:#fecaca; }
+</style>
+</head>
+<body>
+<header><h1>Assistant</h1><span>Gmail demo — real OAuth + HybridDB search</span></header>
+
+<section class="card" id="connect-card">
+  <h2>Connect Gmail</h2>
+  <p id="status" class="muted">Checking connection…</p>
+  <p><button id="signin" hidden>Sign in with Google</button></p>
+  <p class="muted" id="hint" hidden>
+    Opens the real Google consent screen (scope: <code>gmail.readonly</code>).
+  </p>
+</section>
+
+<section class="card" id="search-card" hidden>
+  <h2>Search your inbox</h2>
+  <input id="q" type="search" placeholder="try: from:client, invoice, meeting notes…"
+         autocomplete="off">
+  <p><button id="sync">Sync now</button> <span id="sync-state" class="muted"></span></p>
+  <ul id="results"></ul>
+  <p id="empty" class="muted" hidden>No results. Try a different query, or Sync first.</p>
+</section>
+
+<script>
+const USER = 'default_user';
+let connected = false;
+
+async function refreshStatus() {
+  try {
+    const r = await fetch('/connectors/catalog?user_id=' + USER);
+    const items = await r.json();
+    const gmail = (items || []).find(i => i.name === 'gmail');
+    connected = !!(gmail && gmail.connected);
+  } catch { connected = false; }
+
+  const status = document.getElementById('status');
+  const signin = document.getElementById('signin');
+  const hint = document.getElementById('hint');
+  if (connected) {
+    status.innerHTML = '<span class="badge">Connected</span> Gmail authorized via Sign in with Google';
+    signin.hidden = true; hint.hidden = true;
+    document.getElementById('search-card').hidden = false;
+    search('');
+  } else {
+    status.innerHTML = '<span class="badge off">Not connected</span> Authorize to search your inbox';
+    signin.hidden = false; hint.hidden = false;
+    document.getElementById('search-card').hidden = true;
+  }
+}
+
+document.getElementById('signin').addEventListener('click', () => {
+  location.href = '/auth/login?service=gmail';
+});
+
+document.getElementById('sync').addEventListener('click', async () => {
+  const state = document.getElementById('sync-state');
+  state.textContent = 'syncing…';
+  try {
+    const r = await fetch('/emails/sync?user_id=' + USER + '&provider=gmail', { method: 'POST' });
+    const body = await r.json();
+    state.textContent = body.status === 'sync_started'
+      ? 'sync started (runs in background)'
+      : (body.error || 'sync failed');
+  } catch { state.textContent = 'sync failed'; }
+});
+
+let debounce;
+function search(q) {
+  clearTimeout(debounce);
+  debounce = setTimeout(async () => {
+    const list = document.getElementById('results');
+    const empty = document.getElementById('empty');
+    if (!q) { list.innerHTML = ''; empty.hidden = true; return; }
+    try {
+      const r = await fetch('/emails/search?q=' + encodeURIComponent(q) + '&user_id=' + USER);
+      const body = await r.json();
+      const emails = body.emails || [];
+      list.innerHTML = emails.map(e => {
+        const d = e.timestamp ? new Date(e.timestamp * 1000).toLocaleString() : '';
+        return '<li><div class="from">' + esc(e.from_addr || '') + '</div>' +
+               '<div class="subj">' + esc(e.subject || '(no subject)') + '</div>' +
+               '<div class="meta">' + esc(d) + '</div></li>';
+      }).join('');
+      empty.hidden = emails.length > 0;
+    } catch { empty.hidden = false; }
+  }, 250);
+}
+document.getElementById('q').addEventListener('input', e => search(e.target.value));
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+refreshStatus();
+setInterval(refreshStatus, 5000);
+</script>
+</body>
+</html>
