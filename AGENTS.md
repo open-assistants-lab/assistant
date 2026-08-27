@@ -664,6 +664,15 @@ All LangChain and LangGraph dependencies have been removed:
 - `src/tools/`, `src/agents/`, `src/llm/`, `src/middleware/` directories — deleted
 - `src/sdk/langchain_adapter.py` — deleted
 
+### Agent Loop Roles
+
+The system uses two distinct `AgentLoop` instances with different roles:
+
+- **Worker loop** — the main agent that performs tasks. Has full tools, skills middleware, and the user's system prompt. Created by `get_sdk_loop()` / `RunService`.
+- **Grader loop** — evaluates the worker's output against a rubric. Has empty tools and only the grader system prompt. Created by `RubricMiddleware._ensure_loop()`. Extensible with tools/skills in the future.
+
+Both are proper `AgentLoop` instances and accept the full middleware stack.
+
 ## 10. OSS Repositories
 
 The project extracts reusable components into separate OSS repos:
