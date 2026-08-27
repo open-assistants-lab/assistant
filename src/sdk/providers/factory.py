@@ -23,6 +23,7 @@ from src.sdk.providers.base import LLMProvider
 from src.sdk.providers.gemini import GeminiProvider
 from src.sdk.providers.ollama import OllamaCloud
 from src.sdk.providers.openai import OpenAIProvider
+from src.storage.paths import DEFAULT_USER_ID
 
 logger = get_logger()
 
@@ -415,13 +416,13 @@ def _provider_key(keys: Mapping[str, str] | None, provider_type: str) -> str | N
     )
 
 
-def _load_stored_key(provider_type: str, user_id: str = "default_user") -> str | None:
+def _load_stored_key(provider_type: str, user_id: str =  DEFAULT_USER_ID) -> str | None:
     """Check the canonical per-user settings store for a provider API key."""
     saved = _load_user_settings(user_id)
     return _provider_key(saved.provider_keys, provider_type.lower()) if saved is not None else None
 
 
-def _load_stored_default_model(user_id: str = "default_user") -> str | None:
+def _load_stored_default_model(user_id: str =  DEFAULT_USER_ID) -> str | None:
     """Check the canonical per-user settings store for a default model override."""
     saved = _load_user_settings(user_id)
     return saved.default_model if saved is not None else None
@@ -507,7 +508,7 @@ def _maybe_wrap_langfuse(provider: LLMProvider) -> LLMProvider:
 def create_model_from_config(
     config_model: str | None = None,
     provider_keys: dict[str, str] | None = None,
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
 ) -> LLMProvider:
     """Create a provider from model config — uncached.
 
@@ -534,7 +535,7 @@ def create_model_from_config(
 def get_cached_model_provider(
     config_model: str | None = None,
     provider_keys: dict[str, str] | None = None,
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
 ) -> LLMProvider:
     """Model-config resolver backed by the keyed provider cache (audit S3).
 

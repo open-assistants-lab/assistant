@@ -10,6 +10,7 @@ from coremem.query import expand_queries
 from src.app_logging import get_logger
 from src.sdk.tools import ToolAnnotations, tool
 from src.storage.messages import SearchResult, get_message_store
+from src.storage.paths import DEFAULT_USER_ID
 
 logger = get_logger()
 _coremem_cache: dict[str, Any] = {}
@@ -172,7 +173,7 @@ def _group_results_by_session(results: list[SearchResult], session_ids: dict[str
 def message_history(
     days: int = 7,
     date_str: str | None = None,
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
 ) -> str:
     """Get conversation history for progressive disclosure.
@@ -244,7 +245,7 @@ message_history.annotations = ToolAnnotations(
 @tool
 def message_search(
     query: str,
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
     limit: int = 5,
 ) -> str:
@@ -359,7 +360,7 @@ message_search.annotations = ToolAnnotations(
 @tool
 def message_count(
     query: str,
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
 ) -> str:
     """Count distinct items — call this for "how many" questions.
@@ -477,7 +478,7 @@ message_count.annotations = ToolAnnotations(
 @tool
 def message_timeline(
     query: str,
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
     limit: int = 20,
 ) -> str:

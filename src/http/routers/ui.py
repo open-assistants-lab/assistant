@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from src.http.auth import enforce_user_id
 from src.sdk.ui_state import get_state, track_event
+from src.storage.paths import DEFAULT_USER_ID
 
 router = APIRouter(prefix="/ui", tags=["ui"])
 
@@ -21,7 +22,7 @@ class TrackEventBody(BaseModel):
 @router.post("/track")
 async def track_ui_event(
     body: TrackEventBody,
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
     request: Request = None,
 ) -> dict[str, str]:
     enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
@@ -35,7 +36,7 @@ async def track_ui_event(
 
 @router.get("/state")
 async def get_ui_state(
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
     request: Request = None,
 ) -> dict[str, Any]:
     enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))

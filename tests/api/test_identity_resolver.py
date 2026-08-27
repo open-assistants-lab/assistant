@@ -251,3 +251,92 @@ class TestUserEnforcement:
             "GET", path, headers={"Authorization": "Bearer secret"}, **kw
         )
         assert r.status_code != 403
+
+
+class TestMissingUserIdWarning:
+    """D0-5 troubleshooting visibility: an omitted user_id warns (rate-limited)
+    while the request still succeeds under the default_user namespace."""
+
+    def _spy_warnings(self, monkeypatch):
+        import src.app_logging as _al
+        import src.http.main as _main
+
+        _main._missing_uid_warned.clear()  # isolate from other tests' warnings
+        seen: list[str] = []
+
+        def _fake_warning(
+            self,
+            event: str,
+            data: dict,
+            user_id: str = "default_user",
+            channel: str = "cli",
+        ):
+            seen.append(event)
+
+        monkeypatch.setattr(_al.Logger, "warning", _fake_warning)
+        return seen
+
+    def test_missing_user_id_warns_once_and_succeeds(self, client, monkeypatch):
+        seen = self._spy_warnings(monkeypatch)
+        r1 = client.get("/models")  # GET without user_id query param
+        assert r1.status_code == 200
+        r2 = client.get("/models")  # inside rate-limit window: no re-warn
+        assert r2.status_code == 200
+        warns = [e for e in seen if "user_id missing" in e]
+        assert len(warns) == 1, seen
+
+    def test_explicit_user_id_does_not_warn(self, client, monkeypatch):
+        seen = self._spy_warnings(monkeypatch)
+        r = client.get("/models", params={"user_id": "named_user"})
+        assert r.status_code == 200
+        assert not [e for e in seen if "user_id missing" in e]
+
+    def test_body_missing_user_id_warns(self, client, monkeypatch):
+        seen = self._spy_warnings(monkeypatch)
+
+        store = type("S", (), {})()
+        store.summary_calls = []
+        store.raw_calls = []
+        store.sessions = {}
+
+        async def fake_aget(*a, **k):
+            return store
+
+        class _Dummy:
+            model_id = "x:y"
+
+        async def fake_get_sdk_loop(*a, **k):
+            return _Dummy()
+
+        async def fake_orchestrate(
+            self, loop, messages, run_id, session_id, lock, rubric=None, mode=None
+        ):
+            from src.sdk.run_models import RunResult, RunStatus, RunUsage, VerificationOutcome
+
+            return RunResult(
+                run_id=run_id,
+                session_id=session_id,
+                status=RunStatus.COMPLETED,
+                attempt=1,
+                model="x:y",
+                response="ok",
+                usage=RunUsage(),
+                verification=VerificationOutcome(),
+            )
+
+        import src.http.routers.conversation as conv
+
+        class _Factory:
+            async def __call__(self, *a, **k):
+                return store
+
+        monkeypatch.setattr("src.http.routers.conversation.aget_message_store", _Factory())
+        monkeypatch.setattr(
+            "src.http.routers.conversation.RunService._run_bounded_orchestration",
+            fake_orchestrate,
+        )
+        monkeypatch.setattr("src.sdk.run_service.get_sdk_loop", fake_get_sdk_loop)
+
+        r = client.post("/message", json={"message": "hi"})  # no user_id in body
+        assert r.status_code == 200
+        assert [e for e in seen if "user_id missing" in e]

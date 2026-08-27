@@ -28,6 +28,7 @@ from src.sdk.agent_validation import validate_agent_def
 from src.sdk.coordinator import get_coordinator
 from src.sdk.subagent_models import TaskStatus
 from src.sdk.tools import ToolAnnotations, tool
+from src.storage.paths import DEFAULT_USER_ID
 
 logger = get_logger()
 
@@ -455,7 +456,7 @@ subagent_list.annotations = ToolAnnotations(title="List Subagents", read_only=Tr
 @tool
 def subagent_check(
     task_id: str,
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
 ) -> str:
     """Check progress/status of one subagent job.
@@ -486,7 +487,7 @@ subagent_check.annotations = ToolAnnotations(title="Subagent Check", read_only=T
 
 @tool
 def subagent_tasks(
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
     status: str | None = None,
 ) -> str:

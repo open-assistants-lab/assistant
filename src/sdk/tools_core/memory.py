@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from src.sdk.tools import ToolAnnotations, tool
+from src.storage.paths import DEFAULT_USER_ID
 
 
 def _get_core(user_id: str, workspace_id: str) -> Any:
@@ -26,7 +27,7 @@ _PROFILE_DAYS = 30
 
 @tool
 def memory_profile(
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
 ) -> str:
     """Return a digest of the user's recent conversation context.

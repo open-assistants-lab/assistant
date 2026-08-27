@@ -11,13 +11,14 @@ from typing import Any
 
 from src.skills.models import Skill, _is_valid_skill_name
 from src.skills.storage import SkillStorage
+from src.storage.paths import DEFAULT_USER_ID
 
 _registries: dict[str, "SkillRegistry"] = {}
 _lock = threading.Lock()
 
 
 def get_skill_registry(
-    user_id: str = "default_user", workspace_id: str = "personal"
+    user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal"
 ) -> "SkillRegistry":
     """Get or create a cached user-level SkillRegistry.
 
@@ -25,7 +26,7 @@ def get_skill_registry(
     directly, to ensure a single cached instance per user. workspace_id is
     accepted for compatibility and ignored at runtime.
     """
-    uid = user_id or "default_user"
+    uid = user_id or DEFAULT_USER_ID
     cache_key = uid
     with _lock:
         if cache_key not in _registries:

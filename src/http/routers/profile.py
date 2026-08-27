@@ -12,12 +12,13 @@ from fastapi.responses import JSONResponse
 from src.http.auth import enforce_user_id
 from src.sdk import profile_loader
 from src.sdk.session_worker import get_session_registry
+from src.storage.paths import DEFAULT_USER_ID
 
 router = APIRouter(prefix="/profile", tags=["profile"])
 
 
 @router.post("/reload")
-async def reload_profile(user_id: str = Query(default="default_user"), request: Request = None) -> JSONResponse:
+async def reload_profile(user_id: str = Query(default=DEFAULT_USER_ID), request: Request = None) -> JSONResponse:
     """Re-validate PROFILE.md and reset loops + detach active sessions.
 
     - Invalid PROFILE.md (parse/validation error) -> 400, loops untouched.

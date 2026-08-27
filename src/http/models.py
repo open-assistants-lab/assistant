@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from src.sdk.run_models import RunResult
+from src.storage.paths import DEFAULT_USER_ID
 
 
 class VerificationRequest(BaseModel):
@@ -49,14 +50,14 @@ class MemorySearchRequest(BaseModel):
     query: str
     method: str = "hybrid"
     limit: int = 10
-    user_id: str = "default_user"
+    user_id: str =  DEFAULT_USER_ID
 
 
 class InsightSearchRequest(BaseModel):
     query: str
     method: str = "hybrid"
     limit: int = 5
-    user_id: str = "default_user"
+    user_id: str =  DEFAULT_USER_ID
 
 
 class SearchAllRequest(BaseModel):
@@ -64,7 +65,7 @@ class SearchAllRequest(BaseModel):
     memories_limit: int = 5
     messages_limit: int = 5
     insights_limit: int = 3
-    user_id: str = "default_user"
+    user_id: str =  DEFAULT_USER_ID
 
 
 class ConnectionRequest(BaseModel):
@@ -72,11 +73,11 @@ class ConnectionRequest(BaseModel):
     target_id: str
     relationship: str = "relates_to"
     strength: float = 1.0
-    user_id: str = "default_user"
+    user_id: str =  DEFAULT_USER_ID
 
 
 class EmailConnectRequest(BaseModel):
     email: str
     password: str
     provider: str | None = None
-    user_id: str = "default_user"
+    user_id: str =  DEFAULT_USER_ID

@@ -36,6 +36,7 @@ from src.sdk.messages import Message, Usage
 from src.sdk.middleware import Middleware
 from src.sdk.run_models import ContextSnapshot, UsageAggregate
 from src.sdk.state import AgentState
+from src.storage.paths import DEFAULT_USER_ID
 
 logger = get_logger()
 
@@ -239,7 +240,7 @@ def _get_approximate_token_counter(model: Any) -> TokenCounter:
     return partial(count_tokens_approximately)
 
 
-def _load_prompt_file(prompt_file: str, user_id: str = "default_user") -> str:
+def _load_prompt_file(prompt_file: str, user_id: str =  DEFAULT_USER_ID) -> str:
     """Load summary prompt from per-user file.
 
     If the per-user file doesn't exist, seed it from seeds/prompts/ first.
@@ -314,7 +315,7 @@ class SummarizationMiddleware(Middleware):
         # silently force a full re-summarize after restart).
         self._degraded_summaries: dict[str, CompressionArtifact] = {}
         self._prompt_file = prompt_file
-        self.user_id = user_id or "default_user"
+        self.user_id = user_id or DEFAULT_USER_ID
 
         # Load summary prompt: explicit param > file (seeded per user) > built-in default
         if summary_prompt is not None:

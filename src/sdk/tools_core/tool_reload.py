@@ -11,6 +11,7 @@ from src.sdk.tool_index import (
 )
 from src.sdk.tools import tool
 from src.sdk.tools_custom import is_core_tool
+from src.storage.paths import DEFAULT_USER_ID
 
 
 def _scan_custom_tool_names(tools_dir: Path) -> set[str]:
@@ -41,14 +42,14 @@ def tool_reload() -> str:
 
     if not hasattr(loop, "_tool_index") or loop._tool_index is None:
         from src.storage.paths import get_paths
-        paths = get_paths(user_id=loop.user_id or "default_user", workspace_id=loop.workspace_id or "personal")
+        paths = get_paths(user_id=loop.user_id or DEFAULT_USER_ID, workspace_id=loop.workspace_id or "personal")
         index_dir = paths.user_tools_dir() / ".index"
         index_dir.mkdir(parents=True, exist_ok=True)
         loop._tool_index = ToolIndex(index_dir)
 
     from src.storage.paths import get_paths
 
-    paths = get_paths(user_id=loop.user_id or "default_user", workspace_id=loop.workspace_id or "personal")
+    paths = get_paths(user_id=loop.user_id or DEFAULT_USER_ID, workspace_id=loop.workspace_id or "personal")
     user_tools_dir = paths.user_tools_dir()
     workspace_tools_dir = paths.workspace_tools_dir()
     mcp_config = paths.user_mcp_config()
@@ -63,7 +64,7 @@ def tool_reload() -> str:
         from src.sdk.tools_custom import find_tool_file, get_custom_tools, load_tool_meta
 
         custom_count = 0
-        user_id = loop.user_id or "default_user"
+        user_id = loop.user_id or DEFAULT_USER_ID
         caps = load_user_capabilities(user_id)
         for td in get_custom_tools(user_id=user_id, workspace_id=loop.workspace_id or "personal"):
             if not is_core_tool(td.name) and resource_enabled(caps, "tools", td.name):

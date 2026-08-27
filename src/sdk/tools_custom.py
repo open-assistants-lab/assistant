@@ -7,6 +7,7 @@ from typing import Any
 import yaml
 
 from src.sdk.tools import ToolAnnotations, ToolDefinition
+from src.storage.paths import DEFAULT_USER_ID
 
 CORE_TOOL_NAMES: set[str] = {
     "shell_execute",
@@ -158,7 +159,7 @@ def scan_tools_dir(tools_dir: Path) -> list[ToolDefinition]:
     return results
 
 
-def get_custom_tools(user_id: str = "default_user", workspace_id: str = "personal") -> list[ToolDefinition]:
+def get_custom_tools(user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> list[ToolDefinition]:
     """Load custom tools from user and workspace dirs. Workspace overrides user by name."""
     from src.storage.paths import get_paths
 

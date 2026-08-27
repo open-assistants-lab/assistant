@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 
 from src.http.auth import enforce_user_id
 from src.sdk.audit import ensure_audit_store_subscribed
+from src.storage.paths import DEFAULT_USER_ID
 
 router = APIRouter(prefix="/audit", tags=["audit"])
 
@@ -22,7 +23,7 @@ router = APIRouter(prefix="/audit", tags=["audit"])
 @router.get("")
 async def get_audit_export(
     request: Request,
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     since: str | None = None,
 ) -> StreamingResponse:
     """Export one user's audit trail as NDJSON.

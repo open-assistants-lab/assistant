@@ -71,6 +71,7 @@ from src.sdk.subagent_models import TaskCancelledError
 from src.sdk.tools import ToolDefinition, ToolRegistry, ToolResult
 from src.sdk.tracing import SpanType, TraceProvider
 from src.sdk.validation import repair_tool_call
+from src.storage.paths import DEFAULT_USER_ID
 
 logger = logging.getLogger(__name__)
 
@@ -579,7 +580,7 @@ class AgentLoop:
         try:
             self.capture_bus.emit(
                 AuditEvent(
-                    user_id=self.user_id or "default_user",
+                    user_id=self.user_id or DEFAULT_USER_ID,
                     session_id=getattr(self, "_flow_session_id", None),
                     **kwargs,
                 )

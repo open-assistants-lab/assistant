@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import create_engine, text
 
 from src.app_logging import get_logger
+from src.storage.paths import DEFAULT_USER_ID
 
 logger = get_logger()
 
@@ -17,7 +18,7 @@ def get_db_path(user_id: str) -> str:
     """Get SQLite database path for user."""
     from src.storage.paths import get_paths
 
-    uid = user_id or "default_user"
+    uid = user_id or DEFAULT_USER_ID
     return str(get_paths(uid).contacts_db())
 
 

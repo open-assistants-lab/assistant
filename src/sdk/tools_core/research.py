@@ -13,6 +13,7 @@ from typing import Any
 
 from src.sdk.research import ExperimentResult, ResearchLoop
 from src.sdk.tools import ToolAnnotations, ToolDefinition
+from src.storage.paths import DEFAULT_USER_ID
 
 _loop: asyncio.AbstractEventLoop | None = None
 _loop_lock = threading.Lock()
@@ -38,7 +39,7 @@ def _research_start(
     target_type: str,
     target_ref: str,
     change_description: str,
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
     budget_seconds: int = 300,
 ) -> str:
@@ -109,7 +110,7 @@ research_start = ToolDefinition(
                 "type": "string",
                 "description": "The change to apply and evaluate",
             },
-            "user_id": {"type": "string", "default": "default_user"},
+            "user_id": {"type": "string", "default": DEFAULT_USER_ID},
             "workspace_id": {"type": "string", "default": "personal"},
             "budget_seconds": {"type": "integer", "default": 300},
         },
@@ -124,7 +125,7 @@ research_start = ToolDefinition(
 
 
 def _research_list(
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
 ) -> str:
     """List past research experiments from the results TSV.
@@ -167,7 +168,7 @@ research_list = ToolDefinition(
     parameters={
         "type": "object",
         "properties": {
-            "user_id": {"type": "string", "default": "default_user"},
+            "user_id": {"type": "string", "default": DEFAULT_USER_ID},
             "workspace_id": {"type": "string", "default": "personal"},
         },
     },

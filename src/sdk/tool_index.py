@@ -11,6 +11,7 @@ from typing import Any
 from hybriddb import HybridDB
 
 from src.sdk.tools import ToolDefinition
+from src.storage.paths import DEFAULT_USER_ID
 
 _RECONSTRUCT_EMPTY = "{}"
 
@@ -248,7 +249,7 @@ def get_or_create_index(
     tools_dir: Path,
     workspace_tools_dir: Path | None,
     mcp_config: Path,
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
     index_dir: Path | None = None,
 ) -> tuple[ToolIndex, Callable[[], None]]:

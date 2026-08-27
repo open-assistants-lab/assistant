@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from src.sdk.subagent_models import SubagentResult
+from src.storage.paths import DEFAULT_USER_ID
 
 
 @dataclass
@@ -59,7 +60,7 @@ class PromptTarget(ResearchTarget):
         self,
         prompt_path: Path,
         eval_task: str = "",
-        user_id: str = "default_user",
+        user_id: str =  DEFAULT_USER_ID,
         workspace_id: str = "personal",
         tools: list[Any] | None = None,
     ):
@@ -122,7 +123,7 @@ class SkillTarget(ResearchTarget):
         skill_name: str,
         skill_path: Path,
         eval_queries: list[dict[str, Any]] | None = None,
-        user_id: str = "default_user",
+        user_id: str =  DEFAULT_USER_ID,
         workspace_id: str = "personal",
     ):
         self.skill_name = skill_name
@@ -155,7 +156,7 @@ class SubagentTarget(ResearchTarget):
         self,
         agent_def_path: Path,
         eval_task: str = "",
-        user_id: str = "default_user",
+        user_id: str =  DEFAULT_USER_ID,
         workspace_id: str = "personal",
     ):
         self.agent_def_path = agent_def_path

@@ -3,10 +3,11 @@ from __future__ import annotations
 from src.sdk.capabilities import load_user_capabilities, resource_enabled
 from src.sdk.loop import get_current_agent_loop
 from src.sdk.tools import tool
+from src.storage.paths import DEFAULT_USER_ID
 
 
 @tool
-def tool_search(description: str, user_id: str = "default_user") -> str:
+def tool_search(description: str, user_id: str =  DEFAULT_USER_ID) -> str:
     """Search for a tool by describing what you need. Returns 3-5 matching tool names with descriptions.
 
     After finding the right tool, call it directly by name — it will be loaded for subsequent turns.

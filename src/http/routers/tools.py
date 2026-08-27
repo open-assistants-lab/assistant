@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from src.http.auth import enforce_user_id
 from src.sdk.capabilities import load_user_capabilities, resource_enabled, save_user_capabilities
 from src.sdk.native_tools import get_tool_category
-from src.storage.paths import _validate_path_id
+from src.storage.paths import DEFAULT_USER_ID, _validate_path_id
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ def _purge_tool_index_entry(user_id: str, workspace_id: str, name: str) -> None:
 
 @router.get("")
 async def list_tools(
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),
     request: Request = None,
 ) -> dict[str, Any]:
@@ -126,7 +126,7 @@ async def list_tools(
 @router.get("/{name}")
 async def get_tool(
     name: str,
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),
     request: Request = None,
 ) -> dict[str, Any]:
@@ -165,7 +165,7 @@ async def get_tool(
 async def toggle_tool(
     name: str,
     body: dict[str, Any],
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),
     request: Request = None,
 ) -> dict[str, Any]:

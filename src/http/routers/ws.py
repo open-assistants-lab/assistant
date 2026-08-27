@@ -52,6 +52,7 @@ from src.sdk.runner import (
 )
 from src.sdk.session_worker import SessionBusyError, get_session_registry
 from src.storage.messages import aget_message_store
+from src.storage.paths import DEFAULT_USER_ID
 
 logger = get_logger()
 
@@ -461,7 +462,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
     resolved_user_id = None  # shared-secret cannot scope to a user
 
     session_id = str(uuid.uuid4())[:8]
-    user_id = "default_user"
+    user_id = DEFAULT_USER_ID
     workspace_id = "personal"
     verbose = False
     current_model: str | None = None

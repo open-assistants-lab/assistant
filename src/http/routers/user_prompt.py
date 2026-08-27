@@ -26,6 +26,7 @@ from src.config.user_settings_store import (
 )
 from src.http.auth import enforce_user_id
 from src.sdk.user_prompt import load_user_prompt, save_user_prompt
+from src.storage.paths import DEFAULT_USER_ID
 
 router = APIRouter(prefix="/user", tags=["user"])
 
@@ -97,7 +98,7 @@ def _grader_prompt_configuration_failure() -> JSONResponse:
 
 
 @router.get("/prompt", response_model=UserPromptResponse)
-async def get_user_prompt(user_id: str = "default_user", request: Request = None) -> UserPromptResponse:
+async def get_user_prompt(user_id: str =  DEFAULT_USER_ID, request: Request = None) -> UserPromptResponse:
     """Get the user's custom prompt."""
     enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     prompt = load_user_prompt(user_id)
@@ -105,7 +106,7 @@ async def get_user_prompt(user_id: str = "default_user", request: Request = None
 
 
 @router.put("/prompt", response_model=UserPromptResponse)
-async def set_user_prompt(req: UserPromptRequest, user_id: str = "default_user", request: Request = None) -> UserPromptResponse:
+async def set_user_prompt(req: UserPromptRequest, user_id: str =  DEFAULT_USER_ID, request: Request = None) -> UserPromptResponse:
     """Set the user's custom prompt."""
     enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     save_user_prompt(user_id, req.prompt)
@@ -114,7 +115,7 @@ async def set_user_prompt(req: UserPromptRequest, user_id: str = "default_user",
 
 @router.get("/grader-prompt", response_model=GraderPromptResponse)
 def get_grader_prompt(
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
     request: Request = None,
 ) -> GraderPromptResponse | JSONResponse:
     """Get the user's revisioned grader prompt."""
@@ -130,7 +131,7 @@ def get_grader_prompt(
 @router.put("/grader-prompt", response_model=GraderPromptResponse)
 async def set_grader_prompt(
     request: Request,
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
 ) -> GraderPromptResponse | JSONResponse:
     """Replace the user's grader prompt when its revision is current."""
     enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
@@ -160,7 +161,7 @@ async def set_grader_prompt(
 @router.post("/grader-prompt/reset", response_model=GraderPromptResponse)
 async def reset_grader_prompt(
     request: Request,
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
 ) -> GraderPromptResponse | JSONResponse:
     """Restore the packaged grader prompt when its revision is current."""
     enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))

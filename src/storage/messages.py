@@ -19,7 +19,7 @@ from coremem.core import MemoryCore
 from coremem.types import Memory as _CoreMem
 from coremem.types import SearchResult as _CoreMemResult
 
-from src.storage.paths import get_paths
+from src.storage.paths import DEFAULT_USER_ID, get_paths
 
 USER_LEVEL_CONTEXT = "user"
 SUMMARY_SOURCE = "summarization_middleware"
@@ -406,7 +406,7 @@ class MessageStore:
                 if row_user_id:
                     if row_user_id != user_id:
                         continue
-                elif user_id != "default_user":
+                elif user_id != DEFAULT_USER_ID:
                     continue
                 old_id = str(msg_id)
                 old_session_id = session_id or "default"
@@ -1475,7 +1475,7 @@ def _cache_store(key: str, store: MessageStore) -> None:
         _stores.popitem(last=False)
 
 
-def get_message_store(user_id: str = "default_user", workspace_id: str = "personal") -> MessageStore:
+def get_message_store(user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> MessageStore:
     key = _store_key(user_id)
     if key not in _stores:
         _cache_store(key, MessageStore(user_id, workspace_id=workspace_id))
@@ -1485,7 +1485,7 @@ def get_message_store(user_id: str = "default_user", workspace_id: str = "person
 
 
 async def aget_message_store(
-    user_id: str = "default_user", workspace_id: str = "personal"
+    user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal"
 ) -> MessageStore:
     """Async get-or-create with single-flight off-thread construction (audit S4)."""
     key = _store_key(user_id)

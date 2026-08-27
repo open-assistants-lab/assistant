@@ -9,7 +9,7 @@ from src.sdk.capabilities import (
     load_user_capabilities,
     save_user_capabilities,
 )
-from src.storage.paths import _validate_path_id
+from src.storage.paths import DEFAULT_USER_ID, _validate_path_id
 
 router = APIRouter(prefix="/capabilities", tags=["capabilities"])
 
@@ -61,7 +61,7 @@ def _validate_top_level_keys(body: dict[str, Any]) -> None:
 
 @router.get("")
 async def get_capabilities(
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),
     request: Request = None,
 ) -> dict[str, Any]:
@@ -74,7 +74,7 @@ async def get_capabilities(
 @router.put("")
 async def replace_capabilities(
     body: dict[str, Any],
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),
     request: Request = None,
 ) -> dict[str, Any]:
@@ -92,7 +92,7 @@ async def replace_capabilities(
 @router.patch("")
 async def patch_capabilities(
     body: dict[str, Any],
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),
     request: Request = None,
 ) -> dict[str, Any]:

@@ -12,6 +12,7 @@ from fastapi import Request
 
 from src.http.auth.legacy import is_localhost, verify_key
 from src.http.auth.resolver import UserIdentity
+from src.storage.paths import DEFAULT_USER_ID
 
 
 class SharedSecretResolver:
@@ -30,13 +31,13 @@ class SharedSecretResolver:
         # Auth disabled — solo mode, no key configured.
         if not settings.auth.api_key:
             return UserIdentity(
-                user_id="default_user", key_id=None, trust_domain="solo"
+                user_id=DEFAULT_USER_ID, key_id=None, trust_domain="solo"
             )
 
         # Localhost bypass for multi-device WAN (desktop localhost still works).
         if settings.auth.solo_bypass and is_localhost(request):
             return UserIdentity(
-                user_id="default_user", key_id=None, trust_domain="solo"
+                user_id=DEFAULT_USER_ID, key_id=None, trust_domain="solo"
             )
 
         # Validate Bearer token.

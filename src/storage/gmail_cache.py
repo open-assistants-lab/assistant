@@ -21,7 +21,7 @@ from hybriddb import HybridDB, SearchMode
 from src.app_logging import get_logger
 from src.config import get_settings
 from src.storage.gmail_client import GmailClient, GmailNotConnectedError
-from src.storage.paths import get_paths
+from src.storage.paths import DEFAULT_USER_ID, get_paths
 
 logger = get_logger()
 
@@ -85,7 +85,7 @@ def _deserialize(value: Any, field_name: str) -> Any:
 class GmailCache:
     """HybridDB-backed Gmail email cache."""
 
-    def __init__(self, user_id: str = "default_user"):
+    def __init__(self, user_id: str =  DEFAULT_USER_ID):
         self.user_id = user_id
         base_path = get_paths(user_id).gmail_cache_dir()
         base_path.mkdir(parents=True, exist_ok=True)
@@ -414,7 +414,7 @@ class GmailCache:
 _stores: dict[str, GmailCache] = {}
 
 
-def get_gmail_cache(user_id: str = "default_user") -> GmailCache:
+def get_gmail_cache(user_id: str =  DEFAULT_USER_ID) -> GmailCache:
     if user_id not in _stores:
         _stores[user_id] = GmailCache(user_id)
     return _stores[user_id]
@@ -441,7 +441,7 @@ def _run_async(factory: Any) -> Any:
 
 
 def sync_emails(
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     max_results: int = 50,
     query: str | None = None,
     fetch_body: bool = True,

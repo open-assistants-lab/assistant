@@ -29,6 +29,8 @@ from typing import Any, Literal, cast
 
 from pydantic import BaseModel, Field
 
+from src.storage.paths import DEFAULT_USER_ID
+
 # ─── Client → Server Messages ───
 
 
@@ -37,7 +39,7 @@ class UserMessage(BaseModel):
 
     type: str = "user_message"
     content: str
-    user_id: str = "default_user"
+    user_id: str =  DEFAULT_USER_ID
     verbose: bool = False
     workspace_id: str = "personal"
     session_id: str | None = None

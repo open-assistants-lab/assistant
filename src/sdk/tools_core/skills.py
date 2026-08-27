@@ -20,6 +20,7 @@ from src.app_logging import get_logger
 from src.sdk.capabilities import load_user_capabilities, resource_enabled
 from src.sdk.tools import ToolAnnotations, tool
 from src.skills.registry import get_skill_registry
+from src.storage.paths import DEFAULT_USER_ID
 
 logger = get_logger()
 
@@ -42,7 +43,7 @@ def _skill_enabled(caps: dict[str, Any], name: str) -> bool:
 @tool
 def skills_load(
     name: str,
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
 ) -> str:
     """Load a skill's full SKILL.md content into context.
@@ -101,7 +102,7 @@ skills_load.annotations = ToolAnnotations(
 
 @tool
 def skills_reload(
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
 ) -> str:
     """Reload the skill registry after creating, editing, or deleting SKILL.md files.

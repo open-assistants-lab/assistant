@@ -17,6 +17,7 @@ from src.sdk.workspace_models import (
     delete_workspace as _delete_ws,
 )
 from src.storage.messages import get_message_store
+from src.storage.paths import DEFAULT_USER_ID
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
@@ -36,7 +37,7 @@ class UpdateWorkspaceRequest(BaseModel):
 
 
 @router.get("")
-async def get_workspaces(user_id: str = "default_user", request: Request = None) -> dict[str, Any]:
+async def get_workspaces(user_id: str =  DEFAULT_USER_ID, request: Request = None) -> dict[str, Any]:
     enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     workspaces = list_workspaces(user_id=user_id)
     return {
@@ -55,7 +56,7 @@ async def get_workspaces(user_id: str = "default_user", request: Request = None)
 
 @router.post("")
 async def create_workspace(
-    req: CreateWorkspaceRequest, user_id: str = "default_user", request: Request = None
+    req: CreateWorkspaceRequest, user_id: str =  DEFAULT_USER_ID, request: Request = None
 ) -> dict[str, Any]:
     enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     ws = Workspace.from_name(req.name)
@@ -77,7 +78,7 @@ async def create_workspace(
 
 @router.patch("/{workspace_id}")
 async def update_workspace(
-    workspace_id: str, req: UpdateWorkspaceRequest, user_id: str = "default_user", request: Request = None
+    workspace_id: str, req: UpdateWorkspaceRequest, user_id: str =  DEFAULT_USER_ID, request: Request = None
 ) -> dict[str, Any] | tuple[dict[str, Any], int]:
     enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     ws = load_workspace(workspace_id, user_id=user_id)
@@ -99,7 +100,7 @@ async def update_workspace(
 
 
 @router.delete("/{workspace_id}")
-async def delete_workspace_endpoint(workspace_id: str, user_id: str = "default_user", request: Request = None) -> dict[str, Any] | tuple[dict[str, Any], int]:
+async def delete_workspace_endpoint(workspace_id: str, user_id: str =  DEFAULT_USER_ID, request: Request = None) -> dict[str, Any] | tuple[dict[str, Any], int]:
     enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     ws = load_workspace(workspace_id, user_id=user_id)
     if ws is None or ws.id == "personal":

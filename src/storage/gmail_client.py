@@ -22,6 +22,7 @@ from connectkit.spec import ConnectorSpec
 from connectkit.vault import CredentialVault
 
 from src.app_logging import get_logger
+from src.storage.paths import DEFAULT_USER_ID
 
 logger = get_logger()
 
@@ -39,7 +40,7 @@ class GmailClient:
 
     def __init__(
         self,
-        user_id: str = "default_user",
+        user_id: str =  DEFAULT_USER_ID,
         spec_dir: str | None = None,
         vault_path: str | None = None,
         bridge: ConnectKitBridge | None = None,

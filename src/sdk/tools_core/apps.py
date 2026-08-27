@@ -21,7 +21,7 @@ from hybriddb.embedding import hash_embedding as _hash_embedding
 from src.app_logging import get_logger
 from src.config import get_settings
 from src.sdk.tools import ToolAnnotations, tool
-from src.storage.paths import get_paths
+from src.storage.paths import DEFAULT_USER_ID, get_paths
 
 logger = get_logger()
 
@@ -153,7 +153,7 @@ def _delete_app(app_name: str, user_id: str) -> bool:
 
 
 @tool
-def app_create(name: str, tables: dict[str, dict[str, str]], user_id: str = "default_user") -> str:
+def app_create(name: str, tables: dict[str, dict[str, str]], user_id: str =  DEFAULT_USER_ID) -> str:
     """Create a new app with one or more tables.
 
     Args:
@@ -195,7 +195,7 @@ app_create.annotations = ToolAnnotations(title="Create App", destructive=True)
 
 
 @tool
-def app_list(user_id: str = "default_user") -> str:
+def app_list(user_id: str =  DEFAULT_USER_ID) -> str:
     """List all apps the user has created.
 
     Args:
@@ -220,7 +220,7 @@ app_list.annotations = ToolAnnotations(title="List Apps", read_only=True, idempo
 
 
 @tool
-def app_schema(name: str, user_id: str = "default_user") -> str:
+def app_schema(name: str, user_id: str =  DEFAULT_USER_ID) -> str:
     """Get schema for an app.
 
     Args:
@@ -254,7 +254,7 @@ app_schema.annotations = ToolAnnotations(title="App Schema", read_only=True, ide
 
 
 @tool
-def app_delete(name: str, user_id: str = "default_user") -> str:
+def app_delete(name: str, user_id: str =  DEFAULT_USER_ID) -> str:
     """Delete an app and all its data.
 
     Args:
@@ -277,7 +277,7 @@ app_delete.annotations = ToolAnnotations(title="Delete App", destructive=True)
 
 
 @tool
-def app_insert(app: str, table: str, data: dict[str, Any], user_id: str = "default_user") -> str:
+def app_insert(app: str, table: str, data: dict[str, Any], user_id: str =  DEFAULT_USER_ID) -> str:
     """Insert a row into a table.
 
     Args:
@@ -305,7 +305,7 @@ app_insert.annotations = ToolAnnotations(title="Insert App Row")
 
 @tool
 def app_update(
-    app: str, table: str, id: int, data: dict[str, Any], user_id: str = "default_user"
+    app: str, table: str, id: int, data: dict[str, Any], user_id: str =  DEFAULT_USER_ID
 ) -> str:
     """Update a row by ID.
 
@@ -337,7 +337,7 @@ app_update.annotations = ToolAnnotations(title="Update App Row")
 
 
 @tool
-def app_delete_row(app: str, table: str, id: int, user_id: str = "default_user") -> str:
+def app_delete_row(app: str, table: str, id: int, user_id: str =  DEFAULT_USER_ID) -> str:
     """Delete a row by ID.
 
     Args:
@@ -373,7 +373,7 @@ def app_column_add(
     column: str,
     col_type: str,
     enable_search: bool = True,
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
 ) -> str:
     """Add a column to a table.
 
@@ -406,7 +406,7 @@ app_column_add.annotations = ToolAnnotations(title="Add App Column")
 
 
 @tool
-def app_column_delete(app: str, table: str, column: str, user_id: str = "default_user") -> str:
+def app_column_delete(app: str, table: str, column: str, user_id: str =  DEFAULT_USER_ID) -> str:
     """Delete a column from a table.
 
     Args:
@@ -436,7 +436,7 @@ app_column_delete.annotations = ToolAnnotations(title="Delete App Column", destr
 
 @tool
 def app_column_rename(
-    app: str, table: str, old_name: str, new_name: str, user_id: str = "default_user"
+    app: str, table: str, old_name: str, new_name: str, user_id: str =  DEFAULT_USER_ID
 ) -> str:
     """Rename a column in a table.
 
@@ -534,7 +534,7 @@ def _convert_date_in_query(query: str) -> str:
 
 
 @tool
-def app_query(app: str, query: str, user_id: str = "default_user") -> str:
+def app_query(app: str, query: str, user_id: str =  DEFAULT_USER_ID) -> str:
     """Query app data with SQL.
 
     Args:
@@ -582,7 +582,7 @@ app_query.annotations = ToolAnnotations(title="Query App Data", open_world=True)
 
 @tool
 def app_search_fts(
-    app: str, table: str, column: str, query: str, limit: int = 10, user_id: str = "default_user"
+    app: str, table: str, column: str, query: str, limit: int = 10, user_id: str =  DEFAULT_USER_ID
 ) -> str:
     """Search app data using keyword search (FTS5).
 

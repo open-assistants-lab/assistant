@@ -7,7 +7,7 @@ from pathlib import Path
 
 from src.app_logging import get_logger
 from src.sdk.tools import ToolAnnotations, tool
-from src.storage.paths import get_paths
+from src.storage.paths import DEFAULT_USER_ID, get_paths
 
 logger = get_logger()
 
@@ -64,7 +64,7 @@ def _resolve_path(path: str | None, user_id: str, workspace_id: str = "personal"
 
 
 @tool
-def files_glob_search(pattern: str = "**/*", path: str = ".", user_id: str = "default_user", workspace_id: str = "personal") -> str:
+def files_glob_search(pattern: str = "**/*", path: str = ".", user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> str:
     """Search for files matching a glob pattern.
 
     Args:
@@ -120,7 +120,7 @@ def files_grep_search(
     path: str = ".",
     include: str | None = None,
     count: bool = False,
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
 ) -> str:
     """Search file contents using regex.

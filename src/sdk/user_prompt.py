@@ -2,14 +2,14 @@
 
 from pathlib import Path
 
-from src.storage.paths import DataPaths
+from src.storage.paths import DEFAULT_USER_ID, DataPaths
 
 
 def _user_prompt_path(user_id: str) -> Path:
     return DataPaths(user_id=user_id).user_prompt_path()
 
 
-def load_user_prompt(user_id: str = "default_user") -> str:
+def load_user_prompt(user_id: str =  DEFAULT_USER_ID) -> str:
     """Load the user's custom prompt. Returns empty string if not set."""
     path = _user_prompt_path(user_id)
     if not path.exists():

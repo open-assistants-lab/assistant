@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from src.sdk.capabilities import load_user_capabilities, resource_enabled, save_user_capabilities
 from src.sdk.subagent_models import TaskStatus
+from src.storage.paths import DEFAULT_USER_ID
 
 router = APIRouter(prefix="/subagents", tags=["subagents"])
 
@@ -109,7 +110,7 @@ def _reset_user_loops(user_id: str) -> None:
 
 @router.get("")
 async def list_subagents(
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),) -> dict[str, Any]:
     from src.sdk.coordinator import get_coordinator
 
@@ -147,7 +148,7 @@ async def list_subagents(
 @router.post("")
 async def create_subagent(
     body: SubagentCreateRequest,
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),) -> dict[str, Any]:
     from src.sdk.agent_validation import validate_agent_def
     from src.sdk.coordinator import get_coordinator
@@ -193,7 +194,7 @@ async def create_subagent(
 
 @router.get("/jobs")
 async def list_subagent_jobs(
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),
     status: TaskStatus | None = Query(None),) -> dict[str, Any]:
     from src.sdk.work_queue import get_work_queue
@@ -207,7 +208,7 @@ async def list_subagent_jobs(
 @router.get("/jobs/{job_id}")
 async def get_subagent_job(
     job_id: str,
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),) -> dict[str, Any]:
     from src.sdk.work_queue import get_work_queue
 
@@ -223,7 +224,7 @@ async def get_subagent_job(
 async def instruct_subagent_job(
     job_id: str,
     body: SubagentInstructionRequest,
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),) -> dict[str, Any]:
     from src.sdk.coordinator import get_coordinator
     from src.sdk.work_queue import get_work_queue
@@ -242,7 +243,7 @@ async def instruct_subagent_job(
 @router.post("/jobs/{job_id}/cancel")
 async def cancel_subagent_job(
     job_id: str,
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),) -> dict[str, Any]:
     from src.sdk.coordinator import get_coordinator
     from src.sdk.work_queue import get_work_queue
@@ -262,7 +263,7 @@ async def cancel_subagent_job(
 async def update_subagent(
     name: str,
     body: SubagentUpdateRequest,
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),) -> dict[str, Any]:
     from src.sdk.agent_validation import validate_agent_def
     from src.sdk.coordinator import get_coordinator
@@ -296,7 +297,7 @@ async def update_subagent(
 @router.delete("/{name}")
 async def delete_subagent(
     name: str,
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),) -> dict[str, Any]:
     from src.sdk.coordinator import get_coordinator
 
@@ -311,7 +312,7 @@ async def delete_subagent(
 async def start_subagent(
     name: str,
     body: SubagentStartRequest,
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),) -> dict[str, Any]:
     from src.sdk.coordinator import get_coordinator
 
@@ -328,7 +329,7 @@ async def start_subagent(
 async def set_subagent_scope(
     name: str,
     body: dict[str, Any],
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
 ) -> dict[str, Any]:
     scope: ScopeKind = body.get("scope", "all")
     if scope not in ("all", "selected", "none"):

@@ -1,9 +1,10 @@
 """In-memory UI state tracking per user."""
-
 import threading
 from collections import deque
 from datetime import UTC, datetime
 from typing import Any
+
+from src.storage.paths import DEFAULT_USER_ID
 
 
 class UiState:
@@ -45,7 +46,7 @@ _store: dict[str, UiState] = {}
 _lock = threading.Lock()
 
 
-def get_state(user_id: str = "default_user") -> UiState:
+def get_state(user_id: str =  DEFAULT_USER_ID) -> UiState:
     with _lock:
         if user_id not in _store:
             _store[user_id] = UiState()

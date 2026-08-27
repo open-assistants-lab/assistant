@@ -15,14 +15,14 @@ Precedence rules (spec §4.5 — the contract):
 
 from __future__ import annotations
 
-import logging
 import re
-
-from src.app_logging import get_logger
 from dataclasses import dataclass
 from pathlib import Path
 
 from agentprofile import AgentProfile, load_profile
+
+from src.app_logging import get_logger
+from src.storage.paths import DEFAULT_USER_ID
 
 logger = get_logger()
 
@@ -88,7 +88,7 @@ def validate_model_reference(
     model_ref: str,
     *,
     provider_keys: dict[str, str] | None = None,
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     require_key: bool | None = None,
 ) -> str | None:
     """Fail-fast bootstrap validation of profile.model.

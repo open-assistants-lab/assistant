@@ -220,7 +220,7 @@ def tool(func: Callable[..., Any] | None = None, *, name: str | None = None) -> 
 
     Usage:
         @tool
-        def time_get(user_id: str = "default_user") -> str:
+        def time_get(user_id: str =  DEFAULT_USER_ID) -> str:
             '''Get the current time.'''
             ...
 

@@ -3,12 +3,13 @@
 from src.app_logging import get_logger
 from src.sdk.tools import ToolAnnotations, tool
 from src.sdk.user_prompt import load_user_prompt, save_user_prompt
+from src.storage.paths import DEFAULT_USER_ID
 
 logger = get_logger()
 
 
 @tool
-def user_prompt_get(user_id: str = "default_user") -> str:
+def user_prompt_get(user_id: str =  DEFAULT_USER_ID) -> str:
     """Get the current user's custom prompt.
 
     Returns the prompt if set, or a message saying none is configured.
@@ -31,7 +32,7 @@ user_prompt_get.annotations = ToolAnnotations(
 
 
 @tool
-def user_prompt_set(prompt: str, user_id: str = "default_user") -> str:
+def user_prompt_set(prompt: str, user_id: str =  DEFAULT_USER_ID) -> str:
     """Set the user's custom prompt (persistent instructions for all workspaces).
 
     This prompt is injected into the system prompt before workspace-specific

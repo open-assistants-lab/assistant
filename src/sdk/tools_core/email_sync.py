@@ -13,6 +13,7 @@ from src.config import get_settings
 from src.sdk.tools import tool
 from src.sdk.tools_core.email_db import get_engine as _get_engine
 from src.sdk.tools_core.email_db import parse_email_flags
+from src.storage.paths import DEFAULT_USER_ID
 
 logger = get_logger()
 
@@ -522,7 +523,7 @@ async def _sync_all_accounts() -> None:
 
     user_ids = get_all_user_ids()
     # Filter out "default_user" user - it's not valid for email operations
-    user_ids = [uid for uid in user_ids if uid and uid != "default_user"]
+    user_ids = [uid for uid in user_ids if uid and uid != DEFAULT_USER_ID]
     batch_size = get_settings().email_sync.batch_size
 
     for user_id in user_ids:

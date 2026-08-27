@@ -192,7 +192,7 @@ def _to_detail(
 
 
 @router.get("", response_model=SkillListResponse)
-async def list_skills(user_id: str = "default_user", workspace_id: str = "personal", request: Request = None) -> SkillListResponse:
+async def list_skills(user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal", request: Request = None) -> SkillListResponse:
     enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     _validate_user_id(user_id)
     _validate_workspace_id(workspace_id)
@@ -212,7 +212,7 @@ async def list_skills(user_id: str = "default_user", workspace_id: str = "person
 @router.get("/{skill_name}", response_model=SkillDetail)
 async def get_skill(
     skill_name: str,
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
     request: Request = None,
 ) -> SkillDetail:
@@ -232,7 +232,7 @@ async def get_skill(
 @router.post("", response_model=SkillDetail)
 async def create_skill(
     req: SkillCreateRequest,
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
     request: Request = None,
 ) -> SkillDetail:
@@ -271,7 +271,7 @@ async def create_skill(
 async def update_skill(
     skill_name: str,
     req: SkillUpdateRequest,
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
     request: Request = None,
 ) -> SkillDetail:
@@ -310,7 +310,7 @@ async def update_skill(
 @router.delete("/{skill_name}")
 async def delete_skill(
     skill_name: str,
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
     request: Request = None,
 ) -> dict[str, Any]:
@@ -334,7 +334,7 @@ async def delete_skill(
 async def set_skill_scope(
     skill_name: str,
     body: dict[str, Any],
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     request: Request = None,
 ) -> dict[str, Any]:
     enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))

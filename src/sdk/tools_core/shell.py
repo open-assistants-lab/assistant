@@ -10,7 +10,7 @@ from typing import Any
 from src.app_logging import get_logger
 from src.config import get_settings
 from src.sdk.tools import ToolAnnotations, tool
-from src.storage.paths import get_paths
+from src.storage.paths import DEFAULT_USER_ID, get_paths
 
 logger = get_logger()
 
@@ -115,7 +115,7 @@ def _sweep_old_spill_files(out_dir: Path, max_age_days: int = 7) -> int:
 
 
 @tool
-def shell_execute(command: str, user_id: str = "default_user", workspace_id: str = "personal") -> str:
+def shell_execute(command: str, user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> str:
     """Run a shell command.
 
     Args:

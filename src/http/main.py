@@ -200,6 +200,12 @@ def _is_webhook_fire_path(path: str) -> bool:
     return len(parts) == 2 and parts[0] == "webhooks"
 
 
+# Rate-limited missing-user_id warnings (roadmap troubleshooting): one warn
+# per client host per hour so forgotten user_ids are visible without spam.
+_missing_uid_warned: dict[str, float] = {}
+_MISSING_UID_WARN_INTERVAL_S = 3600.0
+
+
 @app.middleware("http")
 async def api_key_auth_middleware(request: Request, call_next: Any) -> Any:
     """Apply API-key auth consistently across HTTP routes.
@@ -225,6 +231,28 @@ async def api_key_auth_middleware(request: Request, call_next: Any) -> Any:
     # P0-T2: stash the resolved identity so routers can enforce user_id
     # without resolving twice.
     request.state.identity = result
+
+    # Roadmap decision D0-5 follow-up: make an omitted user_id visible.
+    # GET/DELETE endpoints take user_id as a query param; when absent the
+    # endpoint silently defaults to 'default_user', which is indistinguishable
+    # from an intentional default in logs. Body-based user_id (POST /message)
+    # warns at the router instead (the body is not readable here).
+    if request.method in ("GET", "DELETE") and "user_id" not in request.query_params:
+        import time as _time
+
+        from src.app_logging import get_logger
+
+        host = request.client.host if request.client else "unknown"
+        now = _time.monotonic()
+        last = _missing_uid_warned.get(host, 0.0)
+        if now - last >= _MISSING_UID_WARN_INTERVAL_S:
+            _missing_uid_warned[host] = now
+            get_logger().warning(
+                "request.user_id missing — defaulted to 'default_user'; pass "
+                "user_id explicitly for per-user data isolation",
+                {"path": str(request.url.path)},
+                user_id=DEFAULT_USER_ID,
+            )
 
     return await call_next(request)
 

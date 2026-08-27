@@ -20,6 +20,7 @@ from src.storage.email_db import (
 )
 from src.storage.gmail_cache import sync_emails
 from src.storage.gmail_client import GmailClient, GmailNotConnectedError
+from src.storage.paths import DEFAULT_USER_ID
 
 router = APIRouter(prefix="/emails", tags=["emails"])
 
@@ -28,7 +29,7 @@ _SYNC_TASKS: dict[str, 'asyncio.Task[Any]'] = {}
 
 @router.get("")
 async def handle_list(
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     limit: int = 50,
     offset: int = 0,
     is_read: bool | None = None,
@@ -46,13 +47,13 @@ async def handle_list(
 
 
 @router.get("/search")
-async def handle_search(q: str, user_id: str = "default_user", limit: int = 20) -> dict[str, Any]:
+async def handle_search(q: str, user_id: str =  DEFAULT_USER_ID, limit: int = 20) -> dict[str, Any]:
     emails = search_emails(user_id, q, limit=limit)
     return {"emails": emails, "query": q}
 
 
 @router.get("/{email_id}")
-async def handle_get(email_id: str, user_id: str = "default_user") -> dict[str, Any]:
+async def handle_get(email_id: str, user_id: str =  DEFAULT_USER_ID) -> dict[str, Any]:
     email = get_email(user_id, email_id)
     if not email:
         return {"error": "not_found", "email_id": email_id}
@@ -62,7 +63,7 @@ async def handle_get(email_id: str, user_id: str = "default_user") -> dict[str, 
 
 
 @router.post("/sync")
-async def handle_sync(user_id: str = "default_user", provider: str = "gmail") -> dict[str, Any]:
+async def handle_sync(user_id: str =  DEFAULT_USER_ID, provider: str = "gmail") -> dict[str, Any]:
     """Trigger a manual email sync. Returns immediately, sync runs in background.
 
     Gmail sync now runs through GmailClient (ConnectKit OAuth token) instead of

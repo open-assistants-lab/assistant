@@ -42,7 +42,7 @@ from src.sdk.native_tools import get_native_tools
 from src.sdk.providers.factory import get_cached_model_provider
 from src.sdk.tools import ToolDefinition
 from src.sdk.user_prompt import load_user_prompt
-from src.storage.paths import DataPaths
+from src.storage.paths import DEFAULT_USER_ID, DataPaths
 
 logger = get_logger()
 
@@ -1621,7 +1621,7 @@ async def run_sdk_agent_stream(
 
 
 def reset_sdk_loop(
-    user_id: str = "default_user",
+    user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
     session_id: str | None = None,
 ) -> int:

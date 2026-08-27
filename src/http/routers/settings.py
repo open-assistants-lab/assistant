@@ -39,6 +39,7 @@ from src.config.user_settings_store import (
 )
 from src.http.auth import enforce_user_id
 from src.sdk.run_models import CanonicalModel, display_model_name
+from src.storage.paths import DEFAULT_USER_ID
 
 
 class UpdateSettingsRequest(BaseModel):
@@ -396,7 +397,7 @@ def _configuration_failure() -> JSONResponse:
 
 
 @router.get("", response_model=UserSettingsResponse)
-def get_settings(user_id: str = Query("default_user"), request: Request = None) -> UserSettingsResponse | JSONResponse:
+def get_settings(user_id: str = Query(DEFAULT_USER_ID), request: Request = None) -> UserSettingsResponse | JSONResponse:
     """Read canonical saved and effective settings without exposing credentials."""
     enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
 
@@ -410,7 +411,7 @@ def get_settings(user_id: str = Query("default_user"), request: Request = None) 
 
 @router.get("/model-catalog", response_model=None)
 def model_catalog(
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
     request: Request = None,
     max_models_per_provider: int | None = None,
     max_providers: int | None = None,
@@ -470,7 +471,7 @@ def model_catalog(
 @router.patch("", response_model=UserSettingsResponse)
 def update_settings(
     body: Any = Body(...),
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
     request: Request = None,
 ) -> UserSettingsResponse | JSONResponse:
     enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
@@ -514,7 +515,7 @@ def update_settings(
 
 
 @router.get("/api-keys", response_model=None)
-def list_api_keys(user_id: str = Query("default_user"), request: Request = None) -> dict[str, bool] | JSONResponse:
+def list_api_keys(user_id: str = Query(DEFAULT_USER_ID), request: Request = None) -> dict[str, bool] | JSONResponse:
     enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
     """List which providers have stored API keys (without revealing keys)."""
     try:
@@ -529,7 +530,7 @@ def list_api_keys(user_id: str = Query("default_user"), request: Request = None)
 @router.post("/api-keys", response_model=None)
 def set_api_key(
     body: Any = Body(...),
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
     request: Request = None,
 ) -> dict[str, str | int] | JSONResponse:
     enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
@@ -596,7 +597,7 @@ async def test_api_key(body: TestKeyRequest) -> dict[str, Any]:
 @router.delete("/api-keys/{provider}", response_model=None)
 def delete_api_key(
     provider: str,
-    user_id: str = Query("default_user"),
+    user_id: str = Query(DEFAULT_USER_ID),
 ) -> dict[str, str | int] | JSONResponse:
     """Remove a stored API key for a provider."""
     try:

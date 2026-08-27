@@ -2,10 +2,11 @@
 
 from src.sdk.tools import ToolAnnotations, tool
 from src.sdk.ui_state import get_state
+from src.storage.paths import DEFAULT_USER_ID
 
 
 @tool
-def ui_state_get(user_id: str = "default_user") -> str:
+def ui_state_get(user_id: str =  DEFAULT_USER_ID) -> str:
     """Get the current UI state and recent user interactions.
 
     Returns what tab the user is on, what they've selected,
