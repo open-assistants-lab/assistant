@@ -260,7 +260,7 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'http'", specifier = ">=0.129.0" },
     { name = "html2text", specifier = ">=2025.4.15" },
     { name = "httpx", specifier = ">=0.28.0" },
-    { name = "hybriddb", specifier = ">=0.5.8" },
+    { name = "hybriddb", specifier = ">=0.6.0" },
     { name = "imap-tools", specifier = ">=1.0.0" },
     { name = "langfuse", specifier = ">=4.0" },
     { name = "mcp", specifier = ">=1.0.0" },
@@ -1145,14 +1145,14 @@ wheels = [
 
 [[package]]
 name = "hybriddb"
-version = "0.5.8"
+version = "0.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "chromadb" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/51/61/b006a34b9868f5789e33ca87b75d68f3f7c177cd315b041036efee27b0ca/hybriddb-0.5.8.tar.gz", hash = "sha256:b956c110a5e688d15cacafcfe83a38003f95532826918f30714aa9de35623ad8", size = 355958, upload-time = "2026-08-25T03:35:15.68Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bd/c7/35c7d32fab49d7b76aadb5b7c80f6f6d00206aaa9c37f71f0f4c6c1cc220/hybriddb-0.6.0.tar.gz", hash = "sha256:12a25811f2d4a47a0b96aa1f7a70156d047123bcd6a88fa4a2ec2c2a75dec372", size = 370080, upload-time = "2026-08-27T14:56:52.24Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f8/41/239b6ab1498cfa4adf19f850b462a33bc9a30e66a56430c5fb90974b352b/hybriddb-0.5.8-py3-none-any.whl", hash = "sha256:2ef6435163ec3530d88f1e11ffc04d24cdb24d920df6f84047cbd6a3fe0f4307", size = 44848, upload-time = "2026-08-25T03:35:13.929Z" },
+    { url = "https://files.pythonhosted.org/packages/52/09/174a33671ec272391e50e75d4443feb57c4f73b15fb72da2241046720b18/hybriddb-0.6.0-py3-none-any.whl", hash = "sha256:17a71627981d6d494d29348d2074483f85be96bb0799881bd24d00723713bcf3", size = 51042, upload-time = "2026-08-27T14:56:50.152Z" },
 ]
 
 [[package]]
