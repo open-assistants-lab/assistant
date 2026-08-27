@@ -40,7 +40,14 @@ class AgentConfig(_BaseSettings):
     """Agent configuration."""
 
     name: str = Field(default="Assistant")
-    model: str = Field(default="ollama-cloud:deepseek-v4-flash:0731")
+    # No provider is baked in as the shipped default: set agent.model in
+    # config.yaml (deployment-level default) or per-user PROFILE.md (primary
+    # agent configuration). Empty -> fail-fast at first use with guidance.
+    model: str = Field(
+        default="",
+        description="Default model as 'provider:model' (e.g. anthropic:claude-...). "
+        "Empty requires PROFILE.md or per-request model.",
+    )
     title_model: str = Field(
         default="", description="Model for chat title summarization (empty = use model)"
     )
@@ -78,7 +85,8 @@ class SummarizationConfig(_BaseSettings):
     """Summarization middleware configuration (short-term token reduction)."""
 
     enabled: bool = True
-    model: str = Field(default="ollama-cloud:deepseek-v4-flash:0731")
+    # Empty = use agent.model (never a provider-specific fallback).
+    model: str = Field(default="")
     trigger: list[Any] = Field(default_factory=lambda: ["tokens", 50000])
     keep: list[Any] = Field(default_factory=lambda: ["messages", 20])
     trim_tokens_to_summarize: int | None = 4000

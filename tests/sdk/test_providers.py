@@ -2140,3 +2140,37 @@ class TestOllamaCloudUsageExtraction:
         data = {"message": {"role": "assistant", "content": "Hi"}}
         msg = p._parse_response(data)
         assert msg.usage is None
+
+
+class TestNoBakedInModelDefault:
+    """Roadmap decision D0-5: no provider is baked in as the shipped default.
+
+    An empty agent.model (no config.yaml model, no saved user default) fails
+    fast with actionable guidance instead of silently using a provider the
+    operator never chose.
+    """
+
+    def test_empty_everything_raises_clear_error(self):
+        with patch("src.config.get_settings") as mock_settings:
+            mock_settings.return_value.agent.model = ""
+            with patch(
+                "src.sdk.providers.factory._load_user_settings", return_value=None
+            ):
+                with pytest.raises(ValueError, match="No model configured"):
+                    create_model_from_config(None)
+
+    def test_empty_settings_still_uses_saved_user_default(self):
+        saved = SavedUserSettings(default_model="anthropic:claude-sonnet-4")
+        with patch("src.config.get_settings") as mock_settings:
+            mock_settings.return_value.agent.model = ""
+            with patch(
+                "src.sdk.providers.factory._load_user_settings", return_value=saved
+            ):
+                p = create_model_from_config(None)
+                assert isinstance(p, AnthropicProvider)
+
+    def test_config_model_wins_over_empty_settings(self):
+        with patch("src.config.get_settings") as mock_settings:
+            mock_settings.return_value.agent.model = ""
+            p = create_model_from_config("openai:gpt-4o")
+            assert isinstance(p, OpenAIProvider)

@@ -451,6 +451,13 @@ def _resolve_config_model_inputs(
         settings_loaded = True
         model_str = (saved.default_model if saved else None) or settings.agent.model
 
+    if not model_str:
+        raise ValueError(
+            "No model configured. Set agent.model in config.yaml (deployment "
+            "default), add 'model:' to the user's PROFILE.md (primary agent "
+            "configuration), or pass model/provider_keys per request."
+        )
+
     provider_type, model_name = _parse_model_string(model_str)
     normalized_model_ref = _normalized_model_ref(model_str, provider_type, model_name)
 
