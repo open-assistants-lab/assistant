@@ -19,11 +19,9 @@ logger = get_logger()
 
 def _get_sdk_tools_for_subagent(config: SubagentConfig) -> list[Any]:
     """Get SDK ToolDefinition list for a subagent."""
-    from src.sdk.tools import ToolRegistry
+    from src.sdk.native_tools import get_native_tools
 
-    registry = ToolRegistry()
-
-    all_native = registry.get_native_tools()  # type: ignore[attr-defined]
+    all_native = get_native_tools()
 
     if not config.tools:
         return list(all_native)
@@ -188,10 +186,9 @@ You have access to tools and skills as configured.
         provider = create_model_from_config(model_str)
 
         tool_names = config.get("tools", [])
-        from src.sdk.tools import ToolRegistry
+        from src.sdk.native_tools import get_native_tools
 
-        registry = ToolRegistry()
-        all_native = registry.get_native_tools()  # type: ignore[attr-defined]
+        all_native = get_native_tools()
         if tool_names:
             tool_map = {t.name: t for t in all_native}
             sdk_tools = [tool_map[n] for n in tool_names if n in tool_map]

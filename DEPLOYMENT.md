@@ -55,10 +55,10 @@ The CLI must be listed in `shell_tool.allowed_commands` in `config.yaml` (alread
 One user, one machine, `localhost` only. Zero configuration.
 
 ```bash
-uv run assistant http
+uv run assistant-sdk http
 ```
 
-- **URL**: `http://localhost:8000`
+- **URL**: `http://localhost:8080`
 - **Auth**: disabled (localhost-only, no API key needed)
 - **Data**: user data at `~/Assistant/`, project data at `./data/`
 - **Config**: `config.yaml` + `.env` (see [Secrets](#secrets))
@@ -81,11 +81,11 @@ there is nothing to "sync".
 ```bash
 export API_KEY=$(openssl rand -hex 32)
 echo "Your API key: $API_KEY"   # save this!
-uv run assistant http              # binds 0.0.0.0:8000 by default
+uv run assistant-sdk http              # binds 0.0.0.0:8080 by default
 ```
 
 3. On each client device: Settings → Connection → Host
-   `http://<server-tailscale-ip>:8000`, enter the API key.
+   `http://<server-tailscale-ip>:8080`, enter the API key.
 
 **How it works:** Tailscale provides an encrypted mesh network between your
 devices. `API_KEY` protects remote connections; `SOLO_BYPASS=true`
@@ -108,8 +108,8 @@ the agent's shell/filesystem access isolated per user at the OS level.
 
 ```
 bob.myea.com   ──┐
-                 ├──► Caddy (TLS, :443) ──► alice:8000  (alice's container)
-alice.myea.com ──┘                          bob:8000    (bob's container)
+                 ├──► Caddy (TLS, :443) ──► alice:8080  (alice's container)
+alice.myea.com ──┘                          bob:8080    (bob's container)
 ```
 
 ### 1. DNS
@@ -130,10 +130,10 @@ openssl rand -hex 32   # bob's key
     tls { dns cloudflare {env.CLOUDFLARE_API_TOKEN} }
 
     @alice host alice.myea.com
-    handle @alice { reverse_proxy alice:8000 }
+    handle @alice { reverse_proxy alice:8080 }
 
     @bob host bob.myea.com
-    handle @bob { reverse_proxy bob:8000 }
+    handle @bob { reverse_proxy bob:8080 }
 }
 ```
 
@@ -156,7 +156,7 @@ services:
       - API_KEY=${ALICE_KEY}
       - DEPLOYMENT_DATA_ROOT=/app/data        # user data → volume
       - DEPLOYMENT_DATA_PATH=/app/data      # project data → volume
-      - API_PORT=8000
+      - API_PORT=8080
     volumes:
       - alice_data:/app/data
 
@@ -167,7 +167,7 @@ services:
       - API_KEY=${BOB_KEY}
       - DEPLOYMENT_DATA_ROOT=/app/data
       - DEPLOYMENT_DATA_PATH=/app/data
-      - API_PORT=8000
+      - API_PORT=8080
     volumes:
       - bob_data:/app/data
 
@@ -286,9 +286,9 @@ host) for a local model server.
 
 ## Troubleshooting
 
-- **Container won't start** → check the command is `uv run assistant http`
+- **Container won't start** → check the command is `uv run assistant-sdk http`
   (older docs/image references said `ea`, which was never the entry point).
-- **Port mismatch** → the server listens on **8000** (not 8080).
+- **Port mismatch** → the server listens on **8080** (the canonical port).
 - **Data "disappears" after container recreation** → `DEPLOYMENT_DATA_ROOT`
   must point into the mounted volume (see Mode 3).
 - **Health check fails** → `curl` is not installed in the slim image; use the

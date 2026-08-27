@@ -1,9 +1,9 @@
 # Caddyfile for Assistant
 
-# HTTPS site
-ea.mgmtcnsltng.com {
-    # Reverse proxy to app container
-    reverse_proxy app:8000
+# HTTPS site — replace with your own domain
+assistant.example.com {
+    # Reverse proxy to app container (canonical port 8080)
+    reverse_proxy app:8080
 
     # Security headers
     header {

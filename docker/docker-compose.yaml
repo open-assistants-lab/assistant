@@ -4,10 +4,10 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    container_name: ea_app
+    container_name: assistant
     ports:
-      - "8000:8000"
-    command: ["uv", "run", "assistant", "http"]
+      - "8080:8080"
+    command: ["uv", "run", "assistant-sdk", "http"]
     environment:
       # Auth — set API_KEY to require auth on non-localhost connections
       API_KEY: ${API_KEY:-}
@@ -30,9 +30,9 @@ services:
       DEPLOYMENT_DATA_ROOT: /app/data
       DEPLOYMENT_DATA_PATH: /app/data
 
-      # Server (API_* envs, see src/config/settings.py)
+      # Server (API_* envs, see src/config/settings.py) — canonical port 8080
       API_HOST: "0.0.0.0"
-      API_PORT: "8000"
+      API_PORT: "8080"
 
       # Logging
       LOGGING_LEVEL: ${LOGGING_LEVEL:-info}
@@ -41,7 +41,7 @@ services:
     restart: unless-stopped
     healthcheck:
       # python:3.13-slim has no curl — use urllib
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
