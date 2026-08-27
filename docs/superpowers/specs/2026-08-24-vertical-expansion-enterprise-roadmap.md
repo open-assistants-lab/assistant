@@ -262,6 +262,15 @@ it.
 - **Shared capture layer:** the session log is the natural home of the A3
   audit + telemetry capture (one event stream, two sinks) — design together
   with §8a decision 1
+- **Engine-enforced tamper-evidence (2026-08-26):** HybridDB 0.6.0 shipped
+  `versioned=True, hash_chain=True` — the engine maintains a SHA256 hash
+  chain on every write (`verify_chain()`, `diff()`, `as_of()`,
+  `checkpoint()/rollback()`, `archive()/prune()` with chain anchors). The
+  session log's audit trail upgrades from app-computed hashes to
+  **engine-enforced** tamper evidence; `prune()` is chain-safe (anchors keep
+  `verify_chain` valid for the retained tail). Measured write overhead: ~13%.
+  `fork` was deferred by HybridDB (checkpoint/rollback covers the rewind
+  workflow) — B7 fork/resume stays app-level until a consumer demands it.
 
 ### 6.5 Selective pluggability (R-PL1)
 
