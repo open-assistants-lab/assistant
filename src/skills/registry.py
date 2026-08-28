@@ -5,7 +5,11 @@ run. workspace_id and workspace skill directories are accepted for compatibility
 at runtime.
 """
 
+import json
+import re
+import shutil
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +19,10 @@ from src.storage.paths import DEFAULT_USER_ID
 
 _registries: dict[str, "SkillRegistry"] = {}
 _lock = threading.Lock()
+
+
+class DraftConflictError(Exception):
+    """Cannot approve a draft because a live skill of the same name exists."""
 
 
 def get_skill_registry(
@@ -62,6 +70,10 @@ class SkillRegistry:
         self.workspace_id = workspace_id
 
         self.skills_dir = Path(skills_dir) if skills_dir else paths.user_skills_dir()
+        # Drafts live OUTSIDE the scanned skills dir so they never appear in
+        # get_all_skills()/get_skill() until explicitly approved (P1-T6/T8:
+        # human review gate — auto-drafted skills are never runtime-visible).
+        self.drafts_dir = self.skills_dir.parent / ".skill-drafts"
         self.storage = SkillStorage(self.skills_dir)
 
         self.workspace_skills_dir = (
@@ -238,6 +250,95 @@ class SkillRegistry:
             or query_lower in s.get("description", "").lower()
             or query_lower in s.get("content", "").lower()
         ]
+
+    # -- Skill review queue (drafts) ---------------------------------------
+
+    def _draft_dir(self, name: str) -> Path:
+        return self.drafts_dir / name
+
+    def put_skill_draft(self, name: str, content: str, *, source: str = "") -> Path:
+        """Write (or replace) a skill draft in the review queue.
+
+        Args:
+            name: skill name (Agent Skills spec: lowercase a-z 0-9 hyphens).
+            content: full SKILL.md file content (frontmatter + body).
+            source: optional provenance (e.g. the URL it was extracted from).
+
+        Returns the draft SKILL.md path.
+        """
+        if not re.fullmatch(r"[a-z0-9-]+", name or ""):
+            raise ValueError(
+                f"invalid draft skill name {name!r}: lowercase a-z, 0-9, hyphens"
+            )
+        draft_dir = self._draft_dir(name)
+        draft_dir.mkdir(parents=True, exist_ok=True)
+        (draft_dir / "SKILL.md").write_text(content, encoding="utf-8")
+        (draft_dir / ".draft-meta.json").write_text(
+            json.dumps(
+                {"source": source, "drafted_at": datetime.now(UTC).isoformat()}
+            ),
+            encoding="utf-8",
+        )
+        return draft_dir / "SKILL.md"
+
+    def list_skill_drafts(self) -> list[dict[str, Any]]:
+        """List pending drafts: {name, path, source} entries, name-sorted."""
+        if not self.drafts_dir.exists():
+            return []
+        drafts = []
+        for item in sorted(self.drafts_dir.iterdir()):
+            meta_file = item / ".draft-meta.json"
+            meta: dict[str, Any] = {}
+            if meta_file.exists():
+                try:
+                    meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    meta = {}
+            drafts.append(
+                {
+                    "name": item.name,
+                    "path": str(item / "SKILL.md"),
+                    "source": str(meta.get("source", "")),
+                }
+            )
+        return drafts
+
+    def get_skill_draft(self, name: str) -> Skill | None:
+        """Parse a pending draft via the standard frontmatter parser."""
+        draft_skill_md = self._draft_dir(name) / "SKILL.md"
+        if not draft_skill_md.exists():
+            return None
+        from src.skills.models import parse_skill_file
+
+        return parse_skill_file(draft_skill_md)
+
+    def approve_skill_draft(self, name: str) -> Path:
+        """Promote a draft into the live skills dir (human review passed).
+
+        Raises FileNotFoundError if no such draft; FileExistsError when a
+        live skill (possibly user-customized) already occupies the name.
+        """
+        draft_dir = self._draft_dir(name)
+        if not (draft_dir / "SKILL.md").exists():
+            raise FileNotFoundError(f"no draft named {name!r}")
+        target_dir = self.skills_dir / name
+        if target_dir.exists():
+            raise FileExistsError(
+                f"live skill {name!r} already exists at {target_dir}; "
+                "resolve manually (reject or edit the existing skill)"
+            )
+        self.skills_dir.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(draft_dir), str(target_dir))
+        meta_file = target_dir / ".draft-meta.json"
+        if meta_file.exists():
+            meta_file.unlink()
+        return target_dir / "SKILL.md"
+
+    def reject_skill_draft(self, name: str) -> None:
+        """Discard a draft (human review rejected or superseded)."""
+        draft_dir = self._draft_dir(name)
+        if draft_dir.exists():
+            shutil.rmtree(draft_dir)
 
     def get_skill_descriptions(self, include_disabled: bool = False) -> list[str]:
         """Get formatted skill descriptions for system prompt.
