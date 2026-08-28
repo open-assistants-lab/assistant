@@ -11,7 +11,9 @@ basics (data layout, backups, secrets, observability) that apply to all of them.
 
 > **Docker deployment source of truth:** [`docker/DEPLOYMENT.md`](docker/DEPLOYMENT.md)
 > (multi-user trusted deployment). This file covers the three deployment modes and
-> host/VPS specifics.
+> host/VPS specifics. **No clone needed:** `docker pull
+> ghcr.io/open-assistants-lab/assistant:latest` — published on every release tag
+> (multi-arch amd64+arm64).
 
 ## Architecture in 30 seconds
 

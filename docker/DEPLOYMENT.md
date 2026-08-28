@@ -18,12 +18,51 @@ per-project guides) are instances of this one — update here first, then sync c
 
 ## 2. Quick start
 
+### Option A — pull the published image (recommended; no clone, no build)
+
+The image is published to GHCR on every release tag (`v*`) and every push to
+`main` — multi-arch (amd64 + arm64):
+
+```bash
+docker pull ghcr.io/open-assistants-lab/assistant:latest
+
+mkdir -p assistant-deploy && cd assistant-deploy
+curl -sO https://raw.githubusercontent.com/open-assistants-lab/assistant/main/docker/docker-compose.yaml
+curl -sO https://raw.githubusercontent.com/open-assistants-lab/assistant/main/docker/.env.example
+curl -sO https://raw.githubusercontent.com/open-assistants-lab/assistant/main/config.yaml
+mv docker-compose.yaml docker-compose.yaml.orig
+# swap build: for the published image (see note below), then cp .env.example .env
+docker compose up -d
+curl -s http://localhost:8080/health     # → {"status":"healthy"}
+```
+
+Pull-path compose variant — replace the `build:` block in `docker-compose.yaml`
+with the published image:
+
+```yaml
+services:
+  app:
+    image: ghcr.io/open-assistants-lab/assistant:latest
+    # everything else identical to docker-compose.yaml (volumes, ports, env_file)
+```
+
+The published image ships the full feature set (`EXTRAS="--extra memory-vector
+--extra analytics"` — the Dockerfile default), so semantic memory, analytics,
+and the tool index all work.
+
+### Option B — build from source
+
 ```bash
 git clone https://github.com/open-assistants-lab/assistant && cd assistant/docker
 cp .env.example .env          # then edit .env (§3)
-docker compose up -d          # server on :8080
+docker compose up -d --build  # server on :8080 (build ~5-10 min; needs ~15GB disk)
 curl -s http://localhost:8080/health     # → {"status":"healthy"}
 ```
+
+> **Disk note (verified on a 25GB Linode):** building on small VPS disks is tight —
+> the full image is ~12.5GB and the build cache doubles peak usage. Option A
+> (pull) avoids the build entirely; run `docker builder prune -af` if the disk
+> fills.
 
 First boot downloads a one-time ~80MB embedding model (~15–25s) before the first
 message responds. Subsequent boots are instant.
