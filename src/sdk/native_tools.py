@@ -30,6 +30,7 @@ from src.sdk.tools_core.browser import (
     browser_screenshot,
     browser_snapshot,
 )
+from src.sdk.tools_core.corpus import index_corpus, search_corpus
 from src.sdk.tools_core.file_search import (
     files_glob_search,
     files_grep_search,
@@ -117,6 +118,9 @@ def _register_all() -> None:
     registry.register(message_history)
     registry.register(message_timeline)
     registry.register(memory_profile)
+
+    registry.register(index_corpus)
+    registry.register(search_corpus)
 
     registry.register(web_fetch)
     registry.register(web_search)
