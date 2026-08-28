@@ -20,6 +20,7 @@ from hybriddb.embedding import hash_embedding as _hash_embedding
 
 from src.app_logging import get_logger
 from src.config import get_settings
+from src.sdk.messages import Message
 from src.sdk.tools import ToolAnnotations, tool
 from src.storage.paths import DEFAULT_USER_ID, get_paths
 
@@ -644,3 +645,128 @@ app_search_fts.annotations = ToolAnnotations(
 )
 
 
+
+
+@tool
+def app_import_csv(
+    path: str,
+    app_name: str,
+    table: str | None = None,
+    user_id: str = DEFAULT_USER_ID,
+) -> str:
+    """Import a CSV or XLSX file into app tables.
+
+    Excel formula cells are stored raw (never evaluated). Re-importing the
+    same file replaces its prior rows (duplicate import = upsert).
+
+    Args:
+        path: Path to the .csv or .xlsx file
+        app_name: Target app (created on demand)
+        table: Target table name — omit to import every sheet as its own table
+        user_id: User identifier
+
+    Returns:
+        Success message with imported tables/row counts
+    """
+    from src.sdk.tools_core.sheets import (
+        SheetParseError,
+        normalize,
+        parse_sheets,
+        rows_to_schema,
+        source_key,
+    )
+
+    user_id = user_id or DEFAULT_USER_ID
+    try:
+        src = Path(path).expanduser().resolve()
+        if not src.exists():
+            return f"Error: file not found: {src}"
+        sheets = parse_sheets(src)
+        if table:
+            # Explicit table name overrides the sheet/file name.
+            if len(sheets) == 1:
+                sheets = {table: next(iter(sheets.values()))}
+            elif table in sheets:
+                sheets = {table: sheets[table]}
+            else:
+                return f"Error: sheet '{table}' not found in {src.name}"
+        db = _get_db(app_name, user_id)
+        key = source_key(src)
+        imported: list[str] = []
+        for tbl_name, rows in sheets.items():
+            if not rows:
+                continue
+            sql_types = rows_to_schema(rows)
+            existing = set(db.list_tables())
+            tname = _sanitize_app_name(tbl_name) or "sheet1"
+            if tname not in existing:
+                db.create_table(tname, sql_types)
+            else:
+                live_cols = db.get_schema(tname)
+                if "_source_key" not in live_cols:
+                    db.add_column(tname, "_source_key", "TEXT")
+            # Upsert: replace rows previously imported from this source.
+            for stale in db.read_query(
+                f'SELECT id FROM "{tname}" WHERE _source_key = ?', (key,)  # noqa: S608
+            ):
+                db.delete(tname, stale["id"])
+            n = 0
+            for row in normalize(rows, sql_types):
+                db.insert(tname, {**row, "_source_key": key})
+                n += 1
+            imported.append(f"{tname}: {n} rows")
+        logger.info(
+            "app_import_csv.imported",
+            {"source": src.name, "tables": len(imported)},
+            user_id=user_id,
+        )
+        return f"Imported from '{src.name}':\n  - " + "\n  - ".join(imported)
+    except SheetParseError as e:
+        return str(e)
+    except Exception as e:
+        logger.error(
+            "app_import_csv.error", {"path": path, "error": str(e)}, user_id=user_id
+        )
+        return f"Error importing file: {e}"
+
+
+app_import_csv.annotations = ToolAnnotations(title="Import CSV/XLSX", destructive=True)
+
+
+@tool
+async def app_summarize(app: str, user_id: str = DEFAULT_USER_ID) -> str:
+    """One-line (<=200 char) LLM description of what a workbook contains.
+
+    Args:
+        app: App name to summarize
+        user_id: User identifier
+
+    Returns:
+        A <=200 character description of the workbook
+    """
+    try:
+        schema = _get_schema(_sanitize_app_name(app), user_id)
+        if schema is None or not schema.tables:
+            return f"Error: app '{app}' not found"
+        parts = [f"{t.name}: {list(t.columns.keys())}" for t in schema.tables.values()]
+        context = f"App '{app}' tables:\n" + "\n".join(parts[:10])
+        model = get_settings().agent.model
+        if not model:
+            return f"Workbook '{app}' with {len(schema.tables)} table(s): {parts[0]}"[:200]
+        from src.sdk.providers.factory import get_cached_model_provider
+
+        provider = get_cached_model_provider(model)
+        result = await provider.chat(
+            model=model,
+            system="Describe what this structured workbook is in ONE sentence, max 200 characters. Reply with the sentence only.",
+            messages=[Message.user(context)],
+        )
+        content = result.content
+        text = content.strip() if isinstance(content, str) else str(content)
+        return text[:200] or context[:200]
+    except Exception as e:
+        logger.error("app_summarize.error", {"app": app, "error": str(e)}, user_id=user_id)
+        return f"Error summarizing app: {e}"
+
+
+app_summarize.annotations = ToolAnnotations(title="Summarize Workbook", read_only=True)

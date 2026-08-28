@@ -15,11 +15,13 @@ from src.sdk.tools_core.apps import (
     app_create,
     app_delete,
     app_delete_row,
+    app_import_csv,
     app_insert,
     app_list,
     app_query,
     app_schema,
     app_search_fts,
+    app_summarize,
     app_update,
 )
 from src.sdk.tools_core.browser import (
@@ -153,6 +155,8 @@ def _register_all() -> None:
     registry.register(app_column_rename)
     registry.register(app_query)
     registry.register(app_search_fts)
+    registry.register(app_import_csv)
+    registry.register(app_summarize)
 
     registry.register(subagent_create)
     registry.register(subagent_delegate)

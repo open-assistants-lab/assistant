@@ -30,6 +30,7 @@ dependencies = [
     "connectkit==0.1.4",
     "mistune>=3.2.1",
     "langfuse>=4.0",
+    "openpyxl>=3.1.5",
 ]
 
 [project.optional-dependencies]
