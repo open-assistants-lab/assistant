@@ -2,6 +2,12 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
+# OS utilities for TOOL.md command-based custom tools (bridge HTTP calls,
+# JSON post-processing, timezone data for zoneinfo). uv installed below.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl jq tzdata ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install uv
 RUN pip install uv
 
