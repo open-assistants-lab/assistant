@@ -335,6 +335,12 @@ def _resolve_registry_provider(
         return None
 
     base_url = provider_info.get("base_url") or None
+    if provider_id == "ollama-cloud":
+        # OLLAMA_BASE_URL overrides the models.dev endpoint (a local daemon
+        # proxying ollama.com needs no key and must not be sent to ollama.com)
+        # — keeps the registry path consistent with the ollama-cloud
+        # constructor branch (Jen CR B3).
+        base_url = os.environ.get("OLLAMA_BASE_URL", "") or base_url
     env_keys = provider_info.get("env") or []
     resolved_key = api_key
     for env_key in env_keys:
@@ -346,6 +352,23 @@ def _resolve_registry_provider(
         base_url = base_url.rstrip("/")[:-3]
 
     return provider_id, model_name, base_url, resolved_key
+
+
+def provider_key_requirement(provider_type: str) -> str | None:
+    """Return the env var whose API key is required for provider_type, or None
+    when the provider can resolve without one.
+
+    ollama-cloud with a non-default OLLAMA_BASE_URL (e.g. a local daemon
+    proxying ollama.com) needs no key — this mirrors the constructor's URL
+    resolution so bootstrap validation and runtime construction agree
+    (Jen CR B3). The ollama.com default endpoint still requires a key.
+    """
+    if provider_type == "ollama-cloud":
+        base_url = os.environ.get("OLLAMA_BASE_URL", "") or "https://ollama.com"
+        if "ollama.com" not in base_url:
+            return None
+        return "OLLAMA_API_KEY"
+    return _ENV_KEY_MAP.get(provider_type)
 
 
 def create_provider_from_registry_model(

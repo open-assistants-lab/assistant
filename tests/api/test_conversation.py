@@ -1437,7 +1437,11 @@ class TestTitleModelFromSettings:
         )
 
         assert title == "Project Planning"
-        assert captured["model"] == "ollama-cloud:deepseek-v4-flash:0731"
+        # Fallback = the host agent model (whatever the deployment configured),
+        # not a hardcoded string — config.yaml may legitimately differ.
+        from src.config import get_settings
+
+        assert captured["model"] == get_settings().agent.model
 
 
 class TestSseHeartbeat:

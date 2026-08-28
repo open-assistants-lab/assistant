@@ -283,3 +283,76 @@ async def test_revalidate_resets_loops_and_detaches_sessions(monkeypatch):
     # only requests cancellation so no stale loop serves an approved turn.
     assert lock.cancelled
     assert result["profile_found"] is False  # /nonexistent has no PROFILE.md
+
+
+class TestOllamaCloudBaseURLResolution:
+    """Jen CR B3: bootstrap provider resolution must match the runtime factory.
+
+    ollama-cloud with a non-default OLLAMA_BASE_URL (a local daemon proxying
+    ollama.com) needs NO API key; the default ollama.com endpoint does. The
+    registry provider path must also honour OLLAMA_BASE_URL.
+    """
+
+    def _fake_registry(self, monkeypatch):
+        import src.skills.registry as skills_registry
+
+        class FakeRegistry:
+            def get_skill(self, name):
+                return object()
+
+        monkeypatch.setattr(
+            skills_registry, "get_skill_registry", lambda **kw: FakeRegistry()
+        )
+        monkeypatch.setattr(
+            "src.config.user_settings_service.load_saved_user_settings", lambda user_id: None
+        )
+        monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+
+    def test_local_daemon_base_url_needs_no_key(self, monkeypatch, tmp_path):
+        """ollama-cloud + OLLAMA_BASE_URL=local daemon -> bootstrap succeeds keyless."""
+        self._fake_registry(monkeypatch)
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+
+        profile = profile_loader.build_loop_from_profile(
+            "u_b3",
+            _profile(model="ollama-cloud:glm-5.3-flash:cloud"),
+            data_root=tmp_path,
+        )
+        assert profile.model == "ollama-cloud:glm-5.3-flash:cloud"
+
+    def test_default_ollama_com_requires_key(self, monkeypatch, tmp_path):
+        """No OLLAMA_BASE_URL -> default ollama.com endpoint -> key required."""
+        self._fake_registry(monkeypatch)
+        monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+
+        with pytest.raises(profile_loader.ProfileError, match="OLLAMA_API_KEY"):
+            profile_loader.build_loop_from_profile(
+                "u_b3",
+                _profile(model="ollama-cloud:glm-5.3-flash:cloud"),
+                data_root=tmp_path,
+            )
+
+    def test_provider_construction_honours_base_url(self, monkeypatch):
+        """Runtime construction (registry path) uses OLLAMA_BASE_URL, not the
+        models.dev ollama-cloud endpoint."""
+        from src.sdk.providers.factory import create_model_from_config
+        from src.sdk.providers.ollama import OllamaCloud
+
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+        p = create_model_from_config("ollama-cloud:glm-5.3-flash:cloud")
+        assert isinstance(p, OllamaCloud)
+        assert p.base_url == "http://host.docker.internal:11434"
+
+    def test_registry_provider_path_honours_base_url(self, monkeypatch):
+        """_resolve_registry_provider must not hardcode the ollama.com endpoint
+        for ollama-cloud when OLLAMA_BASE_URL points at a local daemon."""
+        from src.sdk.providers.factory import _resolve_registry_provider
+
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+        resolved = _resolve_registry_provider(
+            "ollama-cloud:glm-5.3-flash:cloud", api_key=None
+        )
+        assert resolved is not None
+        provider_id, model_name, base_url, _key = resolved
+        assert provider_id == "ollama-cloud"
+        assert base_url == "http://host.docker.internal:11434"

@@ -26,21 +26,6 @@ from src.storage.paths import DEFAULT_USER_ID
 
 logger = get_logger()
 
-# Providers that require an API key (mirrors factory._ENV_KEY_MAP; kept as a
-# literal copy so this module stays import-light and circular-import safe).
-_CLOUD_PROVIDERS: dict[str, str] = {
-    "openai": "OPENAI_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
-    "gemini": "GOOGLE_API_KEY",
-    "ollama-cloud": "OLLAMA_API_KEY",
-    "agnes": "AGNES_API_KEY",
-    "groq": "GROQ_API_KEY",
-    "deepseek": "DEEPSEEK_API_KEY",
-    "together": "TOGETHER_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
-}
-
-
 class ProfileError(Exception):
     """Raised when a main-agent PROFILE.md fails validation at bootstrap."""
 
@@ -107,7 +92,12 @@ def validate_model_reference(
 
     provider_type, _model_name = _parse_model_string(model_ref)
 
-    env_name = _CLOUD_PROVIDERS.get(provider_type)
+    # Single source of truth: the factory's key-requirement helper honours
+    # OLLAMA_BASE_URL for ollama-cloud (local daemon proxy needs no key) —
+    # bootstrap and runtime construction can no longer drift (Jen CR B3).
+    from src.sdk.providers.factory import provider_key_requirement
+
+    env_name = provider_key_requirement(provider_type)
     needs_key = require_key if require_key is not None else (env_name is not None)
 
     resolved_key: str | None = None
