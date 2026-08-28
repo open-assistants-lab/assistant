@@ -128,3 +128,22 @@ def test_user_settings_path_helpers_do_not_create_files(tmp_path):
     assert paths.user_dir.exists()
     assert not settings_path.exists()
     assert not grader_prompt_path.exists()
+
+
+def test_workspace_tools_dir_is_deployment_shared(monkeypatch, tmp_path):
+    """Deployment-shared Tools dir: visible to every user, outside Users/.
+
+    get_custom_tools merges shared-then-per-user (user overrides same name),
+    so this dir is the deployment-wide toolset while per-user Tools/ stays
+    for user-specific tools (Jen trusted-team mode).
+    """
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    shared = DataPaths(user_id="alice").workspace_tools_dir()
+    assert shared == tmp_path / "Assistant" / "Tools"
+
+    # Per-user tools dir is separate and wins on name collision (merge logic
+    # lives in tools_custom.get_custom_tools).
+    per_user = DataPaths(user_id="bob").user_tools_dir()
+    assert per_user == tmp_path / "Assistant" / "Users" / "bob" / "Tools"
+    assert per_user != shared

@@ -237,7 +237,15 @@ class DataPaths:
         return self.user_subagents_dir()
 
     def workspace_tools_dir(self) -> Path:
-        return self.user_tools_dir()
+        """Deployment-shared tools dir (data_root/Tools) — visible to every user.
+
+        Per-user Tools/ still works and OVERRIDES same-name shared tools
+        (get_custom_tools merges shared-then-user). This gives the deployment
+        a single place for shared agent tooling (Jen trusted-team mode).
+        """
+        p = self.root / "Tools"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
 
     def workspace_files_dir(self) -> Path:
         return self.files_dir()

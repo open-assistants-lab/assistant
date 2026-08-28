@@ -160,16 +160,21 @@ def scan_tools_dir(tools_dir: Path) -> list[ToolDefinition]:
 
 
 def get_custom_tools(user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> list[ToolDefinition]:
-    """Load custom tools from user and workspace dirs. Workspace overrides user by name."""
+    """Load custom tools from shared (deployment) and per-user dirs.
+
+    Merge order: deployment-shared Tools/ is the base; per-user Tools/
+    OVERRIDES same-name shared tools (per-user customization wins —
+    consistent with user settings beating host config everywhere else).
+    """
     from src.storage.paths import get_paths
 
     paths = get_paths(user_id=user_id, workspace_id=workspace_id)
 
+    shared_tools = scan_tools_dir(paths.workspace_tools_dir())
     user_tools = scan_tools_dir(paths.user_tools_dir())
-    workspace_tools = scan_tools_dir(paths.workspace_tools_dir())
 
-    merged = {t.name: t for t in user_tools}
-    for t in workspace_tools:
+    merged = {t.name: t for t in shared_tools}
+    for t in user_tools:
         merged[t.name] = t
 
     return list(merged.values())
