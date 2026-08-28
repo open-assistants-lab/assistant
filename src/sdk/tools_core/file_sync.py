@@ -352,7 +352,7 @@ class FileSyncer:
         if to_download:
             staging = files_dir / ".sync" / f"staging-{provider}-{int(time.time() * 1000)}"
             staging.mkdir(parents=True, exist_ok=True)
-            staged: list[tuple[Path, Path]] = []  # (staged_path, final_path)
+            staged: list[tuple[Path, Path, RemoteFile]] = []  # (staged, final, rf)
             try:
                 for rf in to_download:
                     try:
@@ -365,17 +365,19 @@ class FileSyncer:
                         )
                         result.failed.append(rf.name)
                         continue
-                    staged_path = staging / rf.path
+                    # Stage keyed by remote id — duplicate basenames across
+                    # folders must not collide in staging (review P1).
+                    staged_path = staging / rf.id / Path(rf.path).name
                     staged_path.parent.mkdir(parents=True, exist_ok=True)
                     staged_path.write_bytes(content)
-                    staged.append((staged_path, files_dir / rf.path))
+                    staged.append((staged_path, files_dir / rf.path, rf))
 
                 if result.failed:
                     # No partial trees: commit nothing, clean staging.
                     shutil.rmtree(staging, ignore_errors=True)
                     return result
 
-                for staged_path, final_path in staged:
+                for staged_path, final_path, rf in staged:
                     final_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(staged_path), str(final_path))
                     result.downloaded.append(final_path.name)
@@ -383,8 +385,12 @@ class FileSyncer:
                 shutil.rmtree(staging, ignore_errors=True)
 
         if not result.failed:
-            self._commit(state_path=_manifest_path(provider, self.user_id, self.workspace_id),
-                        manifest=manifest, downloaded=result.downloaded, listing=listing)
+            self._commit(
+                state_path=_manifest_path(provider, self.user_id, self.workspace_id),
+                manifest=manifest,
+                downloaded_rfs=[t[2] for t in staged] if to_download else [],
+                listing=listing,
+            )
 
         logger.info(
             "sync.completed",
@@ -398,15 +404,15 @@ class FileSyncer:
         self,
         state_path: Path,
         manifest: dict[str, dict[str, str]],
-        downloaded: list[str],
+        downloaded_rfs: list[RemoteFile],
         listing: list[RemoteFile],
     ) -> None:
         from src.http.workspace_cache import get_file_cache
 
         cache = get_file_cache(self.user_id, self.workspace_id)
-        by_name = {rf.name: rf for rf in listing}
-        for name in downloaded:
-            rf = by_name[name]
+        # Keyed on remote id, never basename — duplicate basenames across
+        # folders each get their own manifest entry (review P1 finding).
+        for rf in downloaded_rfs:
             cache.mark_downloaded(rf.path, remote_rev=rf.rev)
             manifest[rf.id] = {"path": rf.path, "rev": rf.rev}
         state_path.write_text(json.dumps(manifest, indent=2))

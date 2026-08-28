@@ -14,6 +14,7 @@ from src.sdk.tools_core.file_sync import (
     ReadOnlyViolationError,
     RemoteFile,
 )
+from src.storage.paths import get_paths
 
 
 @dataclass
@@ -203,3 +204,31 @@ async def test_sync_100_files_under_60s(syncer_factory):
 
     assert len(result.downloaded) == 100
     assert elapsed < 60.0
+
+
+async def _duplicate_listing(folder: str = "") -> list[RemoteFile]:
+    """Two remotes, same basename, different folder paths."""
+    return [
+        RemoteFile(id="id-a", name="report.pdf", rev="r1", path="clients/a/report.pdf"),
+        RemoteFile(id="id-b", name="report.pdf", rev="r2", path="clients/b/report.pdf"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sync_duplicate_basenames_idempotent(syncer_factory):
+    """Duplicate basenames in different folders each keep their own manifest
+    entry keyed on remote id — rerun downloads nothing (review P1 finding)."""
+    a = MockFile("id-a", "report.pdf", "r1", b"A")
+    b = MockFile("id-b", "report.pdf", "r2", b"B")
+    syncer = syncer_factory(MockProvider([a, b]))
+    # patch provider listing to use folder-qualified paths
+    syncer.adapter.list_files = _duplicate_listing  # type: ignore[method-assign]
+    r1 = await syncer.sync()
+    assert sorted(r1.downloaded) == ["report.pdf", "report.pdf"]
+    files_dir = get_paths(syncer.user_id, workspace_id=syncer.workspace_id).workspace_files_dir()
+    assert (files_dir / "clients/a/report.pdf").read_bytes() == b"A"
+    assert (files_dir / "clients/b/report.pdf").read_bytes() == b"B"
+
+    r2 = await syncer.sync()
+    assert r2.downloaded == []  # nothing redownloaded
+    assert len(r2.skipped) == 2

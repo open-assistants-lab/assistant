@@ -85,7 +85,13 @@ from src.sdk.tools_core.subagent import (
 )
 from src.sdk.tools_core.summarize import summarize_session
 from src.sdk.tools_core.time import time_get
-from src.sdk.tools_core.user_prompt import user_prompt_get, user_prompt_set
+from src.sdk.tools_core.user_prompt import (
+    interview_ask,
+    interview_finish,
+    interview_start,
+    user_prompt_get,
+    user_prompt_set,
+)
 from src.sdk.tools_core.web import web_fetch, web_search
 
 _registry = ToolRegistry()
@@ -98,6 +104,9 @@ def _register_all() -> None:
     registry.register(shell_execute)
     registry.register(user_prompt_get)
     registry.register(user_prompt_set)
+    registry.register(interview_start)
+    registry.register(interview_ask)
+    registry.register(interview_finish)
 
     registry.register(files_list)
     registry.register(files_read)
