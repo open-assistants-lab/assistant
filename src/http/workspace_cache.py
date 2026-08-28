@@ -49,11 +49,14 @@ class FileCache:
             return None
         return fp if fp.exists() else None
 
-    def mark_downloaded(self, path: str) -> None:
+    def mark_downloaded(self, path: str, remote_rev: str | None = None) -> None:
+        """Mark downloaded; remote_rev (P1-T2) feeds idempotent re-sync checks."""
         entry: dict[str, Any] = {
             "status": "downloaded",
             "downloaded_at": datetime.now(UTC).isoformat(),
         }
+        if remote_rev is not None:
+            entry["remote_rev"] = remote_rev
         # Stamp the current file version so get_all() can compute has_update
         # against a real baseline (audit B17: missing baseline read as
         # "permanently outdated").

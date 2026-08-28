@@ -35,6 +35,7 @@ from src.http.routers import (
 from src.http.routers.connectors import router as connectors_router
 from src.http.routers.dev import router as dev_router
 from src.http.routers.settings import router as settings_router
+from src.http.routers.sync import router as sync_router
 from src.http.routers.v1 import include_v1_aliases
 from src.http.routers.ws import router as ws_router
 from src.storage.paths import DEFAULT_USER_ID
@@ -268,6 +269,7 @@ app.include_router(todos_router)
 # email_router already included above
 app.include_router(workspace_router)
 app.include_router(workspaces_router)
+app.include_router(sync_router)
 app.include_router(skills_router)
 app.include_router(subagents_router)
 app.include_router(tools_router)
