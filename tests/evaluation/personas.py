@@ -358,6 +358,27 @@ PERSONAS = [
         ],
         "system_prompt_addition": "Handle varied queries efficiently.",
     },
+    {
+        "id": "p26",
+        "name": "Interview Ivy",
+        "description": (
+            "Knowledge-interview subject. Answers agent questions patiently "
+            "and completely, one topic at a time. Responds to interview "
+            "questions with concrete, structured answers rather than chat."
+        ),
+        "style": "interviewer",
+        "sample_phrases": [
+            "Go ahead, ask me what you need to know.",
+            "Yes - we bill monthly, net 30 days.",
+            "Onboarding starts with a kickoff call, then a project brief.",
+            "Our brand voice is friendly but precise.",
+            "That is all I have on renewals; everything else is in the deck.",
+        ],
+        "system_prompt_addition": (
+            "You are being interviewed to close the user's knowledge gaps. "
+            "Answer each question fully and concretely; stay on the asked topic."
+        ),
+    },
 ]
 
 

@@ -207,6 +207,12 @@ class DataPaths:
         p.mkdir(parents=True, exist_ok=True)
         return p
 
+    def interviews_dir(self) -> Path:
+        """Per-user knowledge-interview transcripts + active state."""
+        p = self.user_dir / "Interviews"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
     def scheduler_dir(self) -> Path:
         p = self.user_dir / "Scheduler"
         p.mkdir(parents=True, exist_ok=True)
