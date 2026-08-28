@@ -254,6 +254,13 @@ class SkillRegistry:
     # -- Skill review queue (drafts) ---------------------------------------
 
     def _draft_dir(self, name: str) -> Path:
+        # Draft-name validation hoisted here so approve/reject/get inherit it —
+        # reject_skill_draft rmtree's the dir, so an unvalidated traversal name
+        # ("../../../x") could delete outside drafts_dir (review finding P2).
+        if not re.fullmatch(r"[a-z0-9-]+", name):
+            raise ValueError(
+                f"invalid draft name {name!r}: must match [a-z0-9-]+"
+            )
         return self.drafts_dir / name
 
     def put_skill_draft(self, name: str, content: str, *, source: str = "") -> Path:
