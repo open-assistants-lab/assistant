@@ -30,20 +30,30 @@ message responds. Subsequent boots are instant.
 
 ## 3. Configure `.env` — credentials live here, not in code
 
+The compose file loads the **entire `.env` via `env_file`** — every key you set
+there reaches the container; anything you leave unset (or commented out) falls
+back to code defaults. Do NOT add `KEY=` with an empty value: empty strings
+override pydantic defaults and crash bool/int settings at boot (fixed pattern:
+compose uses `env_file`, not `${VAR:-}` interpolation).
+
 ```bash
 # ── Deployment gate (one shared key for all users) ──────────────────────
-API_KEY=<generate: openssl rand -hex 24>   # remote devices send this as Bearer
-SOLO_BYPASS=true                           # localhost requests skip auth
+API_KEY=<generate: openssl rand -hex 24>   # REQUIRED on public hosts (VPS) —
+                                           # anyone without it gets 401
+SOLO_BYPASS=false                          # public host: no localhost bypass
 
-# ── LLM provider — set the key for your provider ────────────────────────
-OLLAMA_API_KEY=            # ollama-cloud:<model>
-OPENAI_API_KEY=            # openai:<model>
-ANTHROPIC_API_KEY=         # anthropic:claude-...
-GOOGLE_API_KEY=            # gemini:...
-DEEPSEEK_API_KEY=
-GROQ_API_KEY=
-TOGETHER_API_KEY=
+# ── LLM provider — UNCOMMENT the key you use ────────────────────────────
+# (the .env.example ships these COMMENTED — an uncommented-but-empty key
+#  yields a graceful 401 from the provider; a missing line yields no key)
+OLLAMA_API_KEY=<your key>                  # e.g. ollama-cloud:deepseek-v4-flash:0731
+# OPENAI_API_KEY=                          # openai:<model>
+# ANTHROPIC_API_KEY=                       # anthropic:claude-...
+# GOOGLE_API_KEY=                          # gemini:...
 ```
+
+**VPS note (verified on a public Linode):** always set `API_KEY` + `SOLO_BYPASS=false`
+on anything internet-facing — an open 8080 lets anyone burn your LLM credits. The
+`config.yaml` mount is `../config.yaml` (repo root, one level up from `docker/`).
 
 **Model selection** (precedence: per-request > per-user settings/PROFILE.md > deployment default):
 1. **Per-request** — `"model": "openai:gpt-5.2"` + optional `"provider_keys": {...}` in the API call (no restart)
