@@ -58,7 +58,7 @@ services:
       - ./data:/app/data
       # Admin-editable settings: edit ./config.yaml + `docker compose restart app`
       # (no rebuild). Remove this mount to bake config into the image instead.
-      - ./config.yaml:/app/config.yaml
+      - ../config.yaml:/app/config.yaml
     restart: unless-stopped
     healthcheck:
       # python:3.13-slim has no curl — use urllib
