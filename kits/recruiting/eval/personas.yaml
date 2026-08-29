@@ -1,0 +1,22 @@
+personas:
+  - id: recp1
+    name: Recruiting Ops Owner
+    style: detailed
+    description: Runs structured, detail-oriented pipeline reviews
+    sample_phrases:
+      - summarize this week's pipeline by stage
+      - which candidates are aging past SLA
+  - id: recp2
+    name: Hiring Manager
+    style: terse
+    description: Wants quick loop status and debrief outcomes
+    sample_phrases:
+      - where is the loop for candidate 12
+      - did all scorecards come in
+  - id: recp3
+    name: Sourcing Lead
+    style: detailed
+    description: Asks about funnel conversion and reason codes
+    sample_phrases:
+      - break down decline reasons for last month
+      - draft the screen-notes template
