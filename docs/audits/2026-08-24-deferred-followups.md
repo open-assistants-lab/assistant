@@ -50,3 +50,38 @@ Excluded from gates via `--deselect`; root-causing is open.
 
 *Add new deferrals here with: source, current state, impact, trigger to
 re-open, priority-at-trigger, fix sketch.*
+
+---
+
+## 2. Phase 1 review residuals (2026-08-29) ⏳ DEFERRED (tracked P2s)
+
+P1-T1..T9 all merged and reviewed. Reviewer-passed commits carried the
+following severity-tagged residuals, deliberately deferred:
+
+- **P1 (fixed in-phase):** interview tools unregistered in native_tools.py +
+  file-sync name-keyed manifest — fixed in `f7504f1`.
+- **P1 (fixed in-phase):** review-queue draft-name traversal — fixed in
+  `7413a10` BEFORE the review API landed.
+- **P2 — file-sync provider path join:** `files_dir / rf.path` is
+  unsanitized; clamp with resolve() containment check before writing
+  (attacker-controlled remote paths must not escape Files/). *Sync connectors
+  batch.*
+- **P2 — live adapter pagination:** Dropbox continuation re-lists root
+  (loop risk); Drive folders >100 files silently incomplete. *Sync connectors
+  batch.*
+- **P2 — interview transcript path:** deviates from plan spec
+  (`data/private/interviews/{user_id}/` JSONL) — now at `data_root Interviews/`
+  JSON. Align or amend the spec. *Interview iteration.*
+- **P2 — interview_ask after completion:** raises IndexError; return a
+  typed error shape. *Interview iteration.*
+- **P2 — CorpusStore error handling:** `index` swallows delete failures
+  (stale rows / overcount on shrunken re-index); `search` masks
+  OperationalError as empty miss. *Corpus iteration.*
+- **P2 — design extractor:** `approve/reject_skill_draft` now validated
+  (`7413a10`); remaining: `.draft-meta.json` pruning on bulk operations.
+  *Review queue batch.*
+- **Ops cluster (GitHub issues #2/#3/#5/#7):** MCP transparent reconnect,
+  `.mcp.json` hash-based index invalidation, hot tool-registry refresh for
+  live sessions, `GET /v1/mcp/health`. *Next batch post-Phase-1.*
+- **Durable approvals (#6):** per-tool confirmation policies + approval
+  receipts; prerequisite for Phase 2 spend-bearing actions. *Phase 2.*
