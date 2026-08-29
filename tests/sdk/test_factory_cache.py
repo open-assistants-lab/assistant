@@ -26,6 +26,11 @@ class FakeProvider:
     async def chat(self, *args: object, **kwargs: object) -> None:
         return None
 
+    async def chat_stream(self, *args: object, **kwargs: object):  # pragma: no cover
+        # langfuse tracer wraps chat_stream unconditionally when enabled
+        yield
+        return
+
     async def aclose(self) -> None:
         self.closed = True
 

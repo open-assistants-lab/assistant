@@ -109,7 +109,16 @@ class TestPromptAlignment:
         from src.sdk.runner import _get_file_ops_guideline
 
         caps: dict[str, Any] = {
-            "tools": {"shell_execute": True, "files_glob_search": False, "files_grep_search": False}
+            # unset file tools DEFAULT TO ENABLED (scope=all) — suppression of
+            # the shell guideline is the correct T4 behavior, so the fixture
+            # must disable ALL dedicated file tools explicitly
+            "tools": {
+                "shell_execute": True,
+                "files_read": False,
+                "files_list": False,
+                "files_glob_search": False,
+                "files_grep_search": False,
+            }
         }
         text = _get_file_ops_guideline(caps)
         assert text  # guideline still present when search tools are off

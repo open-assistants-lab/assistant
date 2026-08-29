@@ -10,17 +10,17 @@
       },
       "blocks": [
         {
-          "type": "reasoning",
           "id": "reasoning-block-001",
           "attempt": 1,
           "sequence": 1,
+          "type": "reasoning",
           "content": "I will provide a concise canonical answer."
         },
         {
-          "type": "tool",
           "id": "tool-block-001",
           "attempt": 1,
           "sequence": 2,
+          "type": "tool",
           "tool_call_id": "tool-call-001",
           "name": "time_get",
           "status": "completed",
@@ -46,6 +46,7 @@
         "attempt": 1,
         "model": "anthropic:claude-sonnet-4",
         "response": "The canonical run completed successfully.",
+        "reasoning": null,
         "final_message_id": "message-assistant-001",
         "usage": {
           "agent": {

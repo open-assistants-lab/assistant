@@ -6,6 +6,7 @@
   "attempt": 1,
   "model": "anthropic:claude-sonnet-4",
   "response": "The canonical run completed successfully.",
+  "reasoning": null,
   "final_message_id": "message-assistant-001",
   "usage": {
     "agent": {

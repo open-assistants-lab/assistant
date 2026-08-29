@@ -7,10 +7,10 @@
     "session_id": "session-canonical-001",
     "run_id": "run-canonical-001",
     "attempt": 1,
-    "type": "reasoning_start",
     "data": {
       "block_id": "reasoning-block-001"
-    }
+    },
+    "type": "reasoning_start"
   },
   {
     "schema_version": 1,
@@ -20,11 +20,11 @@
     "session_id": "session-canonical-001",
     "run_id": "run-canonical-001",
     "attempt": 1,
-    "type": "reasoning_delta",
     "data": {
       "block_id": "reasoning-block-001",
       "delta": "I will provide a concise canonical answer."
-    }
+    },
+    "type": "reasoning_delta"
   },
   {
     "schema_version": 1,
@@ -34,10 +34,10 @@
     "session_id": "session-canonical-001",
     "run_id": "run-canonical-001",
     "attempt": 1,
-    "type": "reasoning_end",
     "data": {
       "block_id": "reasoning-block-001"
-    }
+    },
+    "type": "reasoning_end"
   },
   {
     "schema_version": 1,
@@ -47,12 +47,12 @@
     "session_id": "session-canonical-001",
     "run_id": "run-canonical-001",
     "attempt": 1,
-    "type": "tool_input_start",
     "data": {
       "block_id": "tool-block-001",
       "tool_call_id": "tool-call-001",
       "name": "time_get"
-    }
+    },
+    "type": "tool_input_start"
   },
   {
     "schema_version": 1,
@@ -62,12 +62,12 @@
     "session_id": "session-canonical-001",
     "run_id": "run-canonical-001",
     "attempt": 1,
-    "type": "tool_input_delta",
     "data": {
       "block_id": "tool-block-001",
       "tool_call_id": "tool-call-001",
       "delta": "{\"timezone\":\"UTC\"}"
-    }
+    },
+    "type": "tool_input_delta"
   },
   {
     "schema_version": 1,
@@ -77,14 +77,14 @@
     "session_id": "session-canonical-001",
     "run_id": "run-canonical-001",
     "attempt": 1,
-    "type": "tool_input_end",
     "data": {
       "block_id": "tool-block-001",
       "tool_call_id": "tool-call-001",
       "arguments": {
         "timezone": "UTC"
       }
-    }
+    },
+    "type": "tool_input_end"
   },
   {
     "schema_version": 1,
@@ -94,7 +94,6 @@
     "session_id": "session-canonical-001",
     "run_id": "run-canonical-001",
     "attempt": 1,
-    "type": "tool_result",
     "data": {
       "block_id": "tool-block-001",
       "tool_call_id": "tool-call-001",
@@ -104,7 +103,8 @@
         "timezone": "UTC",
         "time": "12:00:00"
       }
-    }
+    },
+    "type": "tool_result"
   },
   {
     "schema_version": 1,
@@ -114,10 +114,10 @@
     "session_id": "session-canonical-001",
     "run_id": "run-canonical-001",
     "attempt": 1,
-    "type": "text_start",
     "data": {
       "block_id": "text-block-001"
-    }
+    },
+    "type": "text_start"
   },
   {
     "schema_version": 1,
@@ -127,11 +127,11 @@
     "session_id": "session-canonical-001",
     "run_id": "run-canonical-001",
     "attempt": 1,
-    "type": "text_delta",
     "data": {
       "block_id": "text-block-001",
       "delta": "The canonical run completed successfully."
-    }
+    },
+    "type": "text_delta"
   },
   {
     "schema_version": 1,
@@ -141,10 +141,10 @@
     "session_id": "session-canonical-001",
     "run_id": "run-canonical-001",
     "attempt": 1,
-    "type": "text_end",
     "data": {
       "block_id": "text-block-001"
-    }
+    },
+    "type": "text_end"
   },
   {
     "schema_version": 1,
@@ -154,7 +154,6 @@
     "session_id": "session-canonical-001",
     "run_id": "run-canonical-001",
     "attempt": 1,
-    "type": "usage",
     "data": {
       "category": "agent",
       "model": "anthropic:claude-sonnet-4",
@@ -166,7 +165,8 @@
         "cache_read_tokens": 40,
         "cache_creation_tokens": 0
       }
-    }
+    },
+    "type": "usage"
   },
   {
     "schema_version": 1,
@@ -176,11 +176,11 @@
     "session_id": "session-canonical-001",
     "run_id": "run-canonical-001",
     "attempt": 1,
-    "type": "rubric_evaluation_start",
     "data": {
       "grading_run_id": "grading-canonical-001",
       "max_attempts": 2
-    }
+    },
+    "type": "rubric_evaluation_start"
   },
   {
     "schema_version": 1,
@@ -190,7 +190,6 @@
     "session_id": "session-canonical-001",
     "run_id": "run-canonical-001",
     "attempt": 1,
-    "type": "rubric_evaluation_end",
     "data": {
       "evaluation": {
         "grading_run_id": "grading-canonical-001",
@@ -208,7 +207,8 @@
         "total_count": 1
       },
       "max_attempts": 2
-    }
+    },
+    "type": "rubric_evaluation_end"
   },
   {
     "schema_version": 1,
@@ -218,7 +218,6 @@
     "session_id": "session-canonical-001",
     "run_id": "run-canonical-001",
     "attempt": 1,
-    "type": "usage",
     "data": {
       "category": "grader",
       "model": "anthropic:claude-sonnet-4",
@@ -230,7 +229,8 @@
         "cache_read_tokens": 0,
         "cache_creation_tokens": 0
       }
-    }
+    },
+    "type": "usage"
   },
   {
     "schema_version": 1,
@@ -240,7 +240,6 @@
     "session_id": "session-canonical-001",
     "run_id": "run-canonical-001",
     "attempt": 1,
-    "type": "context_snapshot",
     "data": {
       "model": "anthropic:claude-sonnet-4",
       "attempt": 1,
@@ -251,7 +250,8 @@
       "source": "post_run_projection",
       "freshness": "live",
       "estimated": true
-    }
+    },
+    "type": "context_snapshot"
   },
   {
     "schema_version": 1,
@@ -261,7 +261,6 @@
     "session_id": "session-canonical-001",
     "run_id": "run-canonical-001",
     "attempt": 1,
-    "type": "done",
     "data": {
       "result": {
         "schema_version": 1,
@@ -271,6 +270,7 @@
         "attempt": 1,
         "model": "anthropic:claude-sonnet-4",
         "response": "The canonical run completed successfully.",
+        "reasoning": null,
         "final_message_id": "message-assistant-001",
         "usage": {
           "agent": {
@@ -357,6 +357,7 @@
         "persisted_at": "2026-08-02T12:00:16Z",
         "tool_calls": []
       }
-    }
+    },
+    "type": "done"
   }
 ]
