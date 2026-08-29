@@ -1,0 +1,268 @@
+"""Kit factory (P1-T7): vertical kits are CONTENT, not code.
+
+A kit bundles an agent template (PROFILE.md), methodology skills, a review
+rubric, and an eval set. kit_validate checks all content before kit_install
+writes anything, so a malformed kit can never partially install (plan §P1-T7
+non-negotiable: validate-then-write, never partial-install).
+
+Install targets (subagent path per plan):
+- PROFILE.md  -> user_subagents_dir/<kit>/PROFILE.md (coordinator.load_def)
+- skills      -> SkillRegistry drafts, auto-approved (installing admin
+                 content IS the explicit approval act)
+- rubrics     -> data/private/kits/<kit>/rubrics/
+- eval set    -> data/private/kits/<kit>/eval_set.yaml (mirror of kit dir)
+An install manifest (kit.json) records exact paths for orphan-free uninstall.
+"""
+
+import shutil
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+KIT_MANIFEST = "kit.yaml"
+
+
+class KitError(Exception):
+    """Raised when a kit is invalid or install state is inconsistent."""
+
+
+def _kit_problems(kit_dir: Path) -> list[str]:
+    """Collect every validation problem (empty list = valid kit)."""
+    problems: list[str] = []
+    if not kit_dir.is_dir():
+        return [f"kit dir not found: {kit_dir}"]
+
+    manifest = kit_dir / KIT_MANIFEST
+    if not manifest.exists():
+        problems.append(f"missing {KIT_MANIFEST}")
+        return problems
+    try:
+        meta = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as e:
+        problems.append(f"{KIT_MANIFEST} is not valid YAML: {e}")
+        return problems
+    name = meta.get("name")
+    if not isinstance(name, str) or not name or not name.isascii() or " " in name:
+        problems.append(f"{KIT_MANIFEST}: 'name' must be a slug, got {name!r}")
+    elif name != kit_dir.name:
+        problems.append(f"{KIT_MANIFEST}: name {name!r} != dir name {kit_dir.name!r}")
+    if not meta.get("description"):
+        problems.append(f"{KIT_MANIFEST}: 'description' required")
+
+    profile = kit_dir / "PROFILE.md"
+    if not profile.exists():
+        problems.append("missing PROFILE.md (agent template)")
+    else:
+        try:
+            from agentprofile.parser import load_profile as _load_ap
+
+            _load_ap(str(profile))
+        except Exception as e:  # noqa: BLE001 — any parse failure is a kit error
+            problems.append(f"PROFILE.md unparseable: {e}")
+
+    skills_dir = kit_dir / "skills"
+    if not skills_dir.is_dir() or not any(skills_dir.iterdir()):
+        problems.append("skills/ must contain at least one skill dir")
+    else:
+        for skill_dir in sorted(p for p in skills_dir.iterdir() if p.is_dir()):
+            skill_md = skill_dir / "SKILL.md"
+            if not skill_md.exists():
+                problems.append(f"skills/{skill_dir.name}/ missing SKILL.md")
+                continue
+            head = skill_md.read_text(encoding="utf-8", errors="replace").split(
+                "---", 2
+            )
+            fm: dict[str, Any] = {}
+            if len(head) >= 3:
+                try:
+                    fm = yaml.safe_load(head[1]) or {}
+                except yaml.YAMLError:
+                    pass
+            if fm.get("name") != skill_dir.name:
+                problems.append(
+                    f"skills/{skill_dir.name}/SKILL.md frontmatter name "
+                    f"{fm.get('name')!r} != dir name {skill_dir.name!r}"
+                )
+            if not fm.get("description"):
+                problems.append(
+                    f"skills/{skill_dir.name}/SKILL.md missing description"
+                )
+
+    rubrics = kit_dir / "rubrics"
+    if not rubrics.is_dir() or not list(rubrics.glob("*.md")):
+        problems.append("rubrics/ must contain at least one .md rubric")
+
+    personas_file = kit_dir / "eval" / "personas.yaml"
+    if not personas_file.exists():
+        problems.append("eval/personas.yaml missing (kit eval set)")
+    else:
+        try:
+            data = yaml.safe_load(personas_file.read_text(encoding="utf-8")) or {}
+            personas = data.get("personas")
+            if not isinstance(personas, list) or not personas:
+                problems.append("eval/personas.yaml: 'personas' list required")
+            else:
+                for p in personas:
+                    if not isinstance(p, dict) or not p.get("id") or not p.get("style"):
+                        problems.append(
+                            "eval/personas.yaml: each persona needs id+style "
+                            f"(got {p})"
+                        )
+        except yaml.YAMLError as e:
+            problems.append(f"eval/personas.yaml invalid YAML: {e}")
+
+    return problems
+
+
+def kit_validate(kit_dir: str | Path) -> list[str]:
+    """Validate a kit dir. Returns list of problems; empty = valid."""
+    return _kit_problems(Path(kit_dir))
+
+
+def kit_list(kits_root: str | Path = "kits") -> list[dict[str, Any]]:
+    """List kits under kits_root with validity info."""
+    root = Path(kits_root)
+    entries: list[dict[str, Any]] = []
+    if not root.is_dir():
+        return entries
+    for kit_dir in sorted(root.iterdir()):
+        if not kit_dir.is_dir():
+            continue
+        entries.append(
+            {
+                "name": kit_dir.name,
+                "path": str(kit_dir),
+                "valid": _kit_problems(kit_dir) == [],
+            }
+        )
+    return entries
+
+
+def _state_dir(name: str, user_id: str) -> Path:
+    from src.storage.paths import get_paths
+
+    paths = get_paths(user_id=user_id, workspace_id="personal")
+    return paths.user_dir / "private" / "kits" / name
+
+
+def kit_install(kit_dir: str | Path, user_id: str = "default_user") -> dict[str, Any]:
+    """Install a validated kit: agent template, skills, rubrics, eval set.
+
+    Skills go through the review-queue draft API and are immediately
+    approved — installing admin-authored kit content is itself the explicit
+    approval act (auto-DRAFTED skills still require human review; kit skills
+    are curated content).
+    """
+    from src.skills.registry import SkillRegistry
+    from src.storage.paths import get_paths
+
+    kit_dir = Path(kit_dir)
+    problems = _kit_problems(kit_dir)
+    if problems:
+        raise KitError(
+            "kit validation failed (nothing installed):\n- " + "\n- ".join(problems)
+        )
+    meta = yaml.safe_load((kit_dir / KIT_MANIFEST).read_text(encoding="utf-8")) or {}
+    name = kit_dir.name
+
+    paths = get_paths(user_id=user_id, workspace_id="personal")
+    state_dir = _state_dir(name, user_id)
+    profile_target_dir = paths.user_subagents_dir() / name
+    # never partial-install: all copy operations happen AFTER validation, but
+    # still build into the state dir then perform installs; on any failure,
+    # roll back what was written.
+    installed_skills: list[str] = []
+    registry = SkillRegistry(user_id=user_id, workspace_id="personal")
+    try:
+        profile_target_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(kit_dir / "PROFILE.md", profile_target_dir / "PROFILE.md")
+
+        for skill_dir in sorted(p for p in (kit_dir / "skills").iterdir() if p.is_dir()):
+            # reinstall = replace (idempotent): drop the live copy first so
+            # approve_skill_draft's FileExistsError guard doesn't fire
+            existing = registry.skills_dir / skill_dir.name
+            if existing.exists():
+                shutil.rmtree(existing)
+            content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+            registry.put_skill_draft(
+                skill_dir.name, content, source=f"kit:{name}"
+            )
+            registry.approve_skill_draft(skill_dir.name)
+            installed_skills.append(skill_dir.name)
+
+        rubric_dir = state_dir / "rubrics"
+        rubric_dir.mkdir(parents=True, exist_ok=True)
+        for rubric in (kit_dir / "rubrics").glob("*.md"):
+            shutil.copyfile(rubric, rubric_dir / rubric.name)
+
+        eval_src = kit_dir / "eval" / "personas.yaml"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(eval_src, state_dir / "eval_set.yaml")
+
+        (state_dir / "kit.json").write_text(
+            yaml.safe_dump(
+                {
+                    "name": name,
+                    "description": meta.get("description", ""),
+                    "version": meta.get("version", ""),
+                    "profile_path": str(profile_target_dir / "PROFILE.md"),
+                    "skills": installed_skills,
+                    "rubrics": [r.name for r in rubric_dir.glob("*.md")],
+                    "eval_set": str(eval_src),
+                }
+            ),
+            encoding="utf-8",
+        )
+    except Exception: # noqa: BLE001
+        # roll back partial writes so a failed install leaves nothing
+        for skill in installed_skills:
+            _remove_skill(registry, skill)
+        shutil.rmtree(state_dir, ignore_errors=True)
+        shutil.rmtree(profile_target_dir, ignore_errors=True)
+        raise
+
+    return {
+        "kit": name,
+        "profile_path": profile_target_dir / "PROFILE.md",
+        "installed_skills": installed_skills,
+        "rubric_dir": state_dir / "rubrics",
+        "eval_set": str(state_dir / "eval_set.yaml"),
+    }
+
+
+def _remove_skill(registry: Any, name: str) -> None:
+    for candidate in (registry.skills_dir / name,):
+        if candidate.exists():
+            shutil.rmtree(candidate, ignore_errors=True)
+
+
+def kit_uninstall(name: str, user_id: str = "default_user") -> dict[str, Any]:
+    """Remove an installed kit's artifacts (profile, skills, rubrics, state)."""
+    state_dir = _state_dir(name, user_id)
+    manifest_file = state_dir / "kit.json"
+    if manifest_file.exists():
+        meta = yaml.safe_load(manifest_file.read_text(encoding="utf-8")) or {}
+    else:
+        meta = {"name": name, "skills": []}
+    removed: dict[str, Any] = {"profile": False, "skills": [], "state": False}
+
+    from src.storage.paths import get_paths
+
+    paths = get_paths(user_id=user_id, workspace_id="personal")
+    profile_dir = paths.user_subagents_dir() / name
+    if (profile_dir / "PROFILE.md").exists():
+        shutil.rmtree(profile_dir)
+        removed["profile"] = True
+
+    for skill in meta.get("skills", []):
+        skill_dir = paths.user_skills_dir() / skill
+        if skill_dir.exists():
+            shutil.rmtree(skill_dir)
+            removed["skills"].append(skill)
+
+    if state_dir.exists():
+        shutil.rmtree(state_dir)
+        removed["state"] = True
+
+    return {"kit": name, "removed": removed}

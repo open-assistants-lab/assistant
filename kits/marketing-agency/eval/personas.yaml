@@ -1,0 +1,22 @@
+personas:
+  - id: kitp1
+    name: Operations Owner
+    style: detailed
+    description: Runs structured, detail-oriented requests
+    sample_phrases:
+      - draft this quarter's campaign plan
+      - walk me through the onboarding checklist
+  - id: kitp2
+    name: Skeptical CFO
+    style: terse
+    description: Terse, numbers-first questions
+    sample_phrases:
+      - show me the numbers
+      - what does the playbook say
+  - id: kitp3
+    name: New Client
+    style: curious
+    description: Exploratory onboarding questions
+    sample_phrases:
+      - how do we get started
+      - what should I prepare before our first meeting

@@ -399,6 +399,49 @@ class AgentEvaluator:
         return "\n".join(report)
 
 
+async def run_kit_evaluation(args) -> None:
+    """Run a kit's eval set (P1-T7): kit-authored personas, pass-ratio report.
+
+    Loads eval/personas.yaml from the kit dir, runs it through the SAME HTTP
+    harness (no fork). When no evaluation server/model is reachable the run
+    still completes structurally and reports a clean 0-model skip (exit 0).
+    """
+    import yaml
+
+    kit_dir = Path(args.kit)
+    personas_file = kit_dir / "eval" / "personas.yaml"
+    data = yaml.safe_load(personas_file.read_text(encoding="utf-8")) or {}
+    kit_personas = data.get("personas", [])
+    print("=" * 80)
+    print(f"KIT EVALUATION - {kit_dir.name}")
+    print("=" * 80)
+    print(f"Kit personas: {len(kit_personas)}")
+    print("")
+
+    evaluator = AgentEvaluator(user_id=args.user_id, output_dir=args.output)
+
+    # Connectivity probe: no model/server -> structural skip (per plan
+    # acceptance: "if no model available, the harness must still run
+    # structurally and report 0-model skip cleanly").
+    try:
+        await call_agent_via_http(user_id=args.user_id, message="ping", messages=[])
+    except Exception as e:  # noqa: BLE001 - httpx raises varied exceptions
+        print(f"[skip] No evaluation server/model reachable ({type(e).__name__}).")
+        print("[skip] Kit eval set found and parsed; 0-model run skipped cleanly.")
+        return
+
+    total = successful = 0
+    for persona in kit_personas:
+        queries = generate_test_queries(persona, count=args.interactions)
+        for query in queries:
+            result = await evaluator.run_single_interaction(persona, query, None)
+            total += 1
+            successful += 1 if result.success else 0
+    ratio = successful / total if total else 0.0
+    print(f"\\nKit eval: {successful}/{total} passed (ratio {ratio:.2f})")
+    print(f"Gate >= 0.70: {'PASS' if ratio >= 0.7 else 'FAIL'}")
+
+
 async def main():
     """Run evaluation via HTTP."""
     import argparse
@@ -436,7 +479,18 @@ async def main():
         action="store_true",
         help="Save all responses to JSON file",
     )
+    parser.add_argument(
+        "--kit",
+        type=str,
+        help="Kit dir to evaluate (loads eval/personas.yaml from the kit instead "
+        "of the global PERSONAS). Runs structurally with a clean skip when no "
+        "evaluation server/model is available.",
+    )
     args = parser.parse_args()
+
+    if args.kit:
+        await run_kit_evaluation(args)
+        return
 
     # Handle "all" or empty personas
     if args.personas and args.personas.lower() == "all":
