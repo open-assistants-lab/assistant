@@ -401,12 +401,15 @@ class AgentEvaluator:
         return "\n".join(report)
 
 
-async def run_kit_evaluation(args) -> None:
+async def run_kit_evaluation(args) -> bool:
     """Run a kit's eval set (P1-T7): kit-authored personas, pass-ratio report.
 
     Loads eval/personas.yaml from the kit dir, runs it through the SAME HTTP
     harness (no fork). When no evaluation server/model is reachable the run
-    still completes structurally and reports a clean 0-model skip (exit 0).
+    still completes structurally and reports a clean 0-model skip (True).
+
+    Returns the gate outcome so the CLI exits non-zero below 0.70 (fail
+    closed — low acceptance blocks kit GA; exit code is the CI signal).
     """
     import yaml
 
@@ -430,7 +433,7 @@ async def run_kit_evaluation(args) -> None:
     except Exception as e:  # noqa: BLE001 - httpx raises varied exceptions
         print(f"[skip] No evaluation server/model reachable ({type(e).__name__}).")
         print("[skip] Kit eval set found and parsed; 0-model run skipped cleanly.")
-        return
+        return True
 
     total = successful = 0
     for persona in kit_personas:
@@ -440,8 +443,10 @@ async def run_kit_evaluation(args) -> None:
             total += 1
             successful += 1 if result.success else 0
     ratio = successful / total if total else 0.0
-    print(f"\\nKit eval: {successful}/{total} passed (ratio {ratio:.2f})")
-    print(f"Gate >= 0.70: {'PASS' if ratio >= 0.7 else 'FAIL'}")
+    print(f"\nKit eval: {successful}/{total} passed (ratio {ratio:.2f})")
+    passed = ratio >= 0.7
+    print(f"Gate >= 0.70: {'PASS' if passed else 'FAIL'}")
+    return passed
 
 
 async def main():
@@ -491,7 +496,9 @@ async def main():
     args = parser.parse_args()
 
     if args.kit:
-        await run_kit_evaluation(args)
+        gate_pass = await run_kit_evaluation(args)
+        if not gate_pass:
+            raise SystemExit(1)
         return
 
     # Handle "all" or empty personas

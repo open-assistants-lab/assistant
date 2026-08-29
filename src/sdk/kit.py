@@ -15,10 +15,15 @@ An install manifest (kit.json) records exact paths for orphan-free uninstall.
 """
 
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from src.app_logging import get_logger
+
+logger = get_logger()
 
 KIT_MANIFEST = "kit.yaml"
 
@@ -173,16 +178,39 @@ def kit_install(kit_dir: str | Path, user_id: str = "default_user") -> dict[str,
     # still build into the state dir then perform installs; on any failure,
     # roll back what was written.
     installed_skills: list[str] = []
+    # Reinstall safety: back up any live skill before replacing it so a
+    # mid-install failure restores the (possibly hand-customized) previous
+    # copy instead of losing it to the rollback (review P1, T7).
+    backups: dict[str, Path] = {}
     registry = SkillRegistry(user_id=user_id, workspace_id="personal")
+    backup_root = Path(tempfile.mkdtemp(prefix="kit-install-backup-"))
     try:
         profile_target_dir.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(kit_dir / "PROFILE.md", profile_target_dir / "PROFILE.md")
 
         for skill_dir in sorted(p for p in (kit_dir / "skills").iterdir() if p.is_dir()):
-            # reinstall = replace (idempotent): drop the live copy first so
-            # approve_skill_draft's FileExistsError guard doesn't fire
+            # reinstall = replace (idempotent): move the live copy to a temp
+            # backup first so approve_skill_draft's FileExistsError guard
+            # doesn't fire — the backup is the rollback source on failure
             existing = registry.skills_dir / skill_dir.name
             if existing.exists():
+                try:
+                    previous = (existing / "SKILL.md").read_text(encoding="utf-8")
+                except OSError:
+                    previous = ""
+                if previous and previous != (
+                    skill_dir / "SKILL.md").read_text(encoding="utf-8"):
+                    # user modified the live copy since install — overwriting
+                    # discards their edits; warn loudly (hash-guard upgrade
+                    # tracked in deferred followups)
+                    logger.warning(
+                        "kit_reinstall_overwrites_modified_skill",
+                        {"kit": name, "skill": skill_dir.name},
+                        user_id=user_id,
+                    )
+                backup = backup_root / skill_dir.name
+                shutil.copytree(existing, backup)
+                backups[skill_dir.name] = backup
                 shutil.rmtree(existing)
             content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
             registry.put_skill_draft(
@@ -215,12 +243,21 @@ def kit_install(kit_dir: str | Path, user_id: str = "default_user") -> dict[str,
             encoding="utf-8",
         )
     except Exception: # noqa: BLE001
-        # roll back partial writes so a failed install leaves nothing
+        # roll back partial writes so a failed install leaves nothing;
+        # pre-existing live skills come back from the backup untouched
         for skill in installed_skills:
             _remove_skill(registry, skill)
+        for skill, backup in backups.items():
+            target = registry.skills_dir / skill
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(backup, target)
         shutil.rmtree(state_dir, ignore_errors=True)
         shutil.rmtree(profile_target_dir, ignore_errors=True)
+        shutil.rmtree(backup_root, ignore_errors=True)
         raise
+    shutil.rmtree(backup_root, ignore_errors=True)
 
     return {
         "kit": name,

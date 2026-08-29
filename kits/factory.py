@@ -49,8 +49,9 @@ def stamp_kit(name: str, description: str, persona: str, kits_root: Path) -> Pat
         "never invent domain facts — index them in the corpus instead.\n",
         encoding="utf-8",
     )
-    for skill_stub in sorted((_TEMPLATE / "skills").iterdir()) if _TEMPLATE.is_dir() else []:
-        if skill_stub.is_dir():
+    template_skills = _TEMPLATE / "skills"
+    if template_skills.is_dir():
+        for skill_stub in sorted(p for p in template_skills.iterdir() if p.is_dir()):
             (kit_dir / "skills" / skill_stub.name).mkdir()
             src = skill_stub / "SKILL.md"
             if src.exists():

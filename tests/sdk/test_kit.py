@@ -147,3 +147,80 @@ class TestKitList:
         by_name = {e["name"]: e for e in entries}
         assert by_name["test-vertical"]["valid"] is True
         assert by_name["broken-kit"]["valid"] is False
+
+
+class TestReinstallSafety:
+    def test_failed_reinstall_restores_modified_live_skill(self, kit_env):
+        """Rollback restores the user's hand-edited live skill bit-for-bit.
+
+        Review P1: the previous install rmtree'd the live copy before the new
+        content landed; a failure after that point (e.g. eval copy) both
+        dropped the new install AND rolled back into nothing — the user's
+        customized skill was unrecoverable.
+        """
+        from unittest.mock import patch
+
+        from src.skills.registry import SkillRegistry
+
+        kit, tmp_path = kit_env
+        kit_install(kit)
+        # user customizes the live copy after install
+        reg = SkillRegistry(user_id="default_user", workspace_id="personal")
+        live = reg.skills_dir / "demo-skill" / "SKILL.md"
+        live.write_text(
+            live.read_text(encoding="utf-8") + "\n# user customization\n",
+            encoding="utf-8",
+        )
+        original = live.read_text(encoding="utf-8")
+
+        # inject a mid-install failure: rubric copy blows up after the skill
+        # has been approved
+        real_copy = __import__("shutil").copyfile
+
+        def failing_copy(src, dst, *a, **k):  # type: ignore[no-untyped-def]
+            if str(dst).endswith("rubric.md"):
+                raise OSError("injected mid-install failure")
+            return real_copy(src, dst, *a, **k)
+
+        with patch("shutil.copyfile", side_effect=failing_copy):
+            with pytest.raises(OSError, match="injected"):
+                kit_install(kit)
+
+        restored = reg.skills_dir / "demo-skill" / "SKILL.md"
+        assert restored.read_text(encoding="utf-8") == original  # bit-for-bit
+
+    def test_successful_reinstall_cleans_up_backup(self, kit_env):
+        import glob
+        import os
+
+        kit, _ = kit_env
+        kit_install(kit)
+        kit_install(kit)  # success path
+        leftovers = glob.glob(os.path.join(os.path.sep, "tmp", "kit-install-backup-*"))
+        assert leftovers == []
+
+
+class TestFactoryRoundTrip:
+    def test_factory_stamps_valid_kit(self, tmp_path):
+        """kits/factory.py stamps a kit from _template that passes kit_validate.
+
+        Review P1: the empty _template made a fresh clone unable to reproduce
+        a third vertical — the factory exit criterion must be demonstrable
+        from the committed state alone.
+        """
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "uv", "run", "python", "kits/factory.py",
+                "--name", "factory-rt",
+                "--description", "round-trip methodology",
+                "--persona", "factory round-trip persona",
+                "--kits-root", str(tmp_path),
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+        assert result.returncode == 0, result.stderr
+        stamped = tmp_path / "factory-rt"
+        assert (stamped / "skills" / "example-skill" / "SKILL.md").is_file()
+        assert kit_validate(stamped) == []
