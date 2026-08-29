@@ -34,6 +34,7 @@ from src.http.routers import (
 )
 from src.http.routers.connectors import router as connectors_router
 from src.http.routers.dev import router as dev_router
+from src.http.routers.review import router as review_router
 from src.http.routers.settings import router as settings_router
 from src.http.routers.sync import router as sync_router
 from src.http.routers.v1 import include_v1_aliases
@@ -279,6 +280,7 @@ app.include_router(settings_router)
 app.include_router(webhooks_router)
 app.include_router(improvements_router)
 app.include_router(profile_router)
+app.include_router(review_router)
 
 # ConnectKit OAuth + catalog routers (safe if connectkit not installed)
 try:

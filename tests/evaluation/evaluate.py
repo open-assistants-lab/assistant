@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from tests.evaluation.personas import PERSONAS, generate_test_queries
+from tests.evaluation.skill_acceptance import acceptance_summary
 
 HTTP_BASE_URL = os.environ.get("EVAL_HTTP_URL", "http://localhost:8080")
 
@@ -338,6 +339,7 @@ class AgentEvaluator:
         report.append(f"Failed: {total_interactions - total_successful}")
         report.append(f"Total Tool Calls: {total_tool_calls}")
         report.append(f"Tool Errors: {total_tool_errors}")
+        report.append(acceptance_summary(self.user_id))
         report.append("")
 
         # Performance summary
