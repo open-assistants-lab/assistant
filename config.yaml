@@ -1,5 +1,9 @@
 agent:
-  model: ollama-cloud:deepseek-v4-flash:0731
+  # No pinned model ships in the repo (D0-5): each deployment supplies its
+  # own via PROFILE.md, per-user settings, or AGENT_MODEL / this file. Empty
+  # = fail-fast at first use with guidance. Example: anthropic:claude-... or
+  # ollama-cloud:deepseek-v4-flash:0731 (our local-test pin lives in .env).
+  model: ''
   name: Jen
   system_prompt: "You are a helpful assistant.\n\nCRITICAL RULES:\n- NEVER guess or\
     \ estimate - always use tools to get exact numbers/facts\n- If you don't know,\

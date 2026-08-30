@@ -59,8 +59,11 @@ class TestV1Message:
         assert "response" in r.json()
 
     def test_v1_message_stream_equals_legacy(self, client):
-        legacy = client.post("/message/stream", json={"message": "hi"})
-        v1 = client.post("/v1/message/stream", json={"message": "hi"})
+        # The repo ships with no pinned model (D0-5) — alias-equivalence tests
+        # pass the model explicitly per request (the documented bypass).
+        body = {"message": "hi", "model": "ollama-cloud:deepseek-v4-flash:0731"}
+        legacy = client.post("/message/stream", json=body)
+        v1 = client.post("/v1/message/stream", json=body)
         assert legacy.status_code == v1.status_code == 200
         # SSE streams: heartbeat comments may interleave differently, so
         # compare the first data: payload semantically, not raw bytes.
