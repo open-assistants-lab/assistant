@@ -85,3 +85,12 @@ following severity-tagged residuals, deliberately deferred:
   live sessions, `GET /v1/mcp/health`. *Next batch post-Phase-1.*
 - **Durable approvals (#6):** per-tool confirmation policies + approval
   receipts; prerequisite for Phase 2 spend-bearing actions. *Phase 2.*
+
+## 3. v0.3.0 residual (2026-08-29) — combined-suite pytest ordering flake
+
+Canonical per-suite gates are green (api 469/0, unit+storage 255/0, sdk green)
+but a single pytest invocation over api+unit+storage+sdk together flakes ~3-5
+streaming/fixture tests (SSE heartbeat + canonical fixtures) on suite-order
+interference. Regression: 2026-08-29 session. Track: split CI jobs per suite
+or fix ordering at conftest level. Also: 20 pre-existing ruff E-warnings in
+unrelated HTTP router files (E402 import placement) — cleanup batch.
