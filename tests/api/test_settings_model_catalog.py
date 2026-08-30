@@ -85,9 +85,15 @@ def test_get_settings_returns_canonical_secret_free_shape(client, settings_api, 
     body = response.json()
     assert set(body) == {"schema_version", "revision", "saved", "effective", "provider_status"}
     assert set(body["saved"]) == {"default_model", "title_model", "summarization_model", "verification"}
-    assert body["effective"]["default_model"] is None
-    assert body["effective"]["title_model"] is None
-    assert body["effective"]["summarization_model"] is None
+    # Effective mirrors the host default for users with no saved override —
+    # which is the deployed agent.model, whatever the environment supplies
+    # (D0-5: may legitimately be empty).
+    from src.config import get_settings
+
+    host_model = get_settings().agent.model or None
+    assert body["effective"]["default_model"] == host_model
+    assert body["effective"]["title_model"] == host_model
+    assert body["effective"]["summarization_model"] == host_model
     assert body["provider_status"]["openai"] == {
         "name": "OpenAI",
         "has_key": True,

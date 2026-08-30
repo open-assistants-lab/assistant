@@ -528,6 +528,17 @@ def get_settings() -> AppConfig:
             _config.api.host = host
         if port and port.isdigit():
             _config.api.port = int(port)
+        # Same E22 class of fix-up for agent models: flat AGENT_MODEL /
+        # AGENT_TITLE_MODEL never match pydantic-settings nested-env rules
+        # (they'd need AGENT__MODEL, and even that loses to init kwargs from
+        # yaml). Deployments document AGENT_MODEL as the deployment-model
+        # contract (D0-5) — wire it explicitly, env beats yaml.
+        env_agent = os.environ.get("AGENT_MODEL")
+        if env_agent:
+            _config.agent.model = env_agent
+        env_title = os.environ.get("AGENT_TITLE_MODEL")
+        if env_title:
+            _config.agent.title_model = env_title
     return _config
 
 

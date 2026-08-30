@@ -43,6 +43,8 @@ def test_from_yaml_resolves_repo_root_config_regardless_of_cwd(
     settings_module._config = None
     try:
         cfg = settings_module.get_settings()
-        assert cfg.agent.model == "ollama-cloud:deepseek-v4-flash:0731"
+        # D0-5: config.yaml ships NO pinned model — repo-root resolution must
+        # still find the file and surface its (empty) model without error.
+        assert cfg.agent.model == ""
     finally:
         settings_module._config = None
