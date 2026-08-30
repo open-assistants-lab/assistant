@@ -194,7 +194,11 @@ Every tool/skill/subagent has an enable state **per user** (scopes). Capabilitie
 are the governance layer: they decide what an agent *may* use, regardless of what
 its PROFILE.md or a kit requests.
 
-- Unconfigured items default to **enabled** (`scope=all`)
+- Neutral tools default to **enabled** (`scope=all`). Professional-service
+  tools (interview_*, design_extract, app_import_csv, app_summarize, and the
+  email_miner_/email_mine_ families) default to **disabled** — they activate
+  only via a kit manifest's `tools.enable` list or an explicit admin scope
+  change (v0.3.0 flip).
 - `data/Users/{user_id}/capabilities.yaml` (+ migrated `item_scopes`) holds the
   user's enable state; managed via the Settings → Tools UI or the capabilities API
 - Precedence: **capabilities > profile.tools** — an author requesting a disabled

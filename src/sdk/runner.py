@@ -760,6 +760,17 @@ async def create_sdk_loop(
 
     if mcp_bridge:
         loop._mcp_bridge = mcp_bridge  # type: ignore[attr-defined]
+        # LC-4: bootstrap re-discovery — a session created after an MCP
+        # server changed its catalog must see the new tools even without a
+        # reconnect event. Cooldown-limited (60s/user, see MCPManager).
+        try:
+            await mcp_bridge.bootstrap_refresh()
+        except Exception as exc:
+            logger.warning(
+                "sdk_runner.mcp_bootstrap_refresh_failed",
+                {"error": str(exc)},
+                user_id=user_id,
+            )
 
     t5 = time.monotonic()
     logger.info(
@@ -860,6 +871,24 @@ async def get_sdk_loop(user_id: str, workspace_id: str = "personal", model: str 
     raise RuntimeError(f"get_sdk_loop: loop creation kept being superseded by resets ({user_id})")
 
 
+def _detach_loop_resources(loop: Any) -> None:
+    """Release loop-level external resources on eviction/reset.
+
+    The MCP bridge registers a refresh listener on the module-global manager
+    (per-user); an evicted loop's bridge must stop receiving refreshes or it
+    leaks memory and re-runs `_refresh_server` + full registry passes on
+    every reconnect (LC-4 review finding).
+    """
+    bridge = getattr(loop, "_mcp_bridge", None)
+    if bridge is not None and hasattr(bridge, "detach"):
+        try:
+            bridge.detach()
+        except Exception:
+            logger.warning(
+                "sdk_runner.bridge_detach_failed", {}, user_id="system"
+            )
+
+
 def _evict_loop_cache_until_bounded() -> None:
     """Evict LRU entries while the cache exceeds _MAX_LOOP_CACHE.
 
@@ -877,7 +906,8 @@ def _evict_loop_cache_until_bounded() -> None:
                 break
         if victim is None:
             victim = next(iter(_loop_cache))
-        _loop_cache.pop(victim)
+        evicted = _loop_cache.pop(victim)
+        _detach_loop_resources(evicted)
 
 
 def _messages_from_conversation(messages: list[Any]) -> list[Message]:
@@ -1713,6 +1743,7 @@ def reset_user_sdk_loops(user_id: str, reason: str | None = None) -> int:
     cache_prefix = f"{user_id}:"
     for cache_key in list(_loop_cache):
         if cache_key.startswith(cache_prefix):
+            _detach_loop_resources(_loop_cache[cache_key])
             del _loop_cache[cache_key]
             removed += 1
     _loop_generation += 1

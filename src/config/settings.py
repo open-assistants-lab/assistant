@@ -459,9 +459,14 @@ def validate_model_reference(
 
 
 def validate_startup_model_references(config: AppConfig) -> None:
-    """Validate effective deployment model references at application startup."""
+    """Validate effective deployment model references at application startup.
+
+    allow_legacy_syntax=True: a deployment copying a models.dev style
+    `provider/model` ref must boot — the runtime already accepts it. Malformed
+    references (no separator, empty provider/model) still hard-fail.
+    """
     if config.agent.model:
-        validate_model_reference(config.agent.model, role="agent")
+        validate_model_reference(config.agent.model, role="agent", allow_legacy_syntax=True)
     effective_agent = config.agent.model
     for role, configured in (
         ("title", config.agent.title_model),
@@ -470,7 +475,7 @@ def validate_startup_model_references(config: AppConfig) -> None:
     ):
         effective = configured or effective_agent
         if effective:
-            validate_model_reference(effective, role=role)
+            validate_model_reference(effective, role=role, allow_legacy_syntax=True)
 
 
 def warn_unknown_model_providers(config: AppConfig) -> None:

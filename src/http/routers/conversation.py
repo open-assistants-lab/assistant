@@ -264,6 +264,27 @@ def get_context_info(
             model_str = saved_model
         else:
             host_model = settings.agent.model.strip()
+            if not host_model:
+                # D0-5: empty host model is a VALID shipped state — surface it
+                # explicitly, not as a misleading 422 (review finding).
+                return {
+                    "model": None,
+                    "no_model_configured": True,
+                    "model_hint": (
+                        "No model configured. Set agent.model in config.yaml "
+                        "(deployment default), add 'model:' to the user's "
+                        "PROFILE.md (primary agent configuration), or pass "
+                        "model/provider_keys per request."
+                    ),
+                    "context_window": None,
+                    "current_tokens": None,
+                    "summarization_threshold": None,
+                    "summarization_enabled": settings.memory.summarization.enabled,
+                    "context_percentage": None,
+                    "source": "history_estimate",
+                    "freshness": "stale",
+                    "estimated": False,
+                }
             if ":" not in host_model:
                 if "/" in host_model:
                     provider, model_id = host_model.split("/", 1)

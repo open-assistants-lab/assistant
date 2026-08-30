@@ -55,6 +55,12 @@ class MCPManager:
         self._last_errors: dict[str, str | None] = {}
         self._refresh_listeners: list[Callable[[str], Awaitable[None]]] = []
         self._reconnect_tasks: dict[str, asyncio.Task[MCPServerConnection | None]] = {}
+        # LC-4: per-user bootstrap re-discovery cooldown (once per 60s) —
+        # loop creation forces a live tools/list check, but a burst of new
+        # sessions must not hammer every server 60x in a minute.
+        self._last_rediscovery: float = 0.0
+
+    _REDISCOVERY_COOLDOWN_SECONDS: float = 60.0
 
     def _get_idle_timeout(self) -> int:
         try:
@@ -146,6 +152,46 @@ class MCPManager:
         if listener not in self._refresh_listeners:
             self._refresh_listeners.append(listener)
 
+    def remove_refresh_listener(self, listener: Callable[[str], Awaitable[None]]) -> None:
+        """Detach a listener (evicted loop / reset session) — bridges outliving
+        their loop must not fire `_refresh_server` + full registry refreshes on
+        every reconnect (memory retention + O(dead-bridges x live-loops) work)."""
+        try:
+            self._refresh_listeners.remove(listener)
+        except ValueError:
+            pass
+
+    async def rediscover(self, *, cooldown: float | None = None) -> None:
+        """Force a live tools/list refresh for every configured server.
+
+        LC-4: the persisted tool index keys on .mcp.json bytes, so a session
+        created after the SERVER adds tools (no reconnect event) would never
+        see them. Called at loop bootstrap; reuses live connections (cheap)
+        and is rate-limited to once per cooldown per user.
+        """
+        now = time.time()
+        cooldown = self._REDISCOVERY_COOLDOWN_SECONDS if cooldown is None else cooldown
+        if now - self._last_rediscovery < cooldown:
+            return
+        self._last_rediscovery = now
+        await self._ensure_started()
+        connections = await self.snapshot_connections()
+        for server_name, conn in connections.items():
+            try:
+                result = await conn.session.list_tools()
+                conn.tools = result.tools
+                conn.last_refresh = time.time()
+                self._last_errors[server_name] = None
+                self._last_used = time.time()
+                await self._notify_refreshed(server_name)
+            except Exception as exc:
+                self._last_errors[server_name] = str(exc)
+                logger.warning(
+                    "mcp.rediscover_failed",
+                    {"server": server_name, "error": str(exc)},
+                    user_id=self.user_id,
+                )
+
     async def _notify_refreshed(self, server_name: str) -> None:
         for listener in tuple(self._refresh_listeners):
             try:
@@ -221,7 +267,12 @@ class MCPManager:
         try:
             return await task
         finally:
-            self._reconnect_tasks.pop(server_name, None)
+            # Pop only if the stored task is THIS one — after caller A awaits,
+            # event-loop scheduling can let caller C install a newer task; A's
+            # finally must not remove C's entry (which would allow a second
+            # concurrent reconnect and a possible leaked stdio subprocess).
+            if self._reconnect_tasks.get(server_name) is task:
+                self._reconnect_tasks.pop(server_name, None)
 
     async def _create_connection(
         self, server_name: str, server_config: MCPServerConfig

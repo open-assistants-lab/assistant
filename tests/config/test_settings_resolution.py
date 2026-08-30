@@ -112,3 +112,18 @@ def test_historical_misplaced_cloud_provider_reference_warns(tmp_path, caplog):
     AppConfig.from_yaml(config_file)
 
     assert "provider/model separator is misplaced" in caplog.text
+
+
+def test_startup_validation_accepts_provider_model_slash_form():
+    """A models.dev-style provider/model ref must boot: runtime accepts the
+    slash form, so startup validation accepts it too (malformed still fails)."""
+    from src.config.settings import AppConfig, validate_startup_model_references
+
+    cfg = AppConfig(agent={"name": "T", "model": "anthropic/claude-3-5-sonnet"})
+    validate_startup_model_references(cfg)  # must not raise
+
+    # Bare names resolve as ollama models at runtime — startup no longer
+    # rejects them either (same allow_legacy semantics as the factory).
+    cfg_bare = AppConfig(agent={"name": "T", "model": "some-local-pull"})
+    validate_startup_model_references(cfg_bare)  # must not raise
+

@@ -302,3 +302,24 @@ def test_empty_session_id_defaults_to_default(monkeypatch: pytest.MonkeyPatch) -
     conversation_router.get_context_info(session_id="")
 
     assert store.summary_calls == [("default", 100)]
+
+
+def test_context_info_empty_host_model_returns_no_model_configured(monkeypatch):
+    """D0-5: empty agent.model is a valid shipped state — the endpoint must
+    surface an explicit no-model signal (200), not a misleading 422."""
+    from fastapi.testclient import TestClient
+
+    from src.config import get_settings, reload_settings
+    from src.http.main import app
+
+    monkeypatch.setenv("API_KEY", "")
+    monkeypatch.delenv("AGENT_MODEL", raising=False)
+    reload_settings()  # drop cached singleton so the env deletion applies
+    assert get_settings().agent.model == ""
+    with TestClient(app, raise_server_exceptions=False) as c:
+        response = c.get("/context-info", params={"user_id": "ctxuser"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["no_model_configured"] is True
+    assert "No model configured" in body["model_hint"]
+    reload_settings()

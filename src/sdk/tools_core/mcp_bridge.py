@@ -77,6 +77,26 @@ class MCPToolBridge:
             self._manager.add_refresh_listener(self._refresh_server)
         return self._manager
 
+    def detach(self) -> None:
+        """Stop receiving manager refresh notifications (loop evicted/reset).
+
+        Idempotent; safe on bridges whose manager was never created.
+        """
+        if self._manager is not None:
+            self._manager.remove_refresh_listener(self._refresh_server)
+            self._manager = None
+
+    async def bootstrap_refresh(self) -> None:
+        """Re-discover every configured server's live tool list at loop
+        creation (LC-4) — a session born after the server changed its catalog
+        picks up the new tools without any .mcp.json byte change."""
+        manager = self._get_manager()
+        await manager.rediscover()
+        # Apply refreshed catalogs to this bridge's own registry (the bridge
+        # may not be a live refresh listener — it may have been detached).
+        for server_name in await manager.snapshot_connections():
+            await self._refresh_server(server_name)
+
     async def _refresh_server(self, server_name: str) -> None:
         """Replace one server's definitions and refresh all live loop registries."""
         manager = self._get_manager()
