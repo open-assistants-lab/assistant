@@ -1,7 +1,11 @@
 """Shared vs per-user TOOL.md merge (deployment-shared Tools dir)."""
 
+import inspect
 
-from src.sdk.tools_custom import get_custom_tools
+from jsonschema import Draft7Validator
+
+from src.sdk.tool_index import ToolIndex
+from src.sdk.tools_custom import get_custom_tools, scan_tools_dir
 
 
 def _write_tool(tools_dir, name, description):
@@ -56,3 +60,52 @@ def test_user_tool_overrides_shared_same_name(tmp_path, monkeypatch):
     bob_d = {t.name: t.description for t in bob}
     assert alice_d["snooze_check"] == "ALICE version"   # user override wins
     assert bob_d["snooze_check"] == "SHARED version"    # bob sees shared
+
+
+def test_all_multi_parameter_tool_md_tools_bind_and_index(tmp_path):
+    """Generic ``**kwargs`` hid named inputs; YAML also coerced string true/false enums."""
+    specs = {
+        "ch_query": {"sql": "string"},
+        "member_lookup": {"query": "string"},
+        "snooze_check": {"store": "string"},
+        "snooze_confirm": {"pending_id": "string"},
+        "snooze_set": {"store": "string", "snooze": "string", "requested_by": "string"},
+        "jobs_add": {"job_type": "string", "store": "string", "at": "string", "requested_by": "string"},
+        "jobs_cancel": {"job_id": "string"},
+        "changes_log": {"user": "string"},
+    }
+    tools_dir = tmp_path / "Tools"
+    for name, properties in specs.items():
+        required = list(properties)[:-1] if len(properties) > 1 else list(properties)
+        props = "\n".join(f"    {key}: {{type: {kind}}}" for key, kind in properties.items())
+        command_args = " ".join(f"--{key}={{{{{key}}}}}" for key in properties)
+        tool_dir = tools_dir / name
+        tool_dir.mkdir(parents=True)
+        (tool_dir / "TOOL.md").write_text(
+            f"---\nname: {name}\ndescription: fixture {name}\ncommand: echo {command_args}\n"
+            f"parameters:\n  type: object\n  properties:\n{props}\n  required: {required}\n"
+            "annotations:\n  read_only: true\n---\nfixture\n",
+            encoding="utf-8",
+        )
+        if name == "snooze_set":
+            path = tool_dir / "TOOL.md"
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "    snooze: {type: string}",
+                    "    snooze: {type: string, enum: [true, false]}",
+                ),
+                encoding="utf-8",
+            )
+
+    tools = scan_tools_dir(tools_dir)
+    assert {tool.name for tool in tools} == set(specs)
+    index = ToolIndex(tmp_path / "index")
+    for tool in tools:
+        Draft7Validator.check_schema(tool.parameters)
+        if tool.name == "snooze_set":
+            assert tool.parameters["properties"]["snooze"]["enum"] == ["true", "false"]
+        assert tool.function is not None
+        assert set(inspect.signature(tool.function).parameters) == set(specs[tool.name])
+        tool.function(**{key: "true" if key == "snooze" else "x" for key in specs[tool.name]})
+        index.index_tool(tool, tool_type="custom")
+    assert set(index.list_all_names()) == set(specs)

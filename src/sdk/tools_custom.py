@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import shlex
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,8 @@ def _parse_tool_file(tool_path: Path) -> ToolDefinition | None:
 
     if parameters is None:
         parameters = _extract_params_from_command(command_template)
+    else:
+        parameters = _normalize_parameters_schema(parameters)
 
     annotations = ToolAnnotations(
         title=annotations_raw.get("title") if annotations_raw else None,
@@ -112,6 +115,15 @@ def _parse_tool_file(tool_path: Path) -> ToolDefinition | None:
                 return f"Command error: {e}"
 
         fn.__name__ = name
+        properties = parameters.get("properties", {})
+        required = set(parameters.get("required", []))
+        fn.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
+            [inspect.Parameter(
+                param_name,
+                kind=inspect.Parameter.KEYWORD_ONLY,
+                default=(inspect.Parameter.empty if param_name in required else None),
+            ) for param_name in properties]
+        )
         return fn
 
     return ToolDefinition(
@@ -138,6 +150,26 @@ def _extract_params_from_command(command: str) -> dict[str, Any]:
         "properties": properties,
         "required": list(properties.keys()),
     }
+
+
+def _normalize_parameters_schema(parameters: dict[str, Any]) -> dict[str, Any]:
+    """Normalize YAML-loaded input schema while preserving declared string values."""
+    schema = dict(parameters)
+    schema.setdefault("type", "object")
+    raw_properties = schema.get("properties", {})
+    if not isinstance(raw_properties, dict):
+        raw_properties = {}
+    properties: dict[str, Any] = {}
+    for raw_name, raw_property in raw_properties.items():
+        name = str(raw_name)
+        prop = dict(raw_property) if isinstance(raw_property, dict) else {"type": "string"}
+        if prop.get("type") == "string" and isinstance(prop.get("enum"), list):
+            prop["enum"] = [str(value).lower() if isinstance(value, bool) else value for value in prop["enum"]]
+        properties[name] = prop
+    schema["properties"] = properties
+    required = schema.get("required", [])
+    schema["required"] = [str(name) for name in required] if isinstance(required, list) else []
+    return schema
 
 
 def scan_tools_dir(tools_dir: Path) -> list[ToolDefinition]:

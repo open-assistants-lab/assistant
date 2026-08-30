@@ -58,12 +58,18 @@ def tool_reload() -> str:
 
     try:
         prev_names = set(loop._tool_index.list_all_names())
+        managed_names = {
+            name
+            for name in prev_names
+            if loop._tool_index.get_tool_type(name) in {"custom", "mcp"}
+        }
         loop._tool_index.clear()
 
         # Index custom (TOOL.md) tools
         from src.sdk.tools_custom import find_tool_file, get_custom_tools, load_tool_meta
 
         custom_count = 0
+        current_managed_names: set[str] = set()
         user_id = loop.user_id or DEFAULT_USER_ID
         caps = load_user_capabilities(user_id)
         for td in get_custom_tools(user_id=user_id, workspace_id=loop.workspace_id or "personal"):
@@ -79,6 +85,7 @@ def tool_reload() -> str:
                             "tool_dir": str(tool_file.parent),
                         }
                 loop._tool_index.index_tool(td, tool_type="custom", namespace="custom", reconstruct=reconstruct_data)
+                current_managed_names.add(td.name)
                 custom_count += 1
 
         # Index MCP tools from the bridge
@@ -91,6 +98,7 @@ def tool_reload() -> str:
                     server_name = parts[1] if len(parts) == 3 else ""
                     reconstruct = {"server_name": server_name, "mcp_tool_name": td.name}
                     loop._tool_index.index_tool(td, tool_type="mcp", namespace=f"mcp__{server_name}", reconstruct=reconstruct)
+                    current_managed_names.add(td.name)
                     mcp_count += 1
 
         current_hashes = compute_source_hashes(
@@ -101,15 +109,11 @@ def tool_reload() -> str:
         new_names = set(loop._tool_index.list_all_names())
         added = new_names - prev_names
         removed = prev_names - new_names
-        updated = new_names & prev_names  # tools that still exist but may have changed
+        # Refresh every cached/live loop for this user in place. Include all
+        # custom names so newly-created tools become callable immediately.
+        from src.sdk.runner import refresh_user_tool_registries
 
-        # Evict stale inline copies — lazy-load will re-resolve from fresh index on next call
-        if hasattr(loop, "_registry") and loop._registry:
-            for name in removed | updated:
-                if loop._registry.has(name):
-                    loop._registry.remove(name)
-                if hasattr(loop, "_recently_used") and loop._recently_used:
-                    loop._recently_used.discard(name)
+        refresh_user_tool_registries(user_id, managed_names | current_managed_names)
 
         lines = [f"Index rebuilt ({custom_count} custom, {mcp_count} MCP)."]
         if added:

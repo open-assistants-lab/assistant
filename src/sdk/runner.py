@@ -97,6 +97,50 @@ def get_user_loop(user_id: str, session_id: str | None = None) -> AgentLoop | No
     return None
 
 
+def _live_user_loops(user_id: str) -> list[AgentLoop]:
+    """Return each cached or actively-running loop for a user exactly once."""
+    prefix = f"{user_id}:"
+    candidates = [loop for key, loop in _loop_cache.items() if key.startswith(prefix)]
+    candidates.extend(loop for key, loop in _user_loops.items() if key.startswith(prefix))
+    return list({id(loop): loop for loop in candidates}.values())
+
+
+def _current_tool_catalog(loop: AgentLoop) -> list[ToolDefinition]:
+    """Build the current native, custom, and connected-MCP catalog for a live loop."""
+    from src.sdk.tools_core.tool_reload import tool_reload
+    from src.sdk.tools_core.tool_search import tool_search
+    from src.sdk.tools_custom import get_custom_tools
+
+    catalog = list(get_native_tools())
+    catalog.extend((tool_search, tool_reload))
+    catalog.extend(get_custom_tools(loop.user_id or DEFAULT_USER_ID, loop.workspace_id or "personal"))
+    bridge = getattr(loop, "_mcp_bridge", None)
+    if bridge is not None:
+        catalog.extend(bridge.get_tool_definitions())
+    return list({tool.name: tool for tool in catalog}.values())
+
+
+def refresh_user_tool_registries(user_id: str, names: set[str] | None = None) -> int:
+    """Diff current tool definitions into every live loop without replacing loop state."""
+    caps = _load_user_capabilities(user_id)
+    refreshed = 0
+    for loop in _live_user_loops(user_id):
+        loop._caps_check = lambda name, current_caps=caps: _resource_enabled(
+            current_caps, "tools", name
+        )
+        catalog = {tool.name: tool for tool in _current_tool_catalog(loop)}
+        targets = names if names is not None else set(catalog) | set(loop._registry.list_names())
+        for name in targets:
+            desired = catalog.get(name)
+            if desired is not None and _resource_enabled(caps, "tools", name):
+                loop.register_tool(desired)
+            else:
+                loop.unregister_tool(name)
+                loop._recently_used.discard(name)
+        refreshed += 1
+    return refreshed
+
+
 def _loop_cache_key(
     user_id: str,
     workspace_id: str,
@@ -499,7 +543,7 @@ async def create_sdk_loop(
 
     # Register tool_search and tool_reload as core tools
     from src.sdk.tools_core.tool_search import tool_search
-    from src.sdk.tools_custom import CORE_TOOL_NAMES, is_core_tool
+    from src.sdk.tools_custom import CORE_TOOL_NAMES, get_custom_tools, is_core_tool
 
     core_tool_defs: list[ToolDefinition] = []
 
@@ -518,6 +562,12 @@ async def create_sdk_loop(
     user_tools_dir = paths.user_tools_dir()
     workspace_tools_dir = None
     mcp_config = paths.user_mcp_config()
+    custom_tools = [
+        td
+        for td in get_custom_tools(user_id, runtime_workspace_id)
+        if _resource_enabled(caps, "tools", td.name)
+    ]
+    core_tool_defs.extend(custom_tools)
 
     idx, commit_index_hashes = get_or_create_index(
         user_tools_dir, workspace_tools_dir, mcp_config,
@@ -536,8 +586,8 @@ async def create_sdk_loop(
                 idx.index_tool(td, tool_type="native", namespace="native")
 
         # Index custom (TOOL.md) tools
-        from src.sdk.tools_custom import find_tool_file, load_tool_meta, scan_tools_dir
-        for td in scan_tools_dir(user_tools_dir):
+        from src.sdk.tools_custom import find_tool_file, load_tool_meta
+        for td in custom_tools:
             if not is_core_tool(td.name) and _resource_enabled(caps, "tools", td.name):
                 tool_file = find_tool_file(td.name, user_tools_dir, workspace_tools_dir)
                 reconstruct_data = {"command": "", "install": [], "tool_dir": ""}

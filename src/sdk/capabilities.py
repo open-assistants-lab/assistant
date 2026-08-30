@@ -193,6 +193,11 @@ def set_resource_enabled(
     else:
         values[name] = enabled
     save_user_capabilities(user_id, caps)
+    if section == "tools":
+        # Import lazily: runner imports capability predicates during bootstrap.
+        from src.sdk.runner import refresh_user_tool_registries
+
+        refresh_user_tool_registries(user_id, {name})
 
 
 def save_capabilities(root: str | Path, caps: dict[str, Any]) -> None:
