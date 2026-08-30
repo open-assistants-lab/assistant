@@ -32,6 +32,39 @@ class KitError(Exception):
     """Raised when a kit is invalid or install state is inconsistent."""
 
 
+def _manifest_tools(meta: dict[str, Any], problems: list[str]) -> list[str]:
+    """Validate and return the manifest's optional tools.enable list."""
+    tools = meta.get("tools")
+    if tools is None:
+        return []
+    if not isinstance(tools, dict) or not isinstance(tools.get("enable", []), list):
+        problems.append(f"{KIT_MANIFEST}: 'tools.enable' must be a list")
+        return []
+    enabled = tools.get("enable", [])
+    if not all(isinstance(name, str) and name for name in enabled):
+        problems.append(f"{KIT_MANIFEST}: 'tools.enable' entries must be tool names")
+        return []
+
+    from src.sdk.native_tools import get_native_tool_names
+
+    unknown = sorted(set(enabled) - get_native_tool_names())
+    for name in unknown:
+        problems.append(f"{KIT_MANIFEST}: unknown tool in tools.enable: {name}")
+    return list(dict.fromkeys(enabled))
+
+
+def _saved_tool_scopes(state_dir: Path) -> dict[str, bool | None]:
+    """Load exact pre-install settings (None means the key was absent)."""
+    manifest_file = state_dir / "kit.json"
+    if not manifest_file.exists():
+        return {}
+    state = yaml.safe_load(manifest_file.read_text(encoding="utf-8")) or {}
+    scopes = state.get("previous_tool_scopes", {})
+    if not isinstance(scopes, dict):
+        return {}
+    return {name: value if isinstance(value, bool) else None for name, value in scopes.items()}
+
+
 def _kit_problems(kit_dir: Path) -> list[str]:
     """Collect every validation problem (empty list = valid kit)."""
     problems: list[str] = []
@@ -54,6 +87,7 @@ def _kit_problems(kit_dir: Path) -> list[str]:
         problems.append(f"{KIT_MANIFEST}: name {name!r} != dir name {kit_dir.name!r}")
     if not meta.get("description"):
         problems.append(f"{KIT_MANIFEST}: 'description' required")
+    _manifest_tools(meta, problems)
 
     profile = kit_dir / "PROFILE.md"
     if not profile.exists():
@@ -184,7 +218,26 @@ def kit_install(kit_dir: str | Path, user_id: str = "default_user") -> dict[str,
     backups: dict[str, Path] = {}
     registry = SkillRegistry(user_id=user_id, workspace_id="personal")
     backup_root = Path(tempfile.mkdtemp(prefix="kit-install-backup-"))
+    from src.sdk.capabilities import load_user_capabilities, set_resource_enabled
+
+    tools_to_enable = _manifest_tools(meta, [])
+    existing_previous_scopes = _saved_tool_scopes(state_dir)
+    current_caps = load_user_capabilities(user_id).get("tools", {})
+    current_caps = current_caps if isinstance(current_caps, dict) else {}
+    affected_tools = set(tools_to_enable) | set(existing_previous_scopes)
+    rollback_scopes = {tool: current_caps.get(tool) for tool in affected_tools}
+    previous_tool_scopes = {
+        tool: existing_previous_scopes.get(tool, current_caps.get(tool))
+        for tool in tools_to_enable
+    }
     try:
+        # A reinstall may remove a previously requested tool. Restore that
+        # tool's original setting before applying the new manifest.
+        for tool in set(existing_previous_scopes) - set(tools_to_enable):
+            set_resource_enabled(user_id, "tools", tool, existing_previous_scopes[tool])
+        for tool in tools_to_enable:
+            set_resource_enabled(user_id, "tools", tool, True)
+
         profile_target_dir.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(kit_dir / "PROFILE.md", profile_target_dir / "PROFILE.md")
 
@@ -238,6 +291,7 @@ def kit_install(kit_dir: str | Path, user_id: str = "default_user") -> dict[str,
                     "skills": installed_skills,
                     "rubrics": [r.name for r in rubric_dir.glob("*.md")],
                     "eval_set": str(eval_src),
+                    "previous_tool_scopes": previous_tool_scopes,
                 }
             ),
             encoding="utf-8",
@@ -256,6 +310,8 @@ def kit_install(kit_dir: str | Path, user_id: str = "default_user") -> dict[str,
         shutil.rmtree(state_dir, ignore_errors=True)
         shutil.rmtree(profile_target_dir, ignore_errors=True)
         shutil.rmtree(backup_root, ignore_errors=True)
+        for tool, previous in rollback_scopes.items():
+            set_resource_enabled(user_id, "tools", tool, previous)
         raise
     shutil.rmtree(backup_root, ignore_errors=True)
 
@@ -287,6 +343,10 @@ def kit_uninstall(name: str, user_id: str = "default_user") -> dict[str, Any]:
     from src.storage.paths import get_paths
 
     paths = get_paths(user_id=user_id, workspace_id="personal")
+    from src.sdk.capabilities import set_resource_enabled
+
+    for tool, previous in _saved_tool_scopes(state_dir).items():
+        set_resource_enabled(user_id, "tools", tool, previous)
     profile_dir = paths.user_subagents_dir() / name
     if (profile_dir / "PROFILE.md").exists():
         shutil.rmtree(profile_dir)

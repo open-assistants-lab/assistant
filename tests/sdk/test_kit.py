@@ -41,14 +41,17 @@ PERSONAS_YAML = """personas:
 """
 
 
-def _make_kit(root: Path, name: str = "test-vertical") -> Path:
+def _make_kit(
+    root: Path, name: str = "test-vertical", tools: list[str] | None = None
+) -> Path:
     kit_dir = root / "kits" / name
     (kit_dir / "skills" / "demo-skill").mkdir(parents=True)
     (kit_dir / "rubrics").mkdir(parents=True)
     (kit_dir / "eval").mkdir(parents=True)
-    (kit_dir / "kit.yaml").write_text(
-        f"name: {name}\ndescription: Test vertical kit\nversion: 0.1.0\n"
-    )
+    manifest = f"name: {name}\ndescription: Test vertical kit\nversion: 0.1.0\n"
+    if tools is not None:
+        manifest += "tools:\n  enable:\n" + "".join(f"    - {tool}\n" for tool in tools)
+    (kit_dir / "kit.yaml").write_text(manifest)
     (kit_dir / "PROFILE.md").write_text(
         PROFILE_MD.format(name=name, desc="Kit", title="Test Vertical")
     )
@@ -70,6 +73,7 @@ def kit_env(tmp_path, monkeypatch):
     import src.config.settings as settings_mod
 
     monkeypatch.setenv("DEPLOYMENT_DATA_ROOT", str(tmp_path / "assistant_data"))
+    monkeypatch.setenv("DEPLOYMENT_DATA_PATH", str(tmp_path / "data"))
     monkeypatch.setattr(settings_mod, "_config", None)
     try:
         yield kit, tmp_path
@@ -106,6 +110,15 @@ class TestKitValidate:
         problems = kit_validate(kit)
         assert any("personas" in p for p in problems)
 
+    def test_rejects_unknown_manifest_tool(self, kit_env):
+        kit, _ = kit_env
+        with (kit / "kit.yaml").open("a", encoding="utf-8") as manifest:
+            manifest.write("tools:\n  enable:\n    - professional_magic\n")
+
+        problems = kit_validate(kit)
+
+        assert any("unknown tool" in problem and "professional_magic" in problem for problem in problems)
+
 
 class TestKitInstallRoundTrip:
     def test_install_writes_profile_skills_rubric(self, kit_env):
@@ -136,6 +149,31 @@ class TestKitInstallRoundTrip:
         kit_install(kit)
         summary = kit_install(kit)  # replace, not duplicate
         assert summary["installed_skills"] == ["demo-skill"]
+
+    def test_install_enables_manifest_tools_and_uninstall_restores_exact_scopes(self, kit_env):
+        kit, _ = kit_env
+        with (kit / "kit.yaml").open("a", encoding="utf-8") as manifest:
+            manifest.write("tools:\n  enable:\n    - interview_start\n    - app_summarize\n")
+
+        from src.sdk.capabilities import (
+            load_user_capabilities,
+            resource_enabled,
+            set_resource_enabled,
+        )
+
+        set_resource_enabled("default_user", "tools", "interview_start", False)
+        assert "app_summarize" not in load_user_capabilities("default_user")["tools"]
+
+        kit_install(kit)
+        installed = load_user_capabilities("default_user")
+        assert resource_enabled(installed, "tools", "interview_start") is True
+        assert resource_enabled(installed, "tools", "app_summarize") is True
+
+        kit_uninstall("test-vertical")
+        restored = load_user_capabilities("default_user")
+        assert restored["tools"]["interview_start"] is False
+        assert "app_summarize" not in restored["tools"]
+        assert resource_enabled(restored, "tools", "app_summarize") is False
 
 
 class TestKitList:
@@ -209,10 +247,11 @@ class TestFactoryRoundTrip:
         from the committed state alone.
         """
         import subprocess
+        import sys
 
         result = subprocess.run(
             [
-                "uv", "run", "python", "kits/factory.py",
+                sys.executable, "kits/factory.py",
                 "--name", "factory-rt",
                 "--description", "round-trip methodology",
                 "--persona", "factory round-trip persona",

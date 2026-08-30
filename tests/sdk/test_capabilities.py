@@ -116,6 +116,22 @@ def test_resource_enabled_missing_defaults_enabled_but_invalid_configured_values
     assert resource_enabled(caps, "skills", "bad") is False
 
 
+def test_fresh_user_professional_tools_default_none_while_neutral_tools_default_all():
+    caps = {"tools": {}, "skills": {}, "subagents": {}}
+
+    assert resource_enabled(caps, "tools", "interview_start") is False
+    assert resource_enabled(caps, "tools", "app_import_csv") is False
+    assert resource_enabled(caps, "tools", "files_read") is True
+
+
+def test_existing_user_professional_tool_scope_is_preserved():
+    enabled = {"tools": {"interview_start": True}}
+    disabled = {"tools": {"interview_start": False}}
+
+    assert resource_enabled(enabled, "tools", "interview_start") is True
+    assert resource_enabled(disabled, "tools", "interview_start") is False
+
+
 def test_load_user_capabilities_migrates_legacy_item_scopes_fail_closed(monkeypatch, tmp_path):
     db_path = tmp_path / "item_scopes.db"
     conn = sqlite3.connect(db_path)

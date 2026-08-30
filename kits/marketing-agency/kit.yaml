@@ -1,3 +1,11 @@
 name: marketing-agency
 description: Marketing agency methodology
 version: 0.1.0
+tools:
+  enable:
+    - interview_start
+    - interview_ask
+    - interview_finish
+    - design_extract
+    - app_import_csv
+    - app_summarize

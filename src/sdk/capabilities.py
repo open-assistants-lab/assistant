@@ -11,6 +11,17 @@ import yaml
 from src.config import get_settings
 from src.storage.paths import _validate_path_id
 
+PROFESSIONAL_SERVICE_TOOLS = frozenset(
+    {
+        "interview_start",
+        "interview_ask",
+        "interview_finish",
+        "design_extract",
+        "app_import_csv",
+        "app_summarize",
+    }
+)
+
 
 def load_capabilities(root: str | Path) -> dict[str, Any]:
     """Load capabilities.yaml from a directory root.
@@ -135,8 +146,16 @@ def merge_capabilities(
     return merged
 
 
-def _tool_default(annotations: dict[str, Any] | None) -> bool:
+def _tool_default(
+    annotations: dict[str, Any] | None, tool_name: str | None = None
+) -> bool:
     """Unconfigured tools are enabled unless explicitly disabled."""
+    if tool_name in PROFESSIONAL_SERVICE_TOOLS:
+        return False
+    # Reserve the email-miner namespace so tools added to that professional
+    # family inherit the opt-in stance without another defaults migration.
+    if tool_name and tool_name.startswith(("email_miner_", "email_mine_")):
+        return False
     return True
 
 
@@ -144,7 +163,7 @@ def resource_enabled(caps: dict[str, Any], section: str, name: str) -> bool:
     """Return user-level enabled state, failing closed for malformed configured values."""
     values = caps.get(section, {})
     if not isinstance(values, dict) or name not in values:
-        return True
+        return _tool_default(None, name) if section == "tools" else True
     value = values[name]
     if isinstance(value, bool):
         return value
@@ -160,7 +179,20 @@ def tool_enabled(
     if resource_enabled(caps, "tools", tool_name):
         return True
     tools = caps.get("tools", {})
-    return tool_name not in tools and _tool_default(annotations)
+    return tool_name not in tools and _tool_default(annotations, tool_name)
+
+
+def set_resource_enabled(
+    user_id: str, section: str, name: str, enabled: bool | None
+) -> None:
+    """Persist or clear one user-level resource setting through the canonical store."""
+    caps = load_user_capabilities(user_id)
+    values = caps.setdefault(section, {})
+    if enabled is None:
+        values.pop(name, None)
+    else:
+        values[name] = enabled
+    save_user_capabilities(user_id, caps)
 
 
 def save_capabilities(root: str | Path, caps: dict[str, Any]) -> None:
