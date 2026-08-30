@@ -207,7 +207,8 @@ class TestMCPToolInvocation:
         result = await tool_def.ainvoke({})
         assert isinstance(result, ToolResult)
         assert result.is_error is True
-        assert "not connected" in result.content
+        assert "reconnecting" in result.content
+        assert "not connected" not in result.content
 
     async def test_invoke_tool_error(self):
         from src.sdk.tools_core.mcp_bridge import MCPToolBridge

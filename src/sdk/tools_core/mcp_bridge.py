@@ -10,6 +10,7 @@ the LLM *inspect* MCP tools but not *invoke* them.
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any
 
@@ -73,7 +74,40 @@ class MCPToolBridge:
     def _get_manager(self) -> MCPManager:
         if self._manager is None:
             self._manager = get_mcp_manager(self.user_id)
+            self._manager.add_refresh_listener(self._refresh_server)
         return self._manager
+
+    async def _refresh_server(self, server_name: str) -> None:
+        """Replace one server's definitions and refresh all live loop registries."""
+        manager = self._get_manager()
+        conn = await manager.get_connection(server_name)
+        if conn is None:
+            return
+        old_names = {
+            name for name, owner in self._tool_to_server.items() if owner == server_name
+        }
+        for name in old_names:
+            self._registry.remove(name)
+            self._tool_to_server.pop(name, None)
+        new_names: set[str] = set()
+        for mcp_tool in conn.tools:
+            namespaced = _mcp_tool_name(server_name, mcp_tool.name)
+            self._registry.register(self._convert_mcp_tool(namespaced, mcp_tool, server_name))
+            self._tool_to_server[namespaced] = server_name
+            new_names.add(namespaced)
+
+        from src.sdk.runner import refresh_user_tool_registries
+
+        refresh_user_tool_registries(self.user_id, old_names | new_names)
+
+    async def _ensure_connection(
+        self, manager: MCPManager, server_name: str, *, force_reconnect: bool = False
+    ) -> Any:
+        """Use lifecycle-aware managers while retaining lightweight test/legacy adapters."""
+        ensure = getattr(manager, "ensure_connection", None)
+        if ensure is not None and inspect.iscoroutinefunction(ensure):
+            return await ensure(server_name, force_reconnect=force_reconnect)
+        return await manager.get_connection(server_name)
 
     async def discover(self) -> int:
         """Discover tools from all MCP servers and convert to ToolDefinitions.
@@ -131,10 +165,10 @@ class MCPToolBridge:
 
         async def _invoke(**kwargs: Any) -> ToolResult:
             manager = self._get_manager()
-            conn = await manager.get_connection(server_name)
+            conn = await self._ensure_connection(manager, server_name)
             if conn is None:
                 return ToolResult(
-                    content=f"MCP server '{server_name}' is not connected",
+                    content=f"MCP server '{server_name}' is reconnecting; retry shortly",
                     is_error=True,
                 )
 
@@ -155,7 +189,24 @@ class MCPToolBridge:
                     f"mcp_bridge.call_error tool={namespaced_name}: {e}",
                     extra={"user_id": self.user_id},
                 )
-                return ToolResult(content=str(e), is_error=True)
+                conn = await self._ensure_connection(manager, server_name, force_reconnect=True)
+                if conn is None:
+                    return ToolResult(
+                        content=f"MCP server '{server_name}' is reconnecting; retry shortly",
+                        is_error=True,
+                    )
+                try:
+                    result = await conn.session.call_tool(mcp_tool.name, kwargs)
+                    text_parts = [
+                        block.text if hasattr(block, "text") else str(block)
+                        for block in result.content
+                    ]
+                    return ToolResult(
+                        content="\n".join(text_parts),
+                        is_error=bool(getattr(result, "isError", False)),
+                    )
+                except Exception as retry_error:
+                    return ToolResult(content=str(retry_error), is_error=True)
 
         return ToolDefinition(
             name=namespaced_name,
