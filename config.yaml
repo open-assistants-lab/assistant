@@ -53,9 +53,9 @@ memory:
     trim_tokens_to_summarize: 4000
 observability:
   langfuse:
+    # Host is per-deployment env (LANGFUSE_HOST), never hard-coded here.
     enabled: true
     environment: development
-    host: https://langfuse.gongchatea.com.au
   logging:
     enabled: true
     json_dir: data/logs
@@ -79,6 +79,9 @@ tools:
   max_retries: 3
   timeout: 30
 verification:
-  enabled: true
+  # mode defaults to "off" (rubric never runs unless requested) — decision
+  # 2026-08-29: fresh deployments ship with verification off; admins opt in
+  # via mode: auto|on per deployment.
+  enabled: false
   grader_model: ''
   default_rubric: '- Response is non-empty'
