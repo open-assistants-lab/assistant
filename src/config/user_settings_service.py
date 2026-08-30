@@ -116,13 +116,15 @@ def resolve_effective_user_settings(
 ) -> EffectiveUserSettings:
     """Resolve persisted overrides against validated host defaults and availability."""
     try:
-        default_model = saved.default_model or canonical_model(host_default_model)
+        default_model = saved.default_model or (
+            canonical_model(host_default_model) if host_default_model.strip() else None
+        )
     except (TypeError, ValueError):
         raise SettingsResolutionError("Invalid host default model configuration") from None
-    if default_model is None:
-        raise SettingsResolutionError("Invalid host default model configuration")
 
-    def _resolve_role_model(saved_value: str | None, host_value: str | None) -> CanonicalModel:
+    def _resolve_role_model(
+        saved_value: str | None, host_value: str | None
+    ) -> CanonicalModel | None:
         # Catalog drift: a saved/host model that models.dev removed or
         # renamed must not 404 at runtime. Walk the chain (saved → host →
         # default) to the first model the catalog knows; the static seeds

@@ -223,6 +223,14 @@ def test_improvements_analyze_endpoint_exists(monkeypatch):
 
     monkeypatch.setattr("src.sdk.loops.improvement.AnalysisJob.run", fake_run)
 
+    # D0-5: the repo ships with no pinned model — patch provider resolution
+    # directly so the endpoint test doesn't depend on deployment config.
+    fake_provider = MagicMock()
+    monkeypatch.setattr(
+        "src.sdk.providers.factory.get_cached_model_provider",
+        lambda *a, **k: fake_provider,
+    )
+
     client = TestClient(app)
     response = client.post("/improvements/analyze", params={"user_id": "analyze_test"})
     assert response.status_code == 200

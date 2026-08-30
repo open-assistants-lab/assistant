@@ -85,6 +85,9 @@ def test_get_settings_returns_canonical_secret_free_shape(client, settings_api, 
     body = response.json()
     assert set(body) == {"schema_version", "revision", "saved", "effective", "provider_status"}
     assert set(body["saved"]) == {"default_model", "title_model", "summarization_model", "verification"}
+    assert body["effective"]["default_model"] is None
+    assert body["effective"]["title_model"] is None
+    assert body["effective"]["summarization_model"] is None
     assert body["provider_status"]["openai"] == {
         "name": "OpenAI",
         "has_key": True,

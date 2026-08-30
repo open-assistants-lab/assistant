@@ -63,7 +63,14 @@ class TestStreamingEndpoint:
 
     def test_stream_returns_sse(self, client):
         """POST /message/stream must return SSE content type."""
-        r = client.post("/message/stream", json={"message": "test", "user_id": "test_sse_api"})
+        r = client.post(
+            "/message/stream",
+            json={
+                "message": "test",
+                "user_id": "test_sse_api",
+                "model": "ollama-cloud:deepseek-v4-flash:0731",
+            },
+        )
         assert r.status_code == 200
 
 

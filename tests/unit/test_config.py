@@ -18,9 +18,17 @@ class TestConfigValidation:
         assert config.model == "ollama:test-model"
 
     def test_agent_config_defaults(self):
-        """Test agent config has defaults."""
+        """Test agent config has defaults — shipped default is NO model (D0-5)."""
         from src.config.settings import AgentConfig
 
-        config = AgentConfig()
-        assert config.name == "Assistant"
-        assert config.model == "ollama:minimax-m2.5"
+        # D0-5: no provider baked in. The dotenv loader may have set
+        # AGENT_MODEL from the developer's untracked .env — default is empty
+        # only with no env override; bare construction must fail fast later.
+        saved_model = os.environ.pop("AGENT_MODEL", None)
+        try:
+            config = AgentConfig(_env_file=None)
+            assert config.name == "Assistant"
+            assert config.model == ""
+        finally:
+            if saved_model is not None:
+                os.environ["AGENT_MODEL"] = saved_model

@@ -160,9 +160,9 @@ class EffectiveVerificationSettings(SettingsModel):
 
 
 class EffectiveUserSettings(SettingsModel):
-    default_model: CanonicalModel
-    title_model: CanonicalModel
-    summarization_model: CanonicalModel
+    default_model: CanonicalModel | None = None
+    title_model: CanonicalModel | None = None
+    summarization_model: CanonicalModel | None = None
     verification: EffectiveVerificationSettings
 
 

@@ -6,7 +6,11 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from src.http.auth import enforce_user_id
-from src.sdk.capabilities import load_user_capabilities, resource_enabled, save_user_capabilities
+from src.sdk.capabilities import (
+    load_user_capabilities,
+    resource_enabled,
+    set_resource_enabled,
+)
 from src.sdk.native_tools import get_tool_category
 from src.storage.paths import DEFAULT_USER_ID, _validate_path_id
 
@@ -30,9 +34,7 @@ def _load_user_caps(user_id: str) -> dict[str, Any]:
 
 
 def _save_user_enabled(user_id: str, section: str, name: str, enabled: bool) -> None:
-    caps = load_user_capabilities(user_id)
-    caps.setdefault(section, {})[name] = enabled
-    save_user_capabilities(user_id, caps)
+    set_resource_enabled(user_id, section, name, enabled)
 
 
 def _scope_response(enabled: bool) -> tuple[ScopeKind, list[str]]:
