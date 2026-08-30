@@ -482,7 +482,22 @@ def _resolve_config_model_inputs(
             "configuration), or pass model/provider_keys per request."
         )
 
-    provider_type, model_name = _parse_model_string(model_str)
+    from src.config.settings import validate_model_reference
+
+    try:
+        provider_type, model_name = validate_model_reference(
+            model_str, role="runtime", allow_legacy_syntax=True
+        )
+    except ValueError as exc:
+        raise ValueError(f"Cannot create model provider: {exc}") from exc
+    from src.sdk.registry import get_provider
+
+    if get_provider(provider_type) is None:
+        logger.warning(
+            "provider.unknown_type",
+            {"provider_type": provider_type, "model_ref": model_str},
+            user_id=user_id,
+        )
     normalized_model_ref = _normalized_model_ref(model_str, provider_type, model_name)
 
     resolved_key = _provider_key(provider_keys, provider_type)

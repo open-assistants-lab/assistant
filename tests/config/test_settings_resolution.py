@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from src.config import settings as settings_module
-from src.config.settings import reload_settings
+from src.config.settings import AppConfig, reload_settings
 
 
 @pytest.fixture
@@ -80,3 +80,35 @@ def test_api_config_default_port_matches_native_contract():
     """With no config.yaml at all, the default port must be the native-app
     contract (8080), not the docker bind (8000)."""
     assert settings_module.ApiConfig().port == 8080
+
+
+def test_verification_and_aux_models_load_from_yaml_with_inheritance(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """agent:\n  model: openai:gpt-5\nverification:\n  enabled: true\n  grader_model: ''\n  default_rubric: '- Response is non-empty'\nmemory:\n  summarization:\n    model: ''\n"""
+    )
+
+    cfg = AppConfig.from_yaml(config_file)
+
+    assert cfg.verification.enabled is True
+    assert cfg.verification.default_rubric == "- Response is non-empty"
+    assert cfg.verification.grader_model == ""
+    assert cfg.verification.grader_model or cfg.agent.model == "openai:gpt-5"
+    assert cfg.memory.summarization.model or cfg.agent.model == "openai:gpt-5"
+
+
+def test_malformed_startup_model_reference_has_clear_error(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("agent:\n  model: 'ollama:'\n")
+
+    with pytest.raises(ValueError, match="Invalid agent model reference.*provider:model"):
+        AppConfig.from_yaml(config_file)
+
+
+def test_historical_misplaced_cloud_provider_reference_warns(tmp_path, caplog):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("agent:\n  model: ollama:xyz-cloud\n")
+
+    AppConfig.from_yaml(config_file)
+
+    assert "provider/model separator is misplaced" in caplog.text

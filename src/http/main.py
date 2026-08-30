@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from src.config import get_settings
-from src.config.settings import REPO_ROOT
+from src.config.settings import REPO_ROOT, warn_unknown_model_providers
 from src.http.routers import (
     audit_router,
     capabilities,
@@ -47,6 +47,7 @@ load_dotenv(REPO_ROOT / ".env")
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Lifespan context manager — SDK runtime."""
+    warn_unknown_model_providers(get_settings())
     try:
         from src.subagent.scheduler import get_scheduler
 
@@ -57,7 +58,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Start companion scheduler if enabled
     try:
         from src.app_logging import get_logger
-        from src.config import get_settings
         settings = get_settings()
         if getattr(settings.companion, "enabled", False):
             pass  # Companion scheduler disabled

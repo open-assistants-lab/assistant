@@ -1,5 +1,6 @@
 """Settings module for Assistant."""
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -198,6 +199,7 @@ class ObservabilityConfig(_BaseSettings):
     """Observability configuration."""
 
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    langfuse: LangfuseConfig = Field(default_factory=LangfuseConfig)
 
 
 class AuthConfig(_BaseSettings):
@@ -401,17 +403,97 @@ class AppConfig(_BaseSettings):
             logging.getLogger(__name__).warning(
                 "config.yaml not found at %s — using defaults", path
             )
-            return cls()
+            config = cls()
+            validate_startup_model_references(config)
+            return config
 
         with open(path) as f:
             data = yaml.safe_load(f)
 
         if not data:
-            return cls()
+            config = cls()
+            validate_startup_model_references(config)
+            return config
 
         # Bare AGENT (set by opencode/agent runtimes) collides with the nested agent config field.
         _drop_colliding_env()
-        return cls(**data)
+        config = cls(**data)
+        # Langfuse behavior belongs under observability in YAML, while its
+        # credentials continue to arrive through LANGFUSE_* environment vars.
+        if isinstance(data.get("observability"), dict) and "langfuse" in data["observability"]:
+            behavior = config.observability.langfuse
+            config.langfuse.enabled = behavior.enabled
+            config.langfuse.host = behavior.host
+            config.langfuse.environment = behavior.environment
+        validate_startup_model_references(config)
+        return config
+
+
+def validate_model_reference(
+    model_ref: str, *, role: str, allow_legacy_syntax: bool = False
+) -> tuple[str, str]:
+    """Validate one deployment model reference without rejecting custom models."""
+    value = model_ref.strip()
+    if not value:
+        raise ValueError(f"Invalid {role} model reference: value is empty")
+    separator = ":" if ":" in value else "/" if allow_legacy_syntax and "/" in value else None
+    if separator is None:
+        if allow_legacy_syntax and value:
+            return "ollama", value
+        raise ValueError(
+            f"Invalid {role} model reference {model_ref!r}: expected 'provider:model'"
+        )
+    provider, model = (part.strip() for part in value.split(separator, 1))
+    if not provider or not model:
+        raise ValueError(
+            f"Invalid {role} model reference {model_ref!r}: expected non-empty 'provider:model'"
+        )
+
+    if model.endswith("-cloud") and not provider.endswith("-cloud"):
+        logging.getLogger(__name__).warning(
+            "Suspicious %s model reference %r; check whether the provider/model separator is misplaced",
+            role,
+            model_ref,
+        )
+    return provider.lower(), model
+
+
+def validate_startup_model_references(config: AppConfig) -> None:
+    """Validate effective deployment model references at application startup."""
+    if config.agent.model:
+        validate_model_reference(config.agent.model, role="agent")
+    effective_agent = config.agent.model
+    for role, configured in (
+        ("title", config.agent.title_model),
+        ("grader", config.verification.grader_model),
+        ("summarization", config.memory.summarization.model),
+    ):
+        effective = configured or effective_agent
+        if effective:
+            validate_model_reference(effective, role=role)
+
+
+def warn_unknown_model_providers(config: AppConfig) -> None:
+    """Warn for providers absent from models.dev without rejecting custom pulls."""
+    from src.sdk.registry import get_provider
+
+    references = {
+        "agent": config.agent.model,
+        "title": config.agent.title_model or config.agent.model,
+        "grader": config.verification.grader_model or config.agent.model,
+        "summarization": config.memory.summarization.model or config.agent.model,
+    }
+    for role, model_ref in references.items():
+        if not model_ref:
+            continue
+        provider, _ = validate_model_reference(model_ref, role=role)
+        if get_provider(provider) is None:
+            logging.getLogger(__name__).warning(
+                "Unknown provider type %r in %s model reference %r; allowing custom provider",
+                provider,
+                role,
+                model_ref,
+            )
 
 
 _config: AppConfig | None = None

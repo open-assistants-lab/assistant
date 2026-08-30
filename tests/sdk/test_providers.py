@@ -1307,12 +1307,17 @@ class TestProviderFactory:
 
         assert result is provider
         create.assert_called_once_with("ollama", model="host-model", api_key=None)
-        logger.warning.assert_called_once_with(
-            "provider.user_settings_load_failed",
-            {"error_type": "SettingsConfigurationError"},
-            user_id="alice",
-        )
-        assert secret.decode() not in repr(logger.warning.call_args)
+        # The new startup model validation may add a second, unrelated
+        # warning (e.g. provider.unknown_type for the fake ref) — assert the
+        # settings-load-failure event fired and the secret is redacted.
+        user_settings_warnings = [
+            c
+            for c in logger.warning.call_args_list
+            if c.args and c.args[0] == "provider.user_settings_load_failed"
+        ]
+        assert len(user_settings_warnings) == 1
+        assert "SettingsConfigurationError" in str(user_settings_warnings[0])
+        assert secret.decode() not in repr(logger.warning.call_args_list)
 
     def test_invalid_user_id_falls_back_without_path_escape(self, tmp_path: Path):
         provider = MagicMock()
@@ -1334,10 +1339,12 @@ class TestProviderFactory:
 
         assert result is provider
         assert not (tmp_path / "escape").exists()
-        logger.warning.assert_called_once_with(
-            "provider.user_settings_load_failed",
-            {"error_type": "ValueError"},
-            user_id="../escape",
+        # Settings-load-failure event must fire; other warnings (e.g. from
+        # the new model validation) are unrelated to this assertion.
+        assert any(
+            c.args and c.args[0] == "provider.user_settings_load_failed"
+            and "ValueError" in str(c)
+            for c in logger.warning.call_args_list
         )
 
     def test_saved_openrouter_model_with_slash_is_canonical_and_usable(self):
@@ -1608,6 +1615,10 @@ class TestProviderFactory:
         provider, model = _parse_model_string("minimax-m2.5")
         assert provider == "ollama"
         assert model == "minimax-m2.5"
+
+    def test_create_model_from_config_rejects_empty_provider(self):
+        with pytest.raises(ValueError, match="Cannot create model provider.*provider:model"):
+            create_model_from_config(":model")
 
     def test_create_ollama_provider_always_local_regardless_of_env(self):
         with patch.dict(
