@@ -41,15 +41,34 @@ skills: [writing, research]
 You are Alice's operations assistant. Be concise; flag anything financial for review.
 ```
 
-### Precedence (who wins)
+### Configuration layers and precedence
+
+Configuration is deliberately split by ownership:
+
+1. `.env` contains secrets and infrastructure only: provider/API keys, API bind and
+   authentication, deployment storage paths, and logging destinations.
+2. `config.yaml` contains deployment behavior: the deployment default model,
+   verification policy, auxiliary-model overrides, tools, memory, and observability.
+3. Each user's `settings.json` contains saved UI overrides, including the default,
+   title, grader, and summarization models.
+4. `PROFILE.md` is the primary per-user agent definition: model, persona, tools,
+   skills, and run limits.
+
+The effective primary model chain is:
 
 ```
 per-request override (`"model": ...` + `provider_keys` in the API call)
    ↓ if the request doesn't specify a model
 PROFILE.md (`model:`, persona, limits)      ← THE primary agent configuration
-   ↓ only if no profile exists
-deployment config (config.yaml agent.model / env keys)
+   ↓ if the profile has no model
+saved user `default_model` (`settings.json`)
+   ↓ if unset
+deployment config (`config.yaml` `agent.model`)
 ```
+
+Title, grader, and summarization models inherit that effective agent model when
+their value is empty. An admin can pin each auxiliary model in `config.yaml`; a
+user can override each through `settings.json` / the Settings UI.
 
 - **Capabilities always outrank `profile.tools`** — governance over convenience
   (a profile requesting a disabled tool is ignored, not an error)
@@ -103,18 +122,18 @@ Responses can be auto-graded by a separate **grader loop** before delivery.
 **The admin owns the grader; authors do not.** The worker serves the user; the
 grader serves the deployment — same party controlling both would be self-grading.
 
-Admin knobs (`.env` or `config.yaml verification:` — env wins):
+Admin knobs live in `config.yaml` under `verification:`. Secrets remain in `.env`;
+users may override supported verification fields in `settings.json`.
 
-| Env | Field | Default |
+| YAML field | Meaning | Default |
 |---|---|---|
-| `VERIFICATION_ENABLED` | `enabled` | `false` |
-| `VERIFICATION_DEFAULT_RUBRIC` | `default_rubric` | `""` |
-| `VERIFICATION_GRADER_MODEL` | `grader_model` (empty = agent model) | `""` |
-| `VERIFICATION_GRADER_SYSTEM_PROMPT` | `grader_system_prompt` | `""` |
-| `VERIFICATION_GRADER_TOOLS` | `grader_tools` | `[]` (deliberately none) |
-| `VERIFICATION_MAX_ITERATIONS` | `max_iterations` | `3` |
-| `VERIFICATION_SKIP_MAX_RESPONSE_CHARS` / `VERIFY_MIN_HISTORY_TOKENS` / `VERIFY_MIN_RESPONSE_CHARS` / `RISK_KEYWORDS` | selective-verify thresholds | 200 / 4000 / 800 / — (govern `mode: auto` skip behavior) |
-| `VERIFICATION_MODE` | `mode` (`off`/`on`/`auto`) | `off` |
+| `enabled` | Enable verification | `false` |
+| `default_rubric` | Deployment quality bar | `""` |
+| `grader_model` | Grading model; empty inherits the agent model | `""` |
+| `grader_system_prompt` | Grader instructions | `""` |
+| `grader_tools` | Tools available to the grader | `[]` |
+| `max_iterations` | Maximum grading attempts | `3` |
+| `mode` | `off`, `on`, or deterministic `auto` selection | `off` |
 
 **Per-run rubric** — an author/client may pass a rubric for one request:
 

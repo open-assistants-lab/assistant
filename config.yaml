@@ -1,6 +1,6 @@
 agent:
   model: ollama-cloud:deepseek-v4-flash:0731
-  name: Assistant
+  name: Jen
   system_prompt: "You are a helpful assistant.\n\nCRITICAL RULES:\n- NEVER guess or\
     \ estimate - always use tools to get exact numbers/facts\n- If you don't know,\
     \ say \"Let me check\" and call the appropriate tool\n- Tell user EXACTLY what\
@@ -41,7 +41,7 @@ memory:
     keep:
     - messages
     - 20
-    model: ollama-cloud:deepseek-v4-flash
+    model: ''
     prompt_file: summarisation_prompt.md
     trigger:
     - tokens
@@ -51,7 +51,7 @@ observability:
   langfuse:
     enabled: true
     environment: development
-    host: https://cloud.langfuse.com
+    host: https://langfuse.gongchatea.com.au
   logging:
     enabled: true
     json_dir: data/logs
@@ -74,3 +74,7 @@ subagent: null
 tools:
   max_retries: 3
   timeout: 30
+verification:
+  enabled: true
+  grader_model: ''
+  default_rubric: '- Response is non-empty'
