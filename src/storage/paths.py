@@ -295,6 +295,11 @@ class DataPaths:
     def audit_db(self) -> Path:
         return self.audit_dir() / "audit.db"
 
+    def metering_db(self) -> Path:
+        """Per-user usage-metering SQLite (Phase 2 M1.1; users/{id}/ dir)."""
+        self.user_dir.mkdir(parents=True, exist_ok=True)
+        return self.user_dir / "metering.db"
+
     # -- Deprecated wrappers (redirect to new methods with warnings) --
 
     def workspace_dir(self) -> Path:

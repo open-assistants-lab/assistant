@@ -172,7 +172,9 @@ DUPLICATE_TOOL_FINAL_MAX_TOKENS = 200
 class CostTracker:
     """Tracks token usage and estimated cost per invocation."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self, emit_usage: Callable[[AuditEvent], None] | None = None
+    ) -> None:
         self.total_input_tokens: int = 0
         self.total_output_tokens: int = 0
         self.total_reasoning_tokens: int = 0
@@ -180,6 +182,12 @@ class CostTracker:
         self.total_cache_creation_tokens: int = 0
         self.total_cost_usd: float = 0.0
         self.llm_calls: int = 0
+        # Optional CaptureBus emission hook (Phase 2 M1.1): wired by the loop
+        # so each add_usage() becomes an upstream "usage" AuditEvent. A bare
+        # CostTracker() (tests, tools) stays silent.
+        self._emit_usage = emit_usage
+        self._llm_call_count = 0
+        self._last_emitted_cost = 0.0
 
     def add_usage(
         self,
@@ -212,6 +220,27 @@ class CostTracker:
             if cost.cache_write and cache_creation_tokens:
                 # Anthropic bills cache writes at 1.25x the input price.
                 self.total_cost_usd += (cache_creation_tokens / 1_000_000) * cost.cache_write
+        self._llm_call_count += 1
+        if self._emit_usage is not None:
+            # Phase 2 M1.1: emit a per-LLM-call usage event upstream. Cost is
+            # the DELTA of this call (add_usage is incremental). Emit-only:
+            # hook failures never break the loop (bus contract).
+            try:
+                cost_delta = self.total_cost_usd - self._last_emitted_cost
+                self._last_emitted_cost = self.total_cost_usd
+                from src.sdk.audit import AuditEvent
+
+                self._emit_usage(
+                    AuditEvent(
+                        kind="usage",
+                        usage_input_tokens=input_tokens + cache_read_tokens + cache_creation_tokens,
+                        usage_output_tokens=output_tokens,
+                        usage_reasoning_tokens=reasoning_tokens,
+                        usage_cost_usd=round(cost_delta, 8),
+                    )
+                )
+            except Exception:  # pragma: no cover - emit-only by contract
+                pass
 
     def exceeds_limits(self, config: RunConfig) -> str | None:
         if self.llm_calls >= config.max_llm_calls:
@@ -1292,6 +1321,28 @@ class AgentLoop:
         finally:
             _restore_current_agent_loop(token, previous)
 
+    def _emit_usage_event(self, event: Any) -> None:
+        """Bridge CostTracker usage -> CaptureBus "usage" AuditEvent.
+
+        Called from CostTracker.add_usage (Phase 2 M1.1). The default bus has
+        no per-user subscriber for raw events until ensure_audit_store_
+        subscribed/ensure_metering_sink wire sinks; emit-only: with no sinks
+        this is a no-op.
+        """
+        from src.sdk.audit import default_capture_bus
+
+        try:
+            setattr(
+                event,
+                "user_id",
+                getattr(self, "_flow_user_id", None) or self.user_id,
+            )
+            event.session_id = getattr(self, "_flow_session_id", None)
+            event.call_id = None
+            default_capture_bus.emit(event)
+        except Exception:  # pragma: no cover - emit-only contract
+            pass
+
     async def _run_impl(self, messages: list[Message]) -> list[Message]:
         """Internal run implementation (wrapped by run() for ContextVar lifecycle)."""
         self._reset_context_telemetry()
@@ -1305,7 +1356,7 @@ class AgentLoop:
         state.extra["_user_id"] = getattr(self, "_flow_user_id", "default")
         state.extra["_session_id"] = getattr(self, "_flow_session_id", "default")
         state.extra["_model"] = getattr(self, "_flow_model", None)
-        cost_tracker = CostTracker()
+        cost_tracker = CostTracker(emit_usage=self._emit_usage_event)
 
         await self._run_hooks("abefore_agent", state)
 
@@ -1581,7 +1632,7 @@ class AgentLoop:
         state.extra["_session_id"] = getattr(self, "_flow_session_id", "default")
         state.extra["_model"] = getattr(self, "_flow_model", None)
         self._seed_executed_tool_calls(state)
-        cost_tracker = CostTracker()
+        cost_tracker = CostTracker(emit_usage=self._emit_usage_event)
         all_tool_calls: list[dict[str, Any]] = []
 
         previous = _current_agent_loop.get()

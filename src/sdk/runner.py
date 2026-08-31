@@ -466,6 +466,12 @@ async def create_sdk_loop(
 
     ensure_audit_store_subscribed(user_id)
 
+    # Phase 2 M1.1: second CaptureBus sink — per-user metering. No-op unless
+    # METERING_ENABLED (settings.metering.enabled, default False = OSS).
+    from src.storage.metering import ensure_metering_sink
+
+    ensure_metering_sink(user_id)
+
     # Roadmap P0-T7 (K1): a user-level PROFILE.md bootstraps the main loop.
     # Precedence: request-scoped `model` arg wins; then profile.model; then
     # settings default. No PROFILE.md => behavior identical to pre-K1.

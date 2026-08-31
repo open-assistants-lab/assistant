@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 from src.storage.paths import DataPaths
 
 AuditKind = Literal[
-    "tool_call", "tool_result", "approve", "interrupt", "error"
+    "tool_call", "tool_result", "approve", "interrupt", "error", "usage"
 ]
 
 AuditSink = Callable[["AuditEvent"], None]
@@ -41,6 +41,14 @@ class AuditEvent(BaseModel):
     call_id: str | None = None
     approved: bool | None = None
     detail: str | None = None
+    # Optional usage payload (Phase 2 M1.1 — "usage"-kind events): all
+    # default None so existing audit export shapes are byte-identical.
+    model_id: str | None = None
+    usage_input_tokens: int | None = None
+    usage_output_tokens: int | None = None
+    usage_reasoning_tokens: int | None = None
+    usage_cost_usd: float | None = None
+    tool_calls: int | None = None
 
 
 class CaptureBus:

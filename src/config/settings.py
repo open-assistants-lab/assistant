@@ -349,6 +349,16 @@ class MCPConfig(_BaseSettings):
     model_config = SettingsConfigDict(env_prefix="MCP_")
 
 
+class MeteringConfig(_BaseSettings):
+    """Usage metering (Phase 2 M1.1). OFF by default: the OSS sink is a no-op
+    unless explicitly enabled per deployment (METERING_ENABLED)."""
+
+    enabled: bool = False
+    window_days: int = 30
+
+    model_config = SettingsConfigDict(env_prefix="METERING_")
+
+
 class AppConfig(_BaseSettings):
     """Main application configuration."""
 
@@ -367,6 +377,7 @@ class AppConfig(_BaseSettings):
     shell_tool: ShellToolConfig = Field(default_factory=ShellToolConfig)
     email_sync: EmailSyncConfig = Field(default_factory=EmailSyncConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
+    metering: MeteringConfig = Field(default_factory=MeteringConfig)
     companion: SchedulerConfig = Field(default_factory=SchedulerConfig)
     email: EmailConfig = Field(default_factory=EmailConfig)
     connectkit: ConnectKitConfig = Field(default_factory=ConnectKitConfig)

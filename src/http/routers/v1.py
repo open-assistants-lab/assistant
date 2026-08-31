@@ -21,6 +21,7 @@ from src.http.routers import skills as _skills
 from src.http.routers import subagents as _subagents
 from src.http.routers import tools as _tools
 from src.http.routers.audit import router as _audit_router
+from src.http.routers.usage import router as _usage_router
 from src.http.routers.mcp import router as _mcp_router
 from src.http.routers.ws import router as _ws_router
 
@@ -28,6 +29,7 @@ from src.http.routers.ws import router as _ws_router
 def include_v1_aliases(app: FastAPI) -> None:
     """Mount /v1 aliases for the core endpoints on `app`."""
     app.include_router(_audit_router, prefix="/v1")
+    app.include_router(_usage_router, prefix="/v1")
     app.include_router(_mcp_router, prefix="/v1")
     app.include_router(_conversation.router, prefix="/v1")
     app.include_router(_skills.router, prefix="/v1")
