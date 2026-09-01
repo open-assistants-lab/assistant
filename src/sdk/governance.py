@@ -38,6 +38,13 @@ def _now_minus(seconds: int) -> datetime:
     return datetime.now(UTC) - timedelta(seconds=seconds)
 
 
+def governance_enabled() -> bool:
+    from src.config.settings import get_settings
+
+    gov = getattr(get_settings(), "governance", None)
+    return bool(getattr(gov, "enabled", False))
+
+
 class GovernanceService:
     """Tier resolution + durable pending proposals + receipts."""
 
@@ -72,6 +79,21 @@ class GovernanceService:
     # -- tier resolution ---------------------------------------------------
 
     def resolve_tier(self, user_id: str, tool_name: str) -> Tier:
+        # Capabilities profile first (plan M4-1: tier source is the user's
+        # capabilities.yaml governance_tiers section), then deployment
+        # settings, then annotation default.
+        try:
+            from src.sdk.capabilities import (
+                load_capabilities,
+                user_capabilities_root,
+            )
+
+            caps = load_capabilities(user_capabilities_root(user_id))
+            cap_tiers = caps.get("governance_tiers") or {}
+            if tool_name in cap_tiers:
+                return str(cap_tiers[tool_name])
+        except Exception:
+            pass
         from src.config.settings import get_settings
 
         gov = getattr(get_settings(), "governance", None)
@@ -124,8 +146,17 @@ class GovernanceService:
                 ),
             )
             conn.commit()
-        self._emit_receipt(user_id, f"proposal:{tool}:{proposal_id[:8]}", tool)
+        self._emit_receipt(
+            user_id, f"proposal:{tool}:{proposal_id[:8]}", tool,
+            correlation=proposal_id,
+        )
         return proposal_id
+
+    def list_pending_ids(self, user_id: str) -> list[str]:
+        """All proposal ids for the user (any status)."""
+        with self._conn(user_id) as conn:
+            rows = conn.execute("SELECT proposal_id FROM proposals").fetchall()
+        return [r[0] for r in rows]
 
     def get_pending(self, user_id: str, proposal_id: str) -> dict[str, Any] | None:
         with self._conn(user_id) as conn:
@@ -156,7 +187,9 @@ class GovernanceService:
             conn.commit()
             newly = cur.rowcount == 1
         if newly:
-            self._emit_receipt(user_id, f"approved:{proposal_id}", tool="")
+            self._emit_receipt(
+            user_id, f"approved:{proposal_id}", tool="", correlation=proposal_id
+        )
         return newly
 
     def resolve_pending(self, user_id: str, proposal_id: str) -> dict[str, Any]:
@@ -172,6 +205,66 @@ class GovernanceService:
                 row = self.get_pending(user_id, proposal_id)
                 assert row is not None  # just created it — durable store
         return row
+
+    async def execute_approved(
+        self,
+        user_id: str,
+        proposal_id: str,
+        registry: Any | None = None,
+    ) -> dict[str, Any]:
+        """Deterministic execution leg (M4-1 review P0): run the approved
+        tool call EXACTLY once via the tool registry, then mark executed.
+
+        Idempotent: only an approved proposal executes; approved->executed
+        transition emits the execution receipt with the proposal id as
+        call_id (proposal -> approval -> execution chain on the bus)."""
+        row = self.get_pending(user_id, proposal_id)
+        if row is None:
+            return {"status": "missing"}
+        if row["status"] == "executed":
+            return {"status": "executed", "already": True}
+        if row["status"] != "approved":
+            return {"status": row["status"]}
+
+        tool = row["tool"]
+        arguments = row["arguments"] or {}
+        try:
+            if registry is None:
+                from src.sdk.native_tools import get_native_tools
+
+                registry = get_native_tools()
+            td = next((x for x in registry if x.name == tool), None)
+            if td is None:
+                result = {
+                    "content": f"Tool not found for execution: {tool}",
+                    "structured_content": {"executed": False, "error": "unknown tool"},
+                    "is_error": True,
+                }
+            else:
+                out = await td.ainvoke(arguments)
+                result = {
+                    "content": out if isinstance(out, str) else json.dumps(out, default=str),
+                    "structured_content": {"executed": True, "tool": tool},
+                    "is_error": False,
+                }
+        except Exception as exc:  # receipt the failure, never raise
+            result = {
+                "content": f"Governed execution failed: {exc}",
+                "structured_content": {"executed": False, "error": str(exc)},
+                "is_error": True,
+            }
+
+        with self._lock, self._conn(user_id) as conn:
+            conn.execute(
+                "UPDATE proposals SET status='executed'"
+                " WHERE proposal_id=? AND status='approved'",
+                (proposal_id,),
+            )
+            conn.commit()
+        self._emit_receipt(
+            user_id, f"executed:{proposal_id}", tool=tool, correlation=proposal_id
+        )
+        return result
 
     def cancel(self, user_id: str, proposal_id: str) -> None:
         with self._conn(user_id) as conn:
@@ -194,10 +287,15 @@ class GovernanceService:
         gov = getattr(get_settings(), "governance", None)
         return int(getattr(gov, "auto_send_expiry_seconds", 300))
 
-    def _emit_receipt(self, user_id: str, detail: str, tool: str = "") -> None:
+    def _emit_receipt(
+        self, user_id: str, detail: str, tool: str = "", correlation: str | None = None
+    ) -> None:
         from src.sdk.audit import AuditEvent, default_capture_bus
 
-        ev = AuditEvent(kind="approve", user_id=user_id, tool=tool, detail=detail)
+        ev = AuditEvent(
+            kind="approve", user_id=user_id, tool=tool, detail=detail,
+            call_id=correlation,
+        )
         self._recent.append(ev)
         try:
             default_capture_bus.emit(ev)

@@ -619,6 +619,24 @@ class AgentLoop:
             # Emit-only by contract — never break the loop on audit failure.
             pass
 
+    async def _run_guards(self, tc: ToolCall) -> ToolResult | None:
+        """Run middleware guard_tool_call hooks (M4-1). First non-None result
+        REPLACES execution (hard_block refusal / pending acknowledgment).
+        Emit-only: guard exceptions never break the loop."""
+        for mw in self.middlewares:
+            guard = getattr(mw, "guard_tool_call", None)
+            if guard is None:
+                continue
+            try:
+                blocked = await guard(tc.name, tc.arguments)
+            except Exception:
+                mw_name = getattr(mw, "name", type(mw).__name__)
+                logger.warning(f"guard_tool_call error in {mw_name} for {tc.name}", exc_info=True)
+                continue
+            if blocked is not None:
+                return blocked
+        return None
+
     async def _execute_tool(self, tc: ToolCall) -> ToolResult:
         """Execute a tool call, returning a ToolResult with structured content."""
         tool_def = self._registry.get(tc.name)
@@ -754,7 +772,12 @@ class AgentLoop:
                 mw_name = getattr(mw, "name", type(mw).__name__)
                 logger.warning(f"wrap_tool_call error in {mw_name} for {tc.name}", exc_info=True)
 
-        if self.trace_provider:
+        # M4-1 governance gate (issue #6): a middleware may REPLACE execution
+        # with a synthetic ToolResult (hard_block refusal / pending ack).
+        guard_result = await self._run_guards(tc_exec)
+        if guard_result is not None:
+            result = guard_result
+        elif self.trace_provider:
             async with self.trace_provider.start_span(SpanType.TOOL_EXECUTION, tc.name) as span:
                 result = await self._execute_tool(tc_exec)
                 span.set_meta("result_length", len(result.content))
@@ -807,6 +830,18 @@ class AgentLoop:
                 except Exception:
                     mw_name = getattr(mw, "name", type(mw).__name__)
                     logger.warning(f"wrap_tool_call error in {mw_name} for {tc.name}", exc_info=True)
+
+            # M4-1 governance gate: guard may replace execution entirely.
+            guard_result = await self._run_guards(ToolCall(id=tc.id, name=tc.name, arguments=tc_args))
+            if guard_result is not None:
+                result_content = guard_result.content
+                if guard_result.is_error:
+                    result_content = json.dumps({"error": result_content})
+                return Message.tool_result(
+                    tool_call_id=tc.id,
+                    content=result_content,
+                    name=tc.name,
+                )
 
             tc_with_args = ToolCall(id=tc.id, name=tc.name, arguments=tc_args)
 

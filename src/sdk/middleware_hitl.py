@@ -46,9 +46,14 @@ class HITLMiddleware(Middleware):
         acknowledgment for show_then_auto_send / explicit (the loop's
         Interrupt seam handles the explicit pause — see _execute_tool).
         """
-        from src.sdk.governance import get_governance_service
+        from src.sdk.governance import (
+            get_governance_service,
+            governance_enabled,
+        )
         from src.sdk.tools import ToolResult
 
+        if not governance_enabled():
+            return None
         svc = get_governance_service(self.user_id)
         tier = svc.resolve_tier(self.user_id, tool_name)
         if tier == "autonomous":
@@ -71,16 +76,18 @@ class HITLMiddleware(Middleware):
             self.user_id, tool_name, tool_input, tier=tier
         )
         if tier == "show_then_auto_send":
-            resolved = svc.resolve_pending(self.user_id, proposal_id)
+            # Lazy expiry: the window must ACTUALLY elapse before auto-
+            # approval — resolution happens at READ time (the pendings
+            # endpoint / a later read), never at creation (M4-1 review P0).
             return ToolResult(
                 content=(
                     f"Proposal {proposal_id[:8]} for '{tool_name}' submitted "
-                    f"(auto-send window). Status: {resolved['status']}."
+                    f"(auto-send window open). Status: pending."
                 ),
                 structured_content={
                     "governance": "show_then_auto_send",
                     "proposal_id": proposal_id,
-                    "status": resolved["status"],
+                    "status": "pending",
                 },
             )
         # explicit: durable pending; the loop's Interrupt seam surfaces it

@@ -68,3 +68,17 @@ class Middleware(ABC):
             Modified or original tool arguments.
         """
         return tool_input
+
+    async def guard_tool_call(self, tool_name: str, tool_input: dict[str, Any]) -> Any:
+        """Governance gate invoked before tool execution (M4-1, issue #6).
+
+        Args:
+            tool_name: Name of the tool about to execute.
+            tool_input: Tool arguments.
+
+        Returns:
+            None to proceed with execution, or a ToolResult that REPLACES
+            execution entirely (synthetic refusal / pending acknowledgment).
+            Hook exceptions are swallowed by the loop (emit-only contract).
+        """
+        return None

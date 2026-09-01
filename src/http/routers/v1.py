@@ -30,6 +30,8 @@ def include_v1_aliases(app: FastAPI) -> None:
     """Mount /v1 aliases for the core endpoints on `app`."""
     app.include_router(_audit_router, prefix="/v1")
     app.include_router(_usage_router, prefix="/v1")
+    from src.http.routers.governance import router as _gov_router
+    app.include_router(_gov_router, prefix="/v1")
     app.include_router(_mcp_router, prefix="/v1")
     app.include_router(_conversation.router, prefix="/v1")
     app.include_router(_skills.router, prefix="/v1")
