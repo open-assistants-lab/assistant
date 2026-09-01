@@ -356,6 +356,13 @@ class RubricMiddleware:
                 system_prompt=GRADER_SYSTEM_PROMPT,
                 middlewares=[],
                 max_iterations=1,
+                # M1 metering attribution: the grader consumes the OWNING
+                # user's tokens, so usage rows carry the parent loop's
+                # user_id (billing-correct) and the actual grader model id
+                # (per-model analytics distinguish grader from agent calls).
+                # Rows are NOT dropped — audit + metering stay complete.
+                user_id=getattr(self._agent_loop, "user_id", None),
+                model_id=self._grader_model_id,
                 # Bound the grader's output so a verbose verdict can never
                 # blow up latency or hit the provider's 45s timeout. The
                 # prompt also caps the explanation; this is the hard ceiling.

@@ -271,3 +271,47 @@ def ensure_sink_for(user):
 
 def get_store(user):
     return get_metering_store(user)
+
+    async def test_run_stream_rows_have_fresh_run_id(self, monkeypatch, tmp_path):
+        """M1 review P1: run_stream() must stamp a fresh per-run run_id —
+        cached loops previously re-emitted the previous run's id. Two
+        streamed runs must produce rows with distinct run_ids."""
+        import asyncio
+
+        from src.sdk.loop import AgentLoop, RunConfig
+        from src.sdk.messages import Message, Usage
+
+        monkeypatch.setattr(metering, "metering_enabled", lambda: True)
+        monkeypatch.setattr(metering, "_metering_stores", {})
+        monkeypatch.setattr(metering, "_metering_sink_fn", None)
+        monkeypatch.setattr(metering, "_metering_sink_subscribed", False)
+        _patch_user_dir(monkeypatch, tmp_path)
+
+        class UsageProvider:
+            async def chat(self, *a, **k):
+                return Message.assistant(
+                    "Hello!",
+                    usage=Usage(input_tokens=10, output_tokens=5, reasoning_tokens=1),
+                )
+
+        assert ensure_metering_sink("stream_user") is not None
+
+        loop = AgentLoop(
+            provider=UsageProvider(),
+            tools=[],
+            user_id="stream_user",
+            run_config=RunConfig(max_llm_calls=3),
+        )
+        loop._flow_model = "test-model"
+        async def _consume():
+            async for _ in loop.run_stream([Message.user("Hi")]):
+                pass
+        await asyncio.wait_for(_consume(loop.run_stream([Message.user("Hi")])), timeout=10)
+        first = get_metering_store("stream_user").events()
+        assert first and first[0].run_id
+
+        await asyncio.wait_for(_consume(loop.run_stream([Message.user("Hi again")])), timeout=10)
+        rows = get_metering_store("stream_user").events()
+        assert len(rows) == 2
+        assert rows[0].run_id and rows[1].run_id
+        assert rows[0].run_id != rows[1].run_id  # fresh per streamed run

@@ -188,6 +188,7 @@ class CostTracker:
         self._emit_usage = emit_usage
         self._llm_call_count = 0
         self._last_emitted_cost = 0.0
+        self._last_emitted_tool_calls = 0
 
     def add_usage(
         self,
@@ -1346,13 +1347,24 @@ class AgentLoop:
             event.call_id = None
             # M1 review P1/P2: per-model metering needs the model + run
             # correlation stamped; tool_calls from this run's executed set.
-            event.model_id = getattr(self, "_flow_model", None)
+            # model_id falls back to the loop's own model_id (grader loops
+            # carry the grader model; worker loops resolve via _flow_model).
+            event.model_id = (
+                getattr(self, "_flow_model", None) or getattr(self, "model_id", None)
+            )
             event.run_id = getattr(self, "_flow_run_id", None)
             state = getattr(self, "state", None)
             executed = (getattr(state, "extra", None) or {}).get(
                 "_executed_tool_calls", []
             )
-            event.tool_calls = len(executed) if executed else 0
+            # M1 review P2: emit the DELTA since the last emission (mirrors
+            # cost delta) — the executed set is cumulative per run, and each
+            # emitted row must sum correctly in snapshot SUM(tool_calls).
+            current_count = len(executed) if executed else 0
+            event.tool_calls = max(
+                0, current_count - getattr(self, "_last_emitted_tool_calls", 0)
+            )
+            self._last_emitted_tool_calls = current_count
             default_capture_bus.emit(event)
         except Exception:  # pragma: no cover - emit-only contract
             pass
@@ -1638,6 +1650,11 @@ class AgentLoop:
         """
         state = AgentState(messages=list(messages))
         self._reset_context_telemetry()
+        # Fresh per-run correlation id — mirrors run(); without this, cached
+        # loops re-emit the previous run's run_id (M1 review P1).
+        import uuid as _uuid
+
+        self._flow_run_id = _uuid.uuid4().hex
         self.state = state
         if self.rubric:
             state.extra["rubric"] = self.rubric
