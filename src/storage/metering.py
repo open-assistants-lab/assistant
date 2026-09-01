@@ -47,6 +47,20 @@ class UsageSummaryRow(BaseModel):
     llm_calls: int = 0
 
 
+class MeteringSnapshot(BaseModel):
+    """Per-seat aggregate over a window (Phase 2 M1.3)."""
+
+    rows: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
+    cost_usd: float = 0.0
+    tool_calls: int = 0
+    llm_calls: int = 0
+    days: int = 0
+    by_model: dict[str, dict[str, float | int | str]] = Field(default_factory=dict)
+
+
 def metering_enabled() -> bool:
     """Metering is OFF by default (OSS no-op) unless METERING_ENABLED."""
     from src.config import get_settings
@@ -60,6 +74,10 @@ _metering_stores: dict[str, MeteringStore] = {}
 # re-entrant acquisition on the same thread (plain Lock deadlocked there).
 _metering_lock = threading.RLock()
 _metering_sink_subscribed = False
+# Identity of the sink function already on the bus (review P2: tests that
+# monkeypatch _metering_sink_subscribed back to False used to stack duplicate
+# sinks on the global bus — the sink identity is the real guard).
+_metering_sink_fn: Any = None
 
 
 def get_metering_store(user_id: str) -> MeteringStore:
@@ -78,10 +96,19 @@ def get_metering_store(user_id: str) -> MeteringStore:
 
 def reset_metering_stores() -> None:
     """Test helper: drop the per-user store cache and sink subscription."""
-    global _metering_sink_subscribed
+    global _metering_sink_subscribed, _metering_sink_fn
     with _metering_lock:
         _metering_stores.clear()
+        # Actually detach the sink from the bus (no listener leak).
+        if _metering_sink_fn is not None:
+            try:
+                from src.sdk.audit import default_capture_bus
+
+                default_capture_bus.unsubscribe(_metering_sink_fn)
+            except Exception:
+                pass
         _metering_sink_subscribed = False
+        _metering_sink_fn = None
 
 
 def ensure_metering_sink(user_id: str) -> MeteringStore | None:
@@ -90,12 +117,20 @@ def ensure_metering_sink(user_id: str) -> MeteringStore | None:
     subscribed (OSS default: no-op). Events carry their own user_id, so one
     subscription serves every user's per-user store.
     """
-    global _metering_sink_subscribed
+    global _metering_sink_subscribed, _metering_sink_fn
     if not metering_enabled():
         return None
 
     with _metering_lock:
-        if _metering_sink_subscribed:
+        # Idempotent-safe: guard on the registered sink identity, not only the
+        # boolean — tests that reset the boolean used to stack duplicate sinks
+        # on the global bus (review P2).
+        if _metering_sink_subscribed and _metering_sink_fn is not None:
+            return _metering_stores.get(user_id)
+        if _metering_sink_fn is not None:
+            # Flag was reset but the sink is still live on the bus — do not
+            # double-subscribe.
+            _metering_sink_subscribed = True
             return _metering_stores.get(user_id)
         from src.sdk.audit import default_capture_bus
 
@@ -110,7 +145,7 @@ def ensure_metering_sink(user_id: str) -> MeteringStore | None:
                     ts=event.ts,
                     user_id=user,
                     session_id=event.session_id,
-                    run_id=event.call_id,
+                    run_id=getattr(event, "run_id", None) or event.call_id,
                     model_id=event.model_id,
                     input_tokens=event.usage_input_tokens or 0,
                     output_tokens=event.usage_output_tokens or 0,
@@ -122,6 +157,7 @@ def ensure_metering_sink(user_id: str) -> MeteringStore | None:
 
         default_capture_bus.subscribe(_sink)
         _metering_sink_subscribed = True
+        _metering_sink_fn = _sink
         return get_metering_store(user_id)
 
 
@@ -221,9 +257,14 @@ class MeteringStore:
         offset = max(0, int(offset))
         with self._lock, self._conn:
             self._conn.row_factory = sqlite3.Row
+            # Explicit columns, never SELECT * (review P2: Row(**dict) raises
+            # on any column drift — this list is the stable read contract).
             rows = self._conn.execute(
                 """
-                SELECT * FROM usage_events
+                SELECT event_id, ts, user_id, session_id, run_id, model_id,
+                       input_tokens, output_tokens, reasoning_tokens,
+                       cost_usd, tool_calls
+                FROM usage_events
                 WHERE ts >= ?
                 ORDER BY ts DESC
                 LIMIT ? OFFSET ?
@@ -240,3 +281,72 @@ class MeteringStore:
                 (self._cutoff(window_days),),
             ).fetchone()
         return float(row[0]) if row else 0.0
+
+    def snapshot(self, window_days: int = 30) -> MeteringSnapshot:
+        """Per-seat aggregate over the window (Phase 2 M1.3)."""
+        with self._lock, self._conn:
+            self._conn.row_factory = sqlite3.Row
+            totals = self._conn.execute(
+                """
+                SELECT COUNT(*) AS rows,
+                       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                       COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+                       COALESCE(SUM(cost_usd), 0.0) AS cost_usd,
+                       COALESCE(SUM(tool_calls), 0) AS tool_calls,
+                       COALESCE(MIN(ts), '') AS first_ts,
+                       COALESCE(MAX(ts), '') AS last_ts
+                FROM usage_events WHERE ts >= ?
+                """,
+                (self._cutoff(window_days),),
+            ).fetchone()
+            per_model = self._conn.execute(
+                """
+                SELECT model_id, COUNT(*) AS calls,
+                       SUM(input_tokens) AS in_t, SUM(output_tokens) AS out_t,
+                       SUM(cost_usd) AS c_usd
+                FROM usage_events WHERE ts >= ?
+                GROUP BY model_id ORDER BY cost_usd DESC
+                """,
+                (self._cutoff(window_days),),
+            ).fetchall()
+            self._conn.row_factory = None
+        models = {
+            (r["model_id"] or "unknown"): {
+                "llm_calls": int(r["calls"]),
+                "input_tokens": int(r["in_t"] or 0),
+                "output_tokens": int(r["out_t"] or 0),
+                "cost_usd": round(float(r["c_usd"] or 0.0), 6),
+            }
+            for r in per_model
+        }
+        days = 0
+        if totals["first_ts"]:
+            first = datetime.fromisoformat(totals["first_ts"])
+            last = datetime.fromisoformat(totals["last_ts"])
+            days = max(1, (last.date() - first.date()).days + 1)
+        return MeteringSnapshot(
+            rows=int(totals["rows"]),
+            input_tokens=int(totals["input_tokens"]),
+            output_tokens=int(totals["output_tokens"]),
+            reasoning_tokens=int(totals["reasoning_tokens"]),
+            cost_usd=round(float(totals["cost_usd"] or 0.0), 6),
+            tool_calls=int(totals["tool_calls"]),
+            llm_calls=int(totals["rows"]),
+            days=days,
+            by_model=models,
+        )
+
+
+def aggregate_users(
+    store_by_user: dict[str, MeteringStore], window_days: int = 30
+) -> dict[str, MeteringSnapshot]:
+    """Per-user snapshots over an explicit store set (Phase 2 M1.3).
+
+    Tenant membership is NOT modeled here (M3 wires tenant membership);
+    callers pass exactly the users they may aggregate. Each user's snapshot
+    is computed from that user's own store only — no cross-user reads.
+    """
+    return {
+        user: store.snapshot(window_days) for user, store in store_by_user.items()
+    }

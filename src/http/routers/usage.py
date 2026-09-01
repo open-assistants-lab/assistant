@@ -111,3 +111,31 @@ async def get_billing_cost(
         "currency": "USD",
         "as_of": datetime.now(UTC).isoformat(),
     }
+
+
+@router.get("/usage/snapshot")
+async def get_usage_snapshot(
+    request: Request,
+    user_id: str = DEFAULT_USER_ID,
+    window: str | None = Query(default=None, description="e.g. '24h', '7d', '30d'"),
+) -> dict[str, Any]:
+    """Per-seat aggregate snapshot for the calling user (Phase 2 M1.3).
+
+    Admin/tenant-level aggregation across users is deferred to M2/M3 —
+    this endpoint never reads another user's store.
+    """
+    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    store, days = _store_for(user_id, window)
+    import asyncio
+
+    snapshot = await asyncio.to_thread(store.snapshot, days)
+    logger.info(
+        "usage.snapshot",
+        {"window": window or "30d", "rows": snapshot.rows},
+        user_id=user_id,
+    )
+    return {
+        "user_id": user_id,
+        "window_days": days,
+        "snapshot": snapshot.model_dump(mode="json"),
+    }

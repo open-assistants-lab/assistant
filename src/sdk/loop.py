@@ -1314,6 +1314,11 @@ class AgentLoop:
 
     async def run(self, messages: list[Message]) -> list[Message]:
         """Run the agent loop to completion. Returns final message list."""
+        import uuid as _uuid
+
+        # Per-run correlation id for telemetry/metering joins (M1 review P2:
+        # run_id was a dead column — every run now gets a fresh uuid).
+        self._flow_run_id = _uuid.uuid4().hex
         previous = _current_agent_loop.get()
         token = _bind_current_agent_loop(self)
         try:
@@ -1339,6 +1344,15 @@ class AgentLoop:
             )
             event.session_id = getattr(self, "_flow_session_id", None)
             event.call_id = None
+            # M1 review P1/P2: per-model metering needs the model + run
+            # correlation stamped; tool_calls from this run's executed set.
+            event.model_id = getattr(self, "_flow_model", None)
+            event.run_id = getattr(self, "_flow_run_id", None)
+            state = getattr(self, "state", None)
+            executed = (getattr(state, "extra", None) or {}).get(
+                "_executed_tool_calls", []
+            )
+            event.tool_calls = len(executed) if executed else 0
             default_capture_bus.emit(event)
         except Exception:  # pragma: no cover - emit-only contract
             pass

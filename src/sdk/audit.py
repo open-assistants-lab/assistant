@@ -44,6 +44,7 @@ class AuditEvent(BaseModel):
     # Optional usage payload (Phase 2 M1.1 — "usage"-kind events): all
     # default None so existing audit export shapes are byte-identical.
     model_id: str | None = None
+    run_id: str | None = None
     usage_input_tokens: int | None = None
     usage_output_tokens: int | None = None
     usage_reasoning_tokens: int | None = None
@@ -60,6 +61,13 @@ class CaptureBus:
     def subscribe(self, sink: AuditSink) -> None:
         """Register a sink. Sinks receive every subsequently emitted event."""
         self._sinks.append(sink)
+
+    def unsubscribe(self, sink: AuditSink) -> None:
+        """Remove a sink (test/lifecycle helper; absent sink is a no-op)."""
+        try:
+            self._sinks.remove(sink)
+        except ValueError:
+            pass
 
     def emit(self, event: AuditEvent) -> None:
         """Deliver an event to all sinks. Emit-only: sink errors are swallowed."""
