@@ -110,6 +110,17 @@ class SummarizationConfig(_BaseSettings):
         return tuple(self.keep) if self.keep else ("messages", 20)
 
 
+class GovernanceConfig(_BaseSettings):
+    """Durable approval-gated tools (M4, issue #6)."""
+
+    enabled: bool = False
+    # tool name -> tier: autonomous | show_then_auto_send | explicit | hard_block
+    tiers: dict[str, str] = Field(default_factory=dict)
+    auto_send_expiry_seconds: int = 300
+
+    model_config = SettingsConfigDict(env_prefix="GOVERNANCE_")
+
+
 class VerificationConfig(_BaseSettings):
     """Verification (rubric middleware) configuration."""
 
@@ -370,6 +381,7 @@ class AppConfig(_BaseSettings):
     deployment: DeploymentConfig = Field(default_factory=DeploymentConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
+    governance: GovernanceConfig = Field(default_factory=GovernanceConfig)
     hill_climbing: HillClimbingConfig = Field(default_factory=HillClimbingConfig)
     langfuse: LangfuseConfig = Field(default_factory=LangfuseConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
