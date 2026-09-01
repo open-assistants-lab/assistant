@@ -9,8 +9,9 @@ POST /emails/sync          — trigger sync from Gmail/Outlook
 import asyncio
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
+from src.http.auth import resolve_user_id
 from src.storage.email_db import (
     count_emails,
     get_email,
@@ -47,13 +48,17 @@ async def handle_list(
 
 
 @router.get("/search")
-async def handle_search(q: str, user_id: str =  DEFAULT_USER_ID, limit: int = 20) -> dict[str, Any]:
+async def handle_search(q: str, user_id: str =  DEFAULT_USER_ID, limit: int = 20, request: Request = None) -> dict[str, Any]:
+    if request is not None:
+        user_id = resolve_user_id(request, user_id)
     emails = search_emails(user_id, q, limit=limit)
     return {"emails": emails, "query": q}
 
 
 @router.get("/{email_id}")
-async def handle_get(email_id: str, user_id: str =  DEFAULT_USER_ID) -> dict[str, Any]:
+async def handle_get(email_id: str, user_id: str =  DEFAULT_USER_ID, request: Request = None) -> dict[str, Any]:
+    if request is not None:
+        user_id = resolve_user_id(request, user_id)
     email = get_email(user_id, email_id)
     if not email:
         return {"error": "not_found", "email_id": email_id}
@@ -63,7 +68,9 @@ async def handle_get(email_id: str, user_id: str =  DEFAULT_USER_ID) -> dict[str
 
 
 @router.post("/sync")
-async def handle_sync(user_id: str =  DEFAULT_USER_ID, provider: str = "gmail") -> dict[str, Any]:
+async def handle_sync(user_id: str =  DEFAULT_USER_ID, provider: str = "gmail", request: Request = None) -> dict[str, Any]:
+    if request is not None:
+        user_id = resolve_user_id(request, user_id)
     """Trigger a manual email sync. Returns immediately, sync runs in background.
 
     Gmail sync now runs through GmailClient (ConnectKit OAuth token) instead of

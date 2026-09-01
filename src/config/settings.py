@@ -212,6 +212,10 @@ class AuthConfig(_BaseSettings):
 
     api_key: str = Field(default="")
     solo_bypass: bool = Field(default=True)
+    # Phase 2 M2.1: per-user generated keys -> identities. When off (default)
+    # the SharedSecretResolver path is unchanged; when on, Bearer keys from
+    # data/auth.db map to per-user identities (untrusted domain).
+    per_user_auth: bool = Field(default=False)
     # Trusted CORS origins, comma-separated (audit B17). Empty -> wildcard
     # origins WITHOUT credentials (safe default for local dev).
     cors_origins: str = Field(

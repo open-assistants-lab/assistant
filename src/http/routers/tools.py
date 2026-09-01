@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from src.http.auth import enforce_user_id
+from src.http.auth import resolve_user_id
 from src.sdk.capabilities import (
     load_user_capabilities,
     resource_enabled,
@@ -82,7 +82,7 @@ async def list_tools(
     workspace_id: str = Query("personal"),
     request: Request = None,
 ) -> dict[str, Any]:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     _validate_path_id(user_id, "user_id")
     _validate_path_id(workspace_id, "workspace_id")
 
@@ -132,7 +132,7 @@ async def get_tool(
     workspace_id: str = Query("personal"),
     request: Request = None,
 ) -> dict[str, Any]:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     _validate_path_id(user_id, "user_id")
     _validate_path_id(workspace_id, "workspace_id")
 
@@ -171,7 +171,7 @@ async def toggle_tool(
     workspace_id: str = Query("personal"),
     request: Request = None,
 ) -> dict[str, Any]:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     """Set a tool's scope.
 
     New body (preferred):

@@ -27,13 +27,14 @@ from src.http.routers import (
     skills_router,
     subagents_router,
     todos_router,
-    usage_router,
     tools_router,
+    usage_router,
     user_prompt_router,
     webhooks_router,
     workspace_router,
     workspaces_router,
 )
+from src.http.routers.auth_keys import router as auth_keys_router
 from src.http.routers.connectors import router as connectors_router
 from src.http.routers.dev import router as dev_router
 from src.http.routers.review import router as review_router
@@ -262,6 +263,7 @@ async def api_key_auth_middleware(request: Request, call_next: Any) -> Any:
 
 app.include_router(health_router)
 app.include_router(audit_router)
+app.include_router(auth_keys_router)
 app.include_router(usage_router)
 app.include_router(mcp_router)
 app.include_router(scheduler_router)

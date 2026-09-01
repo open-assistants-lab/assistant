@@ -6,9 +6,10 @@ import json
 from typing import Any
 
 from agentprofile.models import AgentProfile
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, ValidationError
 
+from src.http.auth import resolve_user_id
 from src.sdk.capabilities import load_user_capabilities, resource_enabled, save_user_capabilities
 from src.sdk.subagent_models import TaskStatus
 from src.storage.paths import DEFAULT_USER_ID
@@ -111,7 +112,10 @@ def _reset_user_loops(user_id: str) -> None:
 @router.get("")
 async def list_subagents(
     user_id: str = Query(DEFAULT_USER_ID),
-    workspace_id: str = Query("personal"),) -> dict[str, Any]:
+    workspace_id: str = Query("personal"),
+    request: Request = None,) -> dict[str, Any]:
+    if request is not None:
+        user_id = resolve_user_id(request, user_id)
     from src.sdk.coordinator import get_coordinator
 
     _validate_context_ids(user_id, workspace_id)

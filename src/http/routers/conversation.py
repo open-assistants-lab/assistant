@@ -22,7 +22,7 @@ import src.sdk.context_measurement as _context_measurement
 import src.sdk.run_models as _run_models
 from src.app_logging import get_logger
 from src.config import get_settings
-from src.http.auth import enforce_user_id, require_auth
+from src.http.auth import require_auth, resolve_user_id
 from src.http.conversation_persistence import (
     persist_assistant_message,
     persist_reasoning_message,
@@ -243,7 +243,7 @@ def get_context_info(
     model: str | None = None,
 ) -> dict[str, Any]:
     """Estimate persisted session history without running or mutating the agent."""
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     settings = get_settings()
     if model is not None:
         try:
@@ -330,7 +330,7 @@ async def get_conversation(
     session_id: str | None = None,
 ) -> dict[str, Any]:
     """Get conversation history, optionally filtered by session_id."""
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     conversation = await aget_message_store(user_id)
     if session_id:
         messages = conversation.get_messages_by_session_id(session_id, limit)
@@ -360,7 +360,7 @@ async def get_conversation_turns(
     cursor: str | None = None,
 ) -> dict[str, Any]:
     """Get conversation turns grouped by run_id."""
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     conversation = await aget_message_store(user_id)
     sid = session_id or "default"
     turns, next_cursor = conversation.get_turns(sid, limit=limit, cursor=cursor)
@@ -390,7 +390,7 @@ async def get_conversation_turns(
 async def list_sessions(      user_id: str =  DEFAULT_USER_ID, request: Request = None,
 ) -> dict[str, Any]:
     """List all chat sessions with titles derived from first user message."""
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     conversation = await aget_message_store(user_id)
     sessions = conversation.get_sessions()
     return {"sessions": sessions}
@@ -401,7 +401,7 @@ async def delete_session(
     user_id: str =  DEFAULT_USER_ID, session_id: str = "", request: Request = None,
 ) -> dict[str, Any]:
     """Delete all messages in a specific chat session."""
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id required")
     # Audit E26: never delete out from under an active run.
@@ -482,7 +482,7 @@ async def list_available_models(
     request: Request = None,
 ) -> dict[str, list[dict[str, str]]]:
     """List available models from providers with configured API keys."""
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     from src.sdk.registry import list_models
 
     configured = []
@@ -600,7 +600,7 @@ async def _summarize_title(
 @router.post("/conversation/title")
 async def generate_title(req: TitleRequest, request: Request = None, _: None = Depends(require_auth)) -> dict[str, str]:
     """Generate a short title for a chat session."""
-    enforce_user_id(req.user_id, getattr(getattr(request, "state", None), "identity", None))
+    req.user_id = resolve_user_id(request, req.user_id)
     conversation = await aget_message_store(req.user_id)
 
     # Idempotent: a session that already has a stored title keeps it — the
@@ -654,7 +654,7 @@ async def generate_title(req: TitleRequest, request: Request = None, _: None = D
 @router.delete("/conversation")
 async def clear_conversation(user_id: str =  DEFAULT_USER_ID, request: Request = None,) -> dict[str, Any]:
     """Clear conversation history."""
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     conversation = await aget_message_store(user_id)
     conversation.clear()
     return {"status": "cleared", "user_id": user_id}
@@ -688,8 +688,8 @@ def _warn_missing_user_id(req: MessageRequest, request: Request) -> None:
 @router.post("/message", response_model=MessageResponse)
 async def handle_message(req: MessageRequest, request: Request = None, _: None = Depends(require_auth)) -> MessageResponse:
     """Send a message to the agent (SDK-powered)."""
-    enforce_user_id(req.user_id or DEFAULT_USER_ID, getattr(getattr(request, "state", None), "identity", None))
     _warn_missing_user_id(req, request)
+    req.user_id = resolve_user_id(request, req.user_id or DEFAULT_USER_ID)
     try:
         user_id = req.user_id or DEFAULT_USER_ID
 
@@ -836,8 +836,8 @@ async def _sse_with_heartbeat(
 
 @router.post("/message/stream")
 async def message_stream(req: MessageRequest, request: Request = None, _: None = Depends(require_auth)) -> StreamingResponse:
-    enforce_user_id(req.user_id or DEFAULT_USER_ID, getattr(getattr(request, "state", None), "identity", None))
     _warn_missing_user_id(req, request)
+    req.user_id = resolve_user_id(request, req.user_id or DEFAULT_USER_ID)
     """Send a message and stream response using SSE (SDK-powered)."""
     try:
         user_id = req.user_id or DEFAULT_USER_ID
@@ -1145,7 +1145,7 @@ async def _execute_approved_tool(
 
 @router.post("/message/approve")
 async def approve_tool(req: ApproveRequest, request: Request = None, _: None = Depends(require_auth)) -> StreamingResponse:
-    enforce_user_id(req.user_id or DEFAULT_USER_ID, getattr(getattr(request, "state", None), "identity", None))
+    req.user_id = resolve_user_id(request, req.user_id or DEFAULT_USER_ID)
     """Approve a pending tool call (HITL) and resume the agent as an SSE stream.
 
     Mirrors the WebSocket retry loop: pops the pending interrupt, marks the tool
@@ -1433,7 +1433,7 @@ async def approve_tool(req: ApproveRequest, request: Request = None, _: None = D
 
 @router.post("/message/reject")
 async def reject_tool(req: RejectRequest, request: Request = None, _: None = Depends(require_auth)) -> dict[str, Any]:
-    enforce_user_id(req.user_id or DEFAULT_USER_ID, getattr(getattr(request, "state", None), "identity", None))
+    req.user_id = resolve_user_id(request, req.user_id or DEFAULT_USER_ID)
     """Reject a pending tool call (HITL)."""
     skey = _stream_key(req.user_id, req.session_id or "default")
     pending = _pending_interrupts.pop(skey, None)
@@ -1450,7 +1450,7 @@ async def reject_tool(req: RejectRequest, request: Request = None, _: None = Dep
 
 @router.post("/message/cancel")
 async def cancel_message(req: CancelRequest, request: Request = None, _: None = Depends(require_auth)) -> dict[str, Any]:
-    enforce_user_id(req.user_id or DEFAULT_USER_ID, getattr(getattr(request, "state", None), "identity", None))
+    req.user_id = resolve_user_id(request, req.user_id or DEFAULT_USER_ID)
     """Cancel the current agent execution for a session."""
     session_id = req.session_id or "default"
     skey = _stream_key(req.user_id, session_id)
@@ -1474,7 +1474,7 @@ class ConversationImportRequest(BaseModel):
 
 @router.post("/conversation/import")
 async def import_conversation(req: ConversationImportRequest, request: Request = None, _: None = Depends(require_auth)) -> dict[str, Any]:
-    enforce_user_id(req.user_id or DEFAULT_USER_ID, getattr(getattr(request, "state", None), "identity", None))
+    req.user_id = resolve_user_id(request, req.user_id or DEFAULT_USER_ID)
     """Bulk-import conversation history without triggering the agent loop.
 
     Used by evaluation frameworks (LongMemEval) to pre-load session data

@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import APIRouter, Query, Request
 
 from src.app_logging import get_logger
-from src.http.auth import enforce_user_id
+from src.http.auth import resolve_user_id
 from src.storage.metering import get_metering_store
 from src.storage.paths import DEFAULT_USER_ID
 
@@ -49,7 +49,7 @@ async def get_usage_summary(
     window: str | None = Query(default=None, description="e.g. '24h', '7d', '30d'"),
 ) -> dict[str, Any]:
     """Tokens + cost per (day, model) for the window."""
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     store, days = _store_for(user_id, window)
     rows = await _to_thread_summary(store, days)
     logger.info(
@@ -78,7 +78,7 @@ async def get_usage_events(
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
     """Paginated usage events, newest first."""
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     store = get_metering_store(user_id)
     import asyncio
 
@@ -99,7 +99,7 @@ async def get_billing_cost(
     window: str | None = Query(default=None, description="e.g. '24h', '7d', '30d'"),
 ) -> dict[str, Any]:
     """Total metered cost (USD) for the window."""
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     store, days = _store_for(user_id, window)
     import asyncio
 
@@ -124,7 +124,7 @@ async def get_usage_snapshot(
     Admin/tenant-level aggregation across users is deferred to M2/M3 —
     this endpoint never reads another user's store.
     """
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     store, days = _store_for(user_id, window)
     import asyncio
 
