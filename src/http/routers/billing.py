@@ -43,8 +43,9 @@ def tenant_budget_block(user_id: str) -> dict[str, object] | None:
     budget = tenant.get("monthly_budget_usd")
     if budget is None:
         return None
-    mtd = tenant_mtd_cost(tenant)
-    if float(mtd) < float(budget):
+    budget = float(str(budget))
+    mtd = float(tenant_mtd_cost(tenant))
+    if mtd < float(budget):
         return None
     return {
         "code": "billing",
@@ -111,7 +112,7 @@ async def get_billing_tenant(
 @router.post("/plan")
 async def switch_plan(
     req: PlanSwitchRequest, request: Request
-) -> dict[str, object]:
+) -> dict[str, object] | JSONResponse:
     if not _is_admin(request):
         return JSONResponse(
             status_code=403,
