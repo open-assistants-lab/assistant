@@ -282,6 +282,16 @@ class MeteringStore:
             ).fetchone()
         return float(row[0]) if row else 0.0
 
+    def cost_since(self, since_iso: str) -> float:
+        """Sum of cost_usd for events at/after an ISO timestamp (M3-1: the
+        billing path computes month-to-date tenant cost from this)."""
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events WHERE ts >= ?",
+                (since_iso,),
+            ).fetchone()
+        return float(row[0]) if row else 0.0
+
     def snapshot(self, window_days: int = 30) -> MeteringSnapshot:
         """Per-seat aggregate over the window (Phase 2 M1.3)."""
         with self._lock, self._conn:

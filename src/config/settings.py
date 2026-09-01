@@ -374,6 +374,25 @@ class MeteringConfig(_BaseSettings):
     model_config = SettingsConfigDict(env_prefix="METERING_")
 
 
+class PricingConfig(_BaseSettings):
+    """Pricing plan defaults (Phase 2 M3-1). Seat/subscription prices are
+    deployment config (env PRICING_* or yaml); per-tenant overrides live in
+    tenant.db. The budget ENFORCEMENT threshold itself is per-tenant
+    (tenants.monthly_budget_usd); these defaults only seed new tenants."""
+
+    # Motion A (per-seat) defaults, USD per seat per month
+    seat_price_usd: float = 25.0
+    # Motion B (SMB subscription) monthly price
+    smb_price_usd: float = 199.0
+    # Platform-fee margin fraction (Motion C) — informational for price lab
+    platform_fee_pct: float = 0.15
+    # Default monthly usage cap applied to new tenants when unset (None = no
+    # cap; enforcement also honors per-tenant monthly_budget_usd)
+    default_usage_cap_usd: float | None = None
+
+    model_config = SettingsConfigDict(env_prefix="PRICING_")
+
+
 class AppConfig(_BaseSettings):
     """Main application configuration."""
 
@@ -394,6 +413,7 @@ class AppConfig(_BaseSettings):
     email_sync: EmailSyncConfig = Field(default_factory=EmailSyncConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     metering: MeteringConfig = Field(default_factory=MeteringConfig)
+    pricing: PricingConfig = Field(default_factory=PricingConfig)
     companion: SchedulerConfig = Field(default_factory=SchedulerConfig)
     email: EmailConfig = Field(default_factory=EmailConfig)
     connectkit: ConnectKitConfig = Field(default_factory=ConnectKitConfig)

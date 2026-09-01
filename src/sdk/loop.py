@@ -147,6 +147,10 @@ class RunConfig:
     """Configuration for a single agent run."""
 
     max_llm_calls: int = DEFAULT_MAX_LLM_CALLS
+    # H2 (M3-1): per-run tool-call budget. None = off (default).
+    # Exceeded -> synthetic tool result (not an exception) so the
+    # model sees a normal tool_result and can finish its turn.
+    max_tool_calls: int | None = None
     max_iterations: int = DEFAULT_MAX_ITERATIONS
     max_tokens_total: int = DEFAULT_MAX_TOKENS_TOTAL
     cost_limit_usd: float = DEFAULT_COST_LIMIT_USD
@@ -314,6 +318,7 @@ class AgentLoop:
         self.trace_provider = trace_provider
         self.run_config = run_config or RunConfig(max_iterations=max_iterations)
         self.user_id = user_id
+        self._tool_calls_this_run = 0
         self.workspace_id = workspace_id
         # Audit capture bus (P0-T3): emit-only boundary. Sinks (audit store,
         # later metering) never affect control flow.
@@ -648,6 +653,24 @@ class AgentLoop:
 
         if not self._tool_allowed(tc.name):
             return ToolResult(content=f"Tool is disabled: {tc.name}", is_error=True)
+
+        max_calls = getattr(self.run_config, "max_tool_calls", None)
+        if max_calls is not None and self._tool_calls_this_run >= max_calls:
+            # H2: budget exceeded -> synthetic tool result, not an exception
+            # (model sees a normal tool_result and can finish its turn).
+            logger.warning(f"sdk.tool_budget_exceeded tool={tc.name} max={max_calls}")
+            return ToolResult(
+                content=json.dumps(
+                    {
+                        "error": "tool_budget_exceeded",
+                        "tool": tc.name,
+                        "max_tool_calls": max_calls,
+                        "message": "This run's tool-call budget is exhausted; finish without further tool calls.",
+                    }
+                ),
+                is_error=True,
+            )
+        self._tool_calls_this_run += 1
 
         self._recently_used.add(tc.name)
         tc = self._with_runtime_context(tc)
@@ -1409,6 +1432,7 @@ class AgentLoop:
         self._reset_context_telemetry()
         # Per-run harness timings (loops are cached per user — reset each run).
         self.timings = HarnessTimings()
+        self._tool_calls_this_run = 0  # H2 budget counter
         state = AgentState(messages=list(messages))
         self.state = state
         if self.rubric:

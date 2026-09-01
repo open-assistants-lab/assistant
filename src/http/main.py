@@ -14,6 +14,7 @@ from src.config import get_settings
 from src.config.settings import REPO_ROOT, warn_unknown_model_providers
 from src.http.routers import (
     audit_router,
+    billing_router,
     capabilities,
     contacts_router,
     conversation_router,
@@ -266,6 +267,7 @@ app.include_router(health_router)
 app.include_router(audit_router)
 app.include_router(auth_keys_router)
 app.include_router(usage_router)
+app.include_router(billing_router)
 app.include_router(governance_router)
 app.include_router(mcp_router)
 app.include_router(scheduler_router)

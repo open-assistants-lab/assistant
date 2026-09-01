@@ -13,6 +13,7 @@ from src.http.routers.skills import router as skills_router
 from src.http.routers.subagents import router as subagents_router
 from src.http.routers.todos import router as todos_router
 from src.http.routers.tools import router as tools_router
+from src.http.routers.billing import router as billing_router
 from src.http.routers.usage import router as usage_router
 from src.http.routers.user_prompt import router as user_prompt_router
 from src.http.routers.webhooks import router as webhooks_router
@@ -28,6 +29,7 @@ __all__ = [
     "email_router",
     "memories_router",
     "mcp_router",
+    "billing_router",
     "usage_router",
     "profile_router",
     "todos_router",

@@ -14,7 +14,7 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")  # noqa: E402
 
 import mistune  # noqa: E402
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 import src.config.user_settings_store as _user_settings_store
@@ -690,6 +690,12 @@ async def handle_message(req: MessageRequest, request: Request = None, _: None =
     """Send a message to the agent (SDK-powered)."""
     _warn_missing_user_id(req, request)
     req.user_id = resolve_user_id(request, req.user_id or DEFAULT_USER_ID)
+    # M3-1: tenant monthly-budget gate BEFORE model invocation (402 shape)
+    from src.http.routers.billing import tenant_budget_block
+
+    billing_block = tenant_budget_block(req.user_id or DEFAULT_USER_ID)
+    if billing_block is not None:
+        return JSONResponse(status_code=402, content=billing_block)
     try:
         user_id = req.user_id or DEFAULT_USER_ID
 
@@ -838,6 +844,11 @@ async def _sse_with_heartbeat(
 async def message_stream(req: MessageRequest, request: Request = None, _: None = Depends(require_auth)) -> StreamingResponse:
     _warn_missing_user_id(req, request)
     req.user_id = resolve_user_id(request, req.user_id or DEFAULT_USER_ID)
+    from src.http.routers.billing import tenant_budget_block
+
+    billing_block = tenant_budget_block(req.user_id or DEFAULT_USER_ID)
+    if billing_block is not None:
+        return JSONResponse(status_code=402, content=billing_block)
     """Send a message and stream response using SSE (SDK-powered)."""
     try:
         user_id = req.user_id or DEFAULT_USER_ID
