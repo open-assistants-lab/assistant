@@ -94,3 +94,21 @@ streaming/fixture tests (SSE heartbeat + canonical fixtures) on suite-order
 interference. Regression: 2026-08-29 session. Track: split CI jobs per suite
 or fix ordering at conftest level. Also: 20 pre-existing ruff E-warnings in
 unrelated HTTP router files (E402 import placement) — cleanup batch.
+
+## 4. M4/M2 review residuals (2026-09-01) ⏳ tracked
+
+From the governance re-review (db771be/0816d3b) — merge approved with these:
+
+- **P1 — self-approval path**: the network-reachable approve endpoint allows a
+  user to approve their OWN pending (no separation of requester/approver).
+  Decide the trust model: admin-only approve for explicit tier, or
+  second-party approval. *Before Phase 3 tenancy.*
+- **P1 — double-run window in execute_approved**: conditional UPDATE guards
+  pending→approved, but the window between approval and execution can
+  double-run under concurrent approvals. *Next governance iteration.*
+- **P2 — custom/MCP tool pendings can't execute** (only registered native
+  tools resolve). *Governance iteration.*
+- **P2 — cosmetic**: duplicated comment in create_pending; mis-indented
+  _emit_receipt continuation in approve.
+- **P2 — tier source**: capabilities-profile tiers partially wired (env
+  fallback remains); finish when capabilities-profile UI ships.
