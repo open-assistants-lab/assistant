@@ -706,6 +706,13 @@ async def create_sdk_loop(
             )
         )
 
+        # M4-1: durable approval gating — wired only when governance.enabled
+        # (disabled = zero runtime change; the middleware's own guard_tool_call
+        # is also inert when disabled).
+        from src.sdk.middleware_hitl import HITLMiddleware
+
+        middlewares.append(HITLMiddleware(user_id=user_id))
+
     # Verification (rubric) grading is handled by RunService, which creates its
     # own RubricMiddleware and calls grade() after the main loop runs. RubricMiddleware
     # is not a Middleware subclass (no name/wrap_tool_call), so it must NOT be added
