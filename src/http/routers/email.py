@@ -30,11 +30,14 @@ _SYNC_TASKS: dict[str, 'asyncio.Task[Any]'] = {}
 
 @router.get("")
 async def handle_list(
+    request: Request = None,
     user_id: str =  DEFAULT_USER_ID,
     limit: int = 50,
     offset: int = 0,
     is_read: bool | None = None,
 ) -> dict[str, Any]:
+    if request is not None:
+        user_id = resolve_user_id(request, user_id)
     emails = list_emails(user_id, limit=limit, offset=offset, is_read=is_read)
     total = count_emails(user_id)
     unread = count_emails(user_id, is_read=False)

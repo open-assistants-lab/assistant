@@ -453,13 +453,31 @@ async def ws_conversation(websocket: WebSocket) -> None:
         await websocket.send_json(AuthOkMessage().model_dump())
     # ── End auth ──────────────────────────────────────────────────────────
 
-    # P0-T2: an authenticated connection is user-scoped only when the resolver
-    # actually knows the caller's identity. The shared-secret resolver returns
-    # user_id=None (one key per deployment; key→user mapping is Phase 2's
-    # per-user keys) — so no user_id enforcement applies yet, and a non-default
-    # user_id is NOT treated as spoofing. When a per-user resolver is plugged
-    # in, resolved_user_id carries the identity and enforcement activates.
-    resolved_user_id = None  # shared-secret cannot scope to a user
+    # P0-T2 + M2-2: an authenticated connection is user-scoped when the
+    # resolver knows the caller. Priority: per-user key identity (M2 Bearer
+    # key in handshake headers or ?key= query) > shared-secret (user_id=None,
+    # cannot scope) > localhost solo bypass. With PER_USER_AUTH on, a Bearer
+    # key at handshake time resolves to the mapped user and enforcement
+    # activates (body user_id must match — enforce_user_id contract).
+    resolved_user_id: str | None = None
+    try:
+        import inspect
+
+        from src.http.auth import get_resolver
+
+        result = get_resolver().resolve(websocket)  # duck-typed: headers + client
+        if inspect.isawaitable(result):
+            result = await result
+        if (
+            result is not None
+            and result.user_id
+            and result.trust_domain == "untrusted"
+        ):
+            # Only per-user key identities scope the connection (M2 contract).
+            # Solo/shared-secret identities cannot scope — leave enforcement off.
+            resolved_user_id = result.user_id
+    except Exception:
+        resolved_user_id = None  # shared-secret / solo cannot scope to a user
 
     session_id = str(uuid.uuid4())[:8]
     user_id = DEFAULT_USER_ID

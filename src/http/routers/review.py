@@ -58,8 +58,10 @@ def _write_outcome(user_id: str, name: str, status: str) -> dict[str, Any]:
     return outcome
 
 
-def _authorize(request: Request, user_id: str) -> None:
-    user_id = resolve_user_id(request, user_id)
+def _authorize(request: Request, user_id: str) -> str:
+    """Resolve identity and return the EFFECTIVE user_id (M2-2 sweep:
+    routers must use the return value — a per-user key identity wins)."""
+    return resolve_user_id(request, user_id)
 
 
 @router.get("/drafts")
@@ -68,7 +70,7 @@ async def list_drafts(
     user_id: str = Query(DEFAULT_USER_ID),
 ) -> dict[str, list[dict[str, Any]]]:
     """List pending drafts including their complete draft metadata."""
-    _authorize(request, user_id)
+    user_id = _authorize(request, user_id)
     registry = get_skill_registry(user_id)
     drafts: list[dict[str, Any]] = []
     for item in registry.list_skill_drafts():
@@ -86,7 +88,7 @@ async def approve_draft(
 ) -> dict[str, Any]:
     """Promote a pending draft to a live skill."""
     _validate_name(name)
-    _authorize(request, user_id)
+    user_id = _authorize(request, user_id)
     registry = get_skill_registry(user_id)
     meta = _read_json(registry.drafts_dir / name / ".draft-meta.json")
     try:
@@ -110,7 +112,7 @@ async def revise_draft(
 ) -> dict[str, Any]:
     """Replace draft content and retain provenance for later approval."""
     _validate_name(name)
-    _authorize(request, user_id)
+    user_id = _authorize(request, user_id)
     registry = get_skill_registry(user_id)
     meta_path = registry.drafts_dir / name / ".draft-meta.json"
     if registry.get_skill_draft(name) is None:
@@ -132,7 +134,7 @@ async def flag_draft(
 ) -> dict[str, Any]:
     """Remove a draft from the queue and record a flagged outcome."""
     _validate_name(name)
-    _authorize(request, user_id)
+    user_id = _authorize(request, user_id)
     registry = get_skill_registry(user_id)
     if registry.get_skill_draft(name) is None:
         raise HTTPException(status_code=404, detail=f"no draft named {name!r}")

@@ -597,9 +597,12 @@ async def test_api_key(body: TestKeyRequest) -> dict[str, Any]:
 @router.delete("/api-keys/{provider}", response_model=None)
 def delete_api_key(
     provider: str,
+    request: Request = None,
     user_id: str = Query(DEFAULT_USER_ID),
 ) -> dict[str, str | int] | JSONResponse:
     """Remove a stored API key for a provider."""
+    if request is not None:
+        user_id = resolve_user_id(request, user_id)
     try:
         mutation = _get_settings_store(user_id).delete_provider_key(provider)
         if mutation.changed:

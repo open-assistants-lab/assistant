@@ -153,7 +153,11 @@ async def list_subagents(
 async def create_subagent(
     body: SubagentCreateRequest,
     user_id: str = Query(DEFAULT_USER_ID),
-    workspace_id: str = Query("personal"),) -> dict[str, Any]:
+    workspace_id: str = Query("personal"),
+    request: Request = None,
+) -> dict[str, Any]:
+    if request is not None:
+        user_id = resolve_user_id(request, user_id)
     from src.sdk.agent_validation import validate_agent_def
     from src.sdk.coordinator import get_coordinator
 
@@ -200,7 +204,11 @@ async def create_subagent(
 async def list_subagent_jobs(
     user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),
-    status: TaskStatus | None = Query(None),) -> dict[str, Any]:
+    status: TaskStatus | None = Query(None),
+    request: Request = None,
+) -> dict[str, Any]:
+    if request is not None:
+        user_id = resolve_user_id(request, user_id)
     from src.sdk.work_queue import get_work_queue
 
     _validate_context_ids(user_id, workspace_id)
@@ -213,7 +221,11 @@ async def list_subagent_jobs(
 async def get_subagent_job(
     job_id: str,
     user_id: str = Query(DEFAULT_USER_ID),
-    workspace_id: str = Query("personal"),) -> dict[str, Any]:
+    workspace_id: str = Query("personal"),
+    request: Request = None,
+) -> dict[str, Any]:
+    if request is not None:
+        user_id = resolve_user_id(request, user_id)
     from src.sdk.work_queue import get_work_queue
 
     _validate_context_ids(user_id, workspace_id)
@@ -229,7 +241,11 @@ async def instruct_subagent_job(
     job_id: str,
     body: SubagentInstructionRequest,
     user_id: str = Query(DEFAULT_USER_ID),
-    workspace_id: str = Query("personal"),) -> dict[str, Any]:
+    workspace_id: str = Query("personal"),
+    request: Request = None,
+) -> dict[str, Any]:
+    if request is not None:
+        user_id = resolve_user_id(request, user_id)
     from src.sdk.coordinator import get_coordinator
     from src.sdk.work_queue import get_work_queue
 
@@ -248,7 +264,11 @@ async def instruct_subagent_job(
 async def cancel_subagent_job(
     job_id: str,
     user_id: str = Query(DEFAULT_USER_ID),
-    workspace_id: str = Query("personal"),) -> dict[str, Any]:
+    workspace_id: str = Query("personal"),
+    request: Request = None,
+) -> dict[str, Any]:
+    if request is not None:
+        user_id = resolve_user_id(request, user_id)
     from src.sdk.coordinator import get_coordinator
     from src.sdk.work_queue import get_work_queue
 
@@ -268,7 +288,11 @@ async def update_subagent(
     name: str,
     body: SubagentUpdateRequest,
     user_id: str = Query(DEFAULT_USER_ID),
-    workspace_id: str = Query("personal"),) -> dict[str, Any]:
+    workspace_id: str = Query("personal"),
+    request: Request = None,
+) -> dict[str, Any]:
+    if request is not None:
+        user_id = resolve_user_id(request, user_id)
     from src.sdk.agent_validation import validate_agent_def
     from src.sdk.coordinator import get_coordinator
 
@@ -302,7 +326,11 @@ async def update_subagent(
 async def delete_subagent(
     name: str,
     user_id: str = Query(DEFAULT_USER_ID),
-    workspace_id: str = Query("personal"),) -> dict[str, Any]:
+    workspace_id: str = Query("personal"),
+    request: Request = None,
+) -> dict[str, Any]:
+    if request is not None:
+        user_id = resolve_user_id(request, user_id)
     from src.sdk.coordinator import get_coordinator
 
     _validate_context_ids(user_id, workspace_id)
@@ -317,7 +345,11 @@ async def start_subagent(
     name: str,
     body: SubagentStartRequest,
     user_id: str = Query(DEFAULT_USER_ID),
-    workspace_id: str = Query("personal"),) -> dict[str, Any]:
+    workspace_id: str = Query("personal"),
+    request: Request = None,
+) -> dict[str, Any]:
+    if request is not None:
+        user_id = resolve_user_id(request, user_id)
     from src.sdk.coordinator import get_coordinator
 
     _validate_context_ids(user_id, workspace_id)
@@ -334,7 +366,10 @@ async def set_subagent_scope(
     name: str,
     body: dict[str, Any],
     user_id: str = Query(DEFAULT_USER_ID),
+    request: Request = None,
 ) -> dict[str, Any]:
+    if request is not None:
+        user_id = resolve_user_id(request, user_id)
     scope: ScopeKind = body.get("scope", "all")
     if scope not in ("all", "selected", "none"):
         raise HTTPException(status_code=400, detail="scope must be all, selected, or none")
