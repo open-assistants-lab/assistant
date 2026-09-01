@@ -29,6 +29,10 @@ def _isolated_auth(monkeypatch, tmp_path):
     monkeypatch.setattr(http_auth, "_DEFAULT_RESOLVER", None)
     reload_settings()
     yield
+    # Undo THIS fixture's patches first (env + DataPaths.root) — reloading
+    # settings while API_KEY/SOLO_BYPASS are still patched would persist an
+    # auth-on singleton into every later test (401 pollution).
+    monkeypatch.undo()
     # get_paths caches DataPaths instances by (user_id, tenant, workspace) —
     # instances created under the patched root must not leak into other tests.
     paths_mod._paths_cache.clear()
