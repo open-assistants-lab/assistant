@@ -37,7 +37,7 @@ from src.config.user_settings_store import (
     SettingsWriteError,
     UserSettingsStore,
 )
-from src.http.auth import enforce_user_id
+from src.http.auth import resolve_user_id
 from src.sdk.run_models import CanonicalModel, display_model_name
 from src.storage.paths import DEFAULT_USER_ID
 
@@ -399,7 +399,7 @@ def _configuration_failure() -> JSONResponse:
 @router.get("", response_model=UserSettingsResponse)
 def get_settings(user_id: str = Query(DEFAULT_USER_ID), request: Request = None) -> UserSettingsResponse | JSONResponse:
     """Read canonical saved and effective settings without exposing credentials."""
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
 
     try:
         return _preflight_settings(_get_settings_store(user_id)).response()
@@ -417,7 +417,7 @@ def model_catalog(
     max_providers: int | None = None,
 ) -> dict[str, Any] | JSONResponse:
     """Return the Settings provider-grouped model catalog."""
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
 
     try:
         preflight = _preflight_settings(_get_settings_store(user_id))
@@ -474,7 +474,7 @@ def update_settings(
     user_id: str = Query(DEFAULT_USER_ID),
     request: Request = None,
 ) -> UserSettingsResponse | JSONResponse:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     """Apply a revisioned settings patch, retaining omitted legacy revision support."""
     try:
         req = UpdateSettingsRequest.model_validate(body)
@@ -516,7 +516,7 @@ def update_settings(
 
 @router.get("/api-keys", response_model=None)
 def list_api_keys(user_id: str = Query(DEFAULT_USER_ID), request: Request = None) -> dict[str, bool] | JSONResponse:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     """List which providers have stored API keys (without revealing keys)."""
     try:
         saved = _get_settings_store(user_id).load()
@@ -533,7 +533,7 @@ def set_api_key(
     user_id: str = Query(DEFAULT_USER_ID),
     request: Request = None,
 ) -> dict[str, str | int] | JSONResponse:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     """Store an API key for a provider."""
     try:
         req = SetApiKeyRequest.model_validate(body)

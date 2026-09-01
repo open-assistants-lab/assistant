@@ -1,14 +1,17 @@
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
+from src.http.auth import resolve_user_id
 from src.storage.paths import DEFAULT_USER_ID
 
 router = APIRouter(prefix="/todos", tags=["todos"])
 
 
 @router.get("")
-async def list_todos(user_id: str =  DEFAULT_USER_ID) -> dict[str, Any]:
+async def list_todos(request: Request, user_id: str = DEFAULT_USER_ID) -> dict[str, Any]:
+    user_id = resolve_user_id(request, user_id)
+    user_id = resolve_user_id(request, user_id)
     """List all todos."""
     from src.sdk.tools_core.todos import todos_list
 
@@ -21,7 +24,9 @@ async def add_todo(
     content: str,
     priority: int | None = None,
     user_id: str =  DEFAULT_USER_ID,
+    request: Request = None,
 ) -> dict[str, Any]:
+    user_id = resolve_user_id(request, user_id)
     """Add a new todo."""
     from src.sdk.tools_core.todos import todos_add
 
@@ -39,7 +44,9 @@ async def update_todo(
     status: str | None = None,
     priority: int | None = None,
     user_id: str =  DEFAULT_USER_ID,
+    request: Request = None,
 ) -> dict[str, Any]:
+    user_id = resolve_user_id(request, user_id)
     """Update a todo."""
     from src.sdk.tools_core.todos import todos_update
 

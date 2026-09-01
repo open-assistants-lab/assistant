@@ -13,7 +13,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from src.http.auth import enforce_user_id
+from src.http.auth import resolve_user_id
 from src.sdk.audit import ensure_audit_store_subscribed
 from src.storage.paths import DEFAULT_USER_ID
 
@@ -34,7 +34,7 @@ async def get_audit_export(
     - P0-T2 enforcement: a resolved per-user identity (Phase 2) must match
       the requested user_id; solo/shared-secret (user_id=None) is exempt.
     """
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
 
     since_ts: datetime | None = None
     if since is not None:

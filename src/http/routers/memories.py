@@ -8,8 +8,9 @@ clear wipes the conversation store.
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
+from src.http.auth import resolve_user_id
 from src.storage.paths import DEFAULT_USER_ID
 
 router = APIRouter(prefix="/memories", tags=["memories"])
@@ -26,8 +27,10 @@ async def get_profile(
     workspace_id: str = "personal",
     days: int = 30,
     limit: int = 8,
+    request: Request = None,
 ) -> dict[str, Any]:
     """Return a digest of the user's recent conversation context."""
+    user_id = resolve_user_id(request, user_id)
     core = _get_core(user_id, workspace_id)
     cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
     results = core.recall(
@@ -57,8 +60,10 @@ async def get_profile(
 async def clear_memories(
     user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
+    request: Request = None,
 ) -> dict[str, Any]:
     """Delete all messages for the user."""
+    user_id = resolve_user_id(request, user_id)
     core = _get_core(user_id, workspace_id)
     core.clear()
     return {"status": "cleared", "user_id": user_id, "workspace_id": workspace_id}

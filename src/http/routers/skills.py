@@ -8,7 +8,7 @@ import yaml
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from src.http.auth import enforce_user_id
+from src.http.auth import resolve_user_id
 from src.sdk.capabilities import load_user_capabilities, resource_enabled, save_user_capabilities
 from src.skills.models import _is_valid_skill_name, parse_skill_file
 from src.skills.registry import get_skill_registry
@@ -193,7 +193,7 @@ def _to_detail(
 
 @router.get("", response_model=SkillListResponse)
 async def list_skills(user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal", request: Request = None) -> SkillListResponse:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     _validate_user_id(user_id)
     _validate_workspace_id(workspace_id)
     registry = _get_registry(user_id, workspace_id)
@@ -216,7 +216,7 @@ async def get_skill(
     workspace_id: str = "personal",
     request: Request = None,
 ) -> SkillDetail:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     _validate_user_id(user_id)
     _validate_workspace_id(workspace_id)
     _validate_skill_name(skill_name)
@@ -236,7 +236,7 @@ async def create_skill(
     workspace_id: str = "personal",
     request: Request = None,
 ) -> SkillDetail:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     _validate_user_id(user_id)
     _validate_workspace_id(workspace_id)
     _validate_skill_name(req.name)
@@ -275,7 +275,7 @@ async def update_skill(
     workspace_id: str = "personal",
     request: Request = None,
 ) -> SkillDetail:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     _validate_user_id(user_id)
     _validate_workspace_id(workspace_id)
     _validate_skill_name(skill_name)
@@ -314,7 +314,7 @@ async def delete_skill(
     workspace_id: str = "personal",
     request: Request = None,
 ) -> dict[str, Any]:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     _validate_user_id(user_id)
     _validate_workspace_id(workspace_id)
     _validate_skill_name(skill_name)
@@ -337,7 +337,7 @@ async def set_skill_scope(
     user_id: str =  DEFAULT_USER_ID,
     request: Request = None,
 ) -> dict[str, Any]:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     _validate_user_id(user_id)
     _validate_skill_name(skill_name)
     scope: ScopeKind = body.get("scope", "all")

@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from src.app_logging import get_logger
-from src.http.auth import enforce_user_id
+from src.http.auth import resolve_user_id
 from src.sdk.agent_scheduler import get_agent_scheduler
 from src.sdk.tools_core.agent_scheduler_db import SchedulerMemoryDB, SchedulerNotificationDB
 from src.storage.paths import DEFAULT_USER_ID
@@ -22,7 +22,7 @@ async def list_notifications(
     include_dismissed: bool = Query(False),
     request: Request = None,
 ) -> dict[str, Any]:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     db = SchedulerNotificationDB(user_id)
     try:
         notifs = await db.list(limit=limit, include_dismissed=include_dismissed)
@@ -37,7 +37,7 @@ async def dismiss_notification(
     user_id: str = Query(DEFAULT_USER_ID),
     request: Request = None,
 ) -> dict[str, Any]:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     db = SchedulerNotificationDB(user_id)
     try:
         ok = await db.dismiss(notif_id)
@@ -50,7 +50,7 @@ async def dismiss_notification(
 
 @router.post("/pause")
 async def pause_scheduler(user_id: str = Query(DEFAULT_USER_ID), request: Request = None) -> dict[str, Any]:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     scheduler = get_agent_scheduler(user_id)
     await scheduler.pause()
     return {"status": "paused"}
@@ -58,7 +58,7 @@ async def pause_scheduler(user_id: str = Query(DEFAULT_USER_ID), request: Reques
 
 @router.post("/resume")
 async def resume_scheduler(user_id: str = Query(DEFAULT_USER_ID), request: Request = None) -> dict[str, Any]:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     scheduler = get_agent_scheduler(user_id)
     await scheduler.resume()
     return {"status": "resumed"}
@@ -66,7 +66,7 @@ async def resume_scheduler(user_id: str = Query(DEFAULT_USER_ID), request: Reque
 
 @router.get("/status")
 async def scheduler_status(user_id: str = Query(DEFAULT_USER_ID), request: Request = None) -> dict[str, Any]:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     scheduler = get_agent_scheduler(user_id)
     return {
         "running": scheduler.is_running,
@@ -77,7 +77,7 @@ async def scheduler_status(user_id: str = Query(DEFAULT_USER_ID), request: Reque
 
 @router.get("/memory")
 async def list_scheduler_memory(user_id: str = Query(DEFAULT_USER_ID), request: Request = None) -> dict[str, Any]:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     db = SchedulerMemoryDB(user_id)
     try:
         facts = await db.list_all()
@@ -92,7 +92,7 @@ async def delete_scheduler_memory(
     user_id: str = Query(DEFAULT_USER_ID),
     request: Request = None,
 ) -> dict[str, Any]:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     db = SchedulerMemoryDB(user_id)
     try:
         ok = await db.delete(mem_id)

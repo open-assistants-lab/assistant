@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from src.http.auth import enforce_user_id
+from src.http.auth import resolve_user_id
 from src.sdk.capabilities import (
     load_user_capabilities,
     save_user_capabilities,
@@ -65,7 +65,7 @@ async def get_capabilities(
     workspace_id: str = Query("personal"),
     request: Request = None,
 ) -> dict[str, Any]:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     _validate_path_id(user_id, "user_id")
     _validate_path_id(workspace_id, "workspace_id")
     return _resolve_caps(user_id)
@@ -78,7 +78,7 @@ async def replace_capabilities(
     workspace_id: str = Query("personal"),
     request: Request = None,
 ) -> dict[str, Any]:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     _validate_path_id(user_id, "user_id")
     _validate_path_id(workspace_id, "workspace_id")
     _validate_replace_payload(body)
@@ -96,7 +96,7 @@ async def patch_capabilities(
     workspace_id: str = Query("personal"),
     request: Request = None,
 ) -> dict[str, Any]:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     _validate_path_id(user_id, "user_id")
     _validate_path_id(workspace_id, "workspace_id")
 

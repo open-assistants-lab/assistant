@@ -1,14 +1,17 @@
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
+from src.http.auth import resolve_user_id
 from src.storage.paths import DEFAULT_USER_ID
 
 router = APIRouter(prefix="/contacts", tags=["contacts"])
 
 
 @router.get("")
-async def list_contacts(user_id: str =  DEFAULT_USER_ID) -> dict[str, Any]:
+async def list_contacts(request: Request, user_id: str = DEFAULT_USER_ID) -> dict[str, Any]:
+    user_id = resolve_user_id(request, user_id)
+    user_id = resolve_user_id(request, user_id)
     """List all contacts."""
     from src.sdk.tools_core.contacts import contacts_list
 
@@ -32,7 +35,9 @@ async def add_contact(
     phone: str | None = None,
     company: str | None = None,
     user_id: str =  DEFAULT_USER_ID,
+    request: Request = None,
 ) -> dict[str, Any]:
+    user_id = resolve_user_id(request, user_id)
     """Add a new contact."""
     from src.sdk.tools_core.contacts import contacts_add
 
@@ -50,7 +55,9 @@ async def update_contact(
     phone: str | None = None,
     company: str | None = None,
     user_id: str =  DEFAULT_USER_ID,
+    request: Request = None,
 ) -> dict[str, Any]:
+    user_id = resolve_user_id(request, user_id)
     """Update a contact."""
     from src.sdk.tools_core.contacts import contacts_update
 

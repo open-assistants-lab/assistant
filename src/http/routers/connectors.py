@@ -12,7 +12,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from src.app_logging import get_logger
-from src.http.auth import enforce_user_id
+from src.http.auth import resolve_user_id
 
 logger = get_logger()
 router = APIRouter(prefix="/connectors", tags=["connectors"])
@@ -43,13 +43,13 @@ def _get_catalog(user_id: str) -> list[dict[str, Any]]:
 
 @router.get("/catalog")
 async def list_connectors(user_id: str = Query(...), request: Request = None) -> list[dict[str, Any]]:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     return _get_catalog(user_id)
 
 
 @router.get("/catalog/{service}")
 async def get_connector(service: str, user_id: str = Query(...), request: Request = None) -> dict[str, Any]:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     catalog = _get_catalog(user_id)
     match = next((c for c in catalog if c["name"] == service), None)
     if not match:
@@ -69,7 +69,7 @@ async def connect_service(
     For OAuth: stores client_id + client_secret (user still authorizes via Connect button).
     For API key: stores the key and marks connected immediately.
     """
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     try:
         from connectkit.bridge import ConnectKitBridge
 
@@ -120,7 +120,7 @@ async def disconnect_service(
     request: Request = None,
 ) -> dict[str, Any]:
     """Remove stored credentials for a connected service."""
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     try:
         from connectkit.bridge import ConnectKitBridge
 

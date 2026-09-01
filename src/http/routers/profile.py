@@ -9,7 +9,7 @@ serves an approved turn after a mid-session profile swap (E26 detach).
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
-from src.http.auth import enforce_user_id
+from src.http.auth import resolve_user_id
 from src.sdk import profile_loader
 from src.sdk.session_worker import get_session_registry
 from src.storage.paths import DEFAULT_USER_ID
@@ -25,7 +25,7 @@ async def reload_profile(user_id: str = Query(default=DEFAULT_USER_ID), request:
     - Valid or absent profile -> loops reset, active WS sessions cancelled,
       200 with a summary of the new state.
     """
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
     try:
         profile = profile_loader.load_main_agent_profile(user_id)
     except profile_loader.ProfileError as exc:

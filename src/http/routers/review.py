@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from src.app_logging import get_logger
-from src.http.auth import enforce_user_id
+from src.http.auth import resolve_user_id
 from src.skills.registry import get_skill_registry
 from src.storage.paths import DEFAULT_USER_ID, get_paths
 
@@ -59,7 +59,7 @@ def _write_outcome(user_id: str, name: str, status: str) -> dict[str, Any]:
 
 
 def _authorize(request: Request, user_id: str) -> None:
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
 
 
 @router.get("/drafts")

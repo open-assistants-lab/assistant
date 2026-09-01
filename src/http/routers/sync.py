@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from src.app_logging import get_logger
-from src.http.auth import enforce_user_id
+from src.http.auth import resolve_user_id
 from src.sdk.tools_core.file_sync import (
     ConnectorRevokedError,
     FileSyncer,
@@ -34,7 +34,7 @@ async def sync_workspace(
     request: Request = None,
 ) -> dict[str, Any]:
     """Pull a provider folder into the workspace Files/ dir (read-only)."""
-    enforce_user_id(user_id, getattr(getattr(request, "state", None), "identity", None))
+    user_id = resolve_user_id(request, user_id)
 
     registry = get_sync_registry()
     if registry.get(provider) is None:

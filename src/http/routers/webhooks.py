@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from src.app_logging import get_logger
-from src.http.auth import enforce_user_id
+from src.http.auth import resolve_user_id
 from src.sdk.loops.events import AgentEvent, get_trigger_registry
 from src.sdk.messages import Message
 from src.sdk.runner import run_sdk_agent
@@ -48,7 +48,7 @@ class WebhookResponse(BaseModel):
 @router.post("/trigger", response_model=TriggerResponse)
 async def manual_trigger(req: TriggerRequest, request: Request = None) -> TriggerResponse:
     """Manually trigger an agent run (for testing/automation)."""
-    enforce_user_id(req.user_id, getattr(getattr(request, "state", None), "identity", None))
+    req.user_id = resolve_user_id(request, req.user_id)
     event = AgentEvent(
         trigger_type="manual",
         trigger_id=str(uuid.uuid4()),
