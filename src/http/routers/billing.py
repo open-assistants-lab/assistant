@@ -109,10 +109,10 @@ async def get_billing_tenant(
     }
 
 
-@router.post("/plan")
+@router.post("/plan", response_model=None)
 async def switch_plan(
     req: PlanSwitchRequest, request: Request
-) -> dict[str, object] | JSONResponse:
+) -> dict[str, object] | JSONResponse:  # noqa: UP047
     if not _is_admin(request):
         return JSONResponse(
             status_code=403,
