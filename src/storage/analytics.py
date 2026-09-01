@@ -119,6 +119,30 @@ class AnalyticsStore:
                 (user_id, day, drafts_count, llm_calls, cost_usd, tool_calls, avg_turn_seconds),
             )
 
+    def daily_rows(self, user_id: str, window_days: int = 30) -> list[dict[str, object]]:
+        """One row per day in the window, oldest first (H7 trend input)."""
+        with self._lock, self._conn:
+            self._conn.row_factory = sqlite3.Row
+            rows = self._conn.execute(
+                """
+                SELECT day, drafts_count, cost_usd, avg_turn_seconds
+                FROM dashboard_days
+                WHERE user_id = ?
+                  AND day >= ?
+                ORDER BY day ASC
+                """,
+                (user_id, _cutoff(window_days)),
+            ).fetchall()
+        return [
+            {
+                "day": str(r["day"]),
+                "drafts_count": int(r["drafts_count"]),
+                "cost_usd": float(r["cost_usd"]),
+                "avg_turn_seconds": float(r["avg_turn_seconds"]),
+            }
+            for r in rows
+        ]
+
     def summary(self, user_id: str, window_days: int = 30) -> dict[str, object]:
         """Aggregate over the window for one user."""
         with self._lock, self._conn:

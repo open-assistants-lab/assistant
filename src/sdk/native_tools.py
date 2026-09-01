@@ -34,6 +34,7 @@ from src.sdk.tools_core.browser import (
 )
 from src.sdk.tools_core.corpus import index_corpus, search_corpus
 from src.sdk.tools_core.design_extractor import design_extract
+from src.sdk.tools_core.email_draft import email_draft
 from src.sdk.tools_core.file_search import (
     files_glob_search,
     files_grep_search,
@@ -133,6 +134,7 @@ def _register_all() -> None:
 
     registry.register(index_corpus)
     registry.register(search_corpus)
+    registry.register(email_draft)
     registry.register(design_extract)
 
     registry.register(web_fetch)
