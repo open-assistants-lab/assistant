@@ -364,6 +364,15 @@ class MCPConfig(_BaseSettings):
     model_config = SettingsConfigDict(env_prefix="MCP_")
 
 
+class TelemetryConfig(_BaseSettings):
+    """Owner telemetry sidecar (Phase 2 D1-1). OFF by default: self-hosters
+    opt in explicitly (TELEMETRY_ENABLED); opt-out is the shipped stance."""
+
+    enabled: bool = False
+
+    model_config = SettingsConfigDict(env_prefix="TELEMETRY_")
+
+
 class MeteringConfig(_BaseSettings):
     """Usage metering (Phase 2 M1.1). OFF by default: the OSS sink is a no-op
     unless explicitly enabled per deployment (METERING_ENABLED)."""
@@ -413,6 +422,7 @@ class AppConfig(_BaseSettings):
     email_sync: EmailSyncConfig = Field(default_factory=EmailSyncConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     metering: MeteringConfig = Field(default_factory=MeteringConfig)
+    telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     pricing: PricingConfig = Field(default_factory=PricingConfig)
     companion: SchedulerConfig = Field(default_factory=SchedulerConfig)
     email: EmailConfig = Field(default_factory=EmailConfig)

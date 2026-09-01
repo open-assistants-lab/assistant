@@ -39,6 +39,7 @@ from src.http.routers.auth_keys import router as auth_keys_router
 from src.http.routers.connectors import router as connectors_router
 from src.http.routers.dev import router as dev_router
 from src.http.routers.governance import router as governance_router
+from src.http.routers.dashboard import router as dashboard_router
 from src.http.routers.review import router as review_router
 from src.http.routers.settings import router as settings_router
 from src.http.routers.sync import router as sync_router
@@ -267,6 +268,7 @@ app.include_router(health_router)
 app.include_router(audit_router)
 app.include_router(auth_keys_router)
 app.include_router(usage_router)
+app.include_router(dashboard_router)
 app.include_router(billing_router)
 app.include_router(governance_router)
 app.include_router(mcp_router)
