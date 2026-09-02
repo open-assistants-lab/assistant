@@ -77,8 +77,13 @@ def _is_admin(request: Request) -> bool:
     if not get_settings().auth.per_user_auth:
         return True
     identity = getattr(getattr(request, "state", None), "identity", None)
-    if identity is None or identity.trust_domain != "untrusted":
+    if identity is None:
         return False
+    # Bug-hunt P1: the operator's deployment API_KEY (trusted-network shared
+    # secret) is the admin — previously this identity failed the gate and
+    # made POST /billing/plan unreachable with per_user_auth on.
+    if identity.trust_domain == "trusted-network":
+        return True
     scopes = getattr(identity, "scopes", ()) or ()
     return "admin" in scopes
 

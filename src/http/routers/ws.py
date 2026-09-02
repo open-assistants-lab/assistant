@@ -421,16 +421,19 @@ async def ws_conversation(websocket: WebSocket) -> None:
     """
     await websocket.accept()
 
-    # ── API key auth (first message after connect) ─────────────────────────
+    # ── API key auth (first message after connect) ───────────────────────
     settings = get_settings()
     needs_auth = bool(settings.auth.api_key)
 
-    # Check if this is a localhost WebSocket (bypass solo auth)
-    if needs_auth and settings.auth.solo_bypass:
-        client = websocket.client if hasattr(websocket, "client") else None
-        if client and client.host in ("127.0.0.1", "::1", "localhost"):
-            needs_auth = False
+    # Check if this is a localhost WebSocket (bypass solo auth). Delegates to
+    # the audited is_localhost (audit B17 dual-stack form) instead of an
+    # inline divergent set (bug-hunt P2).
+    from src.http.auth.legacy import is_localhost
 
+    if needs_auth and settings.auth.solo_bypass and is_localhost(websocket):
+        needs_auth = False
+
+    handshake_scoped_user: str | None = None
     if needs_auth:
         raw = await websocket.receive_text()
         try:
@@ -444,22 +447,38 @@ async def ws_conversation(websocket: WebSocket) -> None:
             return
 
         if not verify_key(auth_msg.api_key):
-            await websocket.send_json(
-                ErrorMessage(message="Invalid API key", code="AUTH_FAILED").model_dump()
-            )
-            await websocket.close()
-            return
+            # Bug-hunt P1: a per-user oak_ key in the AuthMessage also
+            # satisfies needs_auth and scopes the connection — otherwise
+            # per-user key holders must hold the admin shared secret to use
+            # the primary chat surface at all.
+            scoped = None
+            try:
+                if auth_msg.api_key.startswith("oak_"):
+                    from src.auth.keys import get_key_store
+
+                    verified = get_key_store().verify(auth_msg.api_key)
+                    if verified is not None:
+                        scoped = verified[0]
+            except Exception:
+                scoped = None
+            if scoped is None:
+                await websocket.send_json(
+                    ErrorMessage(message="Invalid API key", code="AUTH_FAILED").model_dump()
+                )
+                await websocket.close()
+                return
+            handshake_scoped_user = scoped
 
         await websocket.send_json(AuthOkMessage().model_dump())
-    # ── End auth ──────────────────────────────────────────────────────────
+    # ── End auth ─────────────────────────────────────────────────────────
 
     # P0-T2 + M2-2: an authenticated connection is user-scoped when the
     # resolver knows the caller. Priority: per-user key identity (M2 Bearer
-    # key in handshake headers or ?key= query) > shared-secret (user_id=None,
-    # cannot scope) > localhost solo bypass. With PER_USER_AUTH on, a Bearer
-    # key at handshake time resolves to the mapped user and enforcement
-    # activates (body user_id must match — enforce_user_id contract).
+    # key in handshake headers or ?key= query) > handshake per-user key >
+    # shared-secret (user_id=None, cannot scope) > localhost solo bypass.
     resolved_user_id: str | None = None
+    identity_failed = False
+    identity: object | None = None
     try:
         import inspect
 
@@ -468,6 +487,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
         result = get_resolver().resolve(websocket)  # duck-typed: headers + client
         if inspect.isawaitable(result):
             result = await result
+        identity = result
         if (
             result is not None
             and result.user_id
@@ -477,7 +497,36 @@ async def ws_conversation(websocket: WebSocket) -> None:
             # Solo/shared-secret identities cannot scope — leave enforcement off.
             resolved_user_id = result.user_id
     except Exception:
-        resolved_user_id = None  # shared-secret / solo cannot scope to a user
+        # Bug-hunt P0: resolver errors are no longer downgraded to "unscoped"
+        # — the connection is closed below unless it is localhost.
+        logger.warning(
+            "ws.resolver_error", {"detail": "identity resolution failed"}
+        )
+        identity_failed = True
+    if handshake_scoped_user:
+        resolved_user_id = handshake_scoped_user
+
+    # Bug-hunt P0 (fail closed): when the resolver rejected the connection
+    # (None) or errored, and no shared-secret gate passed, close — mirroring
+    # the HTTP middleware 401. Without this, API_KEY="" + PER_USER_AUTH=true
+    # + remote host allowed full unauthenticated access as any user.
+    try:
+        local = is_localhost(websocket)
+    except AttributeError:  # synthetic sockets in tests have no .client
+        local = False
+    if resolved_user_id is None and not local:
+        via_shared_secret = (
+            identity is not None
+            and getattr(identity, "trust_domain", "") == "trusted-network"
+        )
+        if not via_shared_secret and (identity is None or identity_failed):
+            await websocket.send_json(
+                ErrorMessage(
+                    message="Authentication required", code="AUTH_FAILED"
+                ).model_dump()
+            )
+            await websocket.close()
+            return
 
     session_id = str(uuid.uuid4())[:8]
     user_id = DEFAULT_USER_ID
@@ -702,6 +751,20 @@ async def ws_conversation(websocket: WebSocket) -> None:
                 return
             workspace_id = getattr(msg, "workspace_id", workspace_id) or workspace_id
             session_id = _resolve_ws_session_id(msg, session_id)
+            # Bug-hunt P1 (billing): tenant budget gate on the WS path — the
+            # native app's primary transport must not bypass the 402 gate.
+            from src.http.routers.billing import tenant_budget_block
+
+            billing_block = tenant_budget_block(user_id)
+            if billing_block is not None:
+                await websocket.send_json(
+                    ErrorMessage(
+                        message=str(billing_block.get("message", "budget exceeded")),
+                        code="billing_exceeded",
+                    ).model_dump()
+                )
+                await websocket.close()
+                return
             verbose = getattr(msg, "verbose", verbose)
             msg_model: str | None = getattr(msg, "model", None)
             msg_provider_keys: dict[str, str] | None = getattr(msg, "provider_keys", None)

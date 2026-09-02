@@ -64,4 +64,18 @@ async def require_auth(request: Request) -> None:
 
     key = auth_header[7:]
     if not verify_key(key):
+        # Bug-hunt P1: delegate to the resolver seam — a valid per-user key
+        # authenticates here too (otherwise require_auth routes reject
+        # identities the middleware already accepted, killing M2 on
+        # POST /message). Unknown keys still 401.
+        from src.config.settings import get_settings as _gs
+
+        if _gs().auth.per_user_auth:
+            try:
+                from src.auth.keys import get_key_store
+
+                if get_key_store().verify(key) is not None:
+                    return
+            except Exception:
+                pass
         raise HTTPException(status_code=401, detail="Invalid API key")

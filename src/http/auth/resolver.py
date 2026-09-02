@@ -24,6 +24,10 @@ class UserIdentity:
     user_id: str | None
     key_id: str | None
     trust_domain: TrustDomain
+    # Bug-hunt P1 (billing): scopes carried so admin gates can check them
+    # ("admin" scope on per-user keys); shared-secret operator identity has
+    # none (admin via trust_domain instead).
+    scopes: tuple[str, ...] = ()
 
 
 @runtime_checkable

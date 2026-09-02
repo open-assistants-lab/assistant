@@ -35,11 +35,14 @@ class PerUserKeyResolver:
         if auth_header.startswith("Bearer "):
             verified = get_key_store().verify(auth_header[7:])
             if verified is not None:
-                user_id, _scopes = verified
+                user_id, scopes = verified
                 return UserIdentity(
                     user_id=user_id,
                     key_id="oak",
                     trust_domain="untrusted",
+                    scopes=tuple(
+                        s.strip() for s in (scopes or "").split(",") if s.strip()
+                    ),
                 )
             # Not a per-user key. Fall through to the shared-secret path:
             # the deployment's API_KEY (admin) and localhost-bypass contracts
