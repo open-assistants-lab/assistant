@@ -954,6 +954,26 @@ class AgentLoop:
                 mw_name = getattr(mw, "name", type(mw).__name__)
                 logger.warning(f"wrap_tool_call error in {mw_name} for {tc.name}", exc_info=True)
 
+        # M4-1 review (issue #12): run governance guards on the streaming
+        # path too — a non-None guard result replaces execution (synthetic
+        # refusal / pending ack), never running the tool body.
+        guard_result = await self._run_guards(tc_exec)
+        if guard_result is not None:
+            blocked = json.dumps(
+                {"governance": "blocked", "tool": tc_exec.name,
+                 "result": guard_result.content or ""}
+            )
+            state.add_message(
+                Message.tool_result(tool_call_id=tc_exec.id, content=blocked, name=tc_exec.name)
+            )
+            yield StreamChunk.tool_result_event(
+                tool=tc_exec.name, call_id=tc_exec.id, result_preview=blocked[:2000]
+            )
+            yield StreamChunk.tool_end(
+                tool=tc_exec.name, call_id=tc_exec.id, result_preview=blocked[:2000]
+            )
+            return
+
         if self.trace_provider:
             async with self.trace_provider.start_span(
                 SpanType.TOOL_EXECUTION, tc.name
@@ -1003,6 +1023,16 @@ class AgentLoop:
             )
 
         async def _run_one(tc: ToolCall) -> tuple[ToolCall, str, bool]:
+            # M4-1 review (issue #12): governance guards on the streaming
+            # batch path as well.
+            guard_result = await self._run_guards(
+                ToolCall(id=tc.id, name=tc.name, arguments=dict(tc.arguments))
+            )
+            if guard_result is not None:
+                return tc, json.dumps(
+                    {"governance": "blocked", "tool": tc.name,
+                     "result": guard_result.content or ""}
+                ), True
             try:
                 await self._check_tool_guardrails(tc, "input", tc.arguments)
             except GuardrailTripwire as e:
