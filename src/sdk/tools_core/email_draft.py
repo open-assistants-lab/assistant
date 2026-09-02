@@ -71,7 +71,7 @@ def append_draft(
             "reconnect the account to draft mail."
         )
 
-    conn = imaplib.IMAP4_SSL(host, port)
+    conn = imaplib.IMAP4_SSL(host, port, timeout=15)
     try:
         conn.login(email, password)
         # imaplib type stubs say str; the runtime returns (status, data).

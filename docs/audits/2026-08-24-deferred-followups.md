@@ -112,3 +112,19 @@ From the governance re-review (db771be/0816d3b) — merge approved with these:
   _emit_receipt continuation in approve.
 - **P2 — tier source**: capabilities-profile tiers partially wired (env
   fallback remains); finish when capabilities-profile UI ships.
+
+## 5. Phase 2 tail review residuals (2026-09-02) — tracked P2s
+
+From the D1-1/D1-2/C1-1 review (bd77d4e, 543aea7):
+- hours_saved dual semantics (agent-time vs manual-time heuristic) — document
+  the heuristic on the card or rename the real-duration branch.
+- flush window double-counts across rolling ISO-day cutoffs (analytics.py).
+- H7 trend: single pooled "all tasks" series (per-task grouping deferred);
+  zero-duration days flatten delta_pct.
+- APPENDUID parsing fragile (uidvalidity vs UID token order); hardcoded
+  "Drafts" mailbox breaks on Gmail ([Gmail]/Drafts) — consult accounts.folders.
+- test_dashboard_ui.py monkeypatches _ANALYTICS_STORES (wrong case, silent
+  no-op) — target _analytics_stores.
+- IMAP passwords plaintext in emails.db — pre-existing pattern.
+- Fixed in-session: telemetry.flush wired at loop run end (P1); IMAP socket
+  timeout 15s.

@@ -1384,6 +1384,15 @@ class AgentLoop:
             return await self._run_impl(messages)
         finally:
             _restore_current_agent_loop(token, previous)
+            # D1-1 review P1: wire the analytics sidecar flush at run end —
+            # opportunistic no-op when telemetry is disabled; without this
+            # the dashboard's drafts/hours_saved cards were dead in prod.
+            try:
+                from src.sdk import telemetry as _telemetry
+
+                _telemetry.flush(self.user_id or "default_user")
+            except Exception:  # pragma: no cover - sidecar never breaks runs
+                pass
 
     def _emit_usage_event(self, event: Any) -> None:
         """Bridge CostTracker usage -> CaptureBus "usage" AuditEvent.
