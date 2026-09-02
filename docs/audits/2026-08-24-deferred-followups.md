@@ -128,3 +128,22 @@ From the D1-1/D1-2/C1-1 review (bd77d4e, 543aea7):
 - IMAP passwords plaintext in emails.db — pre-existing pattern.
 - Fixed in-session: telemetry.flush wired at loop run end (P1); IMAP socket
   timeout 15s.
+
+## 6. Bug-hunt P2 residuals (2026-09-02) — tracked, not blocking
+
+From the 3-surface hunt (auth/governance/billing) after P0+P1 fixes
+(027e61c, 7e01a16):
+- Tenant membership: one-tenant-per-user not enforced (arbitrary pick on
+  multi-tenant membership); membership removal rewrites month-to-date
+  history (budget-evasion vector once member management ships).
+- 402 payload leaks tenant name/budget/spend (enumeration oracle under the
+  shared-secret trust model) — generic message + drop tenant_id/name.
+- Metering sink drops are silent (emit-only contract) — drop counter needed
+  so budget enforcement cannot silently degrade.
+- Budget gate TOCTOU: concurrent requests observe mtd < budget; hard caps
+  need per-run cost_limit + tool-boundary re-check.
+- _recent receipt ring never trims; list_pendings grows unboundedly.
+- /auth/keys revoke path escapes the localhost gate (gate ordering).
+- Key scopes accepted but unenforced beyond admin gate.
+- WS handshake per-user key AuthMessage duplicates the resolver decision
+  (consider unifying into the resolver seam).
