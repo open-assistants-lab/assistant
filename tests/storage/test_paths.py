@@ -137,7 +137,15 @@ def test_workspace_tools_dir_is_deployment_shared(monkeypatch, tmp_path):
     so this dir is the deployment-wide toolset while per-user Tools/ stays
     for user-specific tools (Jen trusted-team mode).
     """
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    # Suite-ordering hygiene: the settings singleton may hold a data_root
+    # from an earlier api test's patched home (combined-run flake). Force the
+    # data root explicitly via env (env beats yaml) and reset caches.
+    from src.config import settings as settings_module
+    from src.storage.paths import _paths_cache
+
+    monkeypatch.setenv("DEPLOYMENT_DATA_ROOT", str(tmp_path / "Assistant"))
+    _paths_cache.clear()
+    settings_module._config = None
 
     shared = DataPaths(user_id="alice").workspace_tools_dir()
     assert shared == tmp_path / "Assistant" / "Tools"
