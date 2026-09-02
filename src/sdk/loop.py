@@ -639,7 +639,7 @@ class AgentLoop:
                 logger.warning(f"guard_tool_call error in {mw_name} for {tc.name}", exc_info=True)
                 continue
             if blocked is not None:
-                return blocked
+                return blocked  # type: ignore[no-any-return]
         return None
 
     async def _execute_tool(self, tc: ToolCall) -> ToolResult:
