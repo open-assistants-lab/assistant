@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from src.sdk.run_models import RunResult
 from src.storage.paths import DEFAULT_USER_ID
@@ -22,7 +22,33 @@ class MessageRequest(BaseModel):
     session_id: str | None = None
     verbose: bool = False
     provider_keys: dict[str, str] | None = None
+    provider_options: dict[str, dict[str, Any]] | None = None
     verification: VerificationRequest | None = None
+
+    @field_validator("provider_options")
+    @classmethod
+    def _allowlisted_provider_options(
+        cls, value: dict[str, dict[str, Any]] | None
+    ) -> dict[str, dict[str, Any]] | None:
+        # Issue #10: no arbitrary request JSON reaches providers — only the
+        # known-safe reasoning-control keys pass through per provider.
+        if value is None:
+            return value
+        allowed = {
+            "think",
+            "chat_template_kwargs",
+            "thinking",
+            "thinkingConfig",
+            "num_ctx",
+        }
+        for provider, opts in value.items():
+            bad = set(opts) - allowed
+            if bad:
+                raise ValueError(
+                    f"Unsupported provider options for {provider!r}: {sorted(bad)}. "
+                    f"Allowed keys: {sorted(allowed)}"
+                )
+        return value
 
 
 class VerificationVerdict(BaseModel):

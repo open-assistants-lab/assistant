@@ -416,6 +416,7 @@ class RunService:
         prompt: str,
         model: str | None = None,
         provider_keys: dict[str, str] | None = None,
+        provider_options: dict[str, dict[str, Any]] | None = None,
         rubric: str | None = None,
         mode: str | None = None,
     ) -> RunResult:
@@ -428,7 +429,7 @@ class RunService:
             # Run-level trace root: the loop's agent_run span and the rubric
             # grader both nest under it (no-op when Langfuse is disabled).
             with LangfuseTracer.trace_run(self._user_id, session_id):
-                return await self._run(session_id, prompt, model, provider_keys, lock, rubric, mode)
+                return await self._run(session_id, prompt, model, provider_keys, lock, rubric, mode, provider_options)
         except SessionBusyError:
             raise
         finally:
@@ -440,6 +441,7 @@ class RunService:
         prompt: str,
         model: str | None = None,
         provider_keys: dict[str, str] | None = None,
+        provider_options: dict[str, dict[str, Any]] | None = None,
         rubric: str | None = None,
         mode: str | None = None,
         on_stream_end: Callable[[AgentLoop], None] | None = None,
@@ -457,10 +459,33 @@ class RunService:
         try:
             # Run-level trace root covering the whole stream (agent + grader).
             with LangfuseTracer.trace_run(self._user_id, session_id):
-                async for event in self._run_stream(session_id, prompt, model, provider_keys, lock, rubric, mode, on_stream_end=on_stream_end):
+                async for event in self._run_stream(session_id, prompt, model, provider_keys, lock, rubric, mode, on_stream_end=on_stream_end, provider_options=provider_options):
                     yield event
         finally:
             await self._registry.release(session_key(self._user_id, session_id))
+
+
+    @staticmethod
+    def _stamp_provider_options(
+        loop: AgentLoop, provider_options: dict[str, dict[str, Any]] | None
+    ) -> dict[str, dict[str, Any]] | None:
+        """Issue #10: merge request provider_options over the loop's config
+        (request wins per D0-5 precedence). Returns the prior value so the
+        caller can restore it in a finally block (per-request semantics on a
+        cached loop)."""
+        rc = getattr(loop, "run_config", None)
+        prior = getattr(rc, "provider_options", None)
+        if rc is not None:
+            rc.provider_options = {**(prior or {}), **(provider_options or {})} or None
+        return prior
+
+    @staticmethod
+    def _restore_provider_options(
+        loop: AgentLoop, prior: dict[str, dict[str, Any]] | None
+    ) -> None:
+        rc = getattr(loop, "run_config", None)
+        if rc is not None:
+            rc.provider_options = prior
 
     async def _run(
         self,
@@ -471,6 +496,7 @@ class RunService:
         lock: SessionLock,
         rubric: str | None = None,
         mode: str | None = None,
+        provider_options: dict[str, dict[str, Any]] | None = None,
     ) -> RunResult:
         run_id = str(uuid.uuid4())
         # Load history BEFORE storing the user message: the store's history
@@ -486,6 +512,7 @@ class RunService:
             self._user_id, "personal", model=model, provider_keys=provider_keys, session_id=session_id
         )
         register_user_loop(self._user_id, loop, session_id=session_id)
+        prior_options = self._stamp_provider_options(loop, provider_options)
         try:
             messages = _storage_messages_to_sdk(list(history)) + [Message.user(prompt)]
 
@@ -536,6 +563,7 @@ class RunService:
                 usage=result.usage.agent if result.usage else None,
             )
 
+            self._restore_provider_options(loop, prior_options)
             return RunResult(
                 run_id=run_id,
                 session_id=session_id,
@@ -551,6 +579,7 @@ class RunService:
                 persisted_at=datetime.now(UTC),
             )
         finally:
+            self._restore_provider_options(loop, prior_options)
             unregister_user_loop(self._user_id, loop, session_id=session_id)
 
     async def _run_stream(
@@ -563,6 +592,7 @@ class RunService:
         rubric: str | None = None,
         mode: str | None = None,
         on_stream_end: Callable[[AgentLoop], None] | None = None,
+        provider_options: dict[str, dict[str, Any]] | None = None,
     ) -> AsyncIterator[RunEvent]:
         run_id = str(uuid.uuid4())
         sequence = 0
@@ -597,6 +627,7 @@ class RunService:
         loop = await get_sdk_loop(
             self._user_id, "personal", model=model, provider_keys=provider_keys, session_id=session_id
         )
+        prior_options = self._stamp_provider_options(loop, provider_options)
         register_user_loop(self._user_id, loop, session_id=session_id)
         try:
             messages = _storage_messages_to_sdk(list(history)) + [Message.user(prompt)]
@@ -838,6 +869,7 @@ class RunService:
                 retryable=False,
             ).model_dump())
         finally:
+            self._restore_provider_options(loop, prior_options)
             # Audit E25: hand the live loop to the caller BEFORE unregistering
             # so post-done work (WS follow-up steer) can still reach it.
             if on_stream_end is not None:

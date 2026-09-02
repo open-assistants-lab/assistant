@@ -709,6 +709,7 @@ async def handle_message(req: MessageRequest, request: Request = None, _: None =
                 prompt=req.message,
                 model=req.model,
                 provider_keys=req.provider_keys,
+                provider_options=req.provider_options,
                 rubric=req.verification.rubric if req.verification else None,
                 mode=req.verification.mode if req.verification else None,
             )
@@ -891,6 +892,7 @@ async def message_stream(req: MessageRequest, request: Request = None, _: None =
                         prompt=req.message,
                         model=req.model,
                         provider_keys=req.provider_keys,
+                        provider_options=req.provider_options,
                         rubric=req.verification.rubric if req.verification else None,
                         mode=req.verification.mode if req.verification else None,
                     )
