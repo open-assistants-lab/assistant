@@ -122,7 +122,63 @@ async def list_tools(
         if tool_info["enabled"]:
             categories_enabled[category]["enabled"] += 1
 
+    # Issue #8: merge the requesting user's custom TOOL.md tools
+    # (deployment-shared + per-user dirs) into the listing.
+    await _merge_custom_tools(tools_list, categories_enabled, user_id, caps)
+
     return {"tools": tools_list, "categories": categories_enabled}
+
+
+async def _merge_custom_tools(
+    tools_list: list[dict[str, Any]],
+    categories_enabled: dict[str, dict[str, Any]],
+    user_id: str,
+    caps: dict[str, Any],
+) -> None:
+    """Issue #8: append the user's custom TOOL.md tools to the listing.
+
+    Same annotation surface as core entries; scope filtered by the user's
+    capabilities (custom tools not in the professional-service set default
+    enabled). source='custom' marks provenance without breaking the shape.
+    """
+    from src.sdk.capabilities import resource_enabled
+    from src.sdk.tools_custom import get_custom_tools
+
+    try:
+        custom = get_custom_tools(user_id)
+    except Exception:
+        return
+
+    existing = {t["name"] for t in tools_list}
+    for tool in custom:
+        if tool.name in existing:
+            continue
+        annotations = (
+            tool.annotations.model_dump()
+            if getattr(tool, "annotations", None)
+            else {}
+        )
+        enabled = resource_enabled(caps, "tools", tool.name)
+        scope, workspace_ids = _scope_response(enabled)
+        tools_list.append(
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "category": "custom",
+                "annotations": annotations,
+                "parameters": tool.parameters,
+                "enabled": enabled,
+                "scope": scope,
+                "workspace_ids": workspace_ids,
+                "source": "custom",
+            }
+        )
+        rollup = categories_enabled.setdefault(
+            "custom", {"count": 0, "enabled": 0}
+        )
+        rollup["count"] += 1
+        if enabled:
+            rollup["enabled"] += 1
 
 
 @router.get("/{name}")
