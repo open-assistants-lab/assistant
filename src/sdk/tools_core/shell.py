@@ -1,7 +1,6 @@
 """Shell tool — SDK-native implementation."""
 
 import re
-import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -142,14 +141,21 @@ def shell_execute(command: str, user_id: str =  DEFAULT_USER_ID, workspace_id: s
         root_path = _get_root_path(user_id, workspace_id)
         config = _get_shell_config()
 
-        result = subprocess.run(
+        # SB1-4: transport goes through the SandboxBackend seam (policy
+        # checks above stay in front — the seam is transport, not policy).
+        from src.sdk.sandbox import SandboxLimits, get_sandbox_backend
+
+        backend = get_sandbox_backend()
+        result = backend.run(
             cmd_parts,
-            shell=False,
-            cwd=str(root_path),
-            capture_output=True,
-            text=True,
-            timeout=config["timeout_seconds"],
+            root_path,
+            SandboxLimits(
+                timeout_seconds=float(config["timeout_seconds"]),
+                max_output_bytes=config["max_output_kb"] * 1024,
+            ),
         )
+        if result.timed_out:
+            return f"Error: Command timed out after {config['timeout_seconds']} seconds"
 
         output = result.stdout
         if result.stderr:
@@ -180,13 +186,10 @@ def shell_execute(command: str, user_id: str =  DEFAULT_USER_ID, workspace_id: s
                 )
 
         logger.info(
-            "shell_execute", {"command": command, "return_code": result.returncode}, user_id=user_id
+            "shell_execute", {"command": command, "return_code": result.exit_code}, user_id=user_id
         )
         return output or "(no output)"
 
-    except subprocess.TimeoutExpired:
-        config = _get_shell_config()
-        return f"Error: Command timed out after {config['timeout_seconds']} seconds"
     except FileNotFoundError:
         return f"Error: Command not found: {cmd_parts[0]}"
     except Exception as e:

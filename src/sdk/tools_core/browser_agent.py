@@ -9,7 +9,6 @@ Install: npm i -g agent-browser && agent-browser install
 
 import json
 import os
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +21,12 @@ logger = get_logger()
 def _find_agent_browser() -> str:
     """Find agent-browser binary on PATH or bundled with EA."""
     try:
-        result = subprocess.run(["which", "agent-browser"], capture_output=True, text=True, timeout=5)
-        if result.returncode == 0:
+        from src.sdk.sandbox import get_sandbox_backend
+
+        result = get_sandbox_backend().run(
+            ["which", "agent-browser"], Path.cwd(), None
+        )
+        if result.exit_code == 0:
             return result.stdout.strip()
     except Exception:
         pass
@@ -39,7 +42,11 @@ def _ab(*args: str, json_output: bool = False, timeout: int = 60) -> dict[str, A
     if json_output:
         cmd.append("--json")
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        from src.sdk.sandbox import SandboxLimits, get_sandbox_backend
+
+        result = get_sandbox_backend().run(
+            cmd, Path.cwd(), SandboxLimits(timeout_seconds=float(timeout))
+        )
         if result.returncode != 0:
             error = result.stderr.strip() or result.stdout.strip()[:200]
             if "not installed" in error.lower() or "not found" in error.lower():
@@ -59,8 +66,6 @@ def _ab(*args: str, json_output: bool = False, timeout: int = 60) -> dict[str, A
             except json.JSONDecodeError:
                 return {"success": True, "text": result.stdout.strip()}
         return {"success": True, "text": result.stdout.strip()}
-    except subprocess.TimeoutExpired:
-        return {"success": False, "error": "Command timed out"}
     except FileNotFoundError:
         return {
             "success": False,
@@ -106,8 +111,12 @@ def _install_instructions() -> ToolResult:
 def _ensure_browser() -> ToolResult | None:
     """Ensure agent-browser is installed and has a browser. Returns ToolResult or None."""
     try:
-        result = subprocess.run(["which", "agent-browser"], capture_output=True, text=True, timeout=5)
-        if result.returncode != 0:
+        from src.sdk.sandbox import get_sandbox_backend
+
+        result = get_sandbox_backend().run(
+            ["which", "agent-browser"], Path.cwd(), None
+        )
+        if result.exit_code != 0:
             return _install_instructions()
     except Exception:
         return _install_instructions()

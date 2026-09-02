@@ -323,6 +323,21 @@ class ConnectKitConfig(_BaseSettings):
     model_config = SettingsConfigDict(env_prefix="CONNECTKIT_")
 
 
+class SandboxConfig(_BaseSettings):
+    """SandboxBackend selection (R-SB1): null (tests) | soft (trusted default).
+
+    Swapping isolation level is a config change, not a code change (SB1-3
+    acceptance). Kernel-enforced isolation (Soft+UID / bwrap) is a later
+    refinement.
+    """
+
+    backend: str = Field(
+        default="soft", description="SandboxBackend: 'soft' (default) or 'null'"
+    )
+
+    model_config = SettingsConfigDict(env_prefix="SANDBOX_")
+
+
 class ShellToolConfig(_BaseSettings):
     """Shell tool configuration."""
 
@@ -419,6 +434,7 @@ class AppConfig(_BaseSettings):
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     filesystem: FilesystemConfig = Field(default_factory=FilesystemConfig)
     shell_tool: ShellToolConfig = Field(default_factory=ShellToolConfig)
+    sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     email_sync: EmailSyncConfig = Field(default_factory=EmailSyncConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     metering: MeteringConfig = Field(default_factory=MeteringConfig)

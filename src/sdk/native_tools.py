@@ -32,6 +32,7 @@ from src.sdk.tools_core.browser import (
     browser_screenshot,
     browser_snapshot,
 )
+from src.sdk.tools_core.code_execute import code_execute
 from src.sdk.tools_core.corpus import index_corpus, search_corpus
 from src.sdk.tools_core.design_extractor import design_extract
 from src.sdk.tools_core.email_draft import email_draft
@@ -134,6 +135,7 @@ def _register_all() -> None:
 
     registry.register(index_corpus)
     registry.register(search_corpus)
+    registry.register(code_execute)
     registry.register(email_draft)
     registry.register(design_extract)
 

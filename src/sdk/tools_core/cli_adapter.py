@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
+from pathlib import Path
 from typing import Any
 
 from src.app_logging import get_logger
@@ -74,35 +74,27 @@ class CLIToolAdapter:
         if json_output and "--json" not in args and "-j" not in args:
             cmd.append("--json")
 
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-            output = result.stdout
-            if result.stderr:
-                output += f"\n{result.stderr}" if output else result.stderr
+        # SB1-4: transport through the SandboxBackend seam (env scrubbed on
+        # soft backends; cwd here is the process cwd — CLI agents are
+        # workspace-agnostic).
+        from src.sdk.sandbox import SandboxLimits, get_sandbox_backend
 
-            if result.returncode != 0:
-                logger.warning(
-                    "cli_tool.error",
-                    {"cli": self.cli_name, "args": args[:3], "rc": result.returncode},
-                )
-
-            return result.returncode, output
-
-        except subprocess.TimeoutExpired:
+        result = get_sandbox_backend().run(
+            cmd,
+            Path.cwd(),
+            SandboxLimits(timeout_seconds=float(timeout)),
+        )
+        if result.timed_out:
             return -2, f"Error: {self.cli_name} command timed out after {timeout}s"
-        except FileNotFoundError:
-            self._detected = False
-            return (
-                -1,
-                f"Error: {self.cli_name} CLI is not installed. Install with: {self.install_hint}",
+        output = result.stdout
+        if result.stderr:
+            output += f"\n{result.stderr}" if output else result.stderr
+        if result.exit_code != 0:
+            logger.warning(
+                "cli_tool.error",
+                {"cli": self.cli_name, "args": args[:3], "rc": result.exit_code},
             )
-        except Exception as e:
-            return -3, f"Error running {self.cli_name}: {e}"
+        return result.exit_code, output
 
     def run_json(
         self,
