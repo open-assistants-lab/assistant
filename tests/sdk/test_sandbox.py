@@ -123,3 +123,12 @@ class TestBackendSelection:
     def test_path_outside_workspace(self, tmp_path):
         assert path_outside_workspace(tmp_path.parent / "x", tmp_path)
         assert not path_outside_workspace(tmp_path / "x", tmp_path)
+
+from src.sdk.sandbox import SoftSandboxBackend, SandboxLimits
+
+def test_single_level_traversal_rejected(tmp_path):
+    b = SoftSandboxBackend()
+    src = "open('../escape.txt','w').write('x')"
+    root = tmp_path / "ws"
+    root.mkdir()
+    assert b.validate_source(src, root) is not None  # rejected

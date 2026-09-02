@@ -24,6 +24,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from src.app_logging import get_logger
+logger = get_logger()
+
 # Env allowlist: only these pass through to sandboxed processes.
 _ENV_ALLOWLIST = {
     "PATH",
@@ -45,7 +48,7 @@ _ENV_DENY_PATTERNS = re.compile(
 # explicitly not implemented here): quoted absolute paths in source are
 # resolved against the workspace root; traversal/home shortcuts checked.
 _ABS_PATH = re.compile(r"['\"](/[^'\"]+)['\"]")
-_TRAVERSAL = re.compile(r"(?i)\.\./\.\.|(?<![\w.])~/\.")
+_TRAVERSAL = re.compile(r"(?:^|[\s'\"=(])\.\./|(^|[\s'\"=(])~/")
 _WRITE_CALLS = re.compile(
     r"(?i)\b(?:open|write_text|write_bytes|shutil|os\.remove|os\.unlink|os\.makedirs|os\.mkdir)\b",
 )
@@ -58,6 +61,7 @@ class SandboxLimits:
     timeout_seconds: float = 30.0
     max_output_bytes: int = 200_000
     env_mode: str = "scrubbed"  # "scrubbed" | "inherit"
+    memory_mb: int = 512  # SB1 review P1: RLIMIT_AS cap
 
 
 @dataclass
@@ -183,6 +187,20 @@ class SoftSandboxBackend:
 
             resource.setrlimit(resource.RLIMIT_FSIZE, (lim.max_output_bytes * 8, lim.max_output_bytes * 8))
             resource.setrlimit(resource.RLIMIT_CPU, (int(lim.timeout_seconds) + 2, int(lim.timeout_seconds) + 2))
+            # M4/SB1 review P1: memory cap — a runaway code_execute must not
+            # OOM the host. RLIMIT_NPROC kept per docstring claim.
+            # RLIMIT_AS/NPROC are Linux-only; macOS lacks both — cap where
+            # the platform supports it (review P1 was about host OOM).
+            for rname, value in (
+                ("RLIMIT_AS", getattr(lim, "memory_mb", 512) * 1024 * 1024),
+                ("RLIMIT_NPROC", 256),
+            ):
+                rlimit = getattr(resource, rname, None)
+                if rlimit is not None:
+                    try:
+                        resource.setrlimit(rlimit, (value, value))
+                    except (OSError, ValueError):
+                        pass
             try:
                 os.setsid()
             except OSError:
@@ -256,5 +274,10 @@ def get_sandbox_backend() -> Any:
     cfg = getattr(settings, "sandbox", None)
     backend = getattr(cfg, "backend", "soft") if cfg else "soft"
     if backend == "null":
+        # SB1 review P1: null = full inherited env, no caps — never silent.
+        logger.warning(
+            "sandbox.null_backend_selected",
+            {"detail": "SANDBOX_BACKEND=null: no caps, full env inheritance; test-only"},
+        )
         return NullSandboxBackend()
     return SoftSandboxBackend()
