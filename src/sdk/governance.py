@@ -25,6 +25,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from src.app_logging import get_logger
 from src.sdk.audit import AuditEvent
 from src.storage.paths import DataPaths
 
@@ -45,6 +46,9 @@ def governance_enabled() -> bool:
     return bool(getattr(gov, "enabled", False))
 
 
+logger = get_logger()
+
+
 class GovernanceService:
     """Tier resolution + durable pending proposals + receipts."""
 
@@ -54,6 +58,9 @@ class GovernanceService:
         self._recent: list[AuditEvent] = []  # receipt ring buffer (process-local)
 
     def _db_path(self, user_id: str) -> Path:
+        from src.storage.paths import _validate_path_id
+
+        _validate_path_id(user_id, "user_id")
         d = self._paths.root / "private" / "governance" / user_id
         d.mkdir(parents=True, exist_ok=True)
         return d / "governance.db"
@@ -92,8 +99,18 @@ class GovernanceService:
             cap_tiers = caps.get("governance_tiers") or {}
             if tool_name in cap_tiers:
                 return str(cap_tiers[tool_name])
-        except Exception:
-            pass
+        except FileNotFoundError:
+            pass  # no capabilities file — normal fallback chain
+        except Exception as exc:
+            # Bug-hunt P2: a corrupt capabilities.yaml must not silently
+            # downgrade tiers to autonomous (fail closed -> conservative
+            # explicit pending until the admin fixes the file).
+            logger.warning(
+                "governance.capabilities_load_failed",
+                {"error": str(exc), "tool": tool_name},
+                user_id=user_id,
+            )
+            return "explicit"
         from src.config.settings import get_settings
 
         gov = getattr(get_settings(), "governance", None)
@@ -229,6 +246,61 @@ class GovernanceService:
         tool = row["tool"]
         arguments = row["arguments"] or {}
         try:
+            # Bug-hunt P1: the execution leg re-checks (a) tool enablement for
+            # this user and (b) the CURRENT tier — a pending created before a
+            # tool was disabled or moved to hard_block must not execute.
+            from src.sdk.capabilities import (
+                load_capabilities,
+                resource_enabled,
+                user_capabilities_root,
+            )
+
+            caps = load_capabilities(user_capabilities_root(user_id))
+            if not resource_enabled(caps, "tools", tool):
+                result = {
+                    "content": (
+                        f"Tool '{tool}' is disabled for this user — approval "
+                        "did not execute it."
+                    ),
+                    "structured_content": {
+                        "executed": False, "error": "tool disabled",
+                    },
+                    "is_error": True,
+                }
+                with self._lock, self._conn(user_id) as conn:
+                    conn.execute(
+                        "UPDATE proposals SET status='executed'"
+                        " WHERE proposal_id=? AND status='approved'",
+                        (proposal_id,),
+                    )
+                    conn.commit()
+                self._emit_receipt(
+                    user_id, f"executed:{proposal_id}", tool=tool, correlation=proposal_id
+                )
+                return result
+            tier_now = self.resolve_tier(user_id, tool)
+            if tier_now == "hard_block":
+                result = {
+                    "content": (
+                        f"Tool '{tool}' is now hard_block tier — approval "
+                        "refused (tier re-checked at execution time)."
+                    ),
+                    "structured_content": {
+                        "executed": False, "error": "tier changed",
+                    },
+                    "is_error": True,
+                }
+                with self._lock, self._conn(user_id) as conn:
+                    conn.execute(
+                        "UPDATE proposals SET status='executed'"
+                        " WHERE proposal_id=? AND status='approved'",
+                        (proposal_id,),
+                    )
+                    conn.commit()
+                self._emit_receipt(
+                    user_id, f"executed:{proposal_id}", tool=tool, correlation=proposal_id
+                )
+                return result
             if registry is None:
                 from src.sdk.native_tools import get_native_tools
 

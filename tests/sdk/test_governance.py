@@ -193,3 +193,100 @@ class TestHITLMiddleware:
         result = await mw.guard_tool_call("email_send", {})
         assert result.structured_content["governance"] == "show_then_auto_send"
         assert result.structured_content["status"] in ("pending", "approved")
+
+
+class TestExecutionLegChecks:
+    """Bug-hunt fixes: execution leg re-checks capabilities + current tier."""
+
+    @pytest.fixture()
+    def svc_with_pending(self, svc, monkeypatch):
+        async def fake_invoke(arguments):
+            return "EXECUTED-BODY"
+
+        monkeypatch.setenv("GOVERNANCE_TIERS", '{"gated_tool": "explicit"}')
+        import src.sdk.governance as gov
+
+        monkeypatch.setattr(gov, "governance_enabled", lambda: True)
+        from src.sdk.tools import ToolDefinition
+
+        td = ToolDefinition(
+            name="gated_tool",
+            description="gated",
+            input_schema={"type": "object", "properties": {}},
+            ainvoke=fake_invoke,  # type: ignore[arg-type]
+        )
+        monkeypatch.setattr(
+            "src.sdk.native_tools.get_native_tools", lambda: [td]
+        )
+        pid = svc.create_pending(
+            "u1", "gated_tool", {"x": "1"}, tier="explicit"
+        )
+        svc.approve("u1", pid)
+        return svc, pid
+
+    @pytest.mark.asyncio
+    async def test_disabled_tool_not_executed(self, svc_with_pending, monkeypatch):
+        """P1: a tool disabled after pending creation must not execute."""
+        import src.sdk.capabilities as caps_mod
+
+        svc, pid = svc_with_pending
+        monkeypatch.setattr(
+            caps_mod, "load_capabilities", lambda root: {"tools": {"gated_tool": False}}
+        )
+        result = await svc.execute_approved("u1", pid)
+        assert result["is_error"] is True
+        assert "disabled" in result["structured_content"].get("error", "")
+
+    @pytest.mark.asyncio
+    async def test_hard_block_tier_change_refuses_execution(self, svc_with_pending, monkeypatch):
+        """Tier re-resolution: pending created as explicit, now hard_block."""
+        import src.sdk.governance as gov
+
+        svc, pid = svc_with_pending
+        monkeypatch.setattr(
+            gov,
+            "get_governance_service",
+            lambda user_id=None: svc,
+        )
+        monkeypatch.setattr(
+            src_sdk_governance_tier_source(svc, monkeypatch), "resolve_tier"
+        ) if False else None
+        # Force resolve_tier to return hard_block via capabilities.
+        import src.sdk.capabilities as caps_mod
+
+        monkeypatch.setattr(
+            caps_mod,
+            "load_capabilities",
+            lambda root: {"governance_tiers": {"gated_tool": "hard_block"}},
+        )
+        result = await svc.execute_approved("u1", pid)
+        assert result["is_error"] is True
+        assert "hard_block" in result["content"]
+
+
+import src.sdk.governance as _gov_mod  # noqa: E402
+
+
+def src_sdk_governance_tier_source(svc, monkeypatch):  # pragma: no cover
+    return _gov_mod
+
+
+class TestPathTraversal:
+    def test_db_path_rejects_traversal(self, svc, tmp_path):
+        with pytest.raises(ValueError):
+            svc._db_path("../../tmp/evil")
+
+    @pytest.mark.asyncio
+    async def test_resolve_tier_corrupt_caps_fails_closed(self, svc, monkeypatch):
+        import src.sdk.capabilities as caps_mod
+        import src.sdk.governance as gov
+
+        def corrupt(root):
+            raise RuntimeError("yaml parse error")
+
+        monkeypatch.setattr(caps_mod, "load_capabilities", corrupt)
+        monkeypatch.setattr(
+            gov, "get_governance_service", lambda user_id=None: svc
+        )
+        tier = svc.resolve_tier("u1", "some_tool")
+        assert tier == "explicit"  # fail closed: conservative pending

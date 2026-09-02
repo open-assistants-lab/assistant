@@ -499,7 +499,14 @@ class SubagentCoordinator:
         )
 
         summarization_mw = SummarizationMiddleware(model=model_str)
-        middlewares = [summarization_mw]
+        middlewares: list[Any] = [summarization_mw]
+        # Bug-hunt P1: governance tiers must hold on delegated loops too —
+        # otherwise hard_block is bypassable via subagent_delegate.
+        from src.sdk.governance import governance_enabled
+        from src.sdk.middleware_hitl import HITLMiddleware
+
+        if governance_enabled():
+            middlewares.append(HITLMiddleware(user_id=self.user_id))
 
         # Roadmap P0-T3 follow-up: loops built directly (bypassing
         # create_sdk_loop) must still wire the per-user audit store.
@@ -511,7 +518,7 @@ class SubagentCoordinator:
             provider=provider,
             tools=tools,
             system_prompt=system_prompt,
-            middlewares=middlewares,  # type: ignore[arg-type]
+            middlewares=middlewares,
             run_config=run_config,
             user_id=self.user_id,
             workspace_id=self.workspace_id,

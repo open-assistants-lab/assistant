@@ -75,6 +75,13 @@ async def approve_pending(
         exec_row = await execute_approved_tool(
             user_id, proposal_id, row["tool"], row["arguments"]
         )
+    elif row["status"] == "approved":
+        # Bug-hunt P2: an approved row whose execution was lost (restart or a
+        # transient UPDATE failure) must be re-executable — the idempotence
+        # guard (approved->executed conditional UPDATE) makes this safe.
+        exec_row = await execute_approved_tool(
+            user_id, proposal_id, row["tool"], row["arguments"]
+        )
     else:
         exec_row = {"status": row["status"], "already": True}
     final = svc.get_pending(user_id, proposal_id)

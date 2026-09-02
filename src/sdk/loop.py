@@ -1023,6 +1023,13 @@ class AgentLoop:
             )
 
         async def _run_one(tc: ToolCall) -> tuple[ToolCall, str, bool]:
+            # Bug-hunt P2 (ordering): input guardrails FIRST — a call that
+            # violates a guardrail must not leave a durable governance
+            # proposal behind (execute_approved does not re-run guardrails).
+            try:
+                await self._check_tool_guardrails(tc, "input", tc.arguments)
+            except GuardrailTripwire as e:
+                return tc, json.dumps({"error": f"Tool input blocked: {e.result.message}"}), True
             # M4-1 review (issue #12): governance guards on the streaming
             # batch path as well.
             guard_result = await self._run_guards(
@@ -1033,10 +1040,6 @@ class AgentLoop:
                     {"governance": "blocked", "tool": tc.name,
                      "result": guard_result.content or ""}
                 ), True
-            try:
-                await self._check_tool_guardrails(tc, "input", tc.arguments)
-            except GuardrailTripwire as e:
-                return tc, json.dumps({"error": f"Tool input blocked: {e.result.message}"}), True
 
             tc_args = dict(tc.arguments)
             for mw in self.middlewares:

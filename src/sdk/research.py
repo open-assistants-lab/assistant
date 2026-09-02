@@ -90,6 +90,13 @@ class PromptTarget(ResearchTarget):
             from src.sdk.audit import ensure_audit_store_subscribed
 
             ensure_audit_store_subscribed(self.user_id)
+            from src.sdk.governance import governance_enabled
+            from src.sdk.middleware_hitl import HITLMiddleware
+
+            mw: list[Any] = []
+            if governance_enabled():
+                # Bug-hunt P1: research delegation must not bypass tiers.
+                mw.append(HITLMiddleware(user_id=self.user_id))
             loop = AgentLoop(
                 provider=provider,
                 tools=self._tools,
@@ -97,6 +104,7 @@ class PromptTarget(ResearchTarget):
                 run_config=RunConfig(max_llm_calls=3, cost_limit_usd=0.05),
                 user_id=self.user_id,
                 workspace_id=self.workspace_id,
+                middlewares=mw,
             )
             messages = [Message.user(self.eval_task)]
             result = await loop.run(messages)
