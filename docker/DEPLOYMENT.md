@@ -219,3 +219,12 @@ their Bearer token; data is unaffected).
   stores); more users = this same container until Phase 3 tenancy
 - Browser automation (`agent-browser`) is not in the image — disable browser tools
   per user via capabilities, or add Chromium to a custom image
+## Ollama daemon on the host (ollama: provider)
+
+Containers cannot reach the host via localhost. If you run an Ollama daemon on
+the host, set in .env:
+
+    OLLAMA_LOCAL_BASE_URL=http://host.docker.internal:11434/v1
+
+(Linux also needs `extra_hosts: ["host.docker.internal:host-gateway"]` on the
+compose service.)
