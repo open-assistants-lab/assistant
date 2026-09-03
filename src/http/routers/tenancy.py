@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from src.http.auth import enforce_user_id, resolve_user_id
 from src.storage.paths import DEFAULT_USER_ID
-from src.storage.tenancy import get_tenancy_store
+from src.storage.tenancy import TenancyError, get_tenancy_store
 
 router = APIRouter(prefix="/v1/tenancy", tags=["tenancy"])
 
@@ -28,6 +28,13 @@ class SubTenantCreate(BaseModel):
 
 class MemberAdd(BaseModel):
     user_id: str = Field(min_length=1)
+
+
+class MemberRole(BaseModel):
+    """T3.2 review P2: role assignment request."""
+
+    user_id: str = Field(default=DEFAULT_USER_ID)
+    role: str = Field(default="staff")
 
 
 class MemberMove(BaseModel):
@@ -66,8 +73,15 @@ async def create_org(req: OrgCreate, request: Request) -> dict[str, object]:
             content={"code": "forbidden", "message": "admin role required"},
         )
     store = get_tenancy_store()
-    tenant_id = store.create_org(name=req.name)
-    return {"tenant_id": tenant_id, "name": req.name, "kind": "org"}
+    # T3.2 review P2: API-created orgs must have an owner membership —
+    # use the requesting admin's identity (trusted-network deployments use
+    # the operator default user).
+    owner_id = None
+    identity = getattr(getattr(request, "state", None), "identity", None)
+    if identity is not None and identity.user_id:
+        owner_id = identity.user_id
+    tenant_id = store.create_org(name=req.name, owner_id=owner_id)
+    return {"tenant_id": tenant_id, "name": req.name, "kind": "org", "owner_id": owner_id}
 
 
 @router.post("/{tenant_id}/sub-tenants")
@@ -114,6 +128,25 @@ async def move_member(req: MemberMove, request: Request) -> dict[str, object]:
     except Exception as e:
         return JSONResponse(status_code=422, content={"code": "validation_error", "message": str(e)})
     return {"moved": True, "user_id": req.user_id, "tenant_id": req.tenant_id}
+
+
+@router.post("/{tenant_id}/members/role", response_model=None)
+async def set_member_role(
+    tenant_id: str, req: MemberRole, request: Request
+) -> dict[str, object] | JSONResponse:  # noqa: UP047
+    """Set a member's role (T3.2 review P2: minimal role management). Admin+
+    required; the store's owner-demotion guard is the enforcement point."""
+    if not _role_gate(request, "admin"):
+        return JSONResponse(
+            status_code=403,
+            content={"code": "forbidden", "message": "admin role required"},
+        )
+    store = get_tenancy_store()
+    try:
+        store.set_role(req.user_id, req.role)
+    except TenancyError as e:
+        return JSONResponse(status_code=422, content={"code": "validation_error", "message": str(e)})
+    return {"user_id": req.user_id, "role": store.role_of(req.user_id)}
 
 
 @router.get("/{tenant_id}/members")

@@ -8,6 +8,7 @@ plaintext EXACTLY ONCE (only the SHA-256 hash is stored).
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from src.http.auth.legacy import require_auth
@@ -30,6 +31,30 @@ async def manage_keys(body: KeyCreateRequest, request: Request) -> dict[str, obj
     from src.config.settings import get_settings
 
     await require_auth(request)
+    # T3.2 review P1-2: key minting/revocation is a deployment-admin act.
+    # Per-user key holders (trust_domain == "untrusted") must NOT mint keys —
+    # an admin-scope key for any user_id is full escalation (org CRUD,
+    # cross-user pending approval, plan changes, impersonation).
+    # Trusted: the API_KEY holder (trusted-network shared secret), solo mode,
+    # or localhost (operator on the box).
+    from src.config.settings import get_settings as _gs
+
+    if _gs().auth.per_user_auth:
+        identity = getattr(getattr(request, "state", None), "identity", None)
+        trust = getattr(identity, "trust_domain", None)
+        from src.http.auth.legacy import is_localhost
+
+        if trust not in (None, "solo", "trusted-network") and not is_localhost(request):
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "code": "forbidden",
+                    "message": (
+                        "key minting/revocation requires the deployment "
+                        "admin (API_KEY holder); per-user keys cannot mint keys"
+                    ),
+                },
+            )
     if body.revoke:
         revoked = get_key_store().revoke(body.revoke)
         return {"revoked": revoked}

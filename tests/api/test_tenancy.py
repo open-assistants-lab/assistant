@@ -100,3 +100,31 @@ class TestMembers:
         body = r.json()
         assert body["id"] == sub["tenant_id"]
         assert body["org_id"] == org["tenant_id"]
+
+
+class TestRoleEndpoint:
+    """T3.2 review P2: minimal role management + owner_id on API orgs."""
+
+    def test_create_org_records_owner(self, client):
+        r = client.post("/v1/tenancy/orgs", json={"name": "OwnerOrg"})
+        assert r.status_code == 200
+        assert r.json()["owner_id"]  # operator default user recorded
+
+    def test_admin_sets_member_role(self, client):
+        org = client.post("/v1/tenancy/orgs", json={"name": "RoleOrg"}).json()
+        tid = org["tenant_id"]
+        assert client.post(
+            f"/v1/tenancy/{tid}/members", json={"user_id": "carol"}
+        ).status_code == 200
+        r = client.post(
+            f"/v1/tenancy/{tid}/members/role",
+            json={"user_id": "carol", "role": "admin"},
+        )
+        assert r.status_code == 200
+        assert r.json()["role"] == "admin"
+
+    def test_unknown_role_422(self, client):
+        org = client.post("/v1/tenancy/orgs", json={"name": "RoleOrg2"}).json()
+        tid = org["tenant_id"]
+        r = client.post(f"/v1/tenancy/{tid}/members/role", json={"user_id": "carol", "role": "superuser"})
+        assert r.status_code == 422

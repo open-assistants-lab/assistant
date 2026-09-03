@@ -117,13 +117,27 @@ class TenancyStore(TenantStore):
                 raise TenancyError(
                     "membership move is restricted to the same org tree"
                 )
+        # T3.2 review P1-1: carry the existing role forward. The old
+        # DELETE+INSERT dropped the role column — the schema default
+        # ('staff') silently demoted admins/owners, and since
+        # resolve_membership then returned the new row, set_role's
+        # owner-demotion guard could no longer recognize them.
+        # tenant_for_user returns the tenant row only — the role lives on
+        # the membership row, so resolve_membership is the read here.
+        current_role = "staff"
+        try:
+            resolved = self.resolve_membership(user_id)
+            if resolved is not None:
+                current_role = str(resolved.get("role") or "staff")
+        except TenancyError:
+            current_role = "staff"
         with self._lock, self._conn:
             self._conn.execute(
                 "DELETE FROM memberships WHERE user_id = ?", (user_id,)
             )
             self._conn.execute(
-                "INSERT INTO memberships (tenant_id, user_id) VALUES (?, ?)",
-                (tenant_id, user_id),
+                "INSERT INTO memberships (tenant_id, user_id, role) VALUES (?, ?, ?)",
+                (tenant_id, user_id, current_role),
             )
         _ = target
 

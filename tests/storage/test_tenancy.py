@@ -110,3 +110,38 @@ class TestNoCrossTenantReadPath:
         assert store.members(o1) == ["dan"] or store.members(o1) == ["dan"]
         assert "erin" not in store.members(o1)
         assert "dan" not in store.members(o2)
+
+
+class TestMovePreservesRole:
+    """T3.2 review P1-1: move_membership must not demote admins/owners.
+
+    The old implementation deleted + re-inserted without the role column,
+    silently demoting an owner to staff (and escaping the set_role owner
+    guard, since resolve_membership then returns the sub-tenant row).
+    """
+
+    def test_move_carries_role_forward(self, tmp_path):
+        store = TenancyStore(str(tmp_path / "tenancy.db"))
+        org_id = store.create_org(name="Org", owner_id="alice")
+        sub_id = store.create_sub_tenant(org_id, name="Sub")
+        store.set_role("alice", "owner")
+        store.move_membership("alice", sub_id)
+        assert store.role_of("alice") == "owner"  # carried, not demoted
+
+    def test_move_admin_stays_admin(self, tmp_path):
+        store = TenancyStore(str(tmp_path / "tenancy2.db"))
+        org_id = store.create_org(name="Org", owner_id="alice")
+        store.add_member(org_id, "bob")
+        store.set_role("bob", "admin")
+        sub_id = store.create_sub_tenant(org_id, name="Sub")
+        store.move_membership("bob", sub_id)
+        assert store.role_of("bob") == "admin"
+        assert store.is_admin("bob")
+
+    def test_move_staff_stays_staff(self, tmp_path):
+        store = TenancyStore(str(tmp_path / "tenancy3.db"))
+        org_id = store.create_org(name="Org", owner_id="alice")
+        store.add_member(org_id, "carol")
+        sub_id = store.create_sub_tenant(org_id, name="Sub")
+        store.move_membership("carol", sub_id)
+        assert store.role_of("carol") == "staff"

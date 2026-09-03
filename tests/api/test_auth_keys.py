@@ -123,3 +123,47 @@ class TestKeyLifecycle:
         )
         # Per-user resolver inactive -> oak_ key isn't a shared secret -> 401.
         assert r.status_code == 401
+
+class TestMintingGate:
+    """T3.2 review P1-2: only deployment-admin can mint/revoke keys.
+
+    A per-user key holder (staff) must NOT be able to mint an admin-scope
+    key for any user_id (escalation). The API_KEY holder (owner-equivalent,
+    trusted-network) mints the first admin keys.
+    """
+
+    def test_staff_key_cannot_mint_keys(self, client):
+        staff_key = _gen_key(client, user_id="alice")
+        r = client.post(
+            "/auth/keys",
+            json={"user_id": "mallory", "scopes": "admin"},
+            headers={"Authorization": f"Bearer {staff_key}"},
+        )
+        assert r.status_code == 403
+
+    def test_staff_key_cannot_revoke(self, client):
+        _gen_key(client, user_id="bob")
+        staff_key = _gen_key(client, user_id="alice")
+        # Mint a revocable key via the operator, then try revoking with the
+        # staff key (plaintext goes to the store for lookup by plaintext).
+        from src.auth.keys import get_key_store
+
+        operator_key = _gen_key(client, user_id="bob")
+        revoked = get_key_store().revoke(operator_key)
+        assert revoked  # sanity: operator CAN revoke
+        # Staff holder attempting the same revocation act:
+        r = client.post(
+            "/auth/keys",
+            json={"user_id": "bob", "revoke": operator_key},
+            headers={"Authorization": f"Bearer {staff_key}"},
+        )
+        assert r.status_code == 403
+
+    def test_operator_key_still_mints(self, client):
+        r = client.post(
+            "/auth/keys",
+            json={"user_id": "alice"},
+            headers={"Authorization": "Bearer admin-secret"},
+        )
+        assert r.status_code == 200
+        assert r.json()["key"].startswith("oak_")
