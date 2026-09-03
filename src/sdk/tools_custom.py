@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import re
 import shlex
 from pathlib import Path
 from typing import Any
@@ -80,6 +81,11 @@ def _parse_tool_file(tool_path: Path) -> ToolDefinition | None:
                 rendered = rendered.replace("{{tool_dir}}", shlex.quote(str(tool_dir)))
             for k, v in kwargs.items():
                 rendered = rendered.replace("{{" + k + "}}", shlex.quote(str(v)))
+            # Issue #14: unfilled optional placeholders must not render
+            # literally ("{{user}}" sent to the downstream API). Strip any
+            # remaining {{param}} (unfilled optional params default to empty
+            # — required-unfilled params fail validation before this point).
+            rendered = re.sub(r"\{\{[A-Za-z0-9_]+\}\}", "", rendered)
 
             tool_name = tmpl.split()[0]
             try:

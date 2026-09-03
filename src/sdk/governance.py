@@ -389,6 +389,19 @@ class GovernanceService:
                 from src.sdk.native_tools import get_native_tools
 
                 registry = get_native_tools()
+                # Issue #13: the loop's function list includes the user's
+                # custom TOOL.md tools — the execution leg must resolve the
+                # same set, not the core-only native registry.
+                try:
+                    from src.sdk.tools_custom import get_custom_tools
+
+                    custom = get_custom_tools(user_id)
+                    have = {x.name for x in registry}
+                    registry = list(registry) + [
+                        x for x in custom if x.name not in have
+                    ]
+                except Exception:
+                    pass  # custom scan failure -> core-only resolution
             td = next((x for x in registry if x.name == tool), None)
             if td is None:
                 result = {
