@@ -394,3 +394,140 @@ class TestReplayResume:
         svc.approve("ru", pid)
         result = await svc.replay_resume("ru", pid)
         assert result.get("status") == "executed"
+
+
+class TestSessionLogParity:
+    """Review P1-1: the REAL executed result reaches the session log."""
+
+    def test_approve_execute_logs_real_result(self, svc, tmp_path, monkeypatch):
+        import json as _json
+
+        import src.sdk.governance as gov
+        from src.sdk.governance import GovernanceService
+        from src.sdk.session_events import (
+            SessionEventStore,
+            session_log_enabled,
+        )
+        from src.storage.paths import DataPaths
+
+        monkeypatch.setattr(gov, "governance_enabled", lambda: True)
+        monkeypatch.setattr(gov, "session_log_enabled", lambda: True)
+
+        # Session event store rooted in the same tmp root.
+        store = SessionEventStore(str(tmp_path / "root" / "events.db"))
+        monkeypatch.setattr(
+            gov, "get_session_event_store", lambda user_id: store
+        )
+        monkeypatch.setattr(
+            "src.sdk.session_events.get_session_event_store",
+            lambda user_id: store,
+        )
+
+        # Seed the log with the synthetic pending-ack result (what the guard
+        # leaves behind) so the fix must REPLACE-supersede it with the real
+        # content in a later event.
+        from src.sdk.run_events import (
+            ToolEndData,
+            ToolInputEndEvent,
+            ToolResultData,
+            ToolResultEvent,
+        )
+
+        pid = svc.create_pending(
+            "u1", "gated_tool", {"x": "1"}, tier="explicit",
+            session_id="sess-1",
+        )
+        seq = store.next_sequence("sess-1")
+        store.append(
+            ToolInputEndEvent(
+                event_id="e1", sequence=seq, timestamp=svc._now() if hasattr(svc, "_now") else __import__("datetime").datetime.now(__import__("datetime").UTC),
+                session_id="sess-1", run_id="r1", attempt=1,
+                data=ToolEndData(block_id="b9", tool_call_id="call_9", arguments={"x": "1"}),
+            )
+        )
+        ack = f"Proposal {pid[:8]} for 'gated_tool' submitted (auto-send window open). Status: pending."
+        store.append(
+            ToolResultEvent(
+                event_id="e2", sequence=seq + 1,
+                timestamp=__import__("datetime").datetime.now(__import__("datetime").UTC),
+                session_id="sess-1", run_id="r1", attempt=1,
+                data=ToolResultData(block_id="b10", tool_call_id="call_9", name="gated_tool", status="completed", content=ack),
+            )
+        )
+
+        assert svc.approve("u1", pid) is True
+
+        # Execute: a fake registry tool returns the real content.
+        class FakeTD:
+            name = "gated_tool"
+
+            async def ainvoke(self, arguments):
+                return "REAL EXECUTED OUTPUT"
+
+        import asyncio
+
+        out = asyncio.run(svc.execute_approved("u1", pid, [FakeTD()]))
+        assert out["structured_content"]["executed"] is True
+
+        events = store.events("sess-1")
+        results = [e for e in events if e.type == "tool_result"]
+        assert len(results) == 2  # ack + real
+        real = results[-1]
+        assert "REAL EXECUTED OUTPUT" in str(real.data.content)
+        assert real.data.tool_call_id == "call_9"  # same call pairing
+        assert real.data.status == "completed"
+
+    def test_no_session_id_no_log_write(self, svc, monkeypatch, tmp_path):
+        import src.sdk.governance as gov
+        from src.sdk.session_events import SessionEventStore
+
+        monkeypatch.setattr(gov, "governance_enabled", lambda: True)
+        monkeypatch.setattr(gov, "session_log_enabled", lambda: True)
+        store = SessionEventStore(str(tmp_path / "root" / "events.db"))
+        monkeypatch.setattr(gov, "get_session_event_store", lambda user_id: store)
+
+        pid = svc.create_pending("u1", "gated_tool", {"x": "1"}, tier="explicit")
+        svc.approve("u1", pid)
+
+        class FakeTD:
+            name = "gated_tool"
+
+            async def ainvoke(self, arguments):
+                return "OUT"
+
+        import asyncio
+
+        out = asyncio.run(svc.execute_approved("u1", pid, [FakeTD()]))
+        assert out["structured_content"]["executed"] is True
+        assert store.events("sess-x") == []  # nothing written without linkage
+
+
+class TestOverrideCounting:
+    """Review P1-2: machine auto-approve at expiry is NOT a human override."""
+
+    def test_lazy_expiry_auto_approve_not_counted_as_override(
+        self, svc, monkeypatch
+    ):
+        import src.sdk.governance as gov
+
+        pid = svc.create_pending(
+            "u1", "auto_tool", {"x": "1"}, tier="show_then_auto_send"
+        )
+        # Freeze time past expiry: shift the clock helper.
+        real_now = gov._now_minus
+        monkeypatch.setattr(
+            gov, "_now_minus", lambda n: real_now(n - 10_000)
+        )
+        row = svc.resolve_pending("u1", pid)
+        assert row["status"] == "approved"  # auto-approved
+        stats = {s["tool"]: s for s in svc.tool_stats("u1")}
+        assert stats["auto_tool"]["approvals"] == 1
+        assert stats["auto_tool"]["overrides"] == 0  # NOT a human override
+
+    def test_human_early_approve_still_counts(self, svc):
+        pid = svc.create_pending(
+            "u1", "auto_tool", {"x": "1"}, tier="show_then_auto_send"
+        )
+        assert svc.approve("u1", pid) is True  # human approves early
+        stats = {s["tool"]: s for s in svc.tool_stats("u1")}
+        assert stats["auto_tool"]["overrides"] == 1

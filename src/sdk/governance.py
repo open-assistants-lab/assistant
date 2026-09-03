@@ -27,6 +27,11 @@ from typing import Any
 
 from src.app_logging import get_logger
 from src.sdk.audit import AuditEvent
+from src.sdk.run_events import ToolResultData, ToolResultEvent
+from src.sdk.session_events import (
+    get_session_event_store,
+    session_log_enabled,
+)
 from src.storage.paths import DataPaths
 
 Tier = str  # "autonomous" | "show_then_auto_send" | "explicit" | "hard_block"
@@ -158,8 +163,6 @@ class GovernanceService:
         session_id: str | None = None,
     ) -> str:
         proposal_id = uuid.uuid4().hex
-        # _now_minus(-N) = now + N — routed through the module-level clock
-        # helper so tests can freeze/shift time (lazy-expiry contract).
         # _now_minus(-N) = now + N — single clock helper so tests shift time
         # by patching this one function (lazy-expiry contract).
         expiry = (
@@ -249,8 +252,15 @@ class GovernanceService:
             "session_id": row[6],
         }
 
-    def approve(self, user_id: str, proposal_id: str) -> bool:
-        """Idempotent approve: True only on the transition pending->approved."""
+    def approve(
+        self, user_id: str, proposal_id: str, count_override: bool = True
+    ) -> bool:
+        """Idempotent approve: True only on the transition pending->approved.
+
+        count_override=False for MACHINE approvals (lazy expiry auto-approve
+        in resolve_pending) — counting those as human overrides inflated
+        override_rate (review P1 on 4a6826f)."""
+
         with self._lock, self._conn(user_id) as conn:
             cur = conn.execute(
                 "UPDATE proposals SET status='approved'"
@@ -261,15 +271,17 @@ class GovernanceService:
             newly = cur.rowcount == 1
         if newly:
             self._emit_receipt(
-            user_id, f"approved:{proposal_id}", tool="", correlation=proposal_id
-        )
+                user_id, f"approved:{proposal_id}", tool="", correlation=proposal_id
+            )
         if newly:
             row = self.get_pending(user_id, proposal_id) or {}
             tool = str(row.get("tool") or "")
             with self._conn(user_id) as conn:
                 # M4-2: approvals per tool; approving a show_then_auto_send
                 # early IS the override of the auto-send window.
-                override = row.get("tier") == "show_then_auto_send"
+                override = (
+                    count_override and row.get("tier") == "show_then_auto_send"
+                )
                 conn.execute(
                     "INSERT INTO tool_stats (tool, approvals, overrides) VALUES (?, 1, ?)"
                     " ON CONFLICT(tool) DO UPDATE SET approvals = approvals + 1,"
@@ -288,7 +300,9 @@ class GovernanceService:
         if row["status"] == "pending" and row["tier"] == "show_then_auto_send":
             exp = row.get("expires_at")
             if exp and _now_minus(0) > datetime.fromisoformat(exp):
-                self.approve(user_id, proposal_id)
+                # Machine auto-approval: NOT a human override (review P1 —
+                # counting it inflated override_rate on every pendings scan).
+                self.approve(user_id, proposal_id, count_override=False)
                 row = self.get_pending(user_id, proposal_id)
                 assert row is not None  # just created it — durable store
         return row
@@ -406,6 +420,10 @@ class GovernanceService:
         self._emit_receipt(
             user_id, f"executed:{proposal_id}", tool=tool, correlation=proposal_id
         )
+        # P1-1 (review on 3314c7e): the REAL execution result must reach the
+        # session log — deriveMessages otherwise keeps feeding the model the
+        # synthetic pending-ack as the tool result forever (re-proposal loop).
+        self._log_execution_result(user_id, proposal_id, tool, result)
         return result
 
     async def replay_resume(
@@ -451,14 +469,64 @@ class GovernanceService:
         exec_row = await execute(user_id, proposal_id, registry)
         if exec_row.get("already"):
             # Replay-resume must not double-execute across restarts.
-            return {"status": "replayed", "execution": exec_row,
-                    "derived_history_len": len(derived)}
+            # Shape parity with the executed branch (review P2).
+            return {"status": "replayed", "session_id": session_id,
+                    "derived_history_len": len(derived), "execution": exec_row}
         return {
             "status": "replayed",
             "session_id": session_id,
             "derived_history_len": len(derived),
             "execution": exec_row,
         }
+
+    def _log_execution_result(
+        self, user_id: str, proposal_id: str, tool: str, result: dict[str, Any]
+    ) -> None:
+        """Append the real executed-tool result to the session log (review
+        P1-1): the log's prior entry for this call is the synthetic pending
+        ack from the guard; without this the next deriveMessages keeps the
+        model in an await-approval loop. No-op when the log is disabled or
+        the proposal has no session linkage. Best-effort: never raises."""
+        try:
+            if not session_log_enabled():
+                return
+            row = self.get_pending(user_id, proposal_id)
+            session_id = (row or {}).get("session_id")
+            if not session_id:
+                return
+            store = get_session_event_store(user_id)
+            events = store.events(session_id)
+            ack_sig = f"Proposal {proposal_id[:8]}"
+            call_id = None
+            for ev in reversed(events):
+                if ev.type == "tool_result" and getattr(
+                    ev.data, "name", None
+                ) == tool and ack_sig in str(getattr(ev.data, "content", "")):
+                    call_id = ev.data.tool_call_id
+                    break
+            if call_id is None:
+                call_id = f"governed:{proposal_id[:8]}"
+            now = datetime.now(UTC)
+            event = ToolResultEvent(
+                event_id=uuid.uuid4().hex,
+                sequence=store.next_sequence(session_id),
+                timestamp=now,
+                session_id=session_id,
+                run_id=f"governed:{proposal_id[:8]}",
+                attempt=1,
+                data=ToolResultData(
+                    block_id=f"blk-{proposal_id[:12]}",
+                    tool_call_id=call_id,
+                    name=tool,
+                    status="completed"
+                    if not result.get("is_error")
+                    else "failed",
+                    content=result.get("content", ""),
+                ),
+            )
+            store.append(event)
+        except Exception:  # pragma: no cover - logging never breaks execution
+            pass
 
     def cancel(self, user_id: str, proposal_id: str) -> None:
         with self._conn(user_id) as conn:
