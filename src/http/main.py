@@ -27,6 +27,7 @@ from src.http.routers import (
     scheduler_router,
     skills_router,
     subagents_router,
+    tenancy_router,
     todos_router,
     tools_router,
     usage_router,
@@ -270,6 +271,7 @@ app.include_router(auth_keys_router)
 app.include_router(usage_router)
 app.include_router(dashboard_router)
 app.include_router(billing_router)
+app.include_router(tenancy_router)
 app.include_router(governance_router)
 app.include_router(mcp_router)
 app.include_router(scheduler_router)

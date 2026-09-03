@@ -42,6 +42,15 @@ def _connect(db_path: str) -> sqlite3.Connection:
         )
         """
     )
+    # T3.1 migration (safe on existing M3 DBs): org/sub-tenant hierarchy.
+    # 'firm' = pre-M3 deployment rows (unchanged semantics).
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tenants)")}
+    if "parent_tenant_id" not in cols:
+        conn.execute("ALTER TABLE tenants ADD COLUMN parent_tenant_id TEXT")
+    if "kind" not in cols:
+        conn.execute(
+            "ALTER TABLE tenants ADD COLUMN kind TEXT NOT NULL DEFAULT 'firm'"
+        )
     conn.commit()
     return conn
 

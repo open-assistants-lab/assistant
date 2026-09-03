@@ -1,5 +1,6 @@
 from src.http.routers.audit import router as audit_router
 from src.http.routers.billing import router as billing_router
+from src.http.routers.tenancy import router as tenancy_router
 from src.http.routers.contacts import router as contacts_router
 from src.http.routers.conversation import router as conversation_router
 from src.http.routers.email import router as email_router
@@ -30,6 +31,7 @@ __all__ = [
     "memories_router",
     "mcp_router",
     "billing_router",
+    "tenancy_router",
     "usage_router",
     "profile_router",
     "todos_router",

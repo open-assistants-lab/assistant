@@ -1,0 +1,127 @@
+"""T3.1 API: org/sub-tenant CRUD under /v1/tenancy (admin-gated).
+
+Auth patterns mirror billing.py: trusted-network (flag off) is admin by
+definition; per-user-key deployments require an admin-scope key (see
+`_is_admin` there — imported here as the single source).
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+
+from src.http.auth import enforce_user_id, resolve_user_id
+from src.http.routers.billing import _is_admin
+from src.storage.paths import DEFAULT_USER_ID
+from src.storage.tenancy import get_tenancy_store
+
+router = APIRouter(prefix="/v1/tenancy", tags=["tenancy"])
+
+
+class OrgCreate(BaseModel):
+    name: str = Field(min_length=1)
+
+
+class SubTenantCreate(BaseModel):
+    name: str = Field(min_length=1)
+
+
+class MemberAdd(BaseModel):
+    user_id: str = Field(min_length=1)
+
+
+class MemberMove(BaseModel):
+    user_id: str = Field(min_length=1)
+    tenant_id: str = Field(min_length=1)
+
+
+@router.post("/orgs")
+async def create_org(req: OrgCreate, request: Request) -> dict[str, object]:
+    """Create a top-level org. Admin-gated (trusted-network deployments are
+    admin by definition; per-user-key deployments need an admin-scope key)."""
+    if not _is_admin(request):
+        return JSONResponse(
+            status_code=403,
+            content={"code": "forbidden", "message": "admin identity required"},
+        )
+    store = get_tenancy_store()
+    tenant_id = store.create_org(name=req.name)
+    return {"tenant_id": tenant_id, "name": req.name, "kind": "org"}
+
+
+@router.post("/{tenant_id}/sub-tenants")
+async def create_sub_tenant(
+    tenant_id: str, req: OrgCreate, request: Request
+) -> dict[str, object]:
+    if not _is_admin(request):
+        return JSONResponse(
+            status_code=403,
+            content={"code": "forbidden", "message": "admin identity required"},
+        )
+    try:
+        sub_id = get_tenancy_store().create_sub_tenant(tenant_id, name=req.name)
+    except Exception as e:  # TenantError / TenancyError
+        return JSONResponse(status_code=422, content={"code": "validation_error", "message": str(e)})
+    return {"tenant_id": sub_id, "name": req.name, "kind": "sub_tenant"}
+
+
+@router.post("/{tenant_id}/members")
+async def add_member(
+    tenant_id: str, req: MemberAdd, request: Request
+) -> dict[str, object]:
+    if not _is_admin(request):
+        return JSONResponse(
+            status_code=403,
+            content={"code": "forbidden", "message": "admin identity required"},
+        )
+    try:
+        get_tenancy_store().add_member(tenant_id, req.user_id)
+    except Exception as e:
+        return JSONResponse(status_code=422, content={"code": "validation_error", "message": str(e)})
+    return {"tenant_id": tenant_id, "user_id": req.user_id, "added": True}
+
+
+@router.post("/members/move")
+async def move_member(req: MemberMove, request: Request) -> dict[str, object]:
+    if not _is_admin(request):
+        return JSONResponse(
+            status_code=403,
+            content={"code": "forbidden", "message": "admin identity required"},
+        )
+    try:
+        get_tenancy_store().move_membership(req.user_id, req.tenant_id)
+    except Exception as e:
+        return JSONResponse(status_code=422, content={"code": "validation_error", "message": str(e)})
+    return {"moved": True, "user_id": req.user_id, "tenant_id": req.tenant_id}
+
+
+@router.get("/{tenant_id}/members")
+async def list_members(tenant_id: str, request: Request) -> dict[str, object]:
+    """Tenant-admin listing: tenant-scoped via membership (org tree)."""
+    if not _is_admin(request):
+        return JSONResponse(
+            status_code=403,
+            content={"code": "forbidden", "message": "admin identity required"},
+        )
+    store = get_tenancy_store()
+    try:
+        rows = store.member_rows(tenant_id)
+    except Exception as e:
+        return JSONResponse(status_code=422, content={"code": "validation_error", "message": str(e)})
+    return {"members": rows}
+
+
+@router.get("/memberships")
+async def user_membership(request: Request, user_id: str = DEFAULT_USER_ID) -> dict[str, object]:
+    """The requesting (or requested) user's membership resolved to its org —
+    mapping only; never a store path."""
+    resolved = resolve_user_id(request, user_id)
+    enforce_user_id(resolved, getattr(getattr(request, "state", None), "identity", None))
+    row = get_tenancy_store().resolve_membership(resolved)
+    if row is None:
+        return JSONResponse(
+            status_code=404,
+            content={"code": "not_found", "message": "no membership for user"},
+        )
+    return row
