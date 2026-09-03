@@ -290,3 +290,31 @@ class TestPathTraversal:
         )
         tier = svc.resolve_tier("u1", "some_tool")
         assert tier == "explicit"  # fail closed: conservative pending
+
+
+class TestFatigueMetric:
+    """M4-2 anti-fatigue: per-tool proposal/override/approval counts."""
+
+    def test_override_rate_seeded(self, svc):
+        for _ in range(3):
+            svc.create_pending("u1", "mailer", {"to": "x"})
+        svc.record_override("u1", "mailer")
+        stats = {s["tool"]: s for s in svc.tool_stats("u1")}
+        s = stats["mailer"]
+        assert s["proposals"] == 3
+        assert s["overrides"] == 1
+        assert s["override_rate"] == pytest.approx(0.33)
+
+    def test_approve_counts_and_show_then_auto_send_is_override(self, svc):
+        pid_explicit = svc.create_pending("u1", "writer", {"a": 1}, tier="explicit")
+        pid_auto = svc.create_pending("u1", "mailer", {"b": 2}, tier="show_then_auto_send")
+        svc.approve("u1", pid_explicit)
+        svc.approve("u1", pid_auto)  # early approve = override of auto-send
+        stats = {s["tool"]: s for s in svc.tool_stats("u1")}
+        assert stats["writer"]["approvals"] == 1
+        assert stats["writer"]["overrides"] == 0
+        assert stats["mailer"]["approvals"] == 1
+        assert stats["mailer"]["overrides"] == 1
+
+    def test_stats_empty_when_no_proposals(self, svc):
+        assert svc.tool_stats("nobody") == []

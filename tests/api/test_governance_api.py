@@ -198,3 +198,16 @@ class _FakeProvider:
                 tool_calls=[{"id": "call1", "name": target, "arguments": {}}],
             )
         return Message.assistant("done")
+
+def test_tool_stats_endpoint(client, test_user_id):
+    from src.sdk.governance import get_governance_service
+
+    svc = get_governance_service(test_user_id)
+    svc.create_pending(test_user_id, "mailer", {"to": "x"})
+    svc.create_pending(test_user_id, "mailer", {"to": "y"})
+    svc.record_override(test_user_id, "mailer")
+    r = client.get("/v1/governance/tool-stats", params={"user_id": test_user_id})
+    assert r.status_code == 200
+    rows = r.json()
+    assert rows and rows[0]["tool"] == "mailer"
+    assert rows[0]["override_rate"] == 0.5

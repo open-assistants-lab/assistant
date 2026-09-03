@@ -76,7 +76,24 @@ class GovernanceService:
                 arguments TEXT NOT NULL,
                 tier TEXT NOT NULL,
                 status TEXT NOT NULL,
-                expires_at TEXT
+                expires_at TEXT,
+                session_id TEXT
+            )
+            """
+        )
+        # Migration-safe: pre-session-log DBs lack the column.
+        try:
+            conn.execute("ALTER TABLE proposals ADD COLUMN session_id TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tool_stats (
+                tool TEXT PRIMARY KEY,
+                proposals INTEGER NOT NULL DEFAULT 0,
+                overrides INTEGER NOT NULL DEFAULT 0,
+                approvals INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -138,6 +155,7 @@ class GovernanceService:
         tool: str,
         arguments: dict[str, Any],
         tier: str = "explicit",
+        session_id: str | None = None,
     ) -> str:
         proposal_id = uuid.uuid4().hex
         # _now_minus(-N) = now + N — routed through the module-level clock
@@ -151,7 +169,7 @@ class GovernanceService:
         )
         with self._conn(user_id) as conn:
             conn.execute(
-                "INSERT INTO proposals VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO proposals VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     proposal_id,
                     datetime.now(UTC).isoformat(),
@@ -160,7 +178,14 @@ class GovernanceService:
                     tier,
                     "pending",
                     expiry,
+                    session_id,
                 ),
+            )
+            # M4-2 anti-fatigue: proposals_created per tool.
+            conn.execute(
+                "INSERT INTO tool_stats (tool, proposals) VALUES (?, 1)"
+                " ON CONFLICT(tool) DO UPDATE SET proposals = proposals + 1",
+                (tool,),
             )
             conn.commit()
         self._emit_receipt(
@@ -168,6 +193,36 @@ class GovernanceService:
             correlation=proposal_id,
         )
         return proposal_id
+
+    def record_override(self, user_id: str, tool: str) -> None:
+        """M4-2 anti-fatigue: count a tier override for a tool (user acted
+        against the configured tier — approving after flagging, or editing
+        args before approve)."""
+        with self._conn(user_id) as conn:
+            conn.execute(
+                "INSERT INTO tool_stats (tool, overrides) VALUES (?, 1)"
+                " ON CONFLICT(tool) DO UPDATE SET overrides = overrides + 1",
+                (tool,),
+            )
+            conn.commit()
+
+    def tool_stats(self, user_id: str) -> list[dict[str, Any]]:
+        """M4-2: per-tool proposal/override/approval counts + override_rate
+        (overrides / proposals, 0.0 when no proposals). Read-time computed —
+        feeds the owner dashboard fatigue tuning (M4-2/D1-1)."""
+        with self._conn(user_id) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT tool, proposals, overrides, approvals FROM tool_stats ORDER BY tool"
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            proposals = int(d.get("proposals") or 0)
+            overrides = int(d.get("overrides") or 0)
+            d["override_rate"] = round(overrides / proposals, 2) if proposals else 0.0
+            out.append(d)
+        return out
 
     def list_pending_ids(self, user_id: str) -> list[str]:
         """All proposal ids for the user (any status)."""
@@ -207,6 +262,20 @@ class GovernanceService:
             self._emit_receipt(
             user_id, f"approved:{proposal_id}", tool="", correlation=proposal_id
         )
+        if newly:
+            row = self.get_pending(user_id, proposal_id) or {}
+            tool = str(row.get("tool") or "")
+            with self._conn(user_id) as conn:
+                # M4-2: approvals per tool; approving a show_then_auto_send
+                # early IS the override of the auto-send window.
+                override = row.get("tier") == "show_then_auto_send"
+                conn.execute(
+                    "INSERT INTO tool_stats (tool, approvals, overrides) VALUES (?, 1, ?)"
+                    " ON CONFLICT(tool) DO UPDATE SET approvals = approvals + 1,"
+                    " overrides = overrides + ?",
+                    (tool, 1 if override else 0, 1 if override else 0),
+                )
+                conn.commit()
         return newly
 
     def resolve_pending(self, user_id: str, proposal_id: str) -> dict[str, Any]:

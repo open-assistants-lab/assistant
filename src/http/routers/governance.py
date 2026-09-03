@@ -56,6 +56,14 @@ async def list_pendings(request: Request, user_id: str = DEFAULT_USER_ID) -> lis
     return out
 
 
+@router.get("/tool-stats")
+async def tool_stats(request: Request, user_id: str = DEFAULT_USER_ID) -> list[dict[str, Any]]:
+    """M4-2 anti-fatigue: per-tool proposals/overrides/approvals + override_rate."""
+    resolved_user = resolve_user_id(request, user_id)
+    enforce_user_id(resolved_user, getattr(getattr(request, "state", None), "identity", None))
+    return _svc(resolved_user).tool_stats(resolved_user)
+
+
 @router.post("/pendings/{proposal_id}/approve")
 async def approve_pending(
     proposal_id: str, request: Request, user_id: str = DEFAULT_USER_ID
