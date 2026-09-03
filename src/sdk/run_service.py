@@ -465,9 +465,19 @@ class RunService:
             await self._registry.release(session_key(self._user_id, session_id))
 
 
-    @staticmethod
+    def _load_history(self, session_id: str) -> list[Message]:
+        """P1-T10: history from the session-event log projection when the log
+        is enabled (settings flag, shipped off); else the MessageStore path."""
+        from src.sdk import session_events as se
+
+        if se.session_log_enabled():
+            derived = se.deriveMessages(session_id, self._user_id)
+            if derived:
+                return derived
+        return self._message_store.get_messages_with_summary(session_id, limit=50)
+
     def _stamp_provider_options(
-        loop: AgentLoop, provider_options: dict[str, dict[str, Any]] | None
+        self, loop: AgentLoop, provider_options: dict[str, dict[str, Any]] | None
     ) -> dict[str, dict[str, Any]] | None:
         """Issue #10: merge request provider_options over the loop's config
         (request wins per D0-5 precedence). Returns the prior value so the
@@ -503,7 +513,7 @@ class RunService:
         # would otherwise include the just-added prompt, and appending it
         # again below would duplicate the current request in the model's
         # context (and in the grader's transcript).
-        history = self._message_store.get_messages_with_summary(session_id, limit=50)
+        history = self._load_history(session_id)
         user_msg_id = self._message_store.add_message(
             "user", prompt, metadata={"run_id": run_id}, session_id=session_id
         )
@@ -619,7 +629,7 @@ class RunService:
         # would otherwise include the just-added prompt, and appending it
         # again below would duplicate the current request in the model's
         # context (and in the grader's transcript).
-        history = self._message_store.get_messages_with_summary(session_id, limit=50)
+        history = self._load_history(session_id)
         user_msg_id = self._message_store.add_message(
             "user", prompt, metadata={"run_id": run_id}, session_id=session_id
         )

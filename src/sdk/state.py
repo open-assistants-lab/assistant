@@ -24,6 +24,9 @@ class AgentState:
 
     messages: list[Message] = field(default_factory=list)
     extra: dict[str, Any] = field(default_factory=dict)
+    # Session-log observer (R-SL1, P1-T11): set by the loop; every model-
+    # visible message appended via add_message is forwarded. Emit-only.
+    message_observer: Any = None
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.extra.get(key, default)
@@ -44,6 +47,12 @@ class AgentState:
 
     def add_message(self, message: Message) -> None:
         self.messages.append(message)
+        observer = self.message_observer
+        if observer is not None:
+            try:
+                observer(message)
+            except Exception:
+                pass  # emit-only: logging must never break the loop
 
     def last_message(self) -> Message | None:
         return self.messages[-1] if self.messages else None

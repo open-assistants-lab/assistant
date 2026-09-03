@@ -169,6 +169,19 @@ class ErrorData(ContractModel):
     result: RunResult | None = None
 
 
+class UserPromptData(ContractModel):
+    content: NonEmptyString
+
+
+class SystemPromptData(ContractModel):
+    content: NonEmptyString
+
+
+class InjectionData(ContractModel):
+    kind: Literal["steer", "inject", "supervisor"]
+    content: NonEmptyString
+
+
 class InterruptData(ContractModel):
     tool: NonEmptyString
     call_id: NonEmptyString
@@ -344,6 +357,18 @@ class InterruptEvent(RunEventBase[InterruptData]):
     type: Literal["interrupt"] = "interrupt"
 
 
+class UserPromptEvent(RunEventBase[UserPromptData]):
+    type: Literal["user_prompt"] = "user_prompt"
+
+
+class SystemPromptEvent(RunEventBase[SystemPromptData]):
+    type: Literal["system_prompt"] = "system_prompt"
+
+
+class InjectionEvent(RunEventBase[InjectionData]):
+    type: Literal["injection"] = "injection"
+
+
 RunEvent = Annotated[
     TextStartEvent
     | TextDeltaEvent
@@ -363,7 +388,10 @@ RunEvent = Annotated[
     | ContextCompressedEvent
     | DoneEvent
     | ErrorEvent
-    | InterruptEvent,
+    | InterruptEvent
+    | UserPromptEvent
+    | SystemPromptEvent
+    | InjectionEvent,
     Field(discriminator="type"),
 ]
 

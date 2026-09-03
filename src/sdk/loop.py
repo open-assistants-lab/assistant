@@ -27,9 +27,11 @@ import inspect
 import json
 import logging
 import time
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import TypeAdapter
@@ -423,6 +425,35 @@ class AgentLoop:
         while not self._steer_queue.empty():
             message = self._steer_queue.get_nowait()
             state.add_message(Message.user(message))
+            # P1-T11 fidelity: steer DELIVERY is model-visible — log it as an
+            # injection (the queued user-role message alone loses the kind).
+            try:
+                from src.sdk import session_events as se
+                from src.sdk.run_events import parse_run_event
+
+                if se.session_log_enabled():
+                    session_id = str(
+                        getattr(self, "_flow_session_id", None) or "default"
+                    ).strip() or "default"
+                    run_id = str(getattr(self, "_flow_run_id", "") or uuid.uuid4().hex)
+                    seq = getattr(self, "_session_log_seq", 1)
+                    ev = parse_run_event(
+                        {
+                            "schema_version": 1,
+                            "event_id": uuid.uuid4().hex,
+                            "sequence": seq,
+                            "timestamp": datetime.now(UTC),
+                            "session_id": session_id,
+                            "run_id": run_id,
+                            "attempt": 1,
+                            "type": "injection",
+                            "data": {"kind": "steer", "content": message},
+                        }
+                    )
+                    se.log_event(self.user_id or "default_user", ev)
+                    self._session_log_seq = seq + 1
+            except Exception:  # pragma: no cover - emit-only contract
+                pass
             if self._steer_sink is not None:
                 try:
                     self._steer_sink(message)
@@ -1469,13 +1500,88 @@ class AgentLoop:
         except Exception:  # pragma: no cover - emit-only contract
             pass
 
+    def _log_session_message(self, message: Message) -> None:
+        """Forward one model-visible message to the session-event log (R-SL1).
+
+        Opt-in (session_log.enabled, shipped off); emit-only — logging
+        failures never break the loop."""
+        try:
+            from src.sdk import session_events as se
+
+            session_id = str(
+                getattr(self, "_flow_session_id", None) or "default"
+            ).strip() or "default"
+            run_id = str(getattr(self, "_flow_run_id", "") or uuid.uuid4().hex)
+            seq = getattr(self, "_session_log_seq", 1)
+            next_seq = se.log_model_message(
+                self.user_id or "default_user", session_id, run_id, seq, message
+            )
+            self._session_log_seq = next_seq
+        except Exception:  # pragma: no cover - emit-only contract
+            pass
+
+    def _log_session_header(self, messages: list[Message]) -> None:
+        """Log the user prompt + assembled folded header once per run."""
+        try:
+            from src.sdk import session_events as se
+            from src.sdk.run_events import SystemPromptEvent, UserPromptEvent
+
+            if not se.session_log_enabled():
+                return
+            session_id = str(
+                getattr(self, "_flow_session_id", None) or "default"
+            ).strip() or "default"
+            run_id = str(getattr(self, "_flow_run_id", "") or uuid.uuid4().hex)
+            seq = getattr(self, "_session_log_seq", 1)
+            store = se.get_session_event_store(self.user_id or "default_user")
+
+            header_seq = {"next": seq}
+
+            def _emit(event_cls: Any, data: Any) -> None:
+                from src.sdk.run_events import parse_run_event
+
+                ev = parse_run_event(
+                    {
+                        "schema_version": 1,
+                        "event_id": uuid.uuid4().hex,
+                        "sequence": header_seq["next"],
+                        "timestamp": datetime.now(UTC),
+                        "session_id": session_id,
+                        "run_id": run_id,
+                        "attempt": 1,
+                        "type": event_cls.model_fields["type"].default,
+                        "data": data,
+                    }
+                )
+                header_seq["next"] += 1
+                store.append(ev)
+
+            from src.sdk.state import AgentState
+
+            for m in messages:
+                if m.role == "user" and isinstance(m.content, str) and m.content:
+                    _emit(UserPromptEvent, {"content": m.content})
+                    break
+            header = self._prepare_messages(AgentState(messages=list(messages)))
+            if header and header[0].role == "system":
+                _emit(SystemPromptEvent, {"content": header[0].content})
+            # Every event consumed one sequence; the observer continues from
+            # the next free slot (under-counting collides on append).
+            self._session_log_seq = header_seq["next"]
+        except Exception:  # pragma: no cover - emit-only contract
+            pass
+
     async def _run_impl(self, messages: list[Message]) -> list[Message]:
         """Internal run implementation (wrapped by run() for ContextVar lifecycle)."""
         self._reset_context_telemetry()
+        self._log_session_header(list(messages))
         # Per-run harness timings (loops are cached per user — reset each run).
         self.timings = HarnessTimings()
         self._tool_calls_this_run = 0  # H2 budget counter
         state = AgentState(messages=list(messages))
+        # R-SL1 P1-T11: every model-visible message is logged (session log,
+        # opt-in). Observing AgentState.add_message covers ALL add sites.
+        state.message_observer = self._log_session_message
         self.state = state
         if self.rubric:
             state.extra["rubric"] = self.rubric
@@ -1750,6 +1856,9 @@ class AgentLoop:
             reasoning (alongside reasoning_delta)
         """
         state = AgentState(messages=list(messages))
+        # R-SL1 P1-T11: session-log observer on the streaming path too.
+        state.message_observer = self._log_session_message
+        self._log_session_header(list(messages))
         self._reset_context_telemetry()
         # Fresh per-run correlation id — mirrors run(); without this, cached
         # loops re-emit the previous run's run_id (M1 review P1).

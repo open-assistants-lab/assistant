@@ -388,6 +388,12 @@ class TelemetryConfig(_BaseSettings):
     model_config = SettingsConfigDict(env_prefix="TELEMETRY_")
 
 
+class SessionLogConfig(_BaseSettings):
+    """Session-event log (R-SL1) — opt-in, shipped off (fallback path unchanged)."""
+
+    enabled: bool = False
+
+
 class MeteringConfig(_BaseSettings):
     """Usage metering (Phase 2 M1.1). OFF by default: the OSS sink is a no-op
     unless explicitly enabled per deployment (METERING_ENABLED)."""
@@ -438,6 +444,8 @@ class AppConfig(_BaseSettings):
     email_sync: EmailSyncConfig = Field(default_factory=EmailSyncConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     metering: MeteringConfig = Field(default_factory=MeteringConfig)
+    session_log: SessionLogConfig = Field(default_factory=SessionLogConfig)
+
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     pricing: PricingConfig = Field(default_factory=PricingConfig)
     companion: SchedulerConfig = Field(default_factory=SchedulerConfig)
