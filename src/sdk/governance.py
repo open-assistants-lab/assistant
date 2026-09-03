@@ -233,8 +233,8 @@ class GovernanceService:
     def get_pending(self, user_id: str, proposal_id: str) -> dict[str, Any] | None:
         with self._conn(user_id) as conn:
             row = conn.execute(
-                "SELECT proposal_id, tool, arguments, tier, status, expires_at"
-                " FROM proposals WHERE proposal_id = ?",
+                "SELECT proposal_id, tool, arguments, tier, status, expires_at,"
+                " session_id FROM proposals WHERE proposal_id = ?",
                 (proposal_id,),
             ).fetchone()
         if row is None:
@@ -246,6 +246,7 @@ class GovernanceService:
             "tier": row[3],
             "status": row[4],
             "expires_at": row[5],
+            "session_id": row[6],
         }
 
     def approve(self, user_id: str, proposal_id: str) -> bool:
@@ -406,6 +407,58 @@ class GovernanceService:
             user_id, f"executed:{proposal_id}", tool=tool, correlation=proposal_id
         )
         return result
+
+    async def replay_resume(
+        self,
+        user_id: str,
+        proposal_id: str,
+        registry: Any | None = None,
+        executor: Any | None = None,
+    ) -> dict[str, Any]:
+        """M4-1 upgrade (session-log payoff, P1-T10..T12): approve-after-
+        restart replays the run IN-PLACE when the session log has the run's
+        events — the approved tool executes exactly once and the continuation
+        seeds from deriveMessages history. Falls back to the deterministic
+        execution leg when the session log is unavailable (flag off / no
+        session linkage / no events). Exactly-once is preserved either way by
+        the approved->executed conditional UPDATE."""
+        row = self.get_pending(user_id, proposal_id)
+        if row is None:
+            return {"status": "missing"}
+        session_id = row.get("session_id")
+        can_replay = False
+        derived: list[Any] = []
+        if session_id:
+            from src.sdk.session_events import (
+                deriveMessages,
+                get_session_event_store,
+                session_log_enabled,
+            )
+
+            if session_log_enabled():
+                events = get_session_event_store(user_id).events(session_id)
+                if events:
+                    can_replay = True
+                    derived = deriveMessages(session_id, user_id)
+        execute = executor or self.execute_approved
+        if not can_replay:
+            # Deterministic fallback — expose the executed contract uniformly.
+            exec_row = await execute(user_id, proposal_id, registry)
+            if "status" not in exec_row:
+                exec_row = {"status": "executed", **exec_row}
+            return exec_row
+
+        exec_row = await execute(user_id, proposal_id, registry)
+        if exec_row.get("already"):
+            # Replay-resume must not double-execute across restarts.
+            return {"status": "replayed", "execution": exec_row,
+                    "derived_history_len": len(derived)}
+        return {
+            "status": "replayed",
+            "session_id": session_id,
+            "derived_history_len": len(derived),
+            "execution": exec_row,
+        }
 
     def cancel(self, user_id: str, proposal_id: str) -> None:
         with self._conn(user_id) as conn:

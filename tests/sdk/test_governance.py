@@ -318,3 +318,79 @@ class TestFatigueMetric:
 
     def test_stats_empty_when_no_proposals(self, svc):
         assert svc.tool_stats("nobody") == []
+
+
+class TestReplayResume:
+    """M4-1 upgrade: approve-after-restart replays in-place via the
+    session log; deterministic fallback otherwise."""
+
+    def _seed_run_events(self, monkeypatch, tmp_path, user_id, session_id):
+        """Seed a logged model-visible run via the canonical API."""
+        import src.sdk.session_events as se
+        import src.storage.paths as paths_mod
+        from src.sdk.messages import Message
+
+        monkeypatch.setattr(se, "session_log_enabled", lambda: True)
+        monkeypatch.setattr(
+            paths_mod.DataPaths,
+            "root",
+            property(lambda self: tmp_path / "root"),
+        )
+        se.reset_session_stores()
+        se.log_model_message(
+            user_id, session_id, "run-1", 1, Message.user("do the thing")
+        )
+
+    async def test_replay_with_session_log(self, svc, monkeypatch, tmp_path):
+        import src.sdk.governance as gov
+        from src.sdk.governance import Tier
+
+        monkeypatch.setattr(gov, "governance_enabled", lambda: True)
+        self._seed_run_events(monkeypatch, tmp_path, "ru", "sess-1")
+
+        pid = svc.create_pending(
+            "ru", "writer", {"q": 1}, tier="explicit", session_id="sess-1"
+        )
+        svc.approve("ru", pid)
+
+        executed: list[str] = []
+
+        async def fake_execute(uid, pid_, registry=None):
+            executed.append(pid_)
+            underlying = await svc.execute_approved(uid, pid_, registry)
+            return {**underlying, "content": "ok"}
+
+        result = await svc.replay_resume("ru", pid, executor=fake_execute)
+        assert result["status"] == "replayed"
+        assert result["derived_history_len"] >= 1
+        assert len(executed) == 1
+        # exactly-once: replaying again reports already
+        again = await svc.replay_resume("ru", pid, executor=fake_execute)
+        assert again["execution"]["already"] is True
+
+    async def test_fallback_without_session_log(self, svc, monkeypatch):
+        import src.sdk.governance as gov
+
+        monkeypatch.setattr(gov, "governance_enabled", lambda: True)
+        pid = svc.create_pending(
+            "ru", "writer", {"q": 1}, tier="explicit", session_id=None
+        )
+        svc.approve("ru", pid)
+        result = await svc.replay_resume("ru", pid)
+        assert result.get("status") == "executed"
+
+    async def test_fallback_when_flag_off(self, svc, monkeypatch, tmp_path):
+        import src.sdk.governance as gov
+        import src.sdk.session_events as se
+
+        monkeypatch.setattr(gov, "governance_enabled", lambda: True)
+        self._seed_run_events(monkeypatch, tmp_path, "ru", "sess-2")
+        # Patch AFTER seeding (the seeding helper enables the flag) — the
+        # flag is off at replay_resume call time, forcing the fallback.
+        monkeypatch.setattr(se, "session_log_enabled", lambda: False)
+        pid = svc.create_pending(
+            "ru", "writer", {"q": 1}, tier="explicit", session_id="sess-2"
+        )
+        svc.approve("ru", pid)
+        result = await svc.replay_resume("ru", pid)
+        assert result.get("status") == "executed"

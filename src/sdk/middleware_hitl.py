@@ -71,9 +71,19 @@ class HITLMiddleware(Middleware):
                 },
                 is_error=True,
             )
-        # explicit / show_then_auto_send -> durable pending proposal
+        # explicit / show_then_auto_send -> durable pending proposal.
+        # session_log payoff (M4-1 replay-resume): capture the run's session
+        # id from the bound loop so approve-after-restart can find the run.
+        session_id: str | None = None
+        try:
+            from src.sdk.loop import _current_agent_loop
+
+            loop = _current_agent_loop.get()
+            session_id = getattr(loop, "_flow_session_id", None) if loop else None
+        except Exception:
+            session_id = None
         proposal_id = svc.create_pending(
-            self.user_id, tool_name, tool_input, tier=tier
+            self.user_id, tool_name, tool_input, tier=tier, session_id=session_id
         )
         if tier == "show_then_auto_send":
             # Lazy expiry: the window must ACTUALLY elapse before auto-

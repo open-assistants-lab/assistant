@@ -77,19 +77,22 @@ async def approve_pending(
         raise HTTPException(status_code=404, detail="No such proposal")
     # Execution runs ONLY on the pending->approved transition made by THIS
     # call — replays (already approved/executed) are no-ops (M4-1 review).
-    if row["status"] == "pending":
-        if not svc.approve(user_id, proposal_id):
+    if row["status"] in ("pending", "approved"):
+        if row["status"] == "pending" and not svc.approve(user_id, proposal_id):
             raise HTTPException(status_code=409, detail="Approve race lost")
-        exec_row = await execute_approved_tool(
-            user_id, proposal_id, row["tool"], row["arguments"]
+        # M4-1 upgrade (session-log payoff): replay-resume when the session
+        # log has the run; deterministic fallback otherwise. Exactly-once is
+        # enforced inside both paths (approved->executed conditional UPDATE).
+        exec_row = await svc.replay_resume(
+            user_id, proposal_id,
+            registry=None,
+            executor=lambda uid, pid, registry=None: execute_approved_tool(
+                uid, pid, (svc.get_pending(uid, pid) or {}).get("tool", ""),
+                (svc.get_pending(uid, pid) or {}).get("arguments") or {},
+            ),
         )
-    elif row["status"] == "approved":
-        # Bug-hunt P2: an approved row whose execution was lost (restart or a
-        # transient UPDATE failure) must be re-executable — the idempotence
-        # guard (approved->executed conditional UPDATE) makes this safe.
-        exec_row = await execute_approved_tool(
-            user_id, proposal_id, row["tool"], row["arguments"]
-        )
+        if exec_row.get("status") == "missing":
+            raise HTTPException(status_code=404, detail="No such proposal")
     else:
         exec_row = {"status": row["status"], "already": True}
     final = svc.get_pending(user_id, proposal_id)
