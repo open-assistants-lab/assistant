@@ -4,6 +4,7 @@ version = "0.3.0"
 description = "AI assistant agent with custom SDK runtime"
 requires-python = ">=3.11,<3.14"
 dependencies = [
+    "pyjwt[crypto]>=2.8",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.7.0",
     "python-dotenv>=1.0.0",

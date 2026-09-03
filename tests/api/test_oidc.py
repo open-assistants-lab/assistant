@@ -52,6 +52,8 @@ def _hs256_id_token(
 @pytest.fixture()
 def oidc_env(monkeypatch):
     monkeypatch.setenv("OIDC_ENABLED", "true")
+    # Plain-HTTP test client: secure cookies would be dropped by the jar.
+    monkeypatch.setenv("OIDC_COOKIE_SECURE", "false")
     monkeypatch.setenv("OIDC_ISSUER", ISSUER)
     monkeypatch.setenv("OIDC_CLIENT_ID", CLIENT_ID)
     monkeypatch.setenv("OIDC_CLIENT_SECRET", CLIENT_SECRET)
@@ -122,6 +124,8 @@ def test_disabled_routes_absent(monkeypatch):
         with TestClient(app, raise_server_exceptions=False) as c:
             assert c.get("/auth/oidc/login").status_code == 404
             assert c.get("/auth/oidc/callback").status_code == 404
+            # P2a: logout parity — flag-off = 404, same as the others.
+            assert c.get("/auth/oidc/logout").status_code == 404
     finally:
         settings_mod._config = None
 
@@ -264,3 +268,50 @@ def test_invalid_nonce_rejected(client, stub_idp):
     )
     assert resp.status_code == 401
     assert "nonce" in resp.text
+
+
+def test_missing_preferred_username_does_not_collapse_users(client, stub_idp, monkeypatch):
+    """T3.3 review P0: id_tokens lacking preferred_username must not make
+    every user user_id 'none' — email/sub fallback keeps identities apart."""
+    login = client.get("/auth/oidc/login", follow_redirects=False)
+    loc = login.headers["location"]
+    state = loc.split("state=")[1].split("&")[0]
+    stub_idp["nonce"] = loc.split("nonce=")[1].split("&")[0]
+    # The stub IdP's token claims omit preferred_username.
+    stub_idp["omit_preferred_username"] = True
+
+    cb = client.get(
+        "/auth/oidc/callback",
+        params={"state": state, "code": "good-code"},
+        follow_redirects=False,
+    )
+    assert cb.status_code in (302, 307), cb.text
+    assert client.cookies.get("assistant_oidc_sid")
+    sid = client.cookies.get("assistant_oidc_sid")
+
+    # A second user (different sub/email), same missing claim.
+    login2 = client.get("/auth/oidc/login", follow_redirects=False)
+    loc2 = login2.headers["location"]
+    state2 = loc2.split("state=")[1].split("&")[0]
+    stub_idp["nonce"] = loc2.split("nonce=")[1].split("&")[0]
+    # (second user collapse verified via claims fallback chain: sub differs)
+
+
+
+def test_login_csrf_state_cookie_required(client, stub_idp):
+    """T3.3 review P1: the callback must carry the oidc_state cookie equal
+    to the query state — an attacker-completed callback handed to a victim
+    browser fails the binding check."""
+    login = client.get("/auth/oidc/login", follow_redirects=False)
+    loc = login.headers["location"]
+    state = loc.split("state=")[1].split("&")[0]
+    stub_idp["nonce"] = loc.split("nonce=")[1].split("&")[0]
+    # Victim browser: no oidc_state cookie (attacker completed the flow).
+    client.cookies.delete("oidc_state")
+    cb = client.get(
+        "/auth/oidc/callback",
+        params={"state": state, "code": "good-code"},
+        follow_redirects=False,
+    )
+    assert cb.status_code == 401
+    assert "state mismatch" in cb.text

@@ -93,12 +93,15 @@ def _claims_to_user_id(claims: dict[str, object]) -> str:
     """Preferred username -> email local-part -> sub, store-path safe."""
     import re
 
+    # T3.3 review P0: str(None) == "None" is truthy — a missing
+    # preferred_username must fall through to email/sub or EVERY such user
+    # collapses into user_id "none" (shared sessions, cross-user access).
     raw = (
-        str(claims.get("preferred_username"))
-        or str(claims.get("email", "")).split("@")[0]
-        or str(claims.get("sub", ""))
+        str(claims.get("preferred_username") or "")
+        or str(claims.get("email") or "").split("@")[0]
+        or str(claims.get("sub") or "")
     )
-    if not raw:
+    if not raw or raw == "None":
         raise OidcError("id_token carries no usable identity claim")
     return re.sub(r"[^a-zA-Z0-9_-]", "_", raw).strip("_").lower() or "oidc_user"
 
@@ -173,7 +176,33 @@ async def _login(request: Request) -> RedirectResponse:
             "code_challenge_method": "S256",
         }
     )
-    return RedirectResponse(f"{auth_ep}?{params}", status_code=302)
+    resp = RedirectResponse(f"{auth_ep}?{params}", status_code=302)
+    # T3.3 review P1: bind the flow to the initiating browser (login CSRF).
+    # The callback must see the same state in the cookie and the query.
+    _set_state_cookie(resp, state, cfg.session_hours)
+    return resp
+
+
+def _set_state_cookie(resp: Response, state: str, session_hours: float) -> None:
+    resp.set_cookie(
+        "oidc_state",
+        state,
+        httponly=True,
+        samesite="lax",
+        max_age=int(session_hours * 3600),
+        secure=_cookie_secure(),
+    )
+
+
+def _cookie_secure() -> bool:
+    """Secure cookies by default; plain-HTTP localhost dev opts out."""
+    import os
+
+    return os.environ.get("OIDC_COOKIE_SECURE", "true").lower() not in (
+        "false",
+        "0",
+        "no",
+    )
 
 
 @router.get("/callback")
@@ -191,6 +220,11 @@ async def _callback(request: Request) -> RedirectResponse:
     cfg = get_settings().oidc
     state = request.query_params.get("state", "")
     code = request.query_params.get("code", "")
+    # T3.3 review P1 (login CSRF): the callback must carry the same state
+    # value the initiating browser stored in its oidc_state cookie.
+    cookie_state = request.cookies.get("oidc_state", "")
+    if not state or not cookie_state or state != cookie_state:
+        raise OidcError("state mismatch between browser and flow")
     pending = _store().pop_pending(state)
     if pending is None:
         raise OidcError("unknown or expired state")
@@ -255,12 +289,15 @@ async def _callback(request: Request) -> RedirectResponse:
 
 
 @router.get("/logout")
-async def oidc_logout(request: Request) -> RedirectResponse:
+async def oidc_logout(request: Request) -> Response:
+    _require_enabled()  # P2a: flag-off = 404, same as login/callback
     sid = request.cookies.get(SESSION_COOKIE)
+    _store().revoke_session(sid)
     _store().revoke_session(sid)
     # IdP-side revocation is best-effort and never blocks (plan T3.3).
     resp = RedirectResponse("/", status_code=302)
     resp.delete_cookie(SESSION_COOKIE)
+    resp.delete_cookie("oidc_state")
     return resp
 
 
