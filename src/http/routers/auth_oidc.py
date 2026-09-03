@@ -60,11 +60,6 @@ def _verify_id_token(token: str, *, issuer: str, audience: str, client_secret: s
     import jwt as pyjwt
 
     header = pyjwt.get_unverified_header(token)
-    key_opts: dict[str, object] = {
-        "audience": audience,
-        "issuer": issuer,
-        "options": {"require": ["exp", "iss", "aud"]},
-    }
     if header.get("alg") == "HS256":
         claims = dict(
             pyjwt.decode(
