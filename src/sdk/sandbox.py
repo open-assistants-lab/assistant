@@ -182,6 +182,12 @@ class SoftSandboxBackend:
         env = scrub_env(lim.env_mode)
         if env_extra:
             env.update(env_extra)
+        # SB1-2 security rule: resolve the drop identity from settings (env
+        # SANDBOX_UID/SANDBOX_GID override), pass into the child via limits.
+        if os.getuid() == 0:
+            uid, gid = get_sandbox_uid_gid()
+            lim._drop_uid = uid  # type: ignore[attr-defined]
+            lim._drop_gid = gid  # type: ignore[attr-defined]
 
         def _preexec() -> None:  # pragma: no cover - runs in child
             import resource
@@ -206,6 +212,25 @@ class SoftSandboxBackend:
                 os.setsid()
             except OSError:
                 pass
+            # SB1-2 security rule: NO agent subprocess runs as root. When the
+            # server runs as root, drop to the configured sandbox uid/gid; a
+            # failed drop under root is fail-closed (child exits rather than
+            # running privileged). When the server is already non-root, the
+            # child inherits that uid — compliant, nothing to do.
+            if getattr(lim, "_force_drop_failure", False) or os.getuid() == 0:
+                try:
+                    os.setgid(getattr(lim, "_drop_gid", 1000))
+                    os.setuid(getattr(lim, "_drop_uid", 1000))
+                except OSError as exc:
+                    if os.getuid() == 0:
+                        import sys as _sys
+
+                        print(
+                            f"sandbox: uid drop to "
+                            f"{getattr(lim, '_drop_uid', 1000)} failed: {exc}",
+                            file=_sys.stderr,
+                        )
+                        os._exit(78)
 
         try:
             proc = subprocess.run(  # noqa: S603 - argv list, no shell
@@ -267,6 +292,19 @@ class SoftSandboxBackend:
         return None
 
 
+
+def get_sandbox_uid_gid() -> tuple[int, int]:
+    """Sandbox drop identity: SANDBOX_UID/SANDBOX_GID env, else settings."""
+    import os as _os
+
+    from src.config import get_settings
+
+    cfg = getattr(get_settings(), "sandbox", None)
+    uid = _os.environ.get("SANDBOX_UID") or (cfg.uid if cfg else 1000)
+    gid = _os.environ.get("SANDBOX_GID") or (cfg.gid if cfg else 1000)
+    return int(uid), int(gid)
+
+
 def get_sandbox_backend() -> Any:
     """Select the backend from settings (config change, not code change)."""
     from src.config import get_settings
@@ -274,6 +312,11 @@ def get_sandbox_backend() -> Any:
     settings = get_settings()
     cfg = getattr(settings, "sandbox", None)
     backend = getattr(cfg, "backend", "soft") if cfg else "soft"
+    # SB1-2: uid-drop availability is decided by the SERVER's uid. A
+    # non-root server is already compliant (children inherit); log once so
+    # operators know the drop path is not in play.
+    if os.getuid() != 0 and backend == "soft":
+        logger.debug("sandbox.uid_drop_unavailable", {"detail": "server already non-root; children inherit"})
     if backend == "null":
         # SB1 review P1: null = full inherited env, no caps — never silent.
         logger.warning(

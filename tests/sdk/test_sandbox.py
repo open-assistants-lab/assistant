@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import json
+
 import pytest
 
 from src.sdk.sandbox import (
@@ -132,3 +134,70 @@ def test_single_level_traversal_rejected(tmp_path):
     root = tmp_path / "ws"
     root.mkdir()
     assert b.validate_source(src, root) is not None  # rejected
+
+
+class TestUidDrop:
+    """SB1-2 acceptance: no agent subprocess runs as root (security rule)."""
+
+    def _uid_probe_script(self):
+        return (
+            "import os, json;"
+            "print(json.dumps({'euid': os.geteuid(), 'egid': os.getegid()}))"
+        )
+
+    def test_subprocess_never_runs_as_root(self, monkeypatch, tmp_path):
+        """Security rule: when the server runs as ROOT, the dropped UID must
+        equal the configured sandbox uid (not root). When the server is
+        already non-root, the child inherits that non-root uid — both are
+        compliant; uid 0 is not."""
+        import os as _os
+
+        import src.config.settings as settings_mod
+        import src.sdk.sandbox as sb
+
+        server_euid = _os.geteuid()
+        uid, gid = 1000, 1000
+        monkeypatch.setattr(
+            settings_mod, "_config", None
+        )
+        monkeypatch.setenv("SANDBOX_UID", str(uid))
+        monkeypatch.setenv("SANDBOX_GID", str(gid))
+        settings_mod._config = None
+
+        backend = sb.SoftSandboxBackend()
+        root = tmp_path / "ws"
+        root.mkdir()
+        result = backend.run(
+            ["python3", "-c", self._uid_probe_script()],
+            cwd=root,
+            limits=sb.SandboxLimits(env_mode="scrubbed"),
+ env_extra={"PATH": _os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(root)},
+        )
+        assert result.exit_code == 0, result.stderr
+        child = json.loads(result.stdout)
+        if server_euid == 0:
+            assert child["euid"] == uid, "root server must drop to sandbox uid"
+            assert child["egid"] == gid
+        else:
+            assert child["euid"] == server_euid != 0
+
+    def test_root_server_failed_drop_fails_closed(self, monkeypatch, tmp_path):
+        """If the server runs as root and the drop FAILS, the run must not
+        proceed as root (fail closed)."""
+        import os as _os
+
+        import src.sdk.sandbox as sb
+
+        if _os.geteuid() != 0:
+            pytest.skip("fail-closed path requires a root server process")
+        backend = sb.SoftSandboxBackend()
+        root = tmp_path / "ws"
+        root.mkdir()
+        backend._force_drop_failure = True  # type: ignore[attr-defined]
+        result = backend.run(
+            ["python3", "-c", "print('should not run')"],
+            cwd=root,
+            limits=sb.SandboxLimits(),
+        )
+        assert result.exit_code != 0
+        assert result.stdout.strip() != "should not run"

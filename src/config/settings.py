@@ -354,6 +354,13 @@ class SandboxConfig(_BaseSettings):
     backend: str = Field(
         default="soft", description="SandboxBackend: 'soft' (default) or 'null'"
     )
+    # SB1-2 security rule: no agent subprocess runs as root. When the server
+    # runs as root, spawned subprocesses drop to this uid/gid (fail closed on
+    # drop failure). Per-user OS accounts remain the OPTIONAL Soft+UID
+    # refinement (2026-08-26 note) — these defaults are a single shared
+    # non-root identity. Env overrides: SANDBOX_UID / SANDBOX_GID.
+    uid: int = Field(default=1000, description="UID to drop to when the server runs as root")
+    gid: int = Field(default=1000, description="GID to drop to when the server runs as root")
 
     model_config = SettingsConfigDict(env_prefix="SANDBOX_")
 
