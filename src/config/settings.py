@@ -236,6 +236,26 @@ class AuthConfig(_BaseSettings):
     model_config = SettingsConfigDict(env_prefix="")
 
 
+class OidcConfig(_BaseSettings):
+    """SSO via OIDC (Phase 3 T3.3). Off by default — zero behavior change.
+
+    Deployment knobs are env vars (OIDC_ISSUER, OIDC_CLIENT_ID,
+    OIDC_CLIENT_SECRET, OIDC_REDIRECT_URI); the yaml section is optional.
+    """
+
+    enabled: bool = Field(default=False)
+    issuer: str = Field(default="", description="IdP issuer URL (discoverable)")
+    client_id: str = Field(default="")
+    client_secret: str = Field(default="")
+    redirect_uri: str = Field(
+        default="", description="Empty = derived from the request base URL"
+    )
+    scope: str = Field(default="openid profile email")
+    session_hours: float = Field(default=8.0)
+
+    model_config = SettingsConfigDict(env_prefix="OIDC_")
+
+
 class ApiConfig(_BaseSettings):
     """API configuration."""
 
@@ -452,6 +472,7 @@ class AppConfig(_BaseSettings):
     email: EmailConfig = Field(default_factory=EmailConfig)
     connectkit: ConnectKitConfig = Field(default_factory=ConnectKitConfig)
     auth: AuthConfig = Field(default_factory=AuthConfig)
+    oidc: OidcConfig = Field(default_factory=OidcConfig)
 
     model_config = SettingsConfigDict(
         env_file=str(REPO_ROOT / ".env"), env_nested_delimiter="__"
@@ -625,6 +646,18 @@ def get_settings() -> AppConfig:
         env_title = os.environ.get("AGENT_TITLE_MODEL")
         if env_title:
             _config.agent.title_model = env_title
+        # OIDC deployment knobs: env beats yaml (same E22 class — nested
+        # sections lose to flat env vars per pydantic-settings rules).
+        for env_key, field_name in (
+            ("OIDC_ISSUER", "issuer"),
+            ("OIDC_CLIENT_ID", "client_id"),
+            ("OIDC_CLIENT_SECRET", "client_secret"),
+            ("OIDC_REDIRECT_URI", "redirect_uri"),
+            ("OIDC_SCOPE", "scope"),
+        ):
+            val = os.environ.get(env_key)
+            if val:
+                setattr(_config.oidc, field_name, val)
     return _config
 
 

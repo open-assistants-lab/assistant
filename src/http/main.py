@@ -188,6 +188,10 @@ _PUBLIC_PATHS = {
     "/redoc",
     "/openapi.json",
     # Browser-initiated OAuth redirects carry no Bearer token (audit E24).
+    # Phase 3 T3.3: the OIDC flow endpoints are themselves the auth entry.
+    "/auth/oidc/login",
+    "/auth/oidc/callback",
+    "/auth/oidc/logout",
     # Exact paths only — the in-app connector guard still rejects
     # unconfigured services with 400.
     "/auth/login",
@@ -272,6 +276,12 @@ app.include_router(usage_router)
 app.include_router(dashboard_router)
 app.include_router(billing_router)
 app.include_router(tenancy_router)
+
+# Phase 3 T3.3: OIDC SSO router — mounted always; routes 404 when the flag
+# is off (mounted-but-404 keeps module-level mount deterministic).
+from src.http.routers.auth_oidc import router as auth_oidc_router
+
+app.include_router(auth_oidc_router)
 app.include_router(governance_router)
 app.include_router(mcp_router)
 app.include_router(scheduler_router)

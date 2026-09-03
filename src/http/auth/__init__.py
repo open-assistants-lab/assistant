@@ -74,6 +74,12 @@ def get_resolver() -> IdentityResolver:
             _DEFAULT_RESOLVER = PerUserKeyResolver()
         else:
             _DEFAULT_RESOLVER = SharedSecretResolver()
+        # Phase 3 T3.3: OIDC session cookies wrap the base chain (when the
+        # flag is on, a valid session wins; otherwise the base auth applies).
+        if get_settings().oidc.enabled:
+            from src.auth.oidc import OidcResolver
+
+            _DEFAULT_RESOLVER = OidcResolver(_DEFAULT_RESOLVER)
     return _DEFAULT_RESOLVER
 
 
