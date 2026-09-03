@@ -41,8 +41,13 @@ class TenancyStore(TenantStore):
 
     # -- CRUD ----------------------------------------------------------------
 
-    def create_org(self, name: str) -> str:
-        """Create a top-level org (kind='org', no parent)."""
+    def create_org(self, name: str, owner_id: str | None = None) -> str:
+        """Create a top-level org (kind='org', no parent).
+
+        owner_id records the org creator — the RBAC original-owner guard
+        (T3.2: an org's original owner cannot drop below admin) reads this.
+        The creator's membership, when created, defaults to role 'owner'.
+        """
         import uuid
 
         tid = uuid.uuid4().hex
@@ -50,11 +55,17 @@ class TenancyStore(TenantStore):
             self._conn.execute(
                 """
                 INSERT INTO tenants (id, name, plan, seat_count, kind,
-                                     parent_tenant_id, created_at)
-                VALUES (?, ?, 'free', 1, 'org', NULL, ?)
+                                     parent_tenant_id, owner_id, created_at)
+                VALUES (?, ?, 'free', 1, 'org', NULL, ?, ?)
                 """,
-                (tid, name, datetime_now_iso()),
+                (tid, name, owner_id, datetime_now_iso()),
             )
+            if owner_id:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO memberships (tenant_id, user_id, role) "
+                    "VALUES (?, ?, 'owner')",
+                    (tid, owner_id),
+                )
         return tid
 
     def create_sub_tenant(self, org_id: str, name: str) -> str:
@@ -116,6 +127,52 @@ class TenancyStore(TenantStore):
             )
         _ = target
 
+    # -- RBAC (T3.2) ------------------------------------------------------
+
+    _ROLE_RANK = {"staff": 0, "admin": 1, "owner": 2}
+
+    def role_of(self, user_id: str) -> str:
+        """The user's org-tree role; 'staff' when unaffiliated (default)."""
+        m = self.resolve_membership(user_id)
+        if m is None:
+            return "staff"
+        return str(m.get("role") or "staff")
+
+    def is_owner(self, user_id: str) -> bool:
+        return self.role_of(user_id) == "owner"
+
+    def is_admin(self, user_id: str) -> bool:
+        return self._ROLE_RANK.get(self.role_of(user_id), 0) >= 1
+
+    def at_least(self, user_id: str, role: str) -> bool:
+        return self._ROLE_RANK.get(self.role_of(user_id), 0) >= self._ROLE_RANK.get(role, 0)
+
+    def set_role(self, user_id: str, role: str) -> None:
+        """Set a membership role. Owner-demotion guard (T3.2): an org's
+        ORIGINAL owner (tenants.owner_id) cannot drop below admin. Role
+        changes require admin+ at the ROUTER layer; the store enforces the
+        demotion invariant itself so no code path can bypass it."""
+        if role not in self._ROLE_RANK:
+            raise TenancyError(f"unknown role {role!r}")
+        m = self.resolve_membership(user_id)
+        if m is None:
+            raise TenancyError(f"user {user_id!r} has no membership")
+        tenant = self._require_tenant(str(m["tenant_id"]))
+        if tenant.get("owner_id") == user_id:
+            new_rank = self._ROLE_RANK.get(role, 0)
+            if new_rank < 1:
+                raise TenancyError(
+                    f"user {user_id!r} is the original owner of tenant "
+                    f"{tenant['id']!r} and cannot be demoted below admin"
+                )
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "UPDATE memberships SET role = ? WHERE user_id = ?",
+                (role, user_id),
+            )
+            if cur.rowcount == 0:
+                raise TenancyError(f"user {user_id!r} has no membership")
+
     # -- resolution ------------------------------------------------------
 
     def org_for_tenant(self, tenant_id: str) -> str:
@@ -139,7 +196,8 @@ class TenancyStore(TenantStore):
             self._conn.row_factory = sqlite3.Row
             row = self._conn.execute(
                 """
-                SELECT t.* FROM tenants t
+                SELECT t.*, m.role AS membership_role
+                FROM tenants t
                 JOIN memberships m ON m.tenant_id = t.id
                 WHERE m.user_id = ?
                 """,
@@ -149,6 +207,8 @@ class TenancyStore(TenantStore):
         if row is None:
             return None
         out = dict(row)
+        out["role"] = out.get("membership_role") or "staff"
+        out["tenant_id"] = out["id"]
         out["org_id"] = self.org_for_tenant(str(out["id"]))
         return out
 

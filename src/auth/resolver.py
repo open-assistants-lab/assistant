@@ -36,6 +36,13 @@ class PerUserKeyResolver:
             verified = get_key_store().verify(auth_header[7:])
             if verified is not None:
                 user_id, scopes = verified
+                # T3.2: role from the org-tree membership (staff default).
+                try:
+                    from src.storage.tenancy import get_tenancy_store
+
+                    role = get_tenancy_store().role_of(user_id)
+                except Exception:
+                    role = "staff"
                 return UserIdentity(
                     user_id=user_id,
                     key_id="oak",
@@ -43,6 +50,7 @@ class PerUserKeyResolver:
                     scopes=tuple(
                         s.strip() for s in (scopes or "").split(",") if s.strip()
                     ),
+                    role=role,
                 )
             # Not a per-user key. Fall through to the shared-secret path:
             # the deployment's API_KEY (admin) and localhost-bypass contracts

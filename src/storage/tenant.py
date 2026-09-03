@@ -51,6 +51,14 @@ def _connect(db_path: str) -> sqlite3.Connection:
         conn.execute(
             "ALTER TABLE tenants ADD COLUMN kind TEXT NOT NULL DEFAULT 'firm'"
         )
+    # T3.2: org owner (creator) + membership roles (RBAC). Migration-safe.
+    if "owner_id" not in cols:
+        conn.execute("ALTER TABLE tenants ADD COLUMN owner_id TEXT")
+    mcols = {r[1] for r in conn.execute("PRAGMA table_info(memberships)")}
+    if "role" not in mcols:
+        conn.execute(
+            "ALTER TABLE memberships ADD COLUMN role TEXT NOT NULL DEFAULT 'staff'"
+        )
     conn.commit()
     return conn
 
@@ -116,7 +124,8 @@ class TenantStore:
     def add_member(self, tenant_id: str, user_id: str) -> None:
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT OR IGNORE INTO memberships (tenant_id, user_id) VALUES (?, ?)",
+                "INSERT OR IGNORE INTO memberships (tenant_id, user_id, role) "
+                "VALUES (?, ?, 'staff')",
                 (tenant_id, user_id),
             )
 

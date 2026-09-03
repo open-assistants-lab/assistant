@@ -28,6 +28,10 @@ class UserIdentity:
     # ("admin" scope on per-user keys); shared-secret operator identity has
     # none (admin via trust_domain instead).
     scopes: tuple[str, ...] = ()
+    # T3.2 RBAC: org-tree role for per-user identities ("owner"/"admin"/
+    # "staff"); shared-secret/operator identity is owner-equivalent ("" here,
+    # admin gates treat trust_domain != "untrusted" as owner-equivalent).
+    role: str = "staff"
 
 
 @runtime_checkable

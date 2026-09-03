@@ -12,7 +12,6 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from src.http.auth import enforce_user_id, resolve_user_id
-from src.http.routers.billing import _is_admin
 from src.storage.paths import DEFAULT_USER_ID
 from src.storage.tenancy import get_tenancy_store
 
@@ -36,14 +35,35 @@ class MemberMove(BaseModel):
     tenant_id: str = Field(min_length=1)
 
 
+def _role_gate(request: Request, need: str) -> bool:
+    """RBAC gate (T3.2): trusted-network deployments are owner-equivalent;
+    per-user-key deployments check the membership role (admin+ for org
+    CRUD, admin for member role changes)."""
+    from src.config import get_settings
+
+    if not get_settings().auth.per_user_auth:
+        return True
+    identity = getattr(getattr(request, "state", None), "identity", None)
+    if identity is None:
+        return False
+    if identity.trust_domain == "trusted-network":
+        return True
+    # Deployment-level admin grant (admin-scope key) OR the org-tree role.
+    if "admin" in (getattr(identity, "scopes", ()) or ()):
+        return True
+    role = getattr(identity, "role", "staff")
+    rank = {"staff": 0, "admin": 1, "owner": 2}
+    return rank.get(role, 0) >= rank.get(need, 0)
+
+
 @router.post("/orgs")
 async def create_org(req: OrgCreate, request: Request) -> dict[str, object]:
     """Create a top-level org. Admin-gated (trusted-network deployments are
     admin by definition; per-user-key deployments need an admin-scope key)."""
-    if not _is_admin(request):
+    if not _role_gate(request, "admin"):
         return JSONResponse(
             status_code=403,
-            content={"code": "forbidden", "message": "admin identity required"},
+            content={"code": "forbidden", "message": "admin role required"},
         )
     store = get_tenancy_store()
     tenant_id = store.create_org(name=req.name)
@@ -54,10 +74,10 @@ async def create_org(req: OrgCreate, request: Request) -> dict[str, object]:
 async def create_sub_tenant(
     tenant_id: str, req: OrgCreate, request: Request
 ) -> dict[str, object]:
-    if not _is_admin(request):
+    if not _role_gate(request, "admin"):
         return JSONResponse(
             status_code=403,
-            content={"code": "forbidden", "message": "admin identity required"},
+            content={"code": "forbidden", "message": "admin role required"},
         )
     try:
         sub_id = get_tenancy_store().create_sub_tenant(tenant_id, name=req.name)
@@ -70,10 +90,10 @@ async def create_sub_tenant(
 async def add_member(
     tenant_id: str, req: MemberAdd, request: Request
 ) -> dict[str, object]:
-    if not _is_admin(request):
+    if not _role_gate(request, "admin"):
         return JSONResponse(
             status_code=403,
-            content={"code": "forbidden", "message": "admin identity required"},
+            content={"code": "forbidden", "message": "admin role required"},
         )
     try:
         get_tenancy_store().add_member(tenant_id, req.user_id)
@@ -84,10 +104,10 @@ async def add_member(
 
 @router.post("/members/move")
 async def move_member(req: MemberMove, request: Request) -> dict[str, object]:
-    if not _is_admin(request):
+    if not _role_gate(request, "admin"):
         return JSONResponse(
             status_code=403,
-            content={"code": "forbidden", "message": "admin identity required"},
+            content={"code": "forbidden", "message": "admin role required"},
         )
     try:
         get_tenancy_store().move_membership(req.user_id, req.tenant_id)
@@ -99,10 +119,10 @@ async def move_member(req: MemberMove, request: Request) -> dict[str, object]:
 @router.get("/{tenant_id}/members")
 async def list_members(tenant_id: str, request: Request) -> dict[str, object]:
     """Tenant-admin listing: tenant-scoped via membership (org tree)."""
-    if not _is_admin(request):
+    if not _role_gate(request, "admin"):
         return JSONResponse(
             status_code=403,
-            content={"code": "forbidden", "message": "admin identity required"},
+            content={"code": "forbidden", "message": "admin role required"},
         )
     store = get_tenancy_store()
     try:
