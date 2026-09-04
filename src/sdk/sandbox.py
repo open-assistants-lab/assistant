@@ -177,6 +177,7 @@ class SoftSandboxBackend:
         limits: SandboxLimits | None = None,
         *,
         env_extra: dict[str, str] | None = None,
+        user_id: str | None = None,
     ) -> SandboxResult:
         lim = limits or SandboxLimits()
         env = scrub_env(lim.env_mode)
@@ -185,7 +186,22 @@ class SoftSandboxBackend:
         # SB1-2 security rule: resolve the drop identity from settings (env
         # SANDBOX_UID/SANDBOX_GID override), pass into the child via limits.
         if os.getuid() == 0:
-            uid, gid = get_sandbox_uid_gid()
+            cfg = None
+            try:
+                from src.config import get_settings
+
+                cfg = getattr(get_settings(), "sandbox", None)
+            except Exception:
+                cfg = None
+            uid_mode = getattr(cfg, "uid_mode", "per_user") if cfg else "shared"
+            if uid_mode == "per_user" and user_id:
+                uid, gid = user_sandbox_uid_gid(user_id)
+                try:
+                    _prepare_user_dirs(user_id, cwd)
+                except Exception:
+                    pass
+            else:
+                uid, gid = get_sandbox_uid_gid()
             lim._drop_uid = uid  # type: ignore[attr-defined]
             lim._drop_gid = gid  # type: ignore[attr-defined]
 
@@ -303,6 +319,68 @@ def get_sandbox_uid_gid() -> tuple[int, int]:
     uid = _os.environ.get("SANDBOX_UID") or (cfg.uid if cfg else 1000)
     gid = _os.environ.get("SANDBOX_GID") or (cfg.gid if cfg else 1000)
     return int(uid), int(gid)
+
+
+def user_sandbox_uid_gid(user_id: str | None) -> tuple[int, int]:
+    """Soft+UID mapping: assistant user_id -> OS (uid, gid), stable across
+    restarts (sha256, not random). uid = uid_base + (sha256 % uid_range);
+    gid mirrors uid so per-user groups are self-contained.
+    """
+    import hashlib as _hashlib
+
+    from src.config import get_settings
+
+    cfg = getattr(get_settings(), "sandbox", None)
+    base = getattr(cfg, "uid_base", 2000) if cfg else 2000
+    rng = getattr(cfg, "uid_range", 1000) if cfg else 1000
+    digest = _hashlib.sha256((user_id or "default_user").encode()).digest()
+    uid = base + (int.from_bytes(digest[:8], "big") % max(1, rng))
+    return uid, uid  # gid mirrors uid: one group per sandbox user
+
+
+def _prepare_user_dirs(user_id: str | None, workspace_root: Path) -> None:
+    """Root server: best-effort chown of the user's workspace Files dir and
+    per-user home (data_root/.sandbox-home/<uid>/) to the mapped uid:gid —
+    ONLY paths inside the user's own dirs are ever chowned. Idempotent per
+    uid per process."""
+    import os as _os
+
+    if _os.getuid() != 0:
+        return
+    uid, gid = user_sandbox_uid_gid(user_id)
+    if uid in _PREPARED_UIDS:
+        return
+    from src.config import get_settings
+
+    cfg = getattr(get_settings(), "sandbox", None)
+    if getattr(cfg, "uid_mode", "per_user") != "per_user":
+        _PREPARED_UIDS.add(uid)
+        return
+
+    env_root = _os.environ.get("SANDBOX_HOME_ROOT") or ""
+    if env_root:
+        home_root = Path(env_root)
+    else:
+        from src.storage.paths import get_paths
+
+        home_root = get_paths(user_id=user_id).root / ".sandbox-home"
+    home = home_root / str(uid)
+    try:
+        home.mkdir(parents=True, exist_ok=True)
+        files_dir = workspace_root / "Files"
+        files_dir.mkdir(parents=True, exist_ok=True)
+        # Never chown outside the user's own dirs (both are ours by layout).
+        _os.chown(str(home), uid, gid)
+        _os.chown(str(files_dir), uid, gid)
+        _PREPARED_UIDS.add(uid)
+    except OSError as exc:
+        logger.warning(
+            "sandbox.user_dir_ownership_failed",
+            {"detail": str(exc), "uid": uid},
+        )
+
+
+_PREPARED_UIDS: set[int] = set()
 
 
 def get_sandbox_backend() -> Any:

@@ -62,6 +62,7 @@ def code_execute(code: str, user_id: str = DEFAULT_USER_ID, workspace_id: str = 
         ["python3", "-c", code],
         root,
         limits,
+        user_id=user_id,
     )
     logger.info(
         "code_execute",

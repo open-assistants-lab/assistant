@@ -347,20 +347,38 @@ class SandboxConfig(_BaseSettings):
     """SandboxBackend selection (R-SB1): null (tests) | soft (trusted default).
 
     Swapping isolation level is a config change, not a code change (SB1-3
-    acceptance). Kernel-enforced isolation (Soft+UID / bwrap) is a later
-    refinement.
+    acceptance). Soft+UID (per-user OS-account drop) is the DEFAULT soft
+    sandbox (decision 2026-09-03): each assistant user_id maps to its own
+    OS uid — kernel-enforced cross-user filesystem separation even for
+    trusted teams. 'shared' keeps the single-identity drop for dev.
     """
 
     backend: str = Field(
         default="soft", description="SandboxBackend: 'soft' (default) or 'null'"
     )
-    # SB1-2 security rule: no agent subprocess runs as root. When the server
-    # runs as root, spawned subprocesses drop to this uid/gid (fail closed on
-    # drop failure). Per-user OS accounts remain the OPTIONAL Soft+UID
-    # refinement (2026-08-26 note) — these defaults are a single shared
-    # non-root identity. Env overrides: SANDBOX_UID / SANDBOX_GID.
-    uid: int = Field(default=1000, description="UID to drop to when the server runs as root")
-    gid: int = Field(default=1000, description="GID to drop to when the server runs as root")
+    # SB1-2 security rule: no agent subprocess runs as root. uid_mode:
+    # 'per_user' — every assistant user_id drops to its own mapped uid:gid
+    # (kernel-enforced cross-user isolation; requires a root/CAP_SETUID
+    # server). 'shared' — one non-root identity for all users (macOS/dev).
+    uid_mode: str = Field(
+        default="per_user",
+        description="'per_user' (kernel-enforced per-user isolation) or 'shared'",
+    )
+    uid: int = Field(
+        default=1000,
+        description="Shared-mode drop UID (uid_mode=shared); env SANDBOX_UID overrides",
+    )
+    gid: int = Field(
+        default=1000,
+        description="Shared-mode drop GID (uid_mode=shared); env SANDBOX_GID overrides",
+    )
+    # Per-user mapping: uid = uid_base + (sha256(user_id) % uid_range).
+    uid_base: int = Field(
+        default=2000, description="First uid of the per-user sandbox range"
+    )
+    uid_range: int = Field(
+        default=1000, description="Size of the per-user sandbox uid range"
+    )
 
     model_config = SettingsConfigDict(env_prefix="SANDBOX_")
 

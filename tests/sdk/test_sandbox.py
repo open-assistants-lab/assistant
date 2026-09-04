@@ -3,6 +3,8 @@
 from pathlib import Path
 
 import json
+import os
+import sys
 
 import pytest
 
@@ -201,3 +203,120 @@ class TestUidDrop:
         )
         assert result.exit_code != 0
         assert result.stdout.strip() != "should not run"
+
+
+
+# ---------------------------------------------------------------------------
+# Soft+UID: per-user OS-account drop (decision 2026-09-03)
+# ---------------------------------------------------------------------------
+
+
+def test_user_sandbox_uid_mapping_deterministic():
+    """uid mapping is stable per user, distinct across users, in range."""
+    import src.sdk.sandbox as sb
+
+    a1 = sb.user_sandbox_uid_gid("alice")
+    a2 = sb.sb_user_uid = sb.user_sandbox_uid_gid("alice")
+    b = sb.user_sandbox_uid_gid("bob")
+    assert a1 == a2
+    assert a1 != b
+    for uid, gid in (a1, b):
+        assert 2000 <= uid < 3000
+        assert gid == uid
+
+
+def test_user_sandbox_uid_no_user_id_maps_default():
+    """None user_id maps to the default_user identity (stable)."""
+    import src.sdk.sandbox as sb
+
+    assert sb.user_sandbox_uid_gid(None) == sb.user_sandbox_uid_gid("default_user")
+
+
+def test_prepare_user_dirs_chowns_only_user_dirs(tmp_path, monkeypatch):
+    """Root server: chown targets are ONLY the user's own home + Files dir."""
+    import os as _os
+
+    import src.sdk.sandbox as sb
+
+    chowned: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(sb, "_PREPARED_UIDS", set())
+    monkeypatch.setattr(os, "getuid", lambda: 0)
+    monkeypatch.setattr(
+        os,
+        "chown",
+        lambda p, u, g: chowned.append((str(p), u, g)),
+    )
+
+    import src.storage.paths as paths_mod
+
+    monkeypatch.setattr(
+        paths_mod.DataPaths,
+        "root",
+        property(lambda self: tmp_path / "root"),
+    )
+
+    ws = tmp_path / "workspaces" / "alice"
+    ws.mkdir(parents=True)
+    sb._prepare_user_dirs("alice", ws)
+    targets = {p for p, _, _ in chowned}
+    assert str(tmp_path / "workspaces" / "alice" / "Files") in targets or any(
+        "Files" in p for p, _, _ in chowned
+    )
+    assert all("sandbox-home" in p or "workspaces" in p for p, _, _ in chowned)
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux" or os.getuid() != 0,
+    reason="per-user setuid kernel isolation requires a root Linux host",
+)
+def test_per_user_kernel_isolation_two_users(tmp_path):
+    """Root Linux: A and B children run under DIFFERENT uids; A cannot
+    write into B's chowned workspace."""
+    import src.sdk.sandbox as sb
+
+    ws_a = tmp_path / "A"
+    ws_b = tmp_path / "B"
+    (ws_a / "Files").mkdir(parents=True)
+    (ws_b / "Files").mkdir(parents=True)
+
+    import src.storage.paths as paths_mod
+
+    paths_mod._paths_cache.clear()
+
+    from src.config import settings as settings_module
+
+    settings_module._config = None
+    try:
+        uid_a, gid_a = sb.user_sandbox_uid_gid("alice")
+        uid_b, gid_b = sb.user_sandbox_uid_gid("bob")
+        os.chown(str(ws_a / "Files"), uid_a, gid_a)
+        os.chown(str(ws_b / "Files"), uid_b, gid_b)
+
+        r_a = sb.SoftSandboxBackend().run(
+            ["python3", "-c", "import os; print(os.geteuid())"],
+            ws_a,
+            user_id="alice",
+        )
+        r_b = sb.SoftSandboxBackend().run(
+            ["python3", "-c", "import os; print(os.geteuid())"],
+            ws_b,
+            SandboxLimits(),
+            user_id="bob",
+        )
+        assert r_a.stdout.strip() == str(uid_a)
+        assert r_b.stdout.strip() == str(uid_b)
+        assert uid_a != uid_b
+
+        # A's sandboxed code cannot write into B's chowned workspace.
+        r = sb.SoftSandboxBackend().run(
+            ["python3", "-c", f"open('{ws_b}/Files/leak.txt','w').write('x')"],
+            ws_a,
+            limits=sb.SandboxLimits(),
+            user_id="alice",
+        )
+        assert not (ws_b / "Files" / "leak.txt").exists()
+        assert r.returncode != 0 or "Permission denied" in (r.stderr or "")
+    finally:
+        settings_module._config = None
+        os.chown(str(ws_a / "Files"), os.getuid(), os.getgid())
+        os.chown(str(ws_b / "Files"), os.getuid(), os.getgid())

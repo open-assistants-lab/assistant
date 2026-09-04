@@ -153,6 +153,7 @@ def shell_execute(command: str, user_id: str =  DEFAULT_USER_ID, workspace_id: s
                 timeout_seconds=float(config["timeout_seconds"]),
                 max_output_bytes=config["max_output_kb"] * 1024,
             ),
+            user_id=user_id,
         )
         if result.timed_out:
             return f"Error: Command timed out after {config['timeout_seconds']} seconds"
