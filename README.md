@@ -66,7 +66,7 @@ importable library:
 # Optional extras install from source via uv (no PyPI path):
 uv sync --extra memory-vector      # + ChromaDB + sentence-transformers (semantic memory/embeddings)
 uv sync --extra analytics          # + DuckDB analytics mirror
-assistant-sdk http                  # zero-config first run
+assistant http                      # zero-config first run
 ```
 
 Heavy optional features (vector search, semantic embeddings, analytics) live in
