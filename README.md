@@ -57,10 +57,7 @@ uv run ruff check src/
 uv run mypy src/
 ```
 
-### Published package
-
-The same engine ships on PyPI as `assistant-sdk` — a deployable server, not an
-importable library:
+### Distribution
 
 ```bash
 # Optional extras install from source via uv (no PyPI path):
