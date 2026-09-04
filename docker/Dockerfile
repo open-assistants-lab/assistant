@@ -32,6 +32,6 @@ COPY seeds/ seeds/
 # Install the project itself (editable, no re-resolve of deps)
 RUN uv pip install --no-deps -e .
 
-# Default command — console script is assistant-sdk (renamed in the PyPI
+# Default command — console script is assistant (
 # packaging commit; the old `assistant` script no longer exists).
-CMD ["uv", "run", "assistant-sdk", "http"]
+CMD ["uv", "run", "assistant", "http"]

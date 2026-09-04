@@ -6,8 +6,8 @@ services:
       dockerfile: docker/Dockerfile
     container_name: assistant
     ports:
-      - "8080:8080"
-    command: ["uv", "run", "assistant-sdk", "http"]
+      - "127.0.0.1:8080:8080"   # loopback only — bot runs on this host; never expose
+    command: ["uv", "run", "assistant", "http"]
     env_file:
       - path: .env
         required: false

@@ -1,5 +1,5 @@
 [project]
-name = "assistant-sdk"
+name = "assistant"
 version = "0.3.0"
 description = "AI assistant agent with custom SDK runtime"
 requires-python = ">=3.11,<3.14"
@@ -68,7 +68,7 @@ benchmark = [
 ]
 
 [project.scripts]
-assistant-sdk = "src.__main__:main"
+assistant = "src.__main__:main"
 
 [build-system]
 requires = ["hatchling"]

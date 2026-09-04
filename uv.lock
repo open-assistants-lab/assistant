@@ -172,7 +172,7 @@ wheels = [
 ]
 
 [[package]]
-name = "assistant-sdk"
+name = "assistant"
 version = "0.3.0"
 source = { editable = "." }
 dependencies = [

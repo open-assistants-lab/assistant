@@ -44,13 +44,13 @@ def _get_embedding_model() -> Any:
                 cache_folder=str(MODEL_CACHE_DIR),
             )
         except Exception as exc:
-            # sentence-transformers is an optional extra (assistant-sdk[memory-vector]).
+            # sentence-transformers is an optional extra (assistant[memory-vector]).
             if "sentence_transformers" in str(exc) or isinstance(
                 exc, ModuleNotFoundError
             ):
                 logger.warning(
                     "apps.embedding_missing",
-                    {"hint": "install assistant-sdk[memory-vector] for semantic embeddings"},
+                    {"hint": "install assistant[memory-vector] for semantic embeddings"},
                 )
             _embedding_model = None
     return _embedding_model
