@@ -265,9 +265,9 @@ Before shipping, tests must demonstrate:
 4. What browser-profile persistence policy balances convenient signed-in sessions with secret handling and supportability? The runtime must keep its profile under `.system/browser/` and use platform secure storage where supported.
 5. Does the first arm64 release include the memory/vector extra, or does it ship a smaller runtime profile? This affects DMG size, signing, cold start, and feature parity.
 6. What is the recovery/support policy if root-level data and `~/Assistant/Users/native_sdk_chat/` both exist after an interrupted/manual migration?
-7. **Dev-route stripping (review P2):** `/dev/gmail-demo` is unauthenticated (in `_PUBLIC_PATHS`) and the dev router mounts unconditionally (`src/http/routers/dev.py`). Confirm: desktop mode strips the dev router entirely.
-8. **MCP enablement (review P2):** shipped `config.yaml` has `mcp.enabled: true`. Confirm the v0.1.0 stance — MCP off in desktop mode, or enabled with a reviewed config?
-9. **`shell_execute` stance (review P2):** `shell_execute` is `destructive=True` (interrupts on use) and shipped `shell_tool.allowed_commands` includes `python3`/`node`/`agent-browser`. Confirm the v0.1.0 consumer-DMG stance: keep-with-HITL (interruption on every use) or exclude from the desktop capability profile. Decide alongside §8's browser question (Q5).
+7. **Dev-route stripping (review P2) — DECIDED 2026-09-05:** desktop mode strips the dev router entirely (incl. `/dev/gmail-demo`).
+8. **MCP enablement (review P2) — DECIDED 2026-09-05:** desktop mode keeps `mcp.enabled: true` (the shipped config stands).
+9. **`shell_execute` stance (review P2) — DECIDED 2026-09-05:** keep-with-HITL in the consumer DMG (destructive=True interrupts on every use; the sandboxed execution leg applies).
 
 ## 9. Recommended implementation order
 
