@@ -1,6 +1,6 @@
 # macOS DMG v0.1.0 — Backend Impact Review Memo
 
-> **Status:** Draft for peer review. This records confirmed product direction and the backend changes it implies. It is not an implementation plan and does not authorize code changes.
+> **Status:** Draft for peer review (backend/security lane verified 2026-09-05 — see §3.1 amendment). This records confirmed product direction and the backend changes it implies. It is not an implementation plan and does not authorize code changes.
 >
 > **Audience:** Backend, security, release-engineering, and product reviewers.
 
@@ -54,11 +54,11 @@ The current repository does not yet meet the desktop-product contract:
 |---|---|---|
 | `pyproject.toml` publishes `assistant-sdk` as the project/console name. | `assistant` is the sole product and distribution name. | Rename entry point and distribution metadata; update all Docker, compose, docs, tests, release scripts, and generated artifacts atomically. PyPI publication remains out of scope. |
 | `native-sdk-experiment/src/main.zig` hard-codes `http://127.0.0.1:8080`, `native_sdk_chat`, and `personal` in many requests. | App discovers a bundled backend endpoint and backend-resolved `default_user` identity. | Create a runtime bootstrap/rendezvous contract; remove client-owned endpoint, user, and workspace constants. |
-| `config.yaml` local default uses port 8080; current docs contain contradictory executable and port references. | Bundled backend must not collide with local servers such as llama.cpp or LocalAI. | Use a dynamically allocated loopback port and make one set of docs/configuration canonical. |
+| `config.yaml` local default uses port 8080; current docs contain contradictory executable and port references. | Bundled backend must not collide with local servers such as llama.cpp or LocalAI. | Use a dynamically allocated loopback port and make one set of docs/configuration canonical. **Bind-host half (review P2): `config.yaml` also sets `api.host: 0.0.0.0` (all interfaces) — the loopback-only requirement covers both host and port.** |
 | Bulk data (`data_root`) and settings/vault/capabilities (`data_path`) are split. | All durable app state is rooted in `~/Assistant`. | Map both roots under `~/Assistant`; do not leave `.app` bundle/CWD-relative writable state. |
 | Conversation data currently lives under `Conversation/`. | New installs use `Messages/`. | Add a safe one-time migration/compatibility path. |
-| `config.yaml` enables email sync. | Email is unavailable in v0.1.0. | The desktop profile must disable background email sync as well as all email/contact/todo tool registrations. |
-| `native package --archive` packages the current native app only. | DMG contains the native GUI, a production backend helper, and a managed browser-automation runtime. | Add a desktop release assembly process; a bare native-app DMG is insufficient. |
+| `config.yaml` enables email sync. | Email is unavailable in v0.1.0. | The desktop profile must disable background email sync as well as all email/contact/todo tool registrations. **Current-state correction (review P2): `start_interval_sync` (`email_sync.py:468`) is never invoked in the repo — sync is an on-demand tool. The actual unconditional background task in the lifespan is the ConnectKit token-refresh loop (`_refresh_loop`, 300s, no enable flag); desktop mode must not start it.** |
+| `native package --archive` packages the current native app only. **(External toolchain — unverified in this repo; only `native build/test/automate` are documented. Source or verify against the native toolchain.)** | DMG contains the native GUI, a production backend helper, and a managed browser-automation runtime. | Add a desktop release assembly process; a bare native-app DMG is insufficient. |
 
 ## 3. Backend changes required for local desktop operation
 
@@ -74,9 +74,10 @@ Required properties:
 - Publish a runtime rendezvous document only after the server is ready. It should contain the port, PID, launch nonce, server version, API version, and protocol version. It must never contain API-provider keys.
 - The native app starts the helper, waits for authenticated readiness, and performs graceful shutdown/restart only for a sidecar matching its nonce.
 - The local API should require a per-launch runtime bearer token for all non-health endpoints. Loopback alone is not a sufficient process-level boundary against other software running as the same macOS user.
+  - **⚠️ Amendment (verified review, P1): today this requirement is DEFEATED BY DEFAULTS.** `SOLO_BYPASS` defaults to `True` and `SharedSecretResolver.resolve` (`src/http/auth/shared_secret.py:27-32`) short-circuits localhost **before** checking the Bearer token — a loopback sidecar with `API_KEY` set still accepts unauthenticated local calls today. **Desktop mode MUST disable `SOLO_BYPASS`** (or the desktop resolver bypasses the localhost shortcut entirely and requires the launch token). The §7 test "rejects requests without its launch token" is only effective with that change — as written, it would fail today.
 - The sidecar must keep `~/Assistant` writable and treat the application bundle as read-only.
 
-A likely shape is a dedicated internal mode such as `assistant desktop-server`, while `assistant http` remains the explicit developer/server command. The public product command remains `assistant`.
+A likely shape is a dedicated internal mode such as `assistant desktop-server`, while `assistant http` remains the explicit developer/server command. The public product command remains `assistant`. **(Review P2): an existing switch point is `DeploymentConfig.mode` (`src/config/settings.py:28-32`, default `"solo"`, docstring already references `.dmg/.exe`) — the desktop-server mode should extend this existing flag rather than imply a greenfield mode concept.**
 
 ### 3.2 Data roots and migration
 
@@ -131,7 +132,7 @@ The native app will restore **Tools**, **Skills**, and **Subagents** as persiste
 
 Required backend work:
 
-- Expose the desktop-consumed operations through the documented versioned API surface and cover them with contract fixtures/tests.
+- Expose the desktop-consumed operations through the documented versioned API surface and cover them with contract fixtures/tests. **(Review P2: the `/v1` versioned surface already exists for tools/skills/subagents/capabilities/conversation/ws — `src/http/routers/v1.py`. Reframe: this is "desktop identity filtering + contract fixtures on the existing `/v1` surface", not new API work.)**
 - Return only the desktop identity's enabled tools/skills/subagents; the fixed exclusions in §3.3 remain enforced server-side.
 - Preserve scope/capability enforcement on every detail, mutation, and subagent-job route rather than trusting a hidden/disabled UI control.
 - Make unavailable features explicit and stable in responses so the client can render an empty state rather than infer absence from a transport error.
@@ -264,6 +265,9 @@ Before shipping, tests must demonstrate:
 4. What browser-profile persistence policy balances convenient signed-in sessions with secret handling and supportability? The runtime must keep its profile under `.system/browser/` and use platform secure storage where supported.
 5. Does the first arm64 release include the memory/vector extra, or does it ship a smaller runtime profile? This affects DMG size, signing, cold start, and feature parity.
 6. What is the recovery/support policy if root-level data and `~/Assistant/Users/native_sdk_chat/` both exist after an interrupted/manual migration?
+7. **Dev-route stripping (review P2):** `/dev/gmail-demo` is unauthenticated (in `_PUBLIC_PATHS`) and the dev router mounts unconditionally (`src/http/routers/dev.py`). Confirm: desktop mode strips the dev router entirely.
+8. **MCP enablement (review P2):** shipped `config.yaml` has `mcp.enabled: true`. Confirm the v0.1.0 stance — MCP off in desktop mode, or enabled with a reviewed config?
+9. **`shell_execute` stance (review P2):** `shell_execute` is `destructive=True` (interrupts on use) and shipped `shell_tool.allowed_commands` includes `python3`/`node`/`agent-browser`. Confirm the v0.1.0 consumer-DMG stance: keep-with-HITL (interruption on every use) or exclude from the desktop capability profile. Decide alongside §8's browser question (Q5).
 
 ## 9. Recommended implementation order
 
