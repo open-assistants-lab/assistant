@@ -14,8 +14,17 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
     subparsers.add_parser("http", help="Start HTTP server")
+    subparsers.add_parser(
+        "desktop-server", help="Run the local desktop sidecar (v0.1)"
+    )
 
     args = parser.parse_args()
+
+    if args.command == "desktop-server":
+        from src.http.desktop import desktop_main
+
+        desktop_main()
+        return
 
     if args.command == "http" or args.command is None:
         from src.http.main import run as http_run

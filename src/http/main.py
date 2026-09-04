@@ -39,6 +39,7 @@ from src.http.routers import (
 from src.http.routers.auth_keys import router as auth_keys_router
 from src.http.routers.connectors import router as connectors_router
 from src.http.routers.dashboard import router as dashboard_router
+from src.http.routers.bootstrap import router as bootstrap_router
 from src.http.routers.dev import router as dev_router
 from src.http.routers.governance import router as governance_router
 from src.http.routers.review import router as review_router
@@ -233,13 +234,19 @@ async def api_key_auth_middleware(request: Request, call_next: Any) -> Any:
 
     import inspect
 
-    from src.http.auth import get_resolver
+    from src.http.auth import get_resolver, desktop_mode_active
 
     result = get_resolver().resolve(request)
     if inspect.isawaitable(result):
         result = await result
     if result is None:
         return JSONResponse({"detail": "Invalid API key"}, status_code=401)
+
+    # Desktop v0.1 task 3: the server resolves identity as default_user —
+    # the native client never chooses user_id/workspace. A client-supplied
+    # user_id is ignored (rewritten) rather than honored.
+    if desktop_mode_active() and result.user_id == "default_user":
+        request.state.desktop_forced_identity = True
 
     # P0-T2: stash the resolved identity so routers can enforce user_id
     # without resolving twice.
@@ -384,7 +391,11 @@ except Exception:
     traceback.print_exc()
 
 app.include_router(connectors_router)
-app.include_router(dev_router)
+app.include_router(bootstrap_router)
+# Desktop v0.1 (D0 Q7 decision): the dev router is stripped entirely in
+# desktop-server mode — /dev/gmail-demo is unauthenticated and dev-only.
+if not os.environ.get("DEPLOYMENT_MODE") == "desktop-server":
+    app.include_router(dev_router)
 
 # P0-T5: /v1 aliases for the stable partner surface (same handlers, no
 # redirect; auth middleware is path-agnostic and applies identically).

@@ -12,6 +12,9 @@ here so existing callers keep working unchanged.
 
 from __future__ import annotations
 
+import os
+import secrets
+
 from fastapi import HTTPException, Request
 
 from src.http.auth.legacy import is_localhost, require_auth, verify_key
@@ -41,6 +44,11 @@ def enforce_user_id(request_user_id: str, resolved: UserIdentity | None) -> None
     """
     if resolved is None or resolved.trust_domain == "solo":
         return
+    if resolved.trust_domain == "desktop":
+        # Desktop v0.1 task 3: server-side identity. The client never
+        # chooses user_id — mismatches are IGNORED (rewritten to
+        # default_user by resolve_user_id), not rejected.
+        return
     if resolved.user_id is None:
         # Authenticated but the resolver can't scope to a user (e.g. the
         # shared-secret reference impl — one key per deployment). Enforcement
@@ -64,6 +72,17 @@ def get_resolver() -> IdentityResolver:
     resolver here.
     """
     global _DEFAULT_RESOLVER
+    # Desktop sidecar mode: the launch-token resolver is the authority
+    # (D0 P1 — SOLO_BYPASS disabled; the token IS the auth). Checked BEFORE
+    # the cached default: desktop mode must win over any resolver cached
+    # from a prior non-desktop request in the same process.
+    if desktop_mode_active():
+        tokens = set(_desktop_launch_tokens)
+        env_token = os.environ.get("DESKTOP_LAUNCH_TOKEN", "")
+        if env_token:
+            tokens.add(env_token)
+        if tokens:
+            return DesktopTokenResolver(tokens)
     if _DEFAULT_RESOLVER is None:
         from src.config.settings import get_settings
 
@@ -96,6 +115,9 @@ def resolve_user_id(request: Request, request_user_id: str) -> str:
     from src.config.settings import get_settings
 
     identity = getattr(getattr(request, "state", None), "identity", None)
+    if identity is not None and identity.trust_domain == "desktop":
+        # Desktop: server-side default_user wins over any client user_id.
+        return identity.user_id
     if identity is not None and identity.trust_domain != "solo":
         # Same contract as enforce_user_id: any identity that knows the
         # caller (trusted-network per-user resolver or untrusted per-user
@@ -105,3 +127,60 @@ def resolve_user_id(request: Request, request_user_id: str) -> str:
         if identity.user_id:
             return identity.user_id
     return request_user_id
+
+
+# ---------------------------------------------------------------------------
+# Desktop sidecar auth (desktop v0.1, Phase D1)
+# ---------------------------------------------------------------------------
+
+_desktop_launch_tokens: set[str] = set()
+
+
+def set_desktop_launch_token(token: str) -> None:
+    """Register the current sidecar run's launch token (desktop v0.1 D1).
+
+    When set, the desktop resolver becomes the auth authority: SOLO_BYPASS
+    is disabled in desktop mode and the launch token IS the credential
+    (D0 P1 decision). Every request resolves to `default_user`.
+    Tokens accumulate (env-provided + runtime-generated) — the active run
+    accepts any token registered for the current process.
+    """
+    _desktop_launch_tokens.add(token)
+
+
+def desktop_mode_active() -> bool:
+    """True when desktop-server mode is configured for this process.
+
+    Reads the env var DIRECTLY: flat nested env vars (DEPLOYMENT_MODE ->
+    deployment.mode) never reach the settings singleton (the AGENT_MODEL
+    class of pydantic-settings limitation) and a stale cached singleton
+    would disagree with the launching process env.
+    """
+    import os
+
+    return os.environ.get("DEPLOYMENT_MODE") == "desktop-server"
+
+
+class DesktopTokenResolver:
+    """Launch-token resolver for the desktop sidecar.
+
+    The launch token IS the auth (SOLO_BYPASS disabled by D0 decision).
+    Identity is always `default_user` — the native client never chooses a
+    user_id or workspace (server-side identity, Phase D1 task 3).
+    """
+
+    def __init__(self, tokens: set[str]) -> None:
+        self.tokens = tokens
+
+    def resolve(self, request: Request) -> UserIdentity | None:
+        from src.storage.paths import DEFAULT_USER_ID
+
+        header = request.headers.get("authorization", "")
+        if not header.startswith("Bearer "):
+            return None
+        supplied = header[7:]
+        if not any(
+            secrets.compare_digest(supplied, tok) for tok in self.tokens
+        ):
+            return None
+        return UserIdentity(user_id=DEFAULT_USER_ID, key_id=None, trust_domain="desktop")
