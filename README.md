@@ -47,7 +47,7 @@ Everything runs locally on your machine. Your data lives at `~/Assistant/` — n
 uv sync --extra dev
 
 # Run the server
-uv run assistant-sdk http
+uv run assistant http
 
 # Tests
 uv run pytest
@@ -63,9 +63,9 @@ The same engine ships on PyPI as `assistant-sdk` — a deployable server, not an
 importable library:
 
 ```bash
-pip install assistant-sdk          # light base (no heavy vector deps)
-pip install "assistant-sdk[memory-vector]"  # + ChromaDB + sentence-transformers (semantic memory/embeddings)
-pip install "assistant-sdk[analytics]"      # + DuckDB analytics mirror
+# Optional extras install from source via uv (no PyPI path):
+uv sync --extra memory-vector      # + ChromaDB + sentence-transformers (semantic memory/embeddings)
+uv sync --extra analytics          # + DuckDB analytics mirror
 assistant-sdk http                  # zero-config first run
 ```
 
@@ -75,7 +75,7 @@ when the matching extra is missing.
 
 ### Build
 
-The backend is the API server — run with `uv run assistant-sdk http`.
+The backend is the API server — run with `uv run assistant http`.
 
 The **native desktop app** lives in `native-sdk-experiment/` (Zig + Native SDK):
 
