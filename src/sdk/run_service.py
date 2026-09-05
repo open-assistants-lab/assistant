@@ -66,7 +66,7 @@ from src.sdk.run_models import (
     UsageAggregate,
     VerificationOutcome,
 )
-from src.sdk.runner import get_sdk_loop, register_user_loop, unregister_user_loop
+from src.sdk.runner import get_sdk_loop, get_user_loop, register_user_loop, unregister_user_loop
 from src.sdk.session_worker import (
     SessionBusyError,
     SessionLock,
@@ -74,9 +74,59 @@ from src.sdk.session_worker import (
     session_key,
 )
 from src.storage.messages import Message as StorageMessage
-from src.storage.messages import MessageStore
+from src.storage.messages import MessageStore, aget_message_store
 
 logger = get_logger()
+
+
+async def handle_subagent_completion(event: Any) -> None:
+    """Feed terminal subagent output back into the parent session.
+
+    Active parent loops receive a steer so the current turn can react at the
+    next tool boundary. Idle sessions get a durable assistant-side completion
+    note so the next turn reloads the result in conversation context.
+    """
+    if not getattr(event, "session_id", None):
+        return
+
+    message = event.message()
+    store = await aget_message_store(event.user_id, event.workspace_id)
+    active_loop = get_user_loop(event.user_id, event.session_id)
+    if active_loop is not None:
+        def _persist_steer(text: str) -> None:
+            store.add_message(
+                "user",
+                text,
+                metadata={
+                    "steer": True,
+                    "subagent_completion": True,
+                    "task_id": event.task_id,
+                },
+                session_id=event.session_id,
+            )
+
+        active_loop.set_steer_sink(_persist_steer)
+        active_loop.steer(message)
+        return
+
+    store.add_message(
+        "assistant",
+        message,
+        metadata={
+            "subagent_completion": True,
+            "task_id": event.task_id,
+            "status": event.status,
+        },
+        session_id=event.session_id,
+    )
+
+
+try:
+    from src.sdk.subagent_completion import completion_bus
+
+    completion_bus.subscribe(None, None, handle_subagent_completion)
+except Exception:
+    pass
 
 
 def _storage_messages_to_sdk(history: list[Any]) -> list[Message]:

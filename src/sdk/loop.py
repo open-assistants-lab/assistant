@@ -793,6 +793,8 @@ class AgentLoop:
             args["user_id"] = self.user_id
         if "workspace_id" in props:
             args["workspace_id"] = getattr(self, "workspace_id", "personal")
+        if "session_id" in props:
+            args["session_id"] = getattr(self, "_flow_session_id", None)
         if args == tc.arguments:
             return tc
         return ToolCall(id=tc.id, name=tc.name, arguments=args)

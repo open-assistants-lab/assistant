@@ -312,6 +312,7 @@ class SubagentCoordinator:
         task: str,
         parent_id: str | None = None,
         timeout_seconds: int | None = None,
+        parent_session_id: str | None = None,
     ) -> str:
         """Run a subagent synchronously and return the result string.
 
@@ -354,22 +355,29 @@ class SubagentCoordinator:
             completed = await db.set_completed(task_id, result)
             if not completed:
                 await self._set_cancelled_if_requested(task_id, db)
+            await self._publish_completion(task_id, profile.name, TaskStatus.COMPLETED.value, result, None, parent_session_id)
             return result.output
         except TaskCancelledError:
             await db.set_cancelled(task_id)
+            await self._publish_completion(task_id, profile.name, TaskStatus.CANCELLED.value, None, "cancelled", parent_session_id)
             return "Cancelled: subagent was cancelled during execution."
         except SubagentCancelledError:
             await db.set_cancelled(task_id)
+            await self._publish_completion(task_id, profile.name, TaskStatus.CANCELLED.value, None, "cancelled", parent_session_id)
             return "Cancelled: subagent was cancelled during execution."
         except TimeoutError:
-            failed = await db.set_failed(task_id, f"timeout after {effective_timeout}s")
+            error = f"timeout after {effective_timeout}s"
+            failed = await db.set_failed(task_id, error)
             if not failed:
                 await self._set_cancelled_if_requested(task_id, db)
+            await self._publish_completion(task_id, profile.name, TaskStatus.FAILED.value, None, error, parent_session_id)
             return f"Timeout: subagent did not complete within {effective_timeout}s."
         except Exception as e:
-            failed = await db.set_failed(task_id, f"{type(e).__name__}: {e}")
+            error = f"{type(e).__name__}: {e}"
+            failed = await db.set_failed(task_id, error)
             if not failed:
                 await self._set_cancelled_if_requested(task_id, db)
+            await self._publish_completion(task_id, profile.name, TaskStatus.FAILED.value, None, error, parent_session_id)
             return f"Error: {type(e).__name__}: {e}"
         finally:
             _active.pop(task_id, None)
@@ -379,6 +387,7 @@ class SubagentCoordinator:
         agent_name: str,
         task: str,
         parent_id: str | None = None,
+        parent_session_id: str | None = None,
     ) -> str:
         if not _subagent_enabled(self.user_id, agent_name):
             raise ValueError(f"Subagent '{agent_name}' is disabled.")
@@ -397,7 +406,10 @@ class SubagentCoordinator:
         ctx = SubagentContext(on_progress=self._make_progress_cb(task_id))
         await self._register_active_context(task_id, db, ctx)
 
-        background_task = asyncio.create_task(self._run_job(task_id, ctx))
+        if parent_session_id is None:
+            background_task = asyncio.create_task(self._run_job(task_id, ctx))
+        else:
+            background_task = asyncio.create_task(self._run_job(task_id, ctx, parent_session_id))
         self._background_tasks.add(background_task)
         background_task.add_done_callback(self._on_background_task_done)
         return task_id
@@ -422,7 +434,12 @@ class SubagentCoordinator:
             await asyncio.sleep(5)
             await db.heartbeat(task_id, worker_id)
 
-    async def _run_job(self, task_id: str, ctx: SubagentContext | None = None) -> None:
+    async def _run_job(
+        self,
+        task_id: str,
+        ctx: SubagentContext | None = None,
+        parent_session_id: str | None = None,
+    ) -> None:
         db = await self._get_db()
         worker_id = f"{self.user_id}:{self.workspace_id}:{id(self)}"
         claimed = await db.claim_task(task_id, worker_id)
@@ -449,20 +466,59 @@ class SubagentCoordinator:
                 completed = await db.set_completed(task_id, result)
                 if not completed:
                     await self._set_cancelled_if_requested(task_id, db)
+                await self._publish_completion(task_id, profile.name, TaskStatus.COMPLETED.value, result, None, parent_session_id)
         except TaskCancelledError:
             await db.set_cancelled(task_id)
+            await self._publish_completion(task_id, profile.name, TaskStatus.CANCELLED.value, None, "cancelled", parent_session_id)
         except TimeoutError:
-            failed = await db.set_failed(task_id, f"timeout after {profile.timeout_seconds}s")
+            error = f"timeout after {profile.timeout_seconds}s"
+            failed = await db.set_failed(task_id, error)
             if not failed:
                 await self._set_cancelled_if_requested(task_id, db)
+            await self._publish_completion(task_id, profile.name, TaskStatus.FAILED.value, None, error, parent_session_id)
         except Exception as e:
-            failed = await db.set_failed(task_id, f"{type(e).__name__}: {e}")
+            error = f"{type(e).__name__}: {e}"
+            failed = await db.set_failed(task_id, error)
             if not failed:
                 await self._set_cancelled_if_requested(task_id, db)
+            await self._publish_completion(task_id, profile.name, TaskStatus.FAILED.value, None, error, parent_session_id)
         finally:
             heartbeat_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat_task
+
+    async def _publish_completion(
+        self,
+        task_id: str,
+        agent_name: str,
+        status: str,
+        result: SubagentResult | None,
+        error: str | None,
+        parent_session_id: str | None,
+    ) -> None:
+        if not parent_session_id:
+            return
+        try:
+            from src.sdk.subagent_completion import SubagentCompletion, completion_bus
+
+            await completion_bus.publish(
+                SubagentCompletion(
+                    user_id=self.user_id,
+                    workspace_id=self.requested_workspace_id,
+                    session_id=parent_session_id,
+                    task_id=task_id,
+                    agent_name=agent_name,
+                    status=status,
+                    result=result,
+                    error=error,
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "subagent.completion_publish_failed",
+                {"task_id": task_id, "error": str(exc)},
+                user_id=self.user_id,
+            )
 
     async def _set_cancelled_if_requested(self, task_id: str, db: WorkQueueDB) -> bool:
         latest = await db.get_task(task_id)

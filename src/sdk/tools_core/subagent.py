@@ -264,6 +264,7 @@ async def subagent_start(
     user_id: str,
     workspace_id: str = "personal",
     parent_id: str | None = None,
+    session_id: str | None = None,
 ) -> str:
     """Start a subagent to execute a task. Returns job ID immediately.
 
@@ -287,7 +288,15 @@ async def subagent_start(
     if existing is None:
         return f"Error: Subagent '{agent_name}' not found. Create it first with subagent_create."
 
-    task_id_str = await coordinator.start(agent_name, task, parent_id=parent_id)
+    if session_id is None:
+        task_id_str = await coordinator.start(agent_name, task, parent_id=parent_id)
+    else:
+        task_id_str = await coordinator.start(
+            agent_name,
+            task,
+            parent_id=parent_id,
+            parent_session_id=session_id,
+        )
 
     return f"""Subagent job started for '{agent_name}'.
 
@@ -309,6 +318,7 @@ async def subagent_delegate(
     workspace_id: str = "personal",
     parent_id: str | None = None,
     timeout_seconds: int = 120,
+    session_id: str | None = None,
 ) -> str:
     """Run a subagent and wait for the result. Returns the subagent's output.
 
@@ -339,10 +349,21 @@ async def subagent_delegate(
         return f"Error: Subagent '{agent_name}' not found. Create it first with subagent_create."
 
     try:
-        result = await coordinator.delegate(
-            agent_name, task, parent_id=parent_id,
-            timeout_seconds=timeout_seconds,
-        )
+        if session_id is None:
+            result = await coordinator.delegate(
+                agent_name,
+                task,
+                parent_id=parent_id,
+                timeout_seconds=timeout_seconds,
+            )
+        else:
+            result = await coordinator.delegate(
+                agent_name,
+                task,
+                parent_id=parent_id,
+                timeout_seconds=timeout_seconds,
+                parent_session_id=session_id,
+            )
         return result
     except Exception as e:
         return f"Error running '{agent_name}': {type(e).__name__}: {e}"

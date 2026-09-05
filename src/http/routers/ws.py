@@ -556,6 +556,14 @@ async def ws_conversation(websocket: WebSocket) -> None:
     current_provider_keys: dict[str, str] | None = None
     pending_container: list[Any] = [None]
 
+    from src.sdk.subagent_completion import SubagentCompletion, completion_bus
+
+    async def _push_subagent_completion(event: SubagentCompletion) -> None:
+        if event.user_id == user_id and event.session_id == session_id:
+            await websocket.send_json(event.to_ws_payload())
+
+    unsubscribe_completion = completion_bus.subscribe(None, None, _push_subagent_completion)
+
     # Persistent reader (audit P6 part B): ONE task owns the socket and feeds
     # an asyncio.Queue. Per-pass receive tasks raced the stream and cancelled a
     # pending frame at stream end, losing it (a frame popped from the socket
@@ -1148,5 +1156,6 @@ async def ws_conversation(websocket: WebSocket) -> None:
         except Exception:
             pass
     finally:
+        unsubscribe_completion()
         if not reader_task.done():
             reader_task.cancel()
