@@ -322,6 +322,13 @@ async def test_subagent_update_rejects_validation_errors_before_save(monkeypatch
     assert validated["tools"] == ["not_a_tool"]
 
 
+def test_subagent_delegate_does_not_accept_parent_session():
+    """Inline delegation returns through its tool result, never the completion bus."""
+    from src.sdk.tools_core import subagent as mod
+
+    assert "session_id" not in mod.subagent_delegate.parameters["properties"]
+
+
 def test_subagent_delegate_registered():
     from src.sdk.native_tools import get_native_tools
 

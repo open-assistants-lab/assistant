@@ -125,22 +125,18 @@ def _build_system_prompt(
 
 
 def _schema_provider_options(
-    provider: Any,
-    model_str: str,
+    _provider: Any,
+    _model_str: str,
     existing: dict[str, Any] | None,
-    schema: dict[str, Any] | None,
+    _schema: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    if not schema:
-        return existing or None
-    provider_id = getattr(provider, "provider_id", None) or model_str.split(":", 1)[0]
-    merged = dict(existing or {})
-    provider_options = dict(merged.get(provider_id) or {})
-    provider_options.setdefault(
-        "response_format",
-        {"type": "json_schema", "json_schema": schema},
-    )
-    merged[provider_id] = provider_options
-    return merged
+    """Keep provider options explicit; schema enforcement is provider-agnostic.
+
+    Each provider has a distinct structured-output API, so forwarding an
+    OpenAI-shaped ``response_format`` to every backend breaks non-OpenAI
+    agents. The coordinator validates the returned JSON locally instead.
+    """
+    return dict(existing) if existing else None
 
 
 def _parse_and_validate_output(output: str, schema: dict[str, Any]) -> Any:
@@ -241,14 +237,16 @@ class SubagentCoordinator:
         )
 
         # Write companion files
+        provider_path = agent_path / "provider.json"
+        schema_path = agent_path / "output-schema.json"
         if profile.provider_options:
-            (agent_path / "provider.json").write_text(
-                json.dumps(profile.provider_options, indent=2)
-            )
+            provider_path.write_text(json.dumps(profile.provider_options, indent=2))
+        else:
+            provider_path.unlink(missing_ok=True)
         if profile.output_schema_def:
-            (agent_path / "output-schema.json").write_text(
-                json.dumps(profile.output_schema_def, indent=2)
-            )
+            schema_path.write_text(json.dumps(profile.output_schema_def, indent=2))
+        else:
+            schema_path.unlink(missing_ok=True)
 
         logger.info(
             "subagent.created",
@@ -271,14 +269,16 @@ class SubagentCoordinator:
         (agent_path / "PROFILE.md").write_text(dumps_profile(updated))
 
         # Write companion files
+        provider_path = agent_path / "provider.json"
+        schema_path = agent_path / "output-schema.json"
         if updated.provider_options:
-            (agent_path / "provider.json").write_text(
-                json.dumps(updated.provider_options, indent=2)
-            )
+            provider_path.write_text(json.dumps(updated.provider_options, indent=2))
+        else:
+            provider_path.unlink(missing_ok=True)
         if updated.output_schema_def:
-            (agent_path / "output-schema.json").write_text(
-                json.dumps(updated.output_schema_def, indent=2)
-            )
+            schema_path.write_text(json.dumps(updated.output_schema_def, indent=2))
+        else:
+            schema_path.unlink(missing_ok=True)
 
         logger.info(
             "subagent.updated",
@@ -355,7 +355,6 @@ class SubagentCoordinator:
         task: str,
         parent_id: str | None = None,
         timeout_seconds: int | None = None,
-        parent_session_id: str | None = None,
     ) -> str:
         """Run a subagent synchronously and return the result string.
 
@@ -396,36 +395,26 @@ class SubagentCoordinator:
                 timeout=effective_timeout,
             )
             completed = await db.set_completed(task_id, result)
-            if completed:
-                await self._publish_completion(
-                    task_id, profile.name, TaskStatus.COMPLETED.value, result, None, parent_session_id
-                )
-            elif await self._set_cancelled_if_requested(task_id, db):
-                await self._publish_completion(
-                    task_id, profile.name, TaskStatus.CANCELLED.value, None, "cancelled", parent_session_id
-                )
+            if not completed:
+                await self._set_cancelled_if_requested(task_id, db)
             return result.output
         except TaskCancelledError:
             await db.set_cancelled(task_id)
-            await self._publish_completion(task_id, profile.name, TaskStatus.CANCELLED.value, None, "cancelled", parent_session_id)
             return "Cancelled: subagent was cancelled during execution."
         except SubagentCancelledError:
             await db.set_cancelled(task_id)
-            await self._publish_completion(task_id, profile.name, TaskStatus.CANCELLED.value, None, "cancelled", parent_session_id)
             return "Cancelled: subagent was cancelled during execution."
         except TimeoutError:
             error = f"timeout after {effective_timeout}s"
             failed = await db.set_failed(task_id, error)
             if not failed:
                 await self._set_cancelled_if_requested(task_id, db)
-            await self._publish_completion(task_id, profile.name, TaskStatus.FAILED.value, None, error, parent_session_id)
             return f"Timeout: subagent did not complete within {effective_timeout}s."
         except Exception as e:
             error = f"{type(e).__name__}: {e}"
             failed = await db.set_failed(task_id, error)
             if not failed:
                 await self._set_cancelled_if_requested(task_id, db)
-            await self._publish_completion(task_id, profile.name, TaskStatus.FAILED.value, None, error, parent_session_id)
             return f"Error: {type(e).__name__}: {e}"
         finally:
             _active.pop(task_id, None)
@@ -510,6 +499,14 @@ class SubagentCoordinator:
             latest = await db.get_task(task_id)
             if latest and latest["status"] == TaskStatus.CANCELLING.value:
                 await db.set_cancelled(task_id)
+                await self._publish_completion(
+                    task_id,
+                    profile.name,
+                    TaskStatus.CANCELLED.value,
+                    None,
+                    "cancelled",
+                    parent_session_id,
+                )
             else:
                 completed = await db.set_completed(task_id, result)
                 if completed:
@@ -526,15 +523,25 @@ class SubagentCoordinator:
         except TimeoutError:
             error = f"timeout after {profile.timeout_seconds}s"
             failed = await db.set_failed(task_id, error)
-            if not failed:
-                await self._set_cancelled_if_requested(task_id, db)
-            await self._publish_completion(task_id, profile.name, TaskStatus.FAILED.value, None, error, parent_session_id)
+            if failed:
+                await self._publish_completion(
+                    task_id, profile.name, TaskStatus.FAILED.value, None, error, parent_session_id
+                )
+            elif await self._set_cancelled_if_requested(task_id, db):
+                await self._publish_completion(
+                    task_id, profile.name, TaskStatus.CANCELLED.value, None, "cancelled", parent_session_id
+                )
         except Exception as e:
             error = f"{type(e).__name__}: {e}"
             failed = await db.set_failed(task_id, error)
-            if not failed:
-                await self._set_cancelled_if_requested(task_id, db)
-            await self._publish_completion(task_id, profile.name, TaskStatus.FAILED.value, None, error, parent_session_id)
+            if failed:
+                await self._publish_completion(
+                    task_id, profile.name, TaskStatus.FAILED.value, None, error, parent_session_id
+                )
+            elif await self._set_cancelled_if_requested(task_id, db):
+                await self._publish_completion(
+                    task_id, profile.name, TaskStatus.CANCELLED.value, None, "cancelled", parent_session_id
+                )
         finally:
             heartbeat_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -590,7 +597,7 @@ class SubagentCoordinator:
         db: WorkQueueDB,
         ctx: SubagentContext | None = None,
     ) -> SubagentResult:
-        from src.sdk.loop import AgentLoop, RunConfig
+        from src.sdk.loop import AgentLoop, CostTracker, RunConfig
         from src.sdk.middleware_summarization import SummarizationMiddleware
         from src.sdk.providers.factory import create_model_from_config
 
@@ -599,6 +606,13 @@ class SubagentCoordinator:
 
         tools = _build_tools_for_subagent(profile, user_id=self.user_id)
         system_prompt = _build_system_prompt(profile, self.user_id, self.workspace_id)
+        try:
+            from src.sdk.registry import get_model_info
+
+            model_info = get_model_info(model_str)
+            model_cost = model_info.cost if model_info and model_info.cost else None
+        except Exception:
+            model_cost = None
 
         run_config = RunConfig(
             max_llm_calls=profile.max_llm_calls,
@@ -639,13 +653,20 @@ class SubagentCoordinator:
         loop.subagent_ctx = ctx or SubagentContext()
 
         messages = [Message.user(task)]
-        result_messages = await loop.run(messages)
+        cost_tracker = CostTracker(
+            emit_usage=getattr(loop, "_emit_usage_event", None), model_cost=model_cost
+        )
+        result_messages = await loop.run(messages, cost_tracker=cost_tracker)
         structured_output: Any | None = None
         if profile.output_schema_def:
             output = _extract_final_output(result_messages)
             try:
                 structured_output = _parse_and_validate_output(output, profile.output_schema_def)
             except ValueError:
+                if limit := cost_tracker.exceeds_limits(run_config):
+                    raise ValueError(
+                        f"schema validation failed: no remaining budget for the schema retry ({limit})"
+                    )
                 retry_messages = [
                     *result_messages,
                     Message.user(
@@ -653,7 +674,7 @@ class SubagentCoordinator:
                         "Retry once and return only schema-valid JSON."
                     ),
                 ]
-                result_messages = await loop.run(retry_messages)
+                result_messages = await loop.run(retry_messages, cost_tracker=cost_tracker)
                 output = _extract_final_output(result_messages)
                 structured_output = _parse_and_validate_output(output, profile.output_schema_def)
 
@@ -668,18 +689,7 @@ class SubagentCoordinator:
                 total_reasoning += msg.usage.reasoning_tokens
                 llm_calls += 1
 
-        try:
-            from src.sdk.registry import get_model_info
-            model_info = get_model_info(model_str)
-            cost = model_info.cost if model_info and model_info.cost else None
-        except Exception:
-            cost = None
-
-        cost_usd = 0.0
-        if cost:
-            cost_usd = (total_input / 1_000_000) * cost.input + (total_output / 1_000_000) * cost.output
-            if cost.reasoning and total_reasoning:
-                cost_usd += (total_reasoning / 1_000_000) * cost.reasoning
+        cost_usd = cost_tracker.total_cost_usd
 
         if profile.output_schema_def:
             output = _extract_final_output(result_messages)

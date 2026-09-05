@@ -1273,6 +1273,26 @@ class TestUsageTracking:
         result = await loop.run([Message.user("Hi")])
         assert len(result) >= 3
 
+    async def test_run_accumulates_usage_in_supplied_cost_tracker(self):
+        """A caller can carry limits across bounded retry runs."""
+        from src.sdk.loop import CostTracker
+
+        provider = MockProvider(
+            responses=[
+                Message.assistant(
+                    content="Hello!", usage=Usage(input_tokens=10, output_tokens=5)
+                ),
+            ]
+        )
+        tracker = CostTracker()
+        loop = AgentLoop(provider=provider, tools=[])
+
+        await loop.run([Message.user("Hi")], cost_tracker=tracker)
+
+        assert tracker.llm_calls == 1
+        assert tracker.total_input_tokens == 10
+        assert tracker.total_output_tokens == 5
+
     async def test_usage_none_in_response(self):
         """Provider response without usage still works."""
         provider = MockProvider(
@@ -1316,6 +1336,16 @@ class TestUsageTracking:
         assert tracker.total_input_tokens == 61_000  # budget accounting includes cache
         assert tracker.total_cache_read_tokens == 50_000
         assert tracker.total_cache_creation_tokens == 10_000
+
+    async def test_cost_tracker_uses_default_model_cost(self):
+        """Shared trackers retain price information across retry runs."""
+        from src.sdk.loop import CostTracker
+        from src.sdk.providers.base import ModelCost
+
+        tracker = CostTracker(model_cost=ModelCost(input=2.0, output=4.0))
+        tracker.add_usage(input_tokens=1_000, output_tokens=500)
+
+        assert tracker.total_cost_usd == 0.004
 
     async def test_cost_tracker_cache_tokens_count_toward_max_tokens_total(self):
         """Cache tokens count toward max_tokens_total so long cached contexts trip the budget."""

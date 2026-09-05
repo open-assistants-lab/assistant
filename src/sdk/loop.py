@@ -179,7 +179,9 @@ class CostTracker:
     """Tracks token usage and estimated cost per invocation."""
 
     def __init__(
-        self, emit_usage: Callable[[AuditEvent], None] | None = None
+        self,
+        emit_usage: Callable[[AuditEvent], None] | None = None,
+        model_cost: ModelCost | None = None,
     ) -> None:
         self.total_input_tokens: int = 0
         self.total_output_tokens: int = 0
@@ -192,6 +194,7 @@ class CostTracker:
         # so each add_usage() becomes an upstream "usage" AuditEvent. A bare
         # CostTracker() (tests, tools) stays silent.
         self._emit_usage = emit_usage
+        self._model_cost = model_cost
         self._llm_call_count = 0
         self._last_emitted_cost = 0.0
         self._last_emitted_tool_calls = 0
@@ -215,6 +218,7 @@ class CostTracker:
         self.total_cache_read_tokens += cache_read_tokens
         self.total_cache_creation_tokens += cache_creation_tokens
         self.llm_calls += 1
+        cost = cost or self._model_cost
         if cost:
             self.total_cost_usd += (input_tokens / 1_000_000) * cost.input + (
                 output_tokens / 1_000_000
@@ -1437,8 +1441,17 @@ class AgentLoop:
             return
         ctx.record_tool_call(tc.name, json.dumps(tc.arguments, sort_keys=True))
 
-    async def run(self, messages: list[Message]) -> list[Message]:
-        """Run the agent loop to completion. Returns final message list."""
+    async def run(
+        self,
+        messages: list[Message],
+        *,
+        cost_tracker: CostTracker | None = None,
+    ) -> list[Message]:
+        """Run the agent loop to completion. Returns final message list.
+
+        A caller coordinating a bounded retry may supply its existing tracker
+        so LLM-call, token, and cost limits remain cumulative.
+        """
         import uuid as _uuid
 
         # Per-run correlation id for telemetry/metering joins (M1 review P2:
@@ -1447,7 +1460,7 @@ class AgentLoop:
         previous = _current_agent_loop.get()
         token = _bind_current_agent_loop(self)
         try:
-            return await self._run_impl(messages)
+            return await self._run_impl(messages, cost_tracker=cost_tracker)
         finally:
             _restore_current_agent_loop(token, previous)
             # D1-1 review P1: wire the analytics sidecar flush at run end —
@@ -1573,7 +1586,12 @@ class AgentLoop:
         except Exception:  # pragma: no cover - emit-only contract
             pass
 
-    async def _run_impl(self, messages: list[Message]) -> list[Message]:
+    async def _run_impl(
+        self,
+        messages: list[Message],
+        *,
+        cost_tracker: CostTracker | None = None,
+    ) -> list[Message]:
         """Internal run implementation (wrapped by run() for ContextVar lifecycle)."""
         self._reset_context_telemetry()
         self._log_session_header(list(messages))
@@ -1591,7 +1609,7 @@ class AgentLoop:
         state.extra["_user_id"] = getattr(self, "_flow_user_id", "default")
         state.extra["_session_id"] = getattr(self, "_flow_session_id", "default")
         state.extra["_model"] = getattr(self, "_flow_model", None)
-        cost_tracker = CostTracker(emit_usage=self._emit_usage_event)
+        cost_tracker = cost_tracker or CostTracker(emit_usage=self._emit_usage_event)
 
         await self._run_hooks("abefore_agent", state)
 
