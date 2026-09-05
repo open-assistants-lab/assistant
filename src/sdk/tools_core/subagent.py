@@ -61,8 +61,7 @@ def _run_async(coro: Any) -> Any:
         future = asyncio.run_coroutine_threadsafe(coro, loop)
         return future.result(timeout=_TIMEOUT_SECONDS)
     except TimeoutError:
-        with _loop_lock:
-            _recreate_loop()
+        future.cancel()
         logger.warning(
             "subagent.bridge_timeout",
             {"timeout_s": _TIMEOUT_SECONDS},
@@ -72,8 +71,10 @@ def _run_async(coro: Any) -> Any:
             f"Subagent tool call timed out after {_TIMEOUT_SECONDS}s"
         )
     except Exception as e:
-        with _loop_lock:
-            _recreate_loop()
+        if loop.is_closed():
+            with _loop_lock:
+                if _loop is loop:
+                    _recreate_loop()
         logger.error(
             "subagent.bridge_error",
             {"error": str(e), "error_type": type(e).__name__},
@@ -402,8 +403,7 @@ async def subagent_delegate(
 
 subagent_delegate.annotations = ToolAnnotations(
     title="Run Subagent (wait for result)",
-    read_only=True,
-    idempotent=True,
+    destructive=True,
     open_world=True,
 )
 

@@ -363,42 +363,81 @@ async def test_subagent_delegate_timeout(monkeypatch):
     assert "Timeout" in result
 
 
-def test_subagent_delegate_is_parallel_safe():
-    """Verify annotations mark it as read_only so it runs in parallel batch."""
+def test_subagent_delegate_requires_hitl_not_parallel_safe():
+    """Delegation can write or hit the network, so it must not be marked read-only/idempotent."""
     from src.sdk.tools_core import subagent as mod
 
     ann = mod.subagent_delegate.annotations
-    assert ann.read_only is True
-    assert ann.idempotent is True
-    assert ann.destructive is False
-    def test_run_async_respects_timeout(self):
-        import asyncio
-        from unittest import mock
+    assert ann.read_only is False
+    assert ann.idempotent is False
+    assert ann.destructive is True
 
-        import src.sdk.tools_core.subagent as subagent_module
 
-        async def slow_coro():
+def test_run_async_respects_timeout_and_cancels_future(monkeypatch):
+    import asyncio
+    import concurrent.futures
+    import time
+
+    import src.sdk.tools_core.subagent as subagent_module
+
+    cancelled = concurrent.futures.Future()
+
+    async def slow_coro():
+        try:
             await asyncio.sleep(60)
-            return "done"
+        except asyncio.CancelledError:
+            cancelled.set_result(True)
+            raise
 
-        with mock.patch.object(subagent_module, "_TIMEOUT_SECONDS", 0.5):
-            with pytest.raises(TimeoutError):
-                subagent_module._run_async(slow_coro())
+    monkeypatch.setattr(subagent_module, "_TIMEOUT_SECONDS", 0.05)
+    with pytest.raises(TimeoutError):
+        subagent_module._run_async(slow_coro())
 
-    def test_get_loop_creates_fresh_loop_when_closed(self):
-        import time
+    assert cancelled.result(timeout=1) is True
+    loop = subagent_module._get_loop()
+    time.sleep(0.05)
+    assert not loop.is_closed()
 
-        import src.sdk.tools_core.subagent as subagent_module
 
-        subagent_module._loop = None
-        loop1 = subagent_module._get_loop()
-        assert not loop1.is_closed()
+def test_run_async_tool_error_does_not_recreate_open_loop():
+    import asyncio
+    import concurrent.futures
 
-        loop1.call_soon_threadsafe(loop1.stop)
-        time.sleep(0.2)
-        loop1.close()
+    import src.sdk.tools_core.subagent as subagent_module
 
-        loop2 = subagent_module._get_loop()
-        assert loop2 is not None
-        assert not loop2.is_closed()
-        assert loop2 is not loop1
+    subagent_module._loop = None
+    loop = subagent_module._get_loop()
+    marker = concurrent.futures.Future()
+
+    async def background_job():
+        await asyncio.sleep(0.2)
+        marker.set_result("survived")
+
+    async def failing_tool_call():
+        raise RuntimeError("unrelated tool error")
+
+    asyncio.run_coroutine_threadsafe(background_job(), loop)
+    with pytest.raises(RuntimeError):
+        subagent_module._run_async(failing_tool_call())
+
+    assert subagent_module._get_loop() is loop
+    assert marker.result(timeout=1) == "survived"
+
+
+def test_get_loop_creates_fresh_loop_when_closed():
+    import time
+
+    import src.sdk.tools_core.subagent as subagent_module
+
+    subagent_module._loop = None
+    loop1 = subagent_module._get_loop()
+    assert not loop1.is_closed()
+
+    loop1.call_soon_threadsafe(loop1.stop)
+    time.sleep(0.2)
+    loop1.close()
+
+    loop2 = subagent_module._get_loop()
+    assert loop2 is not None
+    assert not loop2.is_closed()
+    assert loop2 is not loop1

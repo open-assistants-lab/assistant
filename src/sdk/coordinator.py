@@ -295,6 +295,17 @@ class SubagentCoordinator:
 
         return task_id
 
+    async def _register_active_context(
+        self,
+        task_id: str,
+        db: WorkQueueDB,
+        ctx: SubagentContext,
+    ) -> None:
+        task_row = await db.get_task(task_id)
+        if task_row and task_row.get("cancel_requested"):
+            ctx.cancel_event.set()
+        _active[task_id] = ctx
+
     async def delegate(
         self,
         agent_name: str,
@@ -333,13 +344,7 @@ class SubagentCoordinator:
         task_id = await db.insert_task(agent_name, task, profile, parent_id)
 
         ctx = SubagentContext(on_progress=self._make_progress_cb(task_id))
-        task_row = await db.get_task(task_id)
-        if task_row and task_row.get("cancel_requested"):
-            ctx.cancel_event.set()
-        _active[task_id] = ctx
-        task_row = await db.get_task(task_id)
-        if task_row and task_row.get("cancel_requested"):
-            ctx.cancel_event.set()
+        await self._register_active_context(task_id, db, ctx)
 
         try:
             result: SubagentResult = await asyncio.wait_for(
@@ -390,13 +395,7 @@ class SubagentCoordinator:
         task_id = await db.insert_task(agent_name, task, profile, parent_id)
 
         ctx = SubagentContext(on_progress=self._make_progress_cb(task_id))
-        task_row = await db.get_task(task_id)
-        if task_row and task_row.get("cancel_requested"):
-            ctx.cancel_event.set()
-        _active[task_id] = ctx
-        task_row = await db.get_task(task_id)
-        if task_row and task_row.get("cancel_requested"):
-            ctx.cancel_event.set()
+        await self._register_active_context(task_id, db, ctx)
 
         background_task = asyncio.create_task(self._run_job(task_id, ctx))
         self._background_tasks.add(background_task)
