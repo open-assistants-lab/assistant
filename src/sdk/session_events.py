@@ -21,6 +21,7 @@ from typing import Any
 
 from src.sdk.messages import Message
 from src.sdk.run_events import (
+    ContextCompressedEvent,
     InjectionEvent,
     ReasoningDeltaEvent,
     RunEvent,
@@ -150,6 +151,10 @@ def derive_system_prompt(session_id: str, user_id: str) -> str | None:
     return prompt
 
 
+def _fmt_k(tokens: int) -> str:
+    return f"{tokens // 1000}k" if tokens >= 1000 else str(tokens)
+
+
 def _project(events: list[RunEvent]) -> list[Message]:
     messages: list[Message] = []
     text_parts: list[str] = []
@@ -194,6 +199,24 @@ def _project(events: list[RunEvent]) -> list[Message]:
         if isinstance(ev, ToolResultEvent):
             tool_names[ev.data.tool_call_id] = ev.data.name
     for ev in events:
+        # D2 task 5: durable context-updated timeline event. Successful
+        # compression becomes a compact transcript notice (with before→after
+        # token estimates when known); a failed compression never appears
+        # as a success notice (distinct error path, projection excludes it).
+        if isinstance(ev, ContextCompressedEvent):
+            if ev.data.status != "succeeded":
+                continue
+            flush_assistant()
+            before = ev.data.before.estimated_tokens
+            after = ev.data.after.estimated_tokens
+            if before is not None and after is not None:
+                content = (
+                    f"Context updated · {_fmt_k(before)} → {_fmt_k(after)} tokens"
+                )
+            else:
+                content = "Context updated"
+            messages.append(Message.user(content))
+            continue
         if isinstance(ev, UserPromptEvent):
             flush_assistant()
             messages.append(Message.user(ev.data.content))

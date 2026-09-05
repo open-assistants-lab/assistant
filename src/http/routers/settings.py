@@ -535,6 +535,23 @@ def set_api_key(
 ) -> dict[str, str | int] | JSONResponse:
     user_id = resolve_user_id(request, user_id)
     """Store an API key for a provider."""
+    # Desktop v0.1 credential boundary (Phase D2 task 2): the native app
+    # supplies the active credential per-request/launch (Keychain side);
+    # no plaintext credential persists server-side. Hosted modes keep the
+    # existing stored-key contract.
+    from src.http.auth import desktop_mode_active
+
+    if desktop_mode_active():
+        return _settings_error(
+            409,
+            "validation_error",
+            (
+                "Desktop mode does not persist provider keys server-side: "
+                "supply the active credential per request (provider_keys) or "
+                "re-inject it at launch."
+            ),
+            {},
+        )
     try:
         req = SetApiKeyRequest.model_validate(body)
         mutation = _get_settings_store(user_id).set_provider_key(

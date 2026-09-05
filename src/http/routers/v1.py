@@ -20,9 +20,9 @@ from src.http.routers import conversation as _conversation
 from src.http.routers import skills as _skills
 from src.http.routers import subagents as _subagents
 from src.http.routers import tools as _tools
-from src.http.routers.bootstrap import router as _bootstrap_router
 from src.http.routers.audit import router as _audit_router
 from src.http.routers.billing import router as _billing_router
+from src.http.routers.bootstrap import router as _bootstrap_router
 from src.http.routers.dashboard import router as _dashboard_router
 from src.http.routers.mcp import router as _mcp_router
 from src.http.routers.usage import router as _usage_router
@@ -36,6 +36,10 @@ def include_v1_aliases(app: FastAPI) -> None:
     app.include_router(_usage_router, prefix="/v1")
     app.include_router(_dashboard_router, prefix="/v1")
     app.include_router(_billing_router, prefix="/v1")
+    from src.http.routers.desktop_providers import router as _providers_router
+    app.include_router(_providers_router, prefix="/v1")
+    from src.http.routers.settings import router as _settings_router
+    app.include_router(_settings_router, prefix="/v1")
     from src.http.routers.governance import router as _gov_router
     app.include_router(_gov_router, prefix="/v1")
     app.include_router(_mcp_router, prefix="/v1")

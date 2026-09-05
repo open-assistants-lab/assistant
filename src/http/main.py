@@ -13,8 +13,8 @@ from fastapi.responses import JSONResponse
 
 from src.config import get_settings
 from src.config.settings import REPO_ROOT, warn_unknown_model_providers
-from src.http.auth import desktop_mode_active
 from src.http import auth as _auth_module
+from src.http.auth import desktop_mode_active
 from src.http.routers import (
     audit_router,
     billing_router,
@@ -44,6 +44,7 @@ from src.http.routers.auth_oidc import router as auth_oidc_router
 from src.http.routers.bootstrap import router as bootstrap_router
 from src.http.routers.connectors import router as connectors_router
 from src.http.routers.dashboard import router as dashboard_router
+from src.http.routers.desktop_providers import router as desktop_providers_router
 from src.http.routers.dev import router as dev_router
 from src.http.routers.governance import router as governance_router
 from src.http.routers.review import router as review_router
@@ -285,6 +286,7 @@ async def api_key_auth_middleware(request: Request, call_next: Any) -> Any:
 app.include_router(health_router)
 app.include_router(audit_router)
 app.include_router(auth_keys_router)
+app.include_router(desktop_providers_router)
 app.include_router(usage_router)
 app.include_router(dashboard_router)
 app.include_router(billing_router)
