@@ -354,7 +354,8 @@ class SandboxConfig(_BaseSettings):
     """
 
     backend: str = Field(
-        default="soft", description="SandboxBackend: 'soft' (default) or 'null'"
+        default="soft",
+        description="SandboxBackend: 'soft' (default) | 'bwrap' (hard, T3.4) | 'null' | 'runc' (stub)",
     )
     # SB1-2 security rule: no agent subprocess runs as root. uid_mode:
     # 'per_user' — every assistant user_id drops to its own mapped uid:gid

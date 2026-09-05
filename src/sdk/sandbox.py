@@ -6,9 +6,19 @@ enforcement (spec §6.2 table) is by construction and swapping isolation
 levels is a config change, not a code change.
 
 Providers: `NullSandboxBackend` (passthrough; tests), `SoftSandboxBackend`
-(Phase-2 default for trusted users: workspace-cwd, scrubbed env, resource
-caps, static write-path validation). Kernel-enforced isolation is the
-Soft+UID refinement / Phase-3 hard backend (bwrap/runc) — out of scope here.
+(soft+UID: per-user UID drop, scrubbed env, resource caps, static
+write-path scan), `BwrapSandboxBackend` (bubblewrap: unshared pid/net/ipc
+namespaces, read-only root bind, workspace-only writable — kernel-enforced),
+`RuncSandboxBackend` (OCI bundle stub).
+
+Trust-tier table (plan §6.2):
+
+| tier       | backend | isolation                                   |
+|------------|---------|---------------------------------------------|
+| trusted    | soft    | per-user UID drop + advisory write scan      |
+| untrusted  | bwrap   | namespace jail, workspace-only writable      |
+| enterprise | runc    | container-per-task (stub; T3.4 follow-up)    |
+| tests/dev  | null    | passthrough (loud warning)                   |
 
 Consumers: `code_execute` (SB1-3), `shell_execute` + `cli_adapter` +
 `browser_agent` (SB1-4). Policy (allowlist, metacharacter ban) stays IN
@@ -309,6 +319,131 @@ class SoftSandboxBackend:
 
 
 
+class SandboxError(RuntimeError):
+    """Raised when the configured backend cannot be used (e.g. missing binary)."""
+
+
+def bwrap_available() -> bool:
+    """True when the bubblewrap binary is on PATH."""
+    import shutil
+
+    return shutil.which("bwrap") is not None
+
+
+class BwrapSandboxBackend:
+    """Hard backend (T3.4): bubblewrap namespace jail for untrusted tenants.
+
+    - root is bind-mounted READ-ONLY; only the workspace is writable
+    - pid/net/ipc namespaces unshared; die-with-parent; new session
+    - same env scrubbing + rlimits as soft (kernel + rlimit both apply)
+    - server-root runs pass --uid/--gid (per-user mapping, same as soft)
+    - validate_write_path/validate_source are kernel-enforced (no static scan)
+    """
+
+    def run(
+        self,
+        argv: list[str],
+        cwd: Path,
+        limits: SandboxLimits | None = None,
+        *,
+        env_extra: dict[str, str] | None = None,
+        user_id: str | None = None,
+    ) -> SandboxResult:
+        lim = limits or SandboxLimits()
+        env = scrub_env(lim.env_mode)
+        if env_extra:
+            env.update(env_extra)
+
+        bwrap_argv: list[str] = [
+            "bwrap",
+            "--ro-bind", "/", "/",
+            "--bind", str(cwd), str(cwd),
+            "--proc", "/proc",
+            "--dev", "/dev",
+            "--tmpfs", "/tmp",
+            "--unshare-pid",
+            "--unshare-net",
+            "--unshare-ipc",
+            "--die-with-parent",
+            "--new-session",
+        ]
+        if os.getuid() == 0:
+            if user_id:
+                uid, gid = user_sandbox_uid_gid(user_id)
+            else:
+                uid, gid = get_sandbox_uid_gid()
+            bwrap_argv += ["--uid", str(uid), "--gid", str(gid)]
+        bwrap_argv += ["--", *argv]
+
+        def _preexec() -> None:  # pragma: no cover - runs in child
+            import resource
+
+            resource.setrlimit(
+                resource.RLIMIT_FSIZE, (lim.max_output_bytes * 8,) * 2
+            )
+            resource.setrlimit(
+                resource.RLIMIT_CPU, (int(lim.timeout_seconds) + 2,) * 2
+            )
+            rlimit = getattr(resource, "RLIMIT_AS", None)
+            if rlimit is not None:
+                try:
+                    resource.setrlimit(
+                        rlimit, (lim.memory_mb * 1024 * 1024,) * 2
+                    )
+                except (OSError, ValueError):
+                    pass
+
+        try:
+            proc = subprocess.run(  # noqa: S603 - argv list, no shell
+                bwrap_argv,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=lim.timeout_seconds,
+                env=env,
+                preexec_fn=_preexec,
+            )
+            return SandboxResult(
+                proc.returncode,
+                proc.stdout[: lim.max_output_bytes],
+                proc.stderr[: lim.max_output_bytes],
+            )
+        except subprocess.TimeoutExpired:
+            return SandboxResult(-1, timed_out=True)
+
+    def validate_write_path(self, path: Path, workspace_root: Path) -> str | None:
+        # Kernel-enforced: only the workspace is mounted writable.
+        return None
+
+    def validate_source(self, source: str, workspace_root: Path) -> str | None:
+        # Kernel-enforced: outside-workspace writes fail on the read-only root.
+        return None
+
+    def setup(self, user_id: str, workspace_id: str) -> None:
+        return None
+
+    def teardown(self) -> None:
+        return None
+
+
+class RuncSandboxBackend:
+    """OCI container-per-task backend — T3.4 stub (plan allows deferral).
+
+    Not implemented: runc needs a rootfs bundle per task (build/pull, spec
+    generation, cleanup). Raises NotImplementedError with a clear message.
+    """
+
+    def __init__(self) -> None:
+        raise NotImplementedError(
+            "RuncSandboxBackend is not implemented yet (T3.4 follow-up): "
+            "runc requires a per-task OCI rootfs bundle. Use backend='bwrap' "
+            "for hard isolation or 'soft' for trusted users."
+        )
+
+    def run(self, *args: Any, **kwargs: Any) -> SandboxResult:  # pragma: no cover
+        raise NotImplementedError("RuncSandboxBackend is not implemented yet")
+
+
 def get_sandbox_uid_gid() -> tuple[int, int]:
     """Sandbox drop identity: SANDBOX_UID/SANDBOX_GID env, else settings."""
     import os as _os
@@ -402,4 +537,14 @@ def get_sandbox_backend() -> Any:
             {"detail": "SANDBOX_BACKEND=null: no caps, full env inheritance; test-only"},
         )
         return NullSandboxBackend()
+    if backend == "bwrap":
+        if not bwrap_available():
+            raise SandboxError(
+                "SandboxBackend 'bwrap' selected but the bubblewrap binary "
+                "is not installed (T3.4). Install bwrap or set "
+                "sandbox.backend='soft'."
+            )
+        return BwrapSandboxBackend()
+    if backend == "runc":
+        return RuncSandboxBackend()  # raises: T3.4 stub
     return SoftSandboxBackend()
