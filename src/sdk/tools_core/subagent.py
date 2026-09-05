@@ -16,9 +16,7 @@ Runtime:
 
 from __future__ import annotations
 
-import asyncio
 import json
-import threading
 from typing import Any
 
 from agentprofile.models import AgentProfile
@@ -31,57 +29,6 @@ from src.sdk.tools import ToolAnnotations, tool
 from src.storage.paths import DEFAULT_USER_ID
 
 logger = get_logger()
-
-_loop: asyncio.AbstractEventLoop | None = None
-_loop_lock = threading.Lock()
-_TIMEOUT_SECONDS = 300
-
-
-def _recreate_loop() -> None:
-    global _loop
-    if _loop and not _loop.is_closed():
-        _loop.call_soon_threadsafe(_loop.stop)
-    _loop = asyncio.new_event_loop()
-    thread = threading.Thread(target=_loop.run_forever, daemon=True)
-    thread.start()
-
-
-def _get_loop() -> asyncio.AbstractEventLoop:
-    global _loop
-    with _loop_lock:
-        if _loop is None or _loop.is_closed():
-            _recreate_loop()
-        assert _loop is not None
-        return _loop
-
-
-def _run_async(coro: Any) -> Any:
-    try:
-        loop = _get_loop()
-        future = asyncio.run_coroutine_threadsafe(coro, loop)
-        return future.result(timeout=_TIMEOUT_SECONDS)
-    except TimeoutError:
-        future.cancel()
-        logger.warning(
-            "subagent.bridge_timeout",
-            {"timeout_s": _TIMEOUT_SECONDS},
-            user_id="system",
-        )
-        raise TimeoutError(
-            f"Subagent tool call timed out after {_TIMEOUT_SECONDS}s"
-        )
-    except Exception as e:
-        if loop.is_closed():
-            with _loop_lock:
-                if _loop is loop:
-                    _recreate_loop()
-        logger.error(
-            "subagent.bridge_error",
-            {"error": str(e), "error_type": type(e).__name__},
-            user_id="system",
-        )
-        raise
-
 
 def _parse_object_json(value: str | None, field_name: str) -> tuple[dict[str, Any] | None, str | None]:
     if value is None:
@@ -131,7 +78,7 @@ def _format_task(row: dict[str, Any], task_id: str) -> str:
 
 
 @tool
-def subagent_create(
+async def subagent_create(
     name: str,
     user_id: str,
     workspace_id: str = "personal",
@@ -203,7 +150,7 @@ def subagent_create(
     if existing is not None:
         return f"Error: Subagent '{name}' already exists. Use subagent_update to amend it."
 
-    _run_async(coordinator.create(agent_profile))
+    await coordinator.create(agent_profile)
 
     lines = [f"Subagent '{name}' created successfully."]
     if model:
@@ -219,7 +166,7 @@ subagent_create.annotations = ToolAnnotations(title="Create Subagent", destructi
 
 
 @tool
-def subagent_update(
+async def subagent_update(
     name: str,
     user_id: str,
     workspace_id: str = "personal",
@@ -299,7 +246,7 @@ def subagent_update(
     if errors:
         return "Error: " + "; ".join(errors)
 
-    updated = _run_async(coordinator.update(name, **update_kwargs))
+    updated = await coordinator.update(name, **update_kwargs)
 
     if updated is None:
         return f"Error: Failed to update subagent '{name}'."
@@ -311,7 +258,7 @@ subagent_update.annotations = ToolAnnotations(title="Update Subagent", destructi
 
 
 @tool
-def subagent_start(
+async def subagent_start(
     agent_name: str,
     task: str,
     user_id: str,
@@ -340,7 +287,7 @@ def subagent_start(
     if existing is None:
         return f"Error: Subagent '{agent_name}' not found. Create it first with subagent_create."
 
-    task_id_str = _run_async(coordinator.start(agent_name, task, parent_id=parent_id))
+    task_id_str = await coordinator.start(agent_name, task, parent_id=parent_id)
 
     return f"""Subagent job started for '{agent_name}'.
 
@@ -409,7 +356,7 @@ subagent_delegate.annotations = ToolAnnotations(
 
 
 @tool
-def subagent_list(user_id: str, workspace_id: str = "personal") -> str:
+async def subagent_list(user_id: str, workspace_id: str = "personal") -> str:
     """List all subagents for the user and their active tasks.
 
     Args:
@@ -421,8 +368,8 @@ def subagent_list(user_id: str, workspace_id: str = "personal") -> str:
     """
     coordinator = get_coordinator(user_id, workspace_id)
 
-    defs = _run_async(coordinator.list_defs())
-    tasks = _run_async(coordinator.check_progress())
+    defs = await coordinator.list_defs()
+    tasks = await coordinator.check_progress()
 
     if not defs and not tasks:
         return "No subagents found."
@@ -454,7 +401,7 @@ subagent_list.annotations = ToolAnnotations(title="List Subagents", read_only=Tr
 
 
 @tool
-def subagent_check(
+async def subagent_check(
     task_id: str,
     user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
@@ -475,7 +422,7 @@ def subagent_check(
         db = await coordinator._get_db()
         return await db.get_task(task_id)
 
-    row = _run_async(_get_task())
+    row = await _get_task()
     if row is None:
         return f"No task found with ID: {task_id}"
 
@@ -486,7 +433,7 @@ subagent_check.annotations = ToolAnnotations(title="Subagent Check", read_only=T
 
 
 @tool
-def subagent_tasks(
+async def subagent_tasks(
     user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
     status: str | None = None,
@@ -515,7 +462,7 @@ def subagent_tasks(
         db = await coordinator._get_db()
         return await db.check_progress(status=status_filter)
 
-    tasks = _run_async(_get_tasks())
+    tasks = await _get_tasks()
     if not tasks:
         return "No tasks found." if status_filter else "No active tasks."
 
@@ -533,7 +480,7 @@ subagent_tasks.annotations = ToolAnnotations(title="Subagent Tasks", read_only=T
 
 
 @tool
-def subagent_instruct(
+async def subagent_instruct(
     task_id: str,
     message: str,
     user_id: str,
@@ -564,7 +511,7 @@ def subagent_instruct(
         ok = await db.add_instruction(task_id, message)
         return ok
 
-    result = _run_async(_instruct())
+    result = await _instruct()
 
     if result is None:
         return f"Error: Task '{task_id}' not found or not running."
@@ -578,7 +525,7 @@ subagent_instruct.annotations = ToolAnnotations(title="Instruct Subagent")
 
 
 @tool
-def subagent_cancel(task_id: str, user_id: str, workspace_id: str = "personal") -> str:
+async def subagent_cancel(task_id: str, user_id: str, workspace_id: str = "personal") -> str:
     """Cancel a running or pending subagent task.
 
     Sets cancel_requested flag. The subagent's SubagentContext will
@@ -597,7 +544,7 @@ def subagent_cancel(task_id: str, user_id: str, workspace_id: str = "personal") 
     async def _cancel() -> bool:
         return await coordinator.cancel(task_id)
 
-    ok = _run_async(_cancel())
+    ok = await _cancel()
 
     if ok:
         return f"Task '{task_id}' cancellation requested. The subagent will terminate on its next iteration."
@@ -608,7 +555,7 @@ subagent_cancel.annotations = ToolAnnotations(title="Cancel Subagent", destructi
 
 
 @tool
-def subagent_delete(name: str, user_id: str, workspace_id: str = "personal") -> str:
+async def subagent_delete(name: str, user_id: str, workspace_id: str = "personal") -> str:
     """Delete a subagent definition and cancel any running tasks.
 
     Args:
@@ -624,7 +571,7 @@ def subagent_delete(name: str, user_id: str, workspace_id: str = "personal") -> 
     async def _delete() -> bool:
         return await coordinator.delete(name)
 
-    ok = _run_async(_delete())
+    ok = await _delete()
 
     if ok:
         return f"Subagent '{name}' deleted. Any running tasks have been cancelled."

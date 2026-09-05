@@ -1,3 +1,6 @@
+import asyncio
+import inspect
+
 import pytest
 
 
@@ -11,7 +14,32 @@ def test_new_runtime_tools_registered():
     assert {"subagent_start", "subagent_check", "subagent_tasks"}.issubset(names)
 
 
-def test_subagent_start_returns_job_id(monkeypatch):
+def test_all_subagent_tools_are_native_async_without_bridge():
+    from src.sdk.tools_core import subagent as mod
+
+    for name in [
+        "subagent_create",
+        "subagent_update",
+        "subagent_start",
+        "subagent_delegate",
+        "subagent_list",
+        "subagent_check",
+        "subagent_tasks",
+        "subagent_instruct",
+        "subagent_cancel",
+        "subagent_delete",
+    ]:
+        tool_def = getattr(mod, name)
+        assert inspect.iscoroutinefunction(tool_def.function), name
+        assert tool_def._coroutine is not None, name
+
+    assert not hasattr(mod, "_run_async")
+    assert not hasattr(mod, "_recreate_loop")
+    assert not hasattr(mod, "_get_loop")
+
+
+@pytest.mark.asyncio
+async def test_subagent_start_returns_job_id(monkeypatch):
     from src.sdk.tools_core import subagent as mod
 
     class FakeCoordinator:
@@ -24,7 +52,7 @@ def test_subagent_start_returns_job_id(monkeypatch):
     monkeypatch.setattr(
         mod, "get_coordinator", lambda user_id, workspace_id: FakeCoordinator(), raising=False
     )
-    result = mod.subagent_start.invoke(
+    result = await mod.subagent_start.ainvoke(
         {
             "agent_name": "worker",
             "task": "do work",
@@ -36,7 +64,8 @@ def test_subagent_start_returns_job_id(monkeypatch):
     assert "subagent_check" in result
 
 
-def test_subagent_check_returns_single_job_status(monkeypatch):
+@pytest.mark.asyncio
+async def test_subagent_check_returns_single_job_status(monkeypatch):
     from src.sdk.tools_core import subagent as mod
 
     class FakeDB:
@@ -58,7 +87,7 @@ def test_subagent_check_returns_single_job_status(monkeypatch):
         mod, "get_coordinator", lambda user_id, workspace_id: FakeCoordinator(), raising=False
     )
 
-    result = mod.subagent_check.invoke(
+    result = await mod.subagent_check.ainvoke(
         {"task_id": "job123", "user_id": "u", "workspace_id": "w"}
     )
 
@@ -67,7 +96,8 @@ def test_subagent_check_returns_single_job_status(monkeypatch):
     assert "finished" in result
 
 
-def test_subagent_tasks_filters_by_status(monkeypatch):
+@pytest.mark.asyncio
+async def test_subagent_tasks_filters_by_status(monkeypatch):
     from src.sdk.subagent_models import TaskStatus
     from src.sdk.tools_core import subagent as mod
 
@@ -86,7 +116,7 @@ def test_subagent_tasks_filters_by_status(monkeypatch):
         mod, "get_coordinator", lambda user_id, workspace_id: FakeCoordinator(), raising=False
     )
 
-    result = mod.subagent_tasks.invoke(
+    result = await mod.subagent_tasks.ainvoke(
         {"status": "running", "user_id": "u", "workspace_id": "w"}
     )
 
@@ -95,10 +125,11 @@ def test_subagent_tasks_filters_by_status(monkeypatch):
     assert "worker" in result
 
 
-def test_subagent_tasks_rejects_invalid_status(monkeypatch):
+@pytest.mark.asyncio
+async def test_subagent_tasks_rejects_invalid_status(monkeypatch):
     from src.sdk.tools_core import subagent as mod
 
-    result = mod.subagent_tasks.invoke(
+    result = await mod.subagent_tasks.ainvoke(
         {"status": "not-a-status", "user_id": "u", "workspace_id": "w"}
     )
 
@@ -106,7 +137,8 @@ def test_subagent_tasks_rejects_invalid_status(monkeypatch):
     assert "running" in result
 
 
-def test_subagent_create_parses_new_json_fields_and_validates(monkeypatch):
+@pytest.mark.asyncio
+async def test_subagent_create_parses_new_json_fields_and_validates(monkeypatch):
     from src.sdk.tools_core import subagent as mod
 
     saved = {}
@@ -124,7 +156,7 @@ def test_subagent_create_parses_new_json_fields_and_validates(monkeypatch):
     )
     monkeypatch.setattr(mod, "validate_agent_def", lambda profile, **kwargs: [], raising=False)
 
-    result = mod.subagent_create.invoke(
+    result = await mod.subagent_create.ainvoke(
         {
             "name": "worker",
             "user_id": "u",
@@ -144,17 +176,19 @@ def test_subagent_create_parses_new_json_fields_and_validates(monkeypatch):
     assert profile.handoff_instructions == "return concise output"
 
 
-def test_subagent_create_rejects_non_object_provider_options(monkeypatch):
+@pytest.mark.asyncio
+async def test_subagent_create_rejects_non_object_provider_options(monkeypatch):
     from src.sdk.tools_core import subagent as mod
 
-    result = mod.subagent_create.invoke(
+    result = await mod.subagent_create.ainvoke(
         {"name": "worker", "user_id": "u", "provider_options": '["bad"]'}
     )
 
     assert result == "Error: provider_options must be a JSON object."
 
 
-def test_subagent_update_parses_new_fields_and_validates_before_save(monkeypatch):
+@pytest.mark.asyncio
+async def test_subagent_update_parses_new_fields_and_validates_before_save(monkeypatch):
     from agentprofile.models import AgentProfile
 
     from src.sdk.tools_core import subagent as mod
@@ -182,7 +216,7 @@ def test_subagent_update_parses_new_fields_and_validates_before_save(monkeypatch
     )
     monkeypatch.setattr(mod, "validate_agent_def", fake_validate, raising=False)
 
-    result = mod.subagent_update.invoke(
+    result = await mod.subagent_update.ainvoke(
         {
             "name": "worker",
             "user_id": "u",
@@ -208,7 +242,8 @@ def test_subagent_update_parses_new_fields_and_validates_before_save(monkeypatch
     assert validated["kwargs"] == {"user_id": "u", "workspace_id": "w"}
 
 
-def test_subagent_update_rejects_invalid_provider_options_json(monkeypatch):
+@pytest.mark.asyncio
+async def test_subagent_update_rejects_invalid_provider_options_json(monkeypatch):
     from agentprofile.models import AgentProfile
 
     from src.sdk.tools_core import subagent as mod
@@ -224,14 +259,15 @@ def test_subagent_update_rejects_invalid_provider_options_json(monkeypatch):
         mod, "get_coordinator", lambda user_id, workspace_id: FakeCoordinator(), raising=False
     )
 
-    result = mod.subagent_update.invoke(
+    result = await mod.subagent_update.ainvoke(
         {"name": "worker", "user_id": "u", "provider_options": "{"}
     )
 
     assert result.startswith("Error: Invalid provider_options JSON")
 
 
-def test_subagent_update_rejects_invalid_output_schema_json(monkeypatch):
+@pytest.mark.asyncio
+async def test_subagent_update_rejects_invalid_output_schema_json(monkeypatch):
     from agentprofile.models import AgentProfile
 
     from src.sdk.tools_core import subagent as mod
@@ -247,14 +283,15 @@ def test_subagent_update_rejects_invalid_output_schema_json(monkeypatch):
         mod, "get_coordinator", lambda user_id, workspace_id: FakeCoordinator(), raising=False
     )
 
-    result = mod.subagent_update.invoke(
+    result = await mod.subagent_update.ainvoke(
         {"name": "worker", "user_id": "u", "output_schema": "{"}
     )
 
     assert result.startswith("Error: Invalid output_schema JSON")
 
 
-def test_subagent_update_rejects_validation_errors_before_save(monkeypatch):
+@pytest.mark.asyncio
+async def test_subagent_update_rejects_validation_errors_before_save(monkeypatch):
     from agentprofile.models import AgentProfile
 
     from src.sdk.tools_core import subagent as mod
@@ -277,7 +314,7 @@ def test_subagent_update_rejects_validation_errors_before_save(monkeypatch):
     )
     monkeypatch.setattr(mod, "validate_agent_def", fake_validate, raising=False)
 
-    result = mod.subagent_update.invoke(
+    result = await mod.subagent_update.ainvoke(
         {"name": "worker", "user_id": "u", "tools": ["not_a_tool"]}
     )
 
@@ -373,71 +410,41 @@ def test_subagent_delegate_requires_hitl_not_parallel_safe():
     assert ann.destructive is True
 
 
-def test_run_async_respects_timeout_and_cancels_future(monkeypatch):
-    import asyncio
-    import concurrent.futures
-    import time
 
-    import src.sdk.tools_core.subagent as subagent_module
+@pytest.mark.asyncio
+async def test_concurrent_delegate_and_start_share_current_event_loop(monkeypatch):
+    from src.sdk.tools_core import subagent as mod
 
-    cancelled = concurrent.futures.Future()
+    running_loop = asyncio.get_running_loop()
+    seen: list[asyncio.AbstractEventLoop] = []
 
-    async def slow_coro():
-        try:
-            await asyncio.sleep(60)
-        except asyncio.CancelledError:
-            cancelled.set_result(True)
-            raise
+    class FakeCoordinator:
+        def load_def(self, name):
+            return object()
 
-    monkeypatch.setattr(subagent_module, "_TIMEOUT_SECONDS", 0.05)
-    with pytest.raises(TimeoutError):
-        subagent_module._run_async(slow_coro())
+        async def start(self, agent_name, task, parent_id=None):
+            seen.append(asyncio.get_running_loop())
+            await asyncio.sleep(0)
+            return "job123"
 
-    assert cancelled.result(timeout=1) is True
-    loop = subagent_module._get_loop()
-    time.sleep(0.05)
-    assert not loop.is_closed()
+        async def delegate(self, agent_name, task, parent_id=None, timeout_seconds=None):
+            seen.append(asyncio.get_running_loop())
+            await asyncio.sleep(0)
+            return "finished work"
 
+    monkeypatch.setattr(
+        mod, "get_coordinator", lambda user_id, workspace_id: FakeCoordinator(), raising=False
+    )
 
-def test_run_async_tool_error_does_not_recreate_open_loop():
-    import asyncio
-    import concurrent.futures
+    start_result, delegate_result = await asyncio.gather(
+        mod.subagent_start.ainvoke(
+            {"agent_name": "worker", "task": "background", "user_id": "u", "workspace_id": "w"}
+        ),
+        mod.subagent_delegate.ainvoke(
+            {"agent_name": "worker", "task": "inline", "user_id": "u", "workspace_id": "w"}
+        ),
+    )
 
-    import src.sdk.tools_core.subagent as subagent_module
-
-    subagent_module._loop = None
-    loop = subagent_module._get_loop()
-    marker = concurrent.futures.Future()
-
-    async def background_job():
-        await asyncio.sleep(0.2)
-        marker.set_result("survived")
-
-    async def failing_tool_call():
-        raise RuntimeError("unrelated tool error")
-
-    asyncio.run_coroutine_threadsafe(background_job(), loop)
-    with pytest.raises(RuntimeError):
-        subagent_module._run_async(failing_tool_call())
-
-    assert subagent_module._get_loop() is loop
-    assert marker.result(timeout=1) == "survived"
-
-
-def test_get_loop_creates_fresh_loop_when_closed():
-    import time
-
-    import src.sdk.tools_core.subagent as subagent_module
-
-    subagent_module._loop = None
-    loop1 = subagent_module._get_loop()
-    assert not loop1.is_closed()
-
-    loop1.call_soon_threadsafe(loop1.stop)
-    time.sleep(0.2)
-    loop1.close()
-
-    loop2 = subagent_module._get_loop()
-    assert loop2 is not None
-    assert not loop2.is_closed()
-    assert loop2 is not loop1
+    assert "job123" in start_result
+    assert delegate_result == "finished work"
+    assert seen == [running_loop, running_loop]
