@@ -228,3 +228,72 @@ the host, set in .env:
 
 (Linux also needs `extra_hosts: ["host.docker.internal:host-gateway"]` on the
 compose service.)
+
+---
+
+## 9. Enterprise tier — container-per-tenant-user (T3.5)
+
+**When:** partner with isolated sub-tenants, or any deployment where users are
+not vetted against each other. One container per TENANT USER; the container
+boundary is the isolation tier.
+
+- Generate: `scripts/generate_enterprise_compose.sh <user_id>...` →
+  `docker/docker-compose.enterprise.yaml` (deterministic container names +
+  host ports from a sha256 shard of the user_id; never two services for the
+  same user_id — per-user SQLite/Chroma are single-writer)
+- Per-user host dirs: `docker/enterprise/users/<user>/{data,.env}`
+- Auth: per-container `API_KEY` (auth model A) or `PER_USER_AUTH=true` +
+  `/auth/keys` minted keys (auth model B, see §7)
+- Inside the container the Soft+UID sandbox drops sandboxed subprocesses to
+  per-user UIDs (default base 2000); the container boundary adds the
+  outer kernel tier
+- Smoke: `bash scripts/enterprise_smoke.sh` (boots 2 users, health-checks
+  both, verifies on-disk isolation, tears down; requires `docker login ghcr.io`
+  or `ENTERPRISE_IMAGE=<local tag>`)
+- Upgrade: per-user `docker compose pull && up -d` per container (they are
+  independent services; never scale one user's service beyond 1 replica)
+- Backup: per-user data dirs are self-contained — back up
+  `docker/enterprise/users/<user>/data/` per user
+
+## 10. Partner deployment packaging (T3.7)
+
+**Partners ship an agent, not code.** The only artifact is the published
+Docker image plus the partner's own `PROFILE.md` (agent definition:
+frontmatter + body). No pip install path exists or is planned.
+
+### Onboard a partner (scripted)
+
+```bash
+scripts/partner_deploy.sh -t <tenant_name> -p /path/to/PROFILE.md \
+  -i ghcr.io/open-assistants-lab/assistant:vX.Y.Z -k <api_key>
+```
+
+The script: renders a compose file → mounts the partner PROFILE.md at
+`/app/profile/PROFILE.md` → `compose up` → waits for health → calls
+`POST /profile/reload?user_id=default_user` (the K1 profile bootstrap) →
+prints the loopback URL and auth options.
+
+### Versioned images
+
+`ghcr.io/open-assistants-lab/assistant:vX.Y.Z` (published on every `v*` tag;
+multi-arch). Pin the tag in the generated compose file for reproducible
+partner deployments.
+
+### Bring-your-own-auth (IdentityResolver seam)
+
+Partners choose the auth tier at deployment time; all ride the same
+`IdentityResolver` seam (`src/http/auth/`):
+
+| Option | Env | Identity resolution |
+|--------|-----|--------------------|
+| Shared secret | `API_KEY` | one deployment key; `user_id` accepted as-is (solo/trusted) |
+| Per-user keys | `PER_USER_AUTH=true` | Bearer per-user keys → `(user_id, scopes)` via `/auth/keys` |
+| OIDC SSO | OIDC settings (`/auth/oidc/login`) | IdP token → org + role via the local tenancy store |
+
+### Exact fresh-clone steps
+
+1. `curl -sO .../docker/docker-compose.yaml && curl -sO .../config.yaml`
+2. Replace `build:` with the pinned image (or use `scripts/partner_deploy.sh`)
+3. Set `.env` (API_KEY + provider key)
+4. `docker compose up -d` → mount partner PROFILE.md → `/profile/reload`
+5. Health + round-trip: `/health`, then a chat round-trip
