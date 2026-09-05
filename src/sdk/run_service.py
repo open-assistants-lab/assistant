@@ -93,7 +93,12 @@ async def handle_subagent_completion(event: Any) -> None:
     store = await aget_message_store(event.user_id, event.workspace_id)
     active_loop = get_user_loop(event.user_id, event.session_id)
     if active_loop is not None:
+        persisted = False
+
         def _persist_steer(text: str) -> None:
+            nonlocal persisted
+            if persisted:
+                return
             store.add_message(
                 "user",
                 text,
@@ -104,7 +109,13 @@ async def handle_subagent_completion(event: Any) -> None:
                 },
                 session_id=event.session_id,
             )
+            persisted = True
 
+        # Persist immediately as well as through the steer sink. If the steer
+        # is drained at a tool boundary, the sink is a no-op; if it arrives
+        # during text generation and becomes a follow-up steer, the completion
+        # still exists in the next turn's durable context.
+        _persist_steer(message)
         active_loop.set_steer_sink(_persist_steer)
         active_loop.steer(message)
         return

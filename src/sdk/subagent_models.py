@@ -61,6 +61,7 @@ class SubagentResult(BaseModel):
     cost_usd: float = 0.0
     llm_calls: int = 0
     error: str | None = None
+    structured_output: dict | list | str | int | float | bool | None = None
 
 
 class TaskCancelledError(Exception):

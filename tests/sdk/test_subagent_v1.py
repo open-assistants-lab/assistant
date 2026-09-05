@@ -940,6 +940,156 @@ class TestSubagentCoordinator:
         assert captured_provider_args[1] == {"user_id": "test_user"}
 
     @pytest.mark.asyncio
+    async def test_create_reload_preserves_provider_options_and_output_schema(self, mock_paths):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import SubagentCoordinator
+
+        provider_options = {"anthropic": {"thinking": {"type": "enabled"}}}
+        schema = {
+            "type": "object",
+            "required": ["answer"],
+            "properties": {"answer": {"type": "string"}},
+        }
+        profile = AgentProfile(
+            name="structured",
+            provider_options=provider_options,
+            output_schema_def=schema,
+        )
+        coord = SubagentCoordinator("test_user", workspace_id="sales")
+
+        await coord.create(profile)
+        loaded = coord.load_def("structured")
+
+        assert loaded is not None
+        assert loaded.provider_options == provider_options
+        assert loaded.output_schema_def == schema
+
+    @pytest.mark.asyncio
+    async def test_run_loop_enforces_output_schema_with_one_retry(self, mock_paths):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.messages import Message
+
+        captured_run_config = None
+        calls = 0
+
+        class FakeProvider:
+            provider_id = "openai"
+
+        class FakeAgentLoop:
+            def __init__(self, **kwargs):
+                nonlocal captured_run_config
+                captured_run_config = kwargs["run_config"]
+
+            async def run(self, messages):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return [*messages, Message.assistant('{"answer": "bad", "extra": true}')]
+                return [*messages, Message.assistant('{"answer": "done"}')]
+
+        schema = {
+            "type": "object",
+            "required": ["answer"],
+            "additionalProperties": False,
+            "properties": {"answer": {"type": "string", "enum": ["done"]}},
+        }
+        profile = AgentProfile(name="structured", output_schema_def=schema)
+        coord = SubagentCoordinator("test_user", workspace_id="sales")
+
+        with patch("src.sdk.providers.factory.create_model_from_config", return_value=FakeProvider()):
+            with patch("src.sdk.coordinator._build_tools_for_subagent", return_value=[]):
+                with patch("src.sdk.coordinator._build_system_prompt", return_value="system"):
+                    with patch("src.sdk.loop.AgentLoop", FakeAgentLoop):
+                        result = await coord._run_loop("task-1", profile, "do it", object())
+
+        assert calls == 2
+        assert captured_run_config is not None
+        assert captured_run_config.provider_options == {
+            "openai": {"response_format": {"type": "json_schema", "json_schema": schema}}
+        }
+        assert result.output == '{"answer": "done"}'
+        assert result.structured_output == {"answer": "done"}
+
+    @pytest.mark.asyncio
+    async def test_delegate_publish_uses_cancelled_status_when_completion_loses_race(
+        self, mock_paths, profile, monkeypatch
+    ):
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.subagent_models import SubagentResult, TaskStatus
+
+        coordinator = SubagentCoordinator("test_user")
+        await coordinator.create(profile)
+        published = []
+
+        async def fake_run_loop(task_id_, frozen_agent_def, task, db, ctx=None):
+            return SubagentResult(name=frozen_agent_def.name, task=task, success=True, output="done")
+
+        async def fake_publish(task_id, agent_name, status, result, error, parent_session_id):
+            published.append((status, result, error, parent_session_id))
+
+        monkeypatch.setattr(coordinator, "_run_loop", fake_run_loop)
+        monkeypatch.setattr(coordinator, "_publish_completion", fake_publish)
+
+        db = await coordinator._get_db()
+        original_set_completed = db.set_completed
+
+        async def cancelled_set_completed(task_id, result):
+            await db.request_cancel(task_id)
+            return await original_set_completed(task_id, result)
+
+        monkeypatch.setattr(db, "set_completed", cancelled_set_completed)
+
+        output = await coordinator.delegate(
+            "test_agent",
+            "do work",
+            parent_session_id="session-1",
+        )
+
+        assert output == "done"
+        assert published == [(TaskStatus.CANCELLED.value, None, "cancelled", "session-1")]
+
+    @pytest.mark.asyncio
+    async def test_run_loop_fails_after_output_schema_retry_exhausted(self, mock_paths):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.messages import Message
+
+        calls = 0
+
+        class FakeProvider:
+            provider_id = "openai"
+
+        class FakeAgentLoop:
+            def __init__(self, **kwargs):
+                pass
+
+            async def run(self, messages):
+                nonlocal calls
+                calls += 1
+                return [*messages, Message.assistant('{"ok": false}')]
+
+        schema = {
+            "type": "object",
+            "required": ["answer"],
+            "properties": {"answer": {"type": "string"}},
+        }
+        profile = AgentProfile(name="structured", output_schema_def=schema)
+        coord = SubagentCoordinator("test_user", workspace_id="sales")
+
+        with patch("src.sdk.providers.factory.create_model_from_config", return_value=FakeProvider()):
+            with patch("src.sdk.coordinator._build_tools_for_subagent", return_value=[]):
+                with patch("src.sdk.coordinator._build_system_prompt", return_value="system"):
+                    with patch("src.sdk.loop.AgentLoop", FakeAgentLoop):
+                        with pytest.raises(ValueError, match="schema validation failed"):
+                            await coord._run_loop("task-1", profile, "do it", object())
+
+        assert calls == 2
+
+    @pytest.mark.asyncio
     async def test_start_returns_before_runner_finishes(self, mock_paths, profile, monkeypatch):
         from src.sdk.coordinator import SubagentCoordinator
 

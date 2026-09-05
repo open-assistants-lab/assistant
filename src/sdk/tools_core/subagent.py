@@ -326,7 +326,8 @@ async def subagent_delegate(
     the subagent completes and returns the result inline. Use this when
     you need the subagent's output to continue your work.
 
-    Multiple subagent_delegate calls in the same turn run in parallel.
+    Because delegation may run write/network tools, it is treated as
+    destructive and may require approval under HITL/governance policies.
 
     For long-running tasks (>2 min), use subagent_start instead so the
     user can continue chatting while the subagent works.

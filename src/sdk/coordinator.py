@@ -124,6 +124,49 @@ def _build_system_prompt(
     return "\n\n".join(parts)
 
 
+def _schema_provider_options(
+    provider: Any,
+    model_str: str,
+    existing: dict[str, Any] | None,
+    schema: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not schema:
+        return existing or None
+    provider_id = getattr(provider, "provider_id", None) or model_str.split(":", 1)[0]
+    merged = dict(existing or {})
+    provider_options = dict(merged.get(provider_id) or {})
+    provider_options.setdefault(
+        "response_format",
+        {"type": "json_schema", "json_schema": schema},
+    )
+    merged[provider_id] = provider_options
+    return merged
+
+
+def _parse_and_validate_output(output: str, schema: dict[str, Any]) -> Any:
+    try:
+        parsed = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"schema validation failed: output is not valid JSON: {exc}") from exc
+    try:
+        from jsonschema import Draft202012Validator
+        from jsonschema.exceptions import ValidationError
+
+        Draft202012Validator(schema).validate(parsed)
+    except ValidationError as exc:
+        raise ValueError(f"schema validation failed: {exc.message}") from exc
+    return parsed
+
+
+def _extract_final_output(messages: list[Any]) -> str:
+    for msg in reversed(messages):
+        if hasattr(msg, "role") and msg.role == "assistant" and msg.content:
+            content = msg.content
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+    return ""
+
+
 def _extract_output(messages: list[Any], max_chars: int = 2000) -> tuple[str, bool]:
     output = ""
     for msg in reversed(messages):
@@ -353,9 +396,14 @@ class SubagentCoordinator:
                 timeout=effective_timeout,
             )
             completed = await db.set_completed(task_id, result)
-            if not completed:
-                await self._set_cancelled_if_requested(task_id, db)
-            await self._publish_completion(task_id, profile.name, TaskStatus.COMPLETED.value, result, None, parent_session_id)
+            if completed:
+                await self._publish_completion(
+                    task_id, profile.name, TaskStatus.COMPLETED.value, result, None, parent_session_id
+                )
+            elif await self._set_cancelled_if_requested(task_id, db):
+                await self._publish_completion(
+                    task_id, profile.name, TaskStatus.CANCELLED.value, None, "cancelled", parent_session_id
+                )
             return result.output
         except TaskCancelledError:
             await db.set_cancelled(task_id)
@@ -464,9 +512,14 @@ class SubagentCoordinator:
                 await db.set_cancelled(task_id)
             else:
                 completed = await db.set_completed(task_id, result)
-                if not completed:
-                    await self._set_cancelled_if_requested(task_id, db)
-                await self._publish_completion(task_id, profile.name, TaskStatus.COMPLETED.value, result, None, parent_session_id)
+                if completed:
+                    await self._publish_completion(
+                        task_id, profile.name, TaskStatus.COMPLETED.value, result, None, parent_session_id
+                    )
+                elif await self._set_cancelled_if_requested(task_id, db):
+                    await self._publish_completion(
+                        task_id, profile.name, TaskStatus.CANCELLED.value, None, "cancelled", parent_session_id
+                    )
         except TaskCancelledError:
             await db.set_cancelled(task_id)
             await self._publish_completion(task_id, profile.name, TaskStatus.CANCELLED.value, None, "cancelled", parent_session_id)
@@ -550,7 +603,12 @@ class SubagentCoordinator:
         run_config = RunConfig(
             max_llm_calls=profile.max_llm_calls,
             cost_limit_usd=profile.cost_limit_usd,
-            provider_options=profile.provider_options or None,
+            provider_options=_schema_provider_options(
+                provider,
+                model_str,
+                profile.provider_options or None,
+                profile.output_schema_def,
+            ),
         )
 
         summarization_mw = SummarizationMiddleware(model=model_str)
@@ -582,6 +640,22 @@ class SubagentCoordinator:
 
         messages = [Message.user(task)]
         result_messages = await loop.run(messages)
+        structured_output: Any | None = None
+        if profile.output_schema_def:
+            output = _extract_final_output(result_messages)
+            try:
+                structured_output = _parse_and_validate_output(output, profile.output_schema_def)
+            except ValueError:
+                retry_messages = [
+                    *result_messages,
+                    Message.user(
+                        "Your previous response did not match the required JSON schema. "
+                        "Retry once and return only schema-valid JSON."
+                    ),
+                ]
+                result_messages = await loop.run(retry_messages)
+                output = _extract_final_output(result_messages)
+                structured_output = _parse_and_validate_output(output, profile.output_schema_def)
 
         total_input = 0
         total_output = 0
@@ -607,7 +681,11 @@ class SubagentCoordinator:
             if cost.reasoning and total_reasoning:
                 cost_usd += (total_reasoning / 1_000_000) * cost.reasoning
 
-        output, truncated = _extract_output(result_messages)
+        if profile.output_schema_def:
+            output = _extract_final_output(result_messages)
+            truncated = False
+        else:
+            output, truncated = _extract_output(result_messages)
 
         return SubagentResult(
             name=profile.name,
@@ -617,6 +695,7 @@ class SubagentCoordinator:
             truncated=truncated,
             cost_usd=cost_usd,
             llm_calls=llm_calls,
+            structured_output=structured_output,
         )
 
     def _make_progress_cb(self, task_id: str) -> Callable[..., Any]:
@@ -693,7 +772,18 @@ class SubagentCoordinator:
         if profile_path.exists():
             try:
                 from agentprofile.parser import load_profile as _load_ap
-                return _load_ap(str(profile_path))
+
+                profile = _load_ap(str(profile_path))
+                agent_path = profile_path.parent
+                if not profile.provider_options:
+                    provider_path = agent_path / "provider.json"
+                    if provider_path.exists():
+                        profile.provider_options = json.loads(provider_path.read_text())
+                if not profile.output_schema_def:
+                    schema_path = agent_path / "output-schema.json"
+                    if schema_path.exists():
+                        profile.output_schema_def = json.loads(schema_path.read_text())
+                return profile
             except Exception as e:
                 logger.error("subagent.load_failed", {"name": name, "error": str(e), "error_type": type(e).__name__}, user_id=self.user_id)
         return None
