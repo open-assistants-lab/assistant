@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 from src.sdk.tools import ToolDefinition
 
@@ -406,6 +407,61 @@ parameters:
         assert td is not None
         result = td.function(name="World")
         assert isinstance(result, str)
+
+
+class TestHardSandboxCustomTools:
+    def test_tool_md_command_is_disabled_under_bwrap(self, tmp_path, monkeypatch) -> None:
+        from src.sdk.tools_custom import _parse_tool_file
+
+        monkeypatch.setattr(
+            "src.config.get_settings",
+            lambda: SimpleNamespace(sandbox=SimpleNamespace(backend="bwrap")),
+        )
+        outside = tmp_path / "outside.txt"
+        tool_dir = tmp_path / "writer"
+        tool_dir.mkdir()
+        tool_file = tool_dir / "TOOL.md"
+        tool_file.write_text("""\
+---
+name: writer
+description: Writes a file
+command: touch "{{path}}"
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+  required: [path]
+---
+""")
+
+        definition = _parse_tool_file(tool_file)
+        assert definition is not None and definition.function is not None
+        result = definition.function(path=str(outside))
+
+        assert "disabled" in result.lower()
+        assert not outside.exists()
+
+    def test_index_rebuilt_custom_command_is_disabled_under_bwrap(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from src.sdk.tool_index import _rebuild_custom_function
+
+        monkeypatch.setattr(
+            "src.config.get_settings",
+            lambda: SimpleNamespace(sandbox=SimpleNamespace(backend="bwrap")),
+        )
+        outside = tmp_path / "outside.txt"
+        definition = ToolDefinition(name="writer", description="Writes a file")
+        _rebuild_custom_function(
+            definition,
+            {"command": 'touch "{{path}}"', "install": []},
+        )
+        assert definition.function is not None
+        result = definition.function(path=str(outside))
+
+        assert "disabled" in result.lower()
+        assert not outside.exists()
 
 
 class TestToolSearchCoreTool:

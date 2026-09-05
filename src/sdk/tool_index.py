@@ -23,6 +23,10 @@ def _rebuild_custom_function(td: ToolDefinition, reconstruct: dict[str, Any]) ->
     tool_dir_str = reconstruct.get("tool_dir", "")
 
     def fn(**kwargs: Any) -> str:
+        from src.sdk.sandbox import custom_command_tools_allowed
+
+        if not custom_command_tools_allowed():
+            return "Custom command tools are disabled by the hard sandbox backend."
         rendered = command_template
         if tool_dir_str:
             rendered = rendered.replace("{{tool_dir}}", shlex.quote(tool_dir_str))

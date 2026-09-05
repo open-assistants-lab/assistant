@@ -30,6 +30,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -324,21 +325,47 @@ class SandboxError(RuntimeError):
 
 
 def bwrap_available() -> bool:
-    """True when the bubblewrap binary is on PATH."""
+    """True only when bwrap is available on a supported Linux host."""
     import shutil
 
-    return shutil.which("bwrap") is not None
+    return sys.platform == "linux" and shutil.which("bwrap") is not None
+
+
+def _bwrap_rootfs(config: Any) -> Path:
+    """Return a validated, curated rootfs rather than the host filesystem."""
+    configured = str(getattr(config, "bwrap_rootfs", "") or "")
+    if not configured:
+        raise SandboxError(
+            "SandboxBackend 'bwrap' requires SANDBOX_BWRAP_ROOTFS to name a "
+            "curated, read-only Linux rootfs. Refusing to bind the host root."
+        )
+    rootfs = Path(configured).expanduser()
+    if not rootfs.is_absolute() or not rootfs.is_dir() or rootfs.resolve() == Path("/"):
+        raise SandboxError(
+            "SANDBOX_BWRAP_ROOTFS must be an existing absolute directory other "
+            "than '/'."
+        )
+    return rootfs.resolve()
 
 
 class BwrapSandboxBackend:
     """Hard backend (T3.4): bubblewrap namespace jail for untrusted tenants.
 
-    - root is bind-mounted READ-ONLY; only the workspace is writable
-    - pid/net/ipc namespaces unshared; die-with-parent; new session
+    - mounts a curated rootfs READ-ONLY; only /workspace is writable
+    - pid/net/ipc/user namespaces unshared; die-with-parent; new session
     - same env scrubbing + rlimits as soft (kernel + rlimit both apply)
-    - server-root runs pass --uid/--gid (per-user mapping, same as soft)
+    - requires a non-root service process; root deployment uses runc until
+      idmapped mounts/per-user ownership are provisioned
     - validate_write_path/validate_source are kernel-enforced (no static scan)
     """
+
+    def __init__(self, rootfs: Path) -> None:
+        resolved = rootfs.expanduser().resolve()
+        if not rootfs.is_absolute() or not resolved.is_dir() or resolved == Path("/"):
+            raise SandboxError(
+                "BwrapSandboxBackend requires an existing absolute curated rootfs other than '/'."
+            )
+        self.rootfs = resolved
 
     def run(
         self,
@@ -349,31 +376,41 @@ class BwrapSandboxBackend:
         env_extra: dict[str, str] | None = None,
         user_id: str | None = None,
     ) -> SandboxResult:
+        if sys.platform != "linux":
+            raise SandboxError("SandboxBackend 'bwrap' is supported only on Linux.")
+        if os.getuid() == 0:
+            raise SandboxError(
+                "SandboxBackend 'bwrap' refuses a root service process until "
+                "idmapped workspace ownership is provisioned; use runc."
+            )
         lim = limits or SandboxLimits()
         env = scrub_env(lim.env_mode)
         if env_extra:
             env.update(env_extra)
+        # Never expose a host home/runtime path inside the sandbox.
+        env["HOME"] = "/workspace"
+        env["TMPDIR"] = "/tmp"
 
+        workspace = cwd.resolve()
         bwrap_argv: list[str] = [
             "bwrap",
-            "--ro-bind", "/", "/",
-            "--bind", str(cwd), str(cwd),
+            "--ro-bind", str(self.rootfs), "/",
+            "--dir", "/workspace",
+            "--bind", str(workspace), "/workspace",
+            "--chdir", "/workspace",
             "--proc", "/proc",
             "--dev", "/dev",
             "--tmpfs", "/tmp",
+            "--tmpfs", "/run",
+            "--tmpfs", "/var/run",
+            "--unshare-user",
             "--unshare-pid",
             "--unshare-net",
             "--unshare-ipc",
             "--die-with-parent",
             "--new-session",
+            "--", *argv,
         ]
-        if os.getuid() == 0:
-            if user_id:
-                uid, gid = user_sandbox_uid_gid(user_id)
-            else:
-                uid, gid = get_sandbox_uid_gid()
-            bwrap_argv += ["--uid", str(uid), "--gid", str(gid)]
-        bwrap_argv += ["--", *argv]
 
         def _preexec() -> None:  # pragma: no cover - runs in child
             import resource
@@ -518,6 +555,19 @@ def _prepare_user_dirs(user_id: str | None, workspace_root: Path) -> None:
 _PREPARED_UIDS: set[int] = set()
 
 
+def custom_command_tools_allowed() -> bool:
+    """Whether legacy shell-string custom tools may execute directly.
+
+    TOOL.md command templates use ``shell=True`` and cannot safely be mapped
+    to the argv-only sandbox seam. Hard backends therefore fail closed rather
+    than leaving an escape hatch beside bwrap/runc.
+    """
+    from src.config import get_settings
+
+    cfg = getattr(get_settings(), "sandbox", None)
+    return getattr(cfg, "backend", "soft") in {"null", "soft"}
+
+
 def get_sandbox_backend() -> Any:
     """Select the backend from settings (config change, not code change)."""
     from src.config import get_settings
@@ -525,6 +575,8 @@ def get_sandbox_backend() -> Any:
     settings = get_settings()
     cfg = getattr(settings, "sandbox", None)
     backend = getattr(cfg, "backend", "soft") if cfg else "soft"
+    if backend not in {"null", "soft", "bwrap", "runc"}:
+        raise SandboxError(f"Unknown SandboxBackend {backend!r}.")
     # SB1-2: uid-drop availability is decided by the SERVER's uid. A
     # non-root server is already compliant (children inherit); log once so
     # operators know the drop path is not in play.
@@ -538,13 +590,20 @@ def get_sandbox_backend() -> Any:
         )
         return NullSandboxBackend()
     if backend == "bwrap":
+        if sys.platform != "linux":
+            raise SandboxError("SandboxBackend 'bwrap' is supported only on Linux.")
         if not bwrap_available():
             raise SandboxError(
                 "SandboxBackend 'bwrap' selected but the bubblewrap binary "
                 "is not installed (T3.4). Install bwrap or set "
                 "sandbox.backend='soft'."
             )
-        return BwrapSandboxBackend()
+        if os.getuid() == 0:
+            raise SandboxError(
+                "SandboxBackend 'bwrap' refuses a root service process until "
+                "idmapped workspace ownership is provisioned; use runc."
+            )
+        return BwrapSandboxBackend(_bwrap_rootfs(cfg))
     if backend == "runc":
         return RuncSandboxBackend()  # raises: T3.4 stub
     return SoftSandboxBackend()

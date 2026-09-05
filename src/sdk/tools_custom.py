@@ -76,6 +76,10 @@ def _parse_tool_file(tool_path: Path) -> ToolDefinition | None:
         import subprocess as _subprocess
 
         def fn(**kwargs: Any) -> str:
+            from src.sdk.sandbox import custom_command_tools_allowed
+
+            if not custom_command_tools_allowed():
+                return "Custom command tools are disabled by the hard sandbox backend."
             rendered = tmpl
             if tool_dir:
                 rendered = rendered.replace("{{tool_dir}}", shlex.quote(str(tool_dir)))

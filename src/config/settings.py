@@ -3,7 +3,7 @@
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import Field
@@ -353,15 +353,22 @@ class SandboxConfig(_BaseSettings):
     trusted teams. 'shared' keeps the single-identity drop for dev.
     """
 
-    backend: str = Field(
+    backend: Literal["null", "soft", "bwrap", "runc"] = Field(
         default="soft",
         description="SandboxBackend: 'soft' (default) | 'bwrap' (hard, T3.4) | 'null' | 'runc' (stub)",
+    )
+    bwrap_rootfs: str = Field(
+        default="",
+        description=(
+            "Absolute path to a curated, read-only Linux bwrap rootfs. "
+            "Required for backend=bwrap; '/' is never accepted."
+        ),
     )
     # SB1-2 security rule: no agent subprocess runs as root. uid_mode:
     # 'per_user' — every assistant user_id drops to its own mapped uid:gid
     # (kernel-enforced cross-user isolation; requires a root/CAP_SETUID
     # server). 'shared' — one non-root identity for all users (macOS/dev).
-    uid_mode: str = Field(
+    uid_mode: Literal["per_user", "shared"] = Field(
         default="per_user",
         description="'per_user' (kernel-enforced per-user isolation) or 'shared'",
     )

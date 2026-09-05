@@ -4,6 +4,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +12,7 @@ from src.sdk.sandbox import (
     BwrapSandboxBackend,
     NullSandboxBackend,
     SandboxBackend,
+    SandboxError,
     SandboxLimits,
     SandboxResult,
     SoftSandboxBackend,
@@ -128,6 +130,44 @@ class TestBackendSelection:
     def test_path_outside_workspace(self, tmp_path):
         assert path_outside_workspace(tmp_path.parent / "x", tmp_path)
         assert not path_outside_workspace(tmp_path / "x", tmp_path)
+
+    def test_unknown_backend_fails_closed(self, monkeypatch):
+        monkeypatch.setattr(
+            "src.config.get_settings",
+            lambda: SimpleNamespace(sandbox=SimpleNamespace(backend="bwarp")),
+        )
+        with pytest.raises(SandboxError, match="Unknown SandboxBackend"):
+            get_sandbox_backend()
+
+    def test_bwrap_requires_curated_rootfs(self, monkeypatch):
+        import src.sdk.sandbox as sandbox
+
+        monkeypatch.setattr(sandbox, "bwrap_available", lambda: True)
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(
+            "src.config.get_settings",
+            lambda: SimpleNamespace(
+                sandbox=SimpleNamespace(backend="bwrap", bwrap_rootfs="")
+            ),
+        )
+        with pytest.raises(SandboxError, match="SANDBOX_BWRAP_ROOTFS"):
+            get_sandbox_backend()
+
+    def test_bwrap_rejected_outside_linux(self, monkeypatch, tmp_path):
+        import src.sdk.sandbox as sandbox
+
+        rootfs = tmp_path / "rootfs"
+        rootfs.mkdir()
+        monkeypatch.setattr(sandbox, "bwrap_available", lambda: True)
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(
+            "src.config.get_settings",
+            lambda: SimpleNamespace(
+                sandbox=SimpleNamespace(backend="bwrap", bwrap_rootfs=str(rootfs))
+            ),
+        )
+        with pytest.raises(SandboxError, match="Linux"):
+            get_sandbox_backend()
 
 
 def test_single_level_traversal_rejected(tmp_path):
@@ -328,7 +368,13 @@ def test_per_user_kernel_isolation_two_users(tmp_path):
 
 
 
-_HAS_BWRAP = bwrap_available()
+_BWRAP_ROOTFS = os.environ.get("SANDBOX_BWRAP_ROOTFS", "")
+_HAS_BWRAP = (
+    bwrap_available()
+    and bool(_BWRAP_ROOTFS)
+    and Path(_BWRAP_ROOTFS).is_dir()
+    and os.getuid() != 0
+)
 
 
 def test_get_sandbox_backend_raises_when_bwrap_missing(monkeypatch):
@@ -354,15 +400,73 @@ def test_get_sandbox_backend_raises_when_bwrap_missing(monkeypatch):
         raised = False
     except sbx.SandboxError as e:
         raised = True
-        assert "bubblewrap" in str(e)
+        assert "bwrap" in str(e).lower()
     if _HAS_BWRAP:
         return  # backend actually available; nothing to assert
     assert raised
 
 
-@pytest.mark.skipif(not _HAS_BWRAP, reason="bwrap not installed")
+def test_bwrap_backend_rejects_host_rootfs():
+    with pytest.raises(SandboxError, match="curated rootfs"):
+        BwrapSandboxBackend(Path("/"))
+
+
+def test_bwrap_command_uses_curated_rootfs_and_workspace_mount(tmp_path, monkeypatch):
+    import src.sdk.sandbox as sandbox
+
+    rootfs = tmp_path / "rootfs"
+    workspace = tmp_path / "workspace"
+    rootfs.mkdir()
+    workspace.mkdir()
+    captured: list[str] = []
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 501)
+    monkeypatch.setattr(
+        sandbox.subprocess,
+        "run",
+        lambda argv, **kwargs: (captured.extend(argv) or Completed()),
+    )
+
+    BwrapSandboxBackend(rootfs).run(["python3", "-c", "pass"], workspace)
+
+    assert ["--ro-bind", str(rootfs), "/"] in [
+        captured[i : i + 3] for i in range(len(captured))
+    ]
+    assert ["--bind", str(workspace), "/workspace"] in [
+        captured[i : i + 3] for i in range(len(captured))
+    ]
+    assert ["--ro-bind", "/", "/"] not in [captured[i : i + 3] for i in range(len(captured))]
+    assert "--unshare-user" in captured
+
+
+def test_bwrap_rejects_root_service_process(monkeypatch, tmp_path):
+    import src.sdk.sandbox as sandbox
+
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sandbox, "bwrap_available", lambda: True)
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 0)
+    monkeypatch.setattr(
+        "src.config.get_settings",
+        lambda: SimpleNamespace(
+            sandbox=SimpleNamespace(backend="bwrap", bwrap_rootfs=str(rootfs))
+        ),
+    )
+
+    with pytest.raises(SandboxError, match="root service process"):
+        get_sandbox_backend()
+
+
+@pytest.mark.skipif(not _HAS_BWRAP, reason="bwrap rootfs is not configured")
 def test_bwrap_runs_inside_workspace(tmp_path):
-    b = BwrapSandboxBackend()
+    b = BwrapSandboxBackend(Path(_BWRAP_ROOTFS))
     ws = tmp_path / "ws"
     ws.mkdir()
     r = b.run(
@@ -374,9 +478,9 @@ def test_bwrap_runs_inside_workspace(tmp_path):
     assert (ws / "inside.txt").exists()
 
 
-@pytest.mark.skipif(not _HAS_BWRAP, reason="bwrap not installed")
+@pytest.mark.skipif(not _HAS_BWRAP, reason="bwrap rootfs is not configured")
 def test_bwrap_blocks_outside_workspace_write(tmp_path):
-    b = BwrapSandboxBackend()
+    b = BwrapSandboxBackend(Path(_BWRAP_ROOTFS))
     ws = tmp_path / "ws"
     ws.mkdir()
     outside = tmp_path / "outside.txt"
