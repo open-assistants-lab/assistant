@@ -64,12 +64,12 @@ def test_todos_db():
 
 def test_conversation_dir():
     dp = DataPaths(user_id="tester", data_root="/tmp/ea-test-root")
-    assert str(dp.conversation_dir()) == f"{USER_ROOT}/Conversation"
+    assert str(dp.conversation_dir()) == f"{USER_ROOT}/Messages"
 
 
 def test_conversation_db():
     dp = DataPaths(user_id="tester", data_root="/tmp/ea-test-root")
-    assert str(dp.conversation_db()) == f"{USER_ROOT}/Conversation/messages.db"
+    assert str(dp.conversation_db()) == f"{USER_ROOT}/Messages/messages.db"
 
 
 def test_user_memory_dir():
@@ -137,7 +137,7 @@ def test_workspace_memory_dir_uppercase():
 
 def test_workspace_conversation_path():
     dp = DataPaths(user_id="tester", data_root="/tmp/ea-test-root", workspace_id="testws")
-    assert str(dp.workspace_conversation_path()) == f"{USER_ROOT}/Conversation/app.db"
+    assert str(dp.workspace_conversation_path()) == f"{USER_ROOT}/Messages/app.db"
 
 
 def test_deprecated_skills_dir_warns():
@@ -320,7 +320,7 @@ def test_get_paths_cache_key_includes_workspace_id():
 
 
 def test_get_paths_cache_lru_cap(tmp_path, monkeypatch):
-    from src.storage.paths import _PATHS_CACHE_MAX, _paths_cache, get_paths
+    from src.storage.paths import _paths_cache, get_paths
 
     _paths_cache.clear()
     monkeypatch.setattr("src.storage.paths._PATHS_CACHE_MAX", 3)

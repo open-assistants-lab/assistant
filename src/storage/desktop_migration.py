@@ -25,8 +25,18 @@ from pathlib import Path
 MARKER_FILE = "migration-complete.json"
 RECOVERY_FILE = "migration-recovery.json"
 
-# Top-level user-data dirs carried from a legacy tree into the promoted root.
-_CARRIED_DIRS = ("Files", "Memory", "Skills", "Subagents", "Todos", "Contacts")
+# These are desktop-runtime implementation directories, not legacy user-data
+# sources. A legacy native_sdk_chat tree may be promoted only when every other
+# root entry is one of these safe framework-owned directories.
+_SAFE_ROOT_ENTRIES = {
+    ".DS_Store",
+    ".git",
+    ".gitignore",
+    ".system",
+    ".versions",
+    "Logs",
+    "Users",
+}
 
 
 def _system_dir(data_root: Path, system_dir: Path | None = None) -> Path:
@@ -47,6 +57,40 @@ def _legacy_tree_source(data_root: Path) -> bool:
     return (data_root / "Users" / "native_sdk_chat").is_dir()
 
 
+def _write_recovery(
+    system: Path,
+    data_root: Path,
+    message: str,
+    sources: dict[str, str],
+) -> None:
+    """Persist an explicit recovery state and stop without moving any data."""
+    state = {
+        "requires_recovery": True,
+        "sources": sources,
+        "message": message,
+        "ts": time.time(),
+    }
+    (system / RECOVERY_FILE).write_text(json.dumps(state, indent=2))
+    print(f"Desktop migration stopped: {message} See {system / RECOVERY_FILE}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def _root_entries_conflict_with_legacy(data_root: Path) -> list[Path]:
+    """Return root entries that make legacy-tree promotion ambiguous."""
+    return [entry for entry in data_root.iterdir() if entry.name not in _SAFE_ROOT_ENTRIES]
+
+
+def _legacy_target_conflicts(legacy: Path, data_root: Path) -> list[tuple[Path, Path]]:
+    """Find collisions that would make a legacy promotion non-atomic."""
+    conflicts: list[tuple[Path, Path]] = []
+    for child in legacy.iterdir():
+        name = "Messages" if child.name == "Conversation" else child.name
+        target = data_root / name
+        if target.exists():
+            conflicts.append((child, target))
+    return conflicts
+
+
 def run_desktop_migration(
     data_root: Path, system_dir: Path | None = None
 ) -> dict[str, object]:
@@ -65,54 +109,88 @@ def run_desktop_migration(
     if marker.exists():
         return {"source": "already-migrated", "moved": False}
 
+    conversation = data_root / "Conversation"
+    messages = data_root / "Messages"
+    legacy = data_root / "Users" / "native_sdk_chat"
     has_conv = _conversation_source(data_root)
     has_legacy = _legacy_tree_source(data_root)
+    has_messages = messages.exists()
 
     if has_conv and has_legacy:
-        # Explicit recovery stop: both trees exist, we refuse to choose.
-        state = {
-            "requires_recovery": True,
-            "sources": {
-                "conversation": str(data_root / "Conversation"),
-                "native_sdk_chat": str(data_root / "Users" / "native_sdk_chat"),
-            },
-            "message": (
-                "Both a root-level Conversation/ tree and a pre-DMG "
-                "Users/native_sdk_chat/ tree exist. Resolve manually "
-                "(keep exactly one), then remove this recovery file."
-            ),
-            "ts": time.time(),
-        }
-        (system / RECOVERY_FILE).write_text(json.dumps(state, indent=2))
-        print(
-            "Desktop migration stopped: two data sources found. "
-            f"See {system / RECOVERY_FILE}",
-            file=sys.stderr,
+        _write_recovery(
+            system,
+            data_root,
+            "both root Conversation/ and Users/native_sdk_chat/ sources exist.",
+            {"conversation": str(conversation), "native_sdk_chat": str(legacy)},
         )
-        raise SystemExit(1)
+
+    if has_conv and has_messages:
+        _write_recovery(
+            system,
+            data_root,
+            "both Conversation/ and Messages/ exist; refusing to nest or merge them.",
+            {"conversation": str(conversation), "messages": str(messages)},
+        )
+
+    if has_legacy:
+        root_conflicts = _root_entries_conflict_with_legacy(data_root)
+        target_conflicts = _legacy_target_conflicts(legacy, data_root)
+        legacy_parent = legacy.parent
+        unexpected_legacy_siblings = [
+            entry for entry in legacy_parent.iterdir() if entry.name != legacy.name
+        ]
+        if root_conflicts or target_conflicts or unexpected_legacy_siblings:
+            sources = {"native_sdk_chat": str(legacy)}
+            sources.update({entry.name: str(entry) for entry in root_conflicts})
+            sources.update(
+                {
+                    f"legacy/{source.name}": str(source)
+                    for source, _ in target_conflicts
+                }
+            )
+            sources.update(
+                {
+                    f"root/{target.name}": str(target)
+                    for _, target in target_conflicts
+                }
+            )
+            sources.update(
+                {
+                    f"users/{entry.name}": str(entry)
+                    for entry in unexpected_legacy_siblings
+                }
+            )
+            _write_recovery(
+                system,
+                data_root,
+                "root-level data coexists with Users/native_sdk_chat/; refusing to merge.",
+                sources,
+            )
+
+    if has_messages and not has_conv:
+        _write_recovery(
+            system,
+            data_root,
+            "Messages/ exists without a completed migration marker; explicit recovery is required.",
+            {"messages": str(messages)},
+        )
 
     moved = False
     if has_conv:
-        shutil.move(str(data_root / "Conversation"), str(data_root / "Messages"))
+        shutil.move(str(conversation), str(messages))
         source = "conversation"
         moved = True
     elif has_legacy:
-        legacy = data_root / "Users" / "native_sdk_chat"
         for child in legacy.iterdir():
             name = "Messages" if child.name == "Conversation" else child.name
-            target = data_root / name
-            if target.exists():
-                # Merge: move children, not the dir (never overwrite existing).
-                for sub in child.iterdir():
-                    t = target / sub.name
-                    if not t.exists():
-                        shutil.move(str(sub), str(t))
-            else:
-                shutil.move(str(child), str(target))
-        shutil.rmtree(legacy, ignore_errors=True)
+            shutil.move(str(child), str(data_root / name))
+        legacy.rmdir()
+        if not legacy.parent.iterdir():
+            legacy.parent.rmdir()
         source = "native_sdk_chat"
         moved = True
     else:
+        messages.mkdir()
         source = "fresh"
 
     marker.write_text(
@@ -130,8 +208,11 @@ def run_desktop_migration(
 
 
 def migration_state(data_root: Path, system_dir: Path | None = None) -> dict[str, object]:
-    """Migration marker for the bootstrap payload."""
+    """Migration state for the bootstrap payload."""
     system = _system_dir(Path(data_root), system_dir)
+    recovery = system / RECOVERY_FILE
+    if recovery.exists():
+        return {"migrated": False, "requires_recovery": True}
     marker = system / MARKER_FILE
     if not marker.exists():
         return {"migrated": False, "source": "fresh"}
@@ -141,7 +222,3 @@ def migration_state(data_root: Path, system_dir: Path | None = None) -> dict[str
         "source": state.get("source", "fresh"),
         "migration_version": state.get("migration_version", 1),
     }
-
-
-def _recovery_pending(data_root: Path) -> bool:
-    return (_system_dir(Path(data_root)) / RECOVERY_FILE).exists()

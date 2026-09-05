@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import os
 import secrets
+from typing import cast
 
 from fastapi import HTTPException, Request
 
 from src.http.auth.legacy import is_localhost, require_auth, verify_key
 from src.http.auth.resolver import IdentityResolver, UserIdentity
 from src.http.auth.shared_secret import SharedSecretResolver
+from src.storage.paths import DEFAULT_USER_ID
 
 __all__ = [
     "IdentityResolver",
@@ -112,12 +114,13 @@ def resolve_user_id(request: Request, request_user_id: str) -> str:
 
     Returns the effective user_id; routers must use the return value.
     """
-    from src.config.settings import get_settings
-
-    identity = getattr(getattr(request, "state", None), "identity", None)
-    if identity is not None and identity.trust_domain == "desktop":
+    identity = cast(
+        UserIdentity | None,
+        getattr(getattr(request, "state", None), "identity", None),
+    )
+    if isinstance(identity, UserIdentity) and identity.trust_domain == "desktop":
         # Desktop: server-side default_user wins over any client user_id.
-        return identity.user_id
+        return identity.user_id or DEFAULT_USER_ID
     if identity is not None and identity.trust_domain != "solo":
         # Same contract as enforce_user_id: any identity that knows the
         # caller (trusted-network per-user resolver or untrusted per-user
@@ -137,14 +140,8 @@ _desktop_launch_tokens: set[str] = set()
 
 
 def set_desktop_launch_token(token: str) -> None:
-    """Register the current sidecar run's launch token (desktop v0.1 D1).
-
-    When set, the desktop resolver becomes the auth authority: SOLO_BYPASS
-    is disabled in desktop mode and the launch token IS the credential
-    (D0 P1 decision). Every request resolves to `default_user`.
-    Tokens accumulate (env-provided + runtime-generated) — the active run
-    accepts any token registered for the current process.
-    """
+    """Register the sole ephemeral token for the current sidecar run."""
+    _desktop_launch_tokens.clear()
     _desktop_launch_tokens.add(token)
 
 
@@ -173,8 +170,6 @@ class DesktopTokenResolver:
         self.tokens = tokens
 
     def resolve(self, request: Request) -> UserIdentity | None:
-        from src.storage.paths import DEFAULT_USER_ID
-
         header = request.headers.get("authorization", "")
         if not header.startswith("Bearer "):
             return None

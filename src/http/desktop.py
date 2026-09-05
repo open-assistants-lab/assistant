@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import os
-import secrets
 import socket
 import sys
 import threading
@@ -37,7 +36,7 @@ LOCK_FILE = "sidecar.lock"
 _lock_holder = None
 
 
-def acquire_sidecar_lock() -> "IO[str] | None":
+def acquire_sidecar_lock() -> IO[str] | None:
     """Acquire the single-instance sidecar lock (flock).
 
     Returns the lock file handle on success (the caller holds it for the
@@ -107,6 +106,24 @@ def sidecar_versions() -> dict[str, str]:
     }
 
 
+def _write_rendezvous(system_dir: Path, rendezvous: dict[str, object]) -> None:
+    """Atomically publish non-secret sidecar discovery metadata."""
+    target = system_dir / RENDZVOUS_FILE
+    temporary = system_dir / f".{RENDZVOUS_FILE}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temporary, "x", encoding="utf-8") as handle:
+            handle.write(json.dumps(rendezvous, indent=2))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, target)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def run_desktop_server(stop_event: threading.Event | None = None) -> None:
     """Run the desktop sidecar: lock, migrate, serve, write rendezvous.
 
@@ -131,9 +148,14 @@ def run_desktop_server(stop_event: threading.Event | None = None) -> None:
         sys.exit(1)
 
     try:
-        # Launch token: the auth for this run (D0 P1 decision — the token IS
-        # the auth; SOLO_BYPASS is disabled in this mode).
-        token = os.environ.get("DESKTOP_LAUNCH_TOKEN") or secrets.token_urlsafe(32)
+        # The native launcher generates and retains this token, then passes it
+        # only to its child sidecar. Persisting a generated fallback in the
+        # rendezvous file would let any same-user process impersonate the app.
+        token = os.environ.get("DESKTOP_LAUNCH_TOKEN")
+        if not token:
+            logger.error("desktop.sidecar_missing_launch_token", {})
+            print("Desktop sidecar requires DESKTOP_LAUNCH_TOKEN.", file=sys.stderr)
+            sys.exit(1)
         from src.http import auth as auth_mod
 
         auth_mod.set_desktop_launch_token(token)
@@ -170,13 +192,12 @@ def run_desktop_server(stop_event: threading.Event | None = None) -> None:
         rendezvous = {
             "host": "127.0.0.1",
             "port": port,
-            "token": token,
             "pid": os.getpid(),
             "nonce": uuid.uuid4().hex,
             "started_at": time.time(),
             "versions": sidecar_versions(),
         }
-        (system_dir / RENDZVOUS_FILE).write_text(json.dumps(rendezvous, indent=2))
+        _write_rendezvous(system_dir, rendezvous)
         from src.config import get_settings
 
         logger.info(
@@ -208,14 +229,22 @@ def desktop_main() -> None:
     BEFORE stores initialize, then serves the sidecar until exit.
     """
     home = Path.home() / "Assistant"
-    os.environ.setdefault("DEPLOYMENT_MODE", "desktop-server")
-    os.environ.setdefault("DEPLOYMENT_DATA_ROOT", str(home))
-    os.environ.setdefault("DEPLOYMENT_DATA_PATH", str(home / ".system"))
-    os.environ.setdefault("SOLO_BYPASS", "false")
+    # Product-sidecar configuration is not caller-configurable: .env values
+    # for developer/server modes must not redirect user data or bypass launch
+    # token auth in an installed desktop app.
+    os.environ["DEPLOYMENT_MODE"] = "desktop-server"
+    os.environ["DEPLOYMENT_DATA_ROOT"] = str(home)
+    os.environ["DEPLOYMENT_DATA_PATH"] = str(home / ".system")
+    os.environ["SOLO_BYPASS"] = "false"
 
     from src.config import reload_settings
 
     reload_settings()
+
+    if not os.environ.get("DESKTOP_LAUNCH_TOKEN"):
+        logger.error("desktop.sidecar_missing_launch_token", {})
+        print("Desktop sidecar requires DESKTOP_LAUNCH_TOKEN.", file=sys.stderr)
+        sys.exit(1)
 
     # One-source storage migration BEFORE any store initializes (D1 task 4).
     from src.storage.desktop_migration import run_desktop_migration

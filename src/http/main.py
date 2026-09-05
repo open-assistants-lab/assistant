@@ -1,6 +1,7 @@
 """HTTP server for Assistant."""
 
 import asyncio
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -12,6 +13,8 @@ from fastapi.responses import JSONResponse
 
 from src.config import get_settings
 from src.config.settings import REPO_ROOT, warn_unknown_model_providers
+from src.http.auth import desktop_mode_active
+from src.http import auth as _auth_module
 from src.http.routers import (
     audit_router,
     billing_router,
@@ -37,9 +40,10 @@ from src.http.routers import (
     workspaces_router,
 )
 from src.http.routers.auth_keys import router as auth_keys_router
+from src.http.routers.auth_oidc import router as auth_oidc_router
+from src.http.routers.bootstrap import router as bootstrap_router
 from src.http.routers.connectors import router as connectors_router
 from src.http.routers.dashboard import router as dashboard_router
-from src.http.routers.bootstrap import router as bootstrap_router
 from src.http.routers.dev import router as dev_router
 from src.http.routers.governance import router as governance_router
 from src.http.routers.review import router as review_router
@@ -55,13 +59,16 @@ load_dotenv(REPO_ROOT / ".env")
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Lifespan context manager — SDK runtime."""
+    desktop_mode = desktop_mode_active()
     warn_unknown_model_providers(get_settings())
-    try:
-        from src.subagent.scheduler import get_scheduler
+    _token_refresh_task: asyncio.Task[Any] | None = None
+    if not desktop_mode:
+        try:
+            from src.subagent.scheduler import get_scheduler
 
-        get_scheduler()
-    except Exception:
-        pass
+            get_scheduler()
+        except Exception:
+            pass
 
     # Start companion scheduler if enabled
     try:
@@ -69,9 +76,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         settings = get_settings()
         if getattr(settings.companion, "enabled", False):
             pass  # Companion scheduler disabled
-
-        # Start connectkit token refresh background task
-        _token_refresh_task: asyncio.Task[Any] | None = None
 
         # Register default trigger handler for loop 3 (event-driven)
         try:
@@ -98,11 +102,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                         {"error": str(e), "error_type": type(e).__name__},
                     )
 
-        try:
-            loop = asyncio.get_event_loop()
-            _token_refresh_task = loop.create_task(_refresh_loop())
-        except Exception:
-            pass
+        if not desktop_mode:
+            try:
+                loop = asyncio.get_event_loop()
+                _token_refresh_task = loop.create_task(_refresh_loop())
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -229,14 +234,15 @@ async def api_key_auth_middleware(request: Request, call_next: Any) -> Any:
     returns None. Default resolver = SharedSecretResolver (behavior
     identical to the pre-seam inline verify_key flow).
     """
-    if request.url.path in _PUBLIC_PATHS or _is_webhook_fire_path(request.url.path):
+    if desktop_mode_active():
+        if request.url.path in {"/health", "/health/ready"}:
+            return await call_next(request)
+    elif request.url.path in _PUBLIC_PATHS or _is_webhook_fire_path(request.url.path):
         return await call_next(request)
 
     import inspect
 
-    from src.http.auth import get_resolver, desktop_mode_active
-
-    result = get_resolver().resolve(request)
+    result = _auth_module.get_resolver().resolve(request)  # late-bound: tests/runtime swap resolvers
     if inspect.isawaitable(result):
         result = await result
     if result is None:
@@ -286,19 +292,18 @@ app.include_router(tenancy_router)
 
 # Phase 3 T3.3: OIDC SSO router — mounted always; routes 404 when the flag
 # is off (mounted-but-404 keeps module-level mount deterministic).
-from src.http.routers.auth_oidc import router as auth_oidc_router
-
 app.include_router(auth_oidc_router)
 app.include_router(governance_router)
 app.include_router(mcp_router)
-app.include_router(scheduler_router)
+if not desktop_mode_active():
+    app.include_router(scheduler_router)
 app.include_router(conversation_router)
-app.include_router(email_router)
 app.include_router(memories_router)
 app.include_router(user_prompt_router)
-app.include_router(contacts_router)
-app.include_router(todos_router)
-# email_router already included above
+if not desktop_mode_active():
+    app.include_router(email_router)
+    app.include_router(contacts_router)
+    app.include_router(todos_router)
 app.include_router(workspace_router)
 app.include_router(workspaces_router)
 app.include_router(sync_router)
@@ -331,8 +336,6 @@ try:
 
     # Load specs once — shared between config provider and oauth router
     _oauth_specs = ConnectorSpec.from_yaml_dir(_default_spec_dir())
-
-    import os
 
     def _oauth_config(service: str) -> dict[str, Any]:
         bridge = ConnectKitBridge("")
@@ -369,7 +372,7 @@ try:
         400 on missing client_id). Remove this guard when the app's
         connectkit pin bumps past 0.1.4.
         """
-        if request.url.path == "/auth/login":
+        if request.url.path == "/auth/login" and not desktop_mode_active():
             error = _oauth_login_error(
                 request.query_params.get("service", ""), _oauth_config
             )
@@ -384,13 +387,15 @@ try:
         config=_oauth_config,
         base_url=_oauth_base_url,
     )
-    app.include_router(oauth_router)
-    print(f"Included oauth_router: {[r.path for r in oauth_router.routes]}")
+    if not desktop_mode_active():
+        app.include_router(oauth_router)
+        print(f"Included oauth_router: {[r.path for r in oauth_router.routes]}")
 except Exception:
     import traceback
     traceback.print_exc()
 
-app.include_router(connectors_router)
+if not desktop_mode_active():
+    app.include_router(connectors_router)
 app.include_router(bootstrap_router)
 # Desktop v0.1 (D0 Q7 decision): the dev router is stripped entirely in
 # desktop-server mode — /dev/gmail-demo is unauthenticated and dev-only.

@@ -6,8 +6,6 @@ import json
 import sqlite3
 import tempfile
 from datetime import UTC, datetime, timedelta
-
-UTC = UTC
 from unittest import mock
 
 import pytest
@@ -633,7 +631,7 @@ def test_get_message_store_ignores_workspace_id_for_storage(monkeypatch, tmp_pat
 
     assert second is first
     assert second.count_messages() == 1
-    assert (tmp_path / "assistant" / "Conversation" / "app.db").exists()
+    assert (tmp_path / "assistant" / "Messages" / "app.db").exists()
     assert not (tmp_path / "assistant" / "Workspaces" / "project-x" / "conversation.app.db").exists()
 
 

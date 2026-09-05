@@ -17,7 +17,7 @@ import secrets
 import uuid
 from typing import Any, Literal, cast
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
 from src.app_logging import get_logger
 from src.config.settings import get_settings
@@ -419,18 +419,39 @@ async def ws_conversation(websocket: WebSocket) -> None:
         error: Error occurred
         pong: Heartbeat response
     """
+    # Desktop WebSockets use the same header-borne launch token as HTTP.
+    # Do this before accepting the upgrade: the legacy first-frame API-key
+    # handshake is not the desktop credential and localhost is not a bypass.
+    from src.http.auth import desktop_mode_active, get_resolver
+
+    desktop_mode = desktop_mode_active()
+    desktop_identity: object | None = None
+    if desktop_mode:
+        try:
+            import inspect
+
+            desktop_result = get_resolver().resolve(cast(Request, websocket))
+            if inspect.isawaitable(desktop_result):
+                desktop_result = await desktop_result
+        except Exception:
+            desktop_result = None
+        if getattr(desktop_result, "trust_domain", None) != "desktop":
+            await websocket.close(code=1008)
+            return
+        desktop_identity = desktop_result
+
     await websocket.accept()
 
     # ── API key auth (first message after connect) ───────────────────────
     settings = get_settings()
-    needs_auth = bool(settings.auth.api_key)
+    needs_auth = bool(settings.auth.api_key) and not desktop_mode
 
     # Check if this is a localhost WebSocket (bypass solo auth). Delegates to
     # the audited is_localhost (audit B17 dual-stack form) instead of an
     # inline divergent set (bug-hunt P2).
     from src.http.auth.legacy import is_localhost
 
-    if needs_auth and settings.auth.solo_bypass and is_localhost(websocket):
+    if needs_auth and settings.auth.solo_bypass and is_localhost(cast(Request, websocket)):
         needs_auth = False
 
     handshake_scoped_user: str | None = None
@@ -478,31 +499,30 @@ async def ws_conversation(websocket: WebSocket) -> None:
     # shared-secret (user_id=None, cannot scope) > localhost solo bypass.
     resolved_user_id: str | None = None
     identity_failed = False
-    identity: object | None = None
-    try:
-        import inspect
+    identity: object | None = desktop_identity
+    if not desktop_mode:
+        try:
+            import inspect
 
-        from src.http.auth import get_resolver
-
-        result = get_resolver().resolve(websocket)  # duck-typed: headers + client
-        if inspect.isawaitable(result):
-            result = await result
-        identity = result
-        if (
-            result is not None
-            and result.user_id
-            and result.trust_domain == "untrusted"
-        ):
-            # Only per-user key identities scope the connection (M2 contract).
-            # Solo/shared-secret identities cannot scope — leave enforcement off.
-            resolved_user_id = result.user_id
-    except Exception:
-        # Bug-hunt P0: resolver errors are no longer downgraded to "unscoped"
-        # — the connection is closed below unless it is localhost.
-        logger.warning(
-            "ws.resolver_error", {"detail": "identity resolution failed"}
-        )
-        identity_failed = True
+            result = get_resolver().resolve(cast(Request, websocket))
+            if inspect.isawaitable(result):
+                result = await result
+            identity = result
+            if (
+                result is not None
+                and result.user_id
+                and result.trust_domain == "untrusted"
+            ):
+                # Only per-user key identities scope the connection (M2 contract).
+                # Solo/shared-secret identities cannot scope — leave enforcement off.
+                resolved_user_id = result.user_id
+        except Exception:
+            # Bug-hunt P0: resolver errors are no longer downgraded to "unscoped"
+            # — the connection is closed below unless it is localhost.
+            logger.warning(
+                "ws.resolver_error", {"detail": "identity resolution failed"}
+            )
+            identity_failed = True
     if handshake_scoped_user:
         resolved_user_id = handshake_scoped_user
 
@@ -511,7 +531,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
     # the HTTP middleware 401. Without this, API_KEY="" + PER_USER_AUTH=true
     # + remote host allowed full unauthenticated access as any user.
     try:
-        local = is_localhost(websocket)
+        local = is_localhost(cast(Request, websocket))
     except AttributeError:  # synthetic sockets in tests have no .client
         local = False
     if resolved_user_id is None and not local:
@@ -947,7 +967,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                 else:
                     try:
                         raw = await asyncio.wait_for(
-                            control_queue.get(),  # type: ignore[arg-type]
+                            cast(Any, control_queue.get()),
                             timeout=300,
                         )
                     except TimeoutError:

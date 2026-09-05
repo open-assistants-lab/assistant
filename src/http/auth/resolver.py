@@ -7,7 +7,7 @@ from typing import Literal, Protocol, runtime_checkable
 
 from fastapi import Request
 
-TrustDomain = Literal["solo", "trusted-network", "untrusted"]
+TrustDomain = Literal["desktop", "solo", "trusted-network", "untrusted"]
 
 
 @dataclass(frozen=True)

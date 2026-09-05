@@ -40,6 +40,7 @@ Email/
 Contacts/
 Todos/
 Conversation/
+Messages/
 
 # Cache and temp
 .versions/
@@ -185,7 +186,8 @@ class DataPaths:
         return p
 
     def conversation_dir(self) -> Path:
-        p = self.user_dir / "Conversation"
+        """Return the canonical conversation/message storage directory."""
+        p = self.user_dir / "Messages"
         p.mkdir(parents=True, exist_ok=True)
         return p
 

@@ -347,7 +347,7 @@ class MessageStore:
         """Import legacy per-workspace conversation DBs into the user-level DB.
 
         Old runtime storage used Workspaces/{workspace_id}/conversation.app.db.
-        The user-level store now owns Conversation/app.db; repeated startup is
+        The user-level store now owns Messages/app.db; repeated startup is
         safe because imported message ids are stable and source-prefixed.
         """
         workspaces_dir = root_path / "Workspaces"

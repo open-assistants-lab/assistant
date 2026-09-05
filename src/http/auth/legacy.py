@@ -49,6 +49,18 @@ async def require_auth(request: Request) -> None:
 
     settings = get_settings()
 
+    # The HTTP middleware resolved the desktop launch token before FastAPI
+    # dependencies run. Desktop must never fall through to an inherited
+    # deployment API_KEY (or localhost bypass), because that would reject a
+    # valid launch token or accept the wrong credential.
+    from src.http.auth import desktop_mode_active
+
+    if desktop_mode_active():
+        identity = getattr(getattr(request, "state", None), "identity", None)
+        if getattr(identity, "trust_domain", None) == "desktop":
+            return
+        raise HTTPException(status_code=401, detail="Invalid desktop launch token")
+
     # Auth disabled — solo mode, no key configured
     if not settings.auth.api_key:
         return
