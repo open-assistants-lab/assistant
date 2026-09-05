@@ -146,14 +146,15 @@ async def check_likely(body: _CheckLikelyRequest) -> dict[str, Any]:
             candidates.append(name)
 
     results = []
-    seen: set[str] = set()
+    seen: list[str] = []
     for provider in candidates:
         if provider in seen:
             continue
-        seen.add(provider)
+        seen.append(provider)
         probe = await _probe_provider(provider, key)
         results.append({"provider": provider, **probe})
-    return {"checked": list(seen), "results": results}
+    # ordered like the candidate list (review P2: list(set) was unordered)
+    return {"checked": seen, "results": results}
 
 
 # -- loopback-only local model discovery ------------------------------------
