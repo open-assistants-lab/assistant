@@ -628,3 +628,80 @@ class TestDesktopBackgroundAndPublicSurface:
 
         assert fake_loop.create_task_calls == 0
         assert scheduler_calls == 0
+
+
+class TestReviewFixes4da4110f:
+    """D1 review (4da4110f) P1 regressions: inherited API_KEY + effective settings."""
+
+    @pytest.mark.asyncio
+    async def test_inherited_api_key_does_not_reject_launch_token(self, desktop_env):
+        """P1: with API_KEY inherited from the environment, a launch-token
+        request to a Depends(require_auth) route must succeed — the desktop
+        identity (state.identity) is the credential, not settings.auth.api_key."""
+        import httpx
+
+        from src.http.main import app
+
+        token = "launch-token-with-api-key"
+        monkey_env = {"API_KEY": "inherited-deployment-key", "DESKTOP_LAUNCH_TOKEN": token}
+        saved = {k: os.environ.get(k) for k in monkey_env}
+        os.environ.update(monkey_env)
+        try:
+            from src.config import reload_settings
+
+            reload_settings()
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://127.0.0.1",
+                headers={"Authorization": f"Bearer {token}"},
+            ) as client:
+                # /v1/bootstrap rides the middleware; use a Depends(require_auth)
+                # route to prove require_auth accepts the desktop identity.
+                resp = await client.post(
+                    "/message",
+                    json={"message": "hi", "user_id": "default_user"},
+                )
+                assert resp.status_code != 401, resp.text
+                assert resp.status_code != 403
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    @pytest.mark.asyncio
+    async def test_effective_settings_report_desktop_roots(self, desktop_env, monkeypatch):
+        """P1: desktop overrides must reach the EFFECTIVE settings object —
+        get_settings().deployment and DataPaths report desktop roots/mode,
+        not just os.environ."""
+        token = "settings-launch-token"
+        monkeypatch.setenv("DESKTOP_LAUNCH_TOKEN", token)
+        monkeypatch.setenv("API_KEY", "inherited-deployment-key")
+        import importlib
+
+        from src.config import reload_settings
+        import src.http.desktop as desktop_mod
+        import src.http.main as main_mod
+
+        importlib.reload(main_mod)
+        # Simulate the desktop launch path's settings application.
+        desktop_mod.apply_desktop_settings()
+        try:
+            from src.config import get_settings
+
+            cfg = get_settings()
+            assert cfg.deployment.mode == "desktop-server"
+            assert cfg.deployment.data_root == str(Path.home() / "Assistant")
+            assert cfg.deployment.data_path == str(Path.home() / "Assistant" / ".system")
+
+            from src.storage.paths import DataPaths
+
+            dp = DataPaths(user_id="default_user")
+            assert dp.root == Path.home() / "Assistant"
+        finally:
+            importlib.reload(main_mod)
+            from src.config import reload_settings
+
+            reload_settings()

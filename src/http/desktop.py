@@ -222,12 +222,14 @@ def run_desktop_server(stop_event: threading.Event | None = None) -> None:
     finally:
         release_sidecar_lock(lock)
 
-def desktop_main() -> None:
-    """CLI entry: assistant desktop-server.
+def apply_desktop_settings() -> None:
+    """Apply desktop-mode configuration to the EFFECTIVE settings object.
 
-    Applies the desktop data roots and the one-source storage migration
-    BEFORE stores initialize, then serves the sidecar until exit.
-    """
+    D1 review P1: setting DEPLOYMENT_* env vars alone is insufficient — flat
+    nested env vars never reach the settings singleton (pydantic-settings
+    nested-env limitation, see get_settings' API_HOST/PORT fix-up). Mutate
+    the singleton fields directly so get_settings()/DataPaths/bootstrap
+    report desktop roots and mode, not developer-mode configured values."""
     home = Path.home() / "Assistant"
     # Product-sidecar configuration is not caller-configurable: .env values
     # for developer/server modes must not redirect user data or bypass launch
@@ -239,7 +241,22 @@ def desktop_main() -> None:
 
     from src.config import reload_settings
 
-    reload_settings()
+    settings = reload_settings()
+    # Same pattern as get_settings' API_HOST/PORT fix-up: the flat env vars
+    # cannot reach the nested deployment fields — mutate the singleton.
+    settings.deployment.mode = "desktop-server"
+    settings.deployment.data_root = str(home)
+    settings.deployment.data_path = str(home / ".system")
+
+
+
+def desktop_main() -> None:
+    """CLI entry: assistant desktop-server.
+
+    Applies the desktop data roots and the one-source storage migration
+    BEFORE stores initialize, then serves the sidecar until exit.
+    """
+    apply_desktop_settings()
 
     if not os.environ.get("DESKTOP_LAUNCH_TOKEN"):
         logger.error("desktop.sidecar_missing_launch_token", {})
