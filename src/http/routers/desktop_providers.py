@@ -151,7 +151,8 @@ async def check_likely(body: _CheckLikelyRequest) -> dict[str, Any]:
         if provider in seen:
             continue
         seen.add(provider)
-        results.append({"provider": provider, **_probe_provider(provider, key)})
+        probe = await _probe_provider(provider, key)
+        results.append({"provider": provider, **probe})
     return {"checked": list(seen), "results": results}
 
 

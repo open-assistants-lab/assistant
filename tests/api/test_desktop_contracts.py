@@ -52,7 +52,7 @@ def test_check_likely_providers_requires_consent(client):
 def test_check_likely_providers_with_consent_checks_candidates_only(client, monkeypatch):
     seen_providers: list[str] = []
 
-    def fake_test(provider: str, api_key: str) -> dict[str, object]:
+    async def fake_test(provider: str, api_key: str) -> dict[str, object]:
         seen_providers.append(provider)
         return {"valid": provider == "openai", "status": 200}
 
