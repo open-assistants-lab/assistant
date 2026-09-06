@@ -19,6 +19,7 @@ const sessions_key: u64 = 6;
 const delete_key: u64 = 7;
 const title_key: u64 = 8;
 const models_key: u64 = 9;
+const bootstrap_key: u64 = 19;
 const settings_key: u64 = 10;
 const settings_general_key: u64 = 11;
 const grader_prompt_key: u64 = 12;
@@ -28,6 +29,7 @@ const connectors_key: u64 = 22;
 const connector_disconnect_key: u64 = 23;
 const auth_poll_key: u64 = 24;
 const connector_connect_key: u64 = 25;
+const first_run_key: u64 = 26;
 
 /// OAuth poll budget: 2s timer × 60 ticks = 120s before the authorization
 /// is declared timed out.
@@ -68,6 +70,8 @@ const SettingsSection = enum { providers_models, general, tools };
 
 const ToolsSection = enum { builtin, connections };
 
+pub const LaunchState = enum { starting, first_run, connected, unavailable };
+
 const ToolRow = struct {
     name: []const u8,
     description: []const u8,
@@ -107,6 +111,7 @@ pub const ConnectorRow = struct {
 const max_connector_rows = 128;
 
 const ToolsState = struct {
+    visible: bool = false,
     section: ToolsSection = .builtin,
     loading: bool = false,
     tools: [max_visible_tools_rows]ToolRow = undefined,
@@ -262,7 +267,6 @@ pub const ContextInfo = struct {
     output_tokens: u32 = 0,
     context_window: u32 = 0,
     context_percentage: f32 = 0,
-    freshness: []const u8 = "live",
 };
 
 pub const Chat = struct {
@@ -399,6 +403,9 @@ pub const Msg = union(enum) {
     tools_field_3: canvas.TextInputEvent,
     auth_poll: native_sdk.EffectTimer,
     cancel_connect,
+    first_run_key_input: canvas.TextInputEvent,
+    first_run_submit,
+    first_run_checked: native_sdk.EffectResponse,
     settings_providers_models,
     settings_general,
     settings_loaded: native_sdk.EffectResponse,
@@ -483,6 +490,14 @@ pub const Model = struct {
     model_menu_search_selection: canvas.TextSelection = .{ .anchor = 0, .focus = 0 },
     settings: SettingsState = .{},
     tools: ToolsState = .{},
+    launch_state: LaunchState = .connected,
+    api_base_url: []const u8 = "http://assistant.invalid",
+    launch_token: []const u8 = "",
+    auth_header_value: []const u8 = "",
+    launch_error: []const u8 = "",
+    first_run_key_value: []const u8 = "",
+    first_run_key_selection: canvas.TextSelection = .{ .anchor = 0, .focus = 0 },
+    first_run_status: []const u8 = "",
     allocator: std.mem.Allocator = undefined,
 
     pub const view_unbound = .{
@@ -630,6 +645,89 @@ fn tokensFn(model: *const Model) canvas.DesignTokens {
     };
 }
 
+pub fn configureBackend(model: *Model, allocator: std.mem.Allocator, base_url: []const u8, launch_token: []const u8) !void {
+    const trimmed = std.mem.trim(u8, base_url, "/");
+    model.api_base_url = try allocator.dupe(u8, trimmed);
+    model.launch_token = try allocator.dupe(u8, launch_token);
+    model.auth_header_value = if (launch_token.len > 0)
+        try std.fmt.allocPrint(allocator, "Bearer {s}", .{launch_token})
+    else
+        "";
+    model.launch_state = .connected;
+    model.launch_error = "";
+}
+
+fn apiUrl(model: *const Model, allocator: std.mem.Allocator, path: []const u8) []const u8 {
+    return std.fmt.allocPrint(allocator, "{s}/v1{s}", .{ model.api_base_url, path }) catch path;
+}
+
+fn apiRawUrl(model: *const Model, allocator: std.mem.Allocator, path: []const u8) []const u8 {
+    return std.fmt.allocPrint(allocator, "{s}{s}", .{ model.api_base_url, path }) catch path;
+}
+
+fn connectorUrl(model: *const Model, allocator: std.mem.Allocator, path: []const u8) []const u8 {
+    const separator: []const u8 = if (std.mem.indexOfScalar(u8, path, '?') == null) "?" else "&";
+    return std.fmt.allocPrint(allocator, "{s}{s}{s}user_id=default_user", .{ model.api_base_url, path, separator }) catch path;
+}
+
+fn requestHeaders(model: *const Model, allocator: std.mem.Allocator, content_type: []const u8, accept: []const u8) []const std.http.Header {
+    var count: usize = 0;
+    if (content_type.len > 0) count += 1;
+    if (accept.len > 0) count += 1;
+    if (model.auth_header_value.len > 0) count += 1;
+    const headers = allocator.alloc(std.http.Header, count) catch return &.{};
+    var i: usize = 0;
+    if (content_type.len > 0) {
+        headers[i] = .{ .name = "Content-Type", .value = content_type };
+        i += 1;
+    }
+    if (accept.len > 0) {
+        headers[i] = .{ .name = "Accept", .value = accept };
+        i += 1;
+    }
+    if (model.auth_header_value.len > 0) {
+        headers[i] = .{ .name = "Authorization", .value = model.auth_header_value };
+    }
+    return headers;
+}
+
+fn jsonHeaders(model: *const Model, allocator: std.mem.Allocator) []const std.http.Header {
+    return requestHeaders(model, allocator, "application/json", "");
+}
+
+fn acceptJsonHeaders(model: *const Model, allocator: std.mem.Allocator) []const std.http.Header {
+    return requestHeaders(model, allocator, "", "application/json");
+}
+
+fn eventStreamHeaders(model: *const Model, allocator: std.mem.Allocator) []const std.http.Header {
+    return requestHeaders(model, allocator, "application/json", "text/event-stream");
+}
+
+fn tokenString(allocator: std.mem.Allocator, value: u32) []const u8 {
+    if (value >= 1000 and value % 1000 == 0) return std.fmt.allocPrint(allocator, "{d}k", .{value / 1000}) catch "?";
+    if (value >= 1000) return std.fmt.allocPrint(allocator, "{d}.{d}k", .{ value / 1000, (value % 1000) / 100 }) catch "?";
+    return std.fmt.allocPrint(allocator, "{d}", .{value}) catch "?";
+}
+
+fn contextCompressedLabel(allocator: std.mem.Allocator, data: std.json.ObjectMap) ?[]const u8 {
+    const status = jsonString(data.get("status") orelse return null) orelse return null;
+    if (!std.mem.eql(u8, status, "succeeded")) return null;
+    var before_tokens: ?u32 = null;
+    var after_tokens: ?u32 = null;
+    if (data.get("before")) |before| if (before == .object) {
+        if (before.object.get("tokens")) |t| before_tokens = jsonCount(t);
+    };
+    if (data.get("after")) |after| if (after == .object) {
+        if (after.object.get("tokens")) |t| after_tokens = jsonCount(t);
+    };
+    if (before_tokens) |b| {
+        if (after_tokens) |a| {
+            return std.fmt.allocPrint(allocator, "Context updated · {s} → {s} tokens", .{ tokenString(allocator, b), tokenString(allocator, a) }) catch "Context updated";
+        }
+    }
+    return "Context updated";
+}
+
 /// Process a single SSE event body (the JSON after `data: `).
 /// Used by both stream_line (live streaming) and stream_done (buffered fallback).
 fn processSSEEvent(model: *Model, chat: *Chat, sse_body: []const u8, fx: *Effects) void {
@@ -767,11 +865,10 @@ fn processSSEEvent(model: *Model, chat: *Chat, sse_body: []const u8, fx: *Effect
         chat.open_bubble_type = "assistant";
         chat.status_text = "Revising...";
     } else if (std.mem.eql(u8, event_type, "context_compressed")) {
-        chat.compression_animation_ticks = 8;
-        const status = jsonString(data.get("status") orelse return) orelse "succeeded";
-        if (std.mem.eql(u8, status, "succeeded")) {
+        if (contextCompressedLabel(model.allocator, data)) |label| {
+            chat.compression_animation_ticks = 8;
             removeTrailingEmptyAssistant(chat);
-            addMessage(chat, model.allocator, "system", "Conversation summarized to fit context window.");
+            addMessage(chat, model.allocator, "system", label);
         }
     } else if (std.mem.eql(u8, event_type, "usage")) {
         const usage_data = jsonObject(data.get("usage") orelse return) orelse return;
@@ -881,20 +978,14 @@ fn doSend(model: *Model, fx: *Effects) void {
     const selected_model = model.selectedModel();
     const body = std.fmt.allocPrint(
         model.allocator,
-        "{{\"message\":\"{s}\",\"user_id\":\"native_sdk_chat\",\"session_id\":\"{s}\",\"model\":\"{s}\"}}",
+        "{{\"message\":\"{s}\",\"session_id\":\"{s}\",\"model\":\"{s}\"}}",
         .{ escaped, chat.sessionId(), selected_model },
     ) catch return;
     fx.fetch(.{
         .key = chat.fetch_key,
-        .url = "http://127.0.0.1:8080/message/stream",
+        .url = apiUrl(model, model.allocator, "/message/stream"),
         .method = .POST,
-        .headers = &.{.{
-            .name = "Content-Type",
-            .value = "application/json",
-        }, .{
-            .name = "Accept",
-            .value = "text/event-stream",
-        }},
+        .headers = eventStreamHeaders(model, model.allocator),
         .body = body,
         .response = .stream,
         .on_line = Effects.lineMsg(.stream_line),
@@ -952,6 +1043,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .new_chat => {
             cancelOAuthPoll(model, fx);
             model.settings.visible = false;
+            model.tools.visible = false;
             if (model.chat_count >= max_chats) return;
             // Append the new chat, then sort by created_at descending so the
             // newest chat naturally appears at the top.
@@ -984,6 +1076,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .switch_chat => |chat_id| {
             cancelOAuthPoll(model, fx);
             model.settings.visible = false;
+            model.tools.visible = false;
             var i: usize = 0;
             while (i < model.chat_count) : (i += 1) {
                 if (model.chats[i].id == chat_id) {
@@ -1006,16 +1099,17 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                         model.chats[i].history_loading = true;
                         const fetch_key = model.chats[i].id + 1000;
                         model.chats[i].fetch_key = fetch_key;
-                        const url = std.fmt.allocPrint(
+                        const path = std.fmt.allocPrint(
                             model.allocator,
-                            "http://127.0.0.1:8080/conversation/turns?user_id=native_sdk_chat&session_id={s}&limit=50",
+                            "/conversation/turns?session_id={s}&limit=50",
                             .{model.chats[i].sessionId()},
                         ) catch return;
+                        const url = apiUrl(model, model.allocator, path);
                         fx.fetch(.{
                             .key = fetch_key,
                             .url = url,
                             .method = .GET,
-                            .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                            .headers = acceptJsonHeaders(model, model.allocator),
                             .response = .buffered,
                             .on_response = Effects.responseMsg(.chat_history_loaded),
                         });
@@ -1032,16 +1126,17 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 if (model.chats[i].id == chat_id) {
                     if (model.chats[i].streaming) return;
                     // Send DELETE to backend
-                    const url = std.fmt.allocPrint(
+                    const path = std.fmt.allocPrint(
                         model.allocator,
-                        "http://127.0.0.1:8080/conversation/session?user_id=native_sdk_chat&session_id={s}",
+                        "/conversation/session?session_id={s}",
                         .{model.chats[i].sessionId()},
                     ) catch return;
+                    const url = apiUrl(model, model.allocator, path);
                     fx.fetch(.{
                         .key = delete_key,
                         .url = url,
                         .method = .DELETE,
-                        .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                        .headers = acceptJsonHeaders(model, model.allocator),
                         .response = .buffered,
                         .on_response = Effects.responseMsg(.delete_chat_done),
                     });
@@ -1177,6 +1272,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .model_menu_manage => {
             model.model_menu_open = false;
             cancelOAuthPoll(model, fx);
+            model.tools.visible = false;
             model.settings.visible = true;
             model.settings.section = .providers_models;
         },
@@ -1206,13 +1302,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
         },
         .suggestion_inbox => {
-            model.activeChat().draft_text = "Triage my inbox";
+            model.activeChat().draft_text = "Plan my day";
         },
         .suggestion_summary => {
-            model.activeChat().draft_text = "Draft a weekly summary";
+            model.activeChat().draft_text = "Draft a note";
         },
         .suggestion_contacts => {
-            model.activeChat().draft_text = "Find contacts in marketing";
+            model.activeChat().draft_text = "Explore an idea";
         },
         .quick_action_browse => {
             model.activeChat().draft_text = "Browse the web and find the latest news on AI agents";
@@ -1264,15 +1360,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 }
             }
 
-            const body = std.fmt.allocPrint(model.allocator, "{{\"user_id\":\"native_sdk_chat\",\"session_id\":\"{s}\"}}", .{chat.sessionId()}) catch return;
+            const body = std.fmt.allocPrint(model.allocator, "{{\"session_id\":\"{s}\"}}", .{chat.sessionId()}) catch return;
             fx.fetch(.{
                 .key = cancel_key,
-                .url = "http://127.0.0.1:8080/message/cancel",
+                .url = apiUrl(model, model.allocator, "/message/cancel"),
                 .method = .POST,
-                .headers = &.{.{
-                    .name = "Content-Type",
-                    .value = "application/json",
-                }},
+                .headers = jsonHeaders(model, model.allocator),
                 .body = body,
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.cancel_done),
@@ -1292,17 +1385,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             chat.status_text = "Resuming...";
             fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
             const selected_model = model.selectedModel();
-            const body = std.fmt.allocPrint(model.allocator, "{{\"user_id\":\"native_sdk_chat\",\"call_id\":\"{s}\",\"session_id\":\"{s}\",\"model\":\"{s}\"}}", .{ chat.pending_call_id, chat.sessionId(), selected_model }) catch return;
+            const body = std.fmt.allocPrint(model.allocator, "{{\"call_id\":\"{s}\",\"session_id\":\"{s}\",\"model\":\"{s}\"}}", .{ chat.pending_call_id, chat.sessionId(), selected_model }) catch return;
             chat.pending_tool = "";
             chat.pending_call_id = "";
             fx.fetch(.{
                 .key = chat.fetch_key,
-                .url = "http://127.0.0.1:8080/message/approve",
+                .url = apiUrl(model, model.allocator, "/message/approve"),
                 .method = .POST,
-                .headers = &.{.{
-                    .name = "Content-Type",
-                    .value = "application/json",
-                }},
+                .headers = jsonHeaders(model, model.allocator),
                 .body = body,
                 .response = .stream,
                 .on_line = Effects.lineMsg(.stream_line),
@@ -1312,18 +1402,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .reject => {
             const chat = model.activeChat();
             if (!chat.has_pending) return;
-            const body = std.fmt.allocPrint(model.allocator, "{{\"user_id\":\"native_sdk_chat\",\"call_id\":\"{s}\",\"session_id\":\"{s}\"}}", .{ chat.pending_call_id, chat.sessionId() }) catch return;
+            const body = std.fmt.allocPrint(model.allocator, "{{\"call_id\":\"{s}\",\"session_id\":\"{s}\"}}", .{ chat.pending_call_id, chat.sessionId() }) catch return;
             chat.has_pending = false;
             chat.pending_tool = "";
             chat.pending_call_id = "";
             fx.fetch(.{
                 .key = reject_key,
-                .url = "http://127.0.0.1:8080/message/reject",
+                .url = apiUrl(model, model.allocator, "/message/reject"),
                 .method = .POST,
-                .headers = &.{.{
-                    .name = "Content-Type",
-                    .value = "application/json",
-                }},
+                .headers = jsonHeaders(model, model.allocator),
                 .body = body,
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.reject_done),
@@ -1368,14 +1455,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (!chat.title_generated and chat.title.len >= 5) {
                 const body = std.fmt.allocPrint(
                     model.allocator,
-                    "{{\"user_id\":\"native_sdk_chat\",\"session_id\":\"{s}\"}}",
+                    "{{\"session_id\":\"{s}\"}}",
                     .{chat.sessionId()},
                 ) catch return;
                 fx.fetch(.{
                     .key = title_key,
-                    .url = "http://127.0.0.1:8080/conversation/title",
+                    .url = apiUrl(model, model.allocator, "/conversation/title"),
                     .method = .POST,
-                    .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+                    .headers = jsonHeaders(model, model.allocator),
                     .body = body,
                     .response = .buffered,
                     .on_response = Effects.responseMsg(.title_generated),
@@ -1557,7 +1644,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             chat.fetch_key = 0;
             // Startup chain end: fetch the saved default model so the
             // composer selects it (the settings panel also fetches on open).
-            fetchSettingsCatalog(fx);
+            fetchSettingsCatalog(model, fx);
         },
         .chat_history_loaded => |response| {
             if (response.outcome != .ok) {
@@ -1632,7 +1719,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .sessions_loaded => |response| blk: {
             // Chain the models fetch (and from it, history) so startup never
             // fires concurrent connects to the same host (ISCONN panic race).
-            defer fetchModels(fx);
+            defer fetchModels(model, fx);
             if (response.outcome != .ok) {
                 // A3: surface backend connection error
                 const chat = model.activeChat();
@@ -1725,6 +1812,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 cancelOAuthPoll(model, fx);
                 return;
             }
+            model.tools.visible = false;
             model.settings.visible = true;
             model.settings.loading = true;
             model.settings.provider_count = 0;
@@ -1745,28 +1833,34 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
             fx.fetch(.{
                 .key = settings_key,
-                .url = "http://127.0.0.1:8080/settings/model-catalog?user_id=native_sdk_chat&max_models_per_provider=20&max_providers=64",
+                .url = apiUrl(model, model.allocator, "/settings/model-catalog?max_models_per_provider=20&max_providers=64"),
                 .method = .GET,
-                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .headers = acceptJsonHeaders(model, model.allocator),
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.settings_loaded),
             });
             fx.fetch(.{
                 .key = settings_general_key,
-                .url = "http://127.0.0.1:8080/settings?user_id=native_sdk_chat",
+                .url = apiUrl(model, model.allocator, "/settings"),
                 .method = .GET,
-                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .headers = acceptJsonHeaders(model, model.allocator),
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.settings_general_loaded),
             });
         },
         .close_settings => {
             cancelOAuthPoll(model, fx);
+            model.tools.visible = false;
             model.settings.visible = false;
             model.settings.key_modal_visible = false;
         },
         .settings_tools => {
-            model.settings.section = .tools;
+            if (model.tools.visible) {
+                model.tools.visible = false;
+                return;
+            }
+            model.settings.visible = false;
+            model.tools.visible = true;
             model.tools.loading = true;
             model.tools.tool_error = "";
             model.tools.tool_count = 0;
@@ -1774,9 +1868,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.tools.search_selection = .{ .anchor = 0, .focus = 0 };
             fx.fetch(.{
                 .key = tools_key,
-                .url = "http://127.0.0.1:8080/tools?user_id=native_sdk_chat&workspace_id=personal",
+                .url = apiUrl(model, model.allocator, "/tools"),
                 .method = .GET,
-                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .headers = acceptJsonHeaders(model, model.allocator),
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.tools_loaded),
             });
@@ -1788,9 +1882,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.tools.connector_count = 0;
             fx.fetch(.{
                 .key = connectors_key,
-                .url = "http://127.0.0.1:8080/connectors/catalog?user_id=native_sdk_chat",
+                .url = connectorUrl(model, model.allocator, "/connectors/catalog"),
                 .method = .GET,
-                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .headers = acceptJsonHeaders(model, model.allocator),
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.connectors_loaded),
             });
@@ -1874,16 +1968,17 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const tool = &model.tools.tools[idx];
             const enable = !tool.enabled;
             const body = toolToggleBody(enable);
-            const url = std.fmt.allocPrint(
+            const path = std.fmt.allocPrint(
                 model.allocator,
-                "http://127.0.0.1:8080/tools/{s}?user_id=native_sdk_chat&workspace_id=personal",
+                "/tools/{s}",
                 .{tool.name},
             ) catch return;
+            const url = apiUrl(model, model.allocator, path);
             fx.fetch(.{
                 .key = tools_toggle_key,
                 .url = url,
                 .method = .PATCH,
-                .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+                .headers = jsonHeaders(model, model.allocator),
                 .body = body,
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.tool_toggled),
@@ -1898,9 +1993,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             // also resets the user's agent loops on toggle).
             fx.fetch(.{
                 .key = tools_key,
-                .url = "http://127.0.0.1:8080/tools?user_id=native_sdk_chat&workspace_id=personal",
+                .url = apiUrl(model, model.allocator, "/tools"),
                 .method = .GET,
-                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .headers = acceptJsonHeaders(model, model.allocator),
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.tools_loaded),
             });
@@ -2039,16 +2134,17 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .disconnect_connector => |idx| {
             if (idx >= model.tools.connector_count) return;
             const connector = model.tools.connectors[idx];
-            const url = std.fmt.allocPrint(
+            const path = std.fmt.allocPrint(
                 model.allocator,
-                "http://127.0.0.1:8080/connectors/disconnect?service={s}&user_id=native_sdk_chat",
+                "/connectors/disconnect?service={s}",
                 .{connector.name},
             ) catch return;
+            const url = connectorUrl(model, model.allocator, path);
             fx.fetch(.{
                 .key = connector_disconnect_key,
                 .url = url,
                 .method = .DELETE,
-                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .headers = acceptJsonHeaders(model, model.allocator),
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.connector_disconnected),
             });
@@ -2061,9 +2157,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             // Re-fetch the catalog so the UI reflects server truth.
             fx.fetch(.{
                 .key = connectors_key,
-                .url = "http://127.0.0.1:8080/connectors/catalog?user_id=native_sdk_chat",
+                .url = connectorUrl(model, model.allocator, "/connectors/catalog"),
                 .method = .GET,
-                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .headers = acceptJsonHeaders(model, model.allocator),
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.connectors_loaded),
             });
@@ -2104,9 +2200,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.tools.poll_ticks = 0;
                 model.tools.connect_service = connector.name;
                 model.tools.connect_error = "";
-                const post_url = std.fmt.allocPrint(
+                const post_path = std.fmt.allocPrint(
                     model.allocator,
-                    "http://127.0.0.1:8080/connectors/connect?service={s}&user_id=native_sdk_chat",
+                    "/connectors/connect?service={s}",
                     .{connector.name},
                 ) catch {
                     // URL build failure: abort rather than starting the
@@ -2118,7 +2214,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 };
                 fx.fetch(.{
                     .key = connector_connect_key,
-                    .url = post_url,
+                    .url = connectorUrl(model, model.allocator, post_path),
                     .method = .POST,
                     .headers = &.{
                         .{ .name = "Content-Type", .value = "application/json" },
@@ -2172,9 +2268,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.tools.connect_error = "Failed to prepare request";
                 return;
             };
-            const url = std.fmt.allocPrint(
+            const path = std.fmt.allocPrint(
                 model.allocator,
-                "http://127.0.0.1:8080/connectors/connect?service={s}&user_id=native_sdk_chat",
+                "/connectors/connect?service={s}",
                 .{connector.name},
             ) catch {
                 model.tools.connect_error = "Failed to prepare request";
@@ -2184,12 +2280,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.tools.connect_error = "";
             fx.fetch(.{
                 .key = connector_connect_key,
-                .url = url,
+                .url = connectorUrl(model, model.allocator, path),
                 .method = .POST,
-                .headers = &.{
-                    .{ .name = "Content-Type", .value = "application/json" },
-                    .{ .name = "Accept", .value = "application/json" },
-                },
+                .headers = requestHeaders(model, model.allocator, "application/json", "application/json"),
                 .body = body,
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.connector_connected),
@@ -2235,9 +2328,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             };
             fx.fetch(.{
                 .key = connectors_key,
-                .url = "http://127.0.0.1:8080/connectors/catalog?user_id=native_sdk_chat",
+                .url = connectorUrl(model, model.allocator, "/connectors/catalog"),
                 .method = .GET,
-                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .headers = acceptJsonHeaders(model, model.allocator),
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.connectors_loaded),
             });
@@ -2255,9 +2348,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
             fx.fetch(.{
                 .key = connectors_key,
-                .url = "http://127.0.0.1:8080/connectors/catalog?user_id=native_sdk_chat",
+                .url = connectorUrl(model, model.allocator, "/connectors/catalog"),
                 .method = .GET,
-                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .headers = acceptJsonHeaders(model, model.allocator),
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.connectors_loaded),
             });
@@ -2270,6 +2363,43 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.tools.connecting = false;
             model.tools.connect_service = "";
             model.tools.connect_error = "";
+        },
+        .first_run_key_input => |event| {
+            const extra = switch (event) {
+                .insert_text => |text| text.len,
+                .set_composition => |composition| composition.text.len,
+                else => 0,
+            };
+            const output = model.allocator.alloc(u8, model.first_run_key_value.len + extra + 256) catch return;
+            const next = (canvas.TextEditState{ .text = model.first_run_key_value, .selection = model.first_run_key_selection }).apply(event, output) catch return;
+            model.first_run_key_value = next.text;
+            model.first_run_key_selection = next.selection;
+        },
+        .first_run_submit => {
+            const key = std.mem.trim(u8, model.first_run_key_value, " \n\r\t");
+            if (key.len == 0) {
+                model.first_run_status = "Paste an API key or choose a local model.";
+                return;
+            }
+            const escaped = escapeJsonString(model.allocator, key) catch return;
+            const body = std.fmt.allocPrint(model.allocator, "{{\"key\":\"{s}\"}}", .{escaped}) catch return;
+            model.first_run_status = "Checking key locally…";
+            fx.fetch(.{
+                .key = first_run_key,
+                .url = apiUrl(model, model.allocator, "/providers/classify-key"),
+                .method = .POST,
+                .headers = jsonHeaders(model, model.allocator),
+                .body = body,
+                .response = .buffered,
+                .on_response = Effects.responseMsg(.first_run_checked),
+            });
+        },
+        .first_run_checked => |response| {
+            if (response.outcome != .ok) {
+                model.first_run_status = "Could not validate this key. Check the connection and try again.";
+                return;
+            }
+            model.first_run_status = "Key recognized. Choose a model to continue.";
         },
         .close_form => {
             model.tools.form_open = false;
@@ -2301,9 +2431,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.settings.grader_prompt_loading = true;
                 fx.fetch(.{
                     .key = grader_prompt_key,
-                    .url = "http://127.0.0.1:8080/user/grader-prompt?user_id=native_sdk_chat",
+                    .url = apiUrl(model, model.allocator, "/user/grader-prompt"),
                     .method = .GET,
-                    .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                    .headers = acceptJsonHeaders(model, model.allocator),
                     .response = .buffered,
                     .on_response = Effects.responseMsg(.grader_prompt_loaded),
                 });
@@ -2613,9 +2743,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const fetch_key = model.allocFetchKey();
             fx.fetch(.{
                 .key = fetch_key,
-                .url = "http://127.0.0.1:8080/settings/test-key",
+                .url = apiUrl(model, model.allocator, "/providers/validate-key"),
                 .method = .POST,
-                .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+                .headers = jsonHeaders(model, model.allocator),
                 .body = body,
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.key_tested),
@@ -2660,9 +2790,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     const fetch_key = model.allocFetchKey();
                     fx.fetch(.{
                         .key = fetch_key,
-                        .url = "http://127.0.0.1:8080/settings/api-keys?user_id=native_sdk_chat",
+                        .url = apiUrl(model, model.allocator, "/settings/api-keys"),
                         .method = .POST,
-                        .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+                        .headers = jsonHeaders(model, model.allocator),
                         .body = save_body,
                         .response = .buffered,
                         .on_response = Effects.responseMsg(.key_saved),
@@ -2688,9 +2818,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                         const fetch_key = model.allocFetchKey();
                         fx.fetch(.{
                             .key = fetch_key,
-                            .url = "http://127.0.0.1:8080/settings/api-keys?user_id=native_sdk_chat",
+                            .url = apiUrl(model, model.allocator, "/settings/api-keys"),
                             .method = .POST,
-                            .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+                            .headers = jsonHeaders(model, model.allocator),
                             .body = save_body,
                             .response = .buffered,
                             .on_response = Effects.responseMsg(.key_saved),
@@ -2766,11 +2896,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const p = &model.settings.providers[idx];
             if (p.via_env) return;
             const provider_id = p.id;
-            const url = std.fmt.allocPrint(
+            const path = std.fmt.allocPrint(
                 model.allocator,
-                "http://127.0.0.1:8080/settings/api-keys/{s}?user_id=native_sdk_chat",
+                "/settings/api-keys/{s}",
                 .{provider_id},
             ) catch return;
+            const url = apiUrl(model, model.allocator, path);
             const fetch_key = model.allocFetchKey();
             if (model.settings.pending_key_delete_count < max_pending_key_deletes) {
                 model.settings.pending_key_deletes[model.settings.pending_key_delete_count] = .{ .key = fetch_key, .provider_id = provider_id };
@@ -2780,7 +2911,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .key = fetch_key,
                 .url = url,
                 .method = .DELETE,
-                .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+                .headers = acceptJsonHeaders(model, model.allocator),
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.key_deleted),
             });
@@ -2856,18 +2987,18 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             ) catch return;
             fx.fetch(.{
                 .key = settings_general_key,
-                .url = "http://127.0.0.1:8080/settings?user_id=native_sdk_chat",
+                .url = apiUrl(model, model.allocator, "/settings"),
                 .method = .PATCH,
-                .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+                .headers = jsonHeaders(model, model.allocator),
                 .body = settings_body,
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.settings_general_saved),
             });
             fx.fetch(.{
                 .key = grader_prompt_key,
-                .url = "http://127.0.0.1:8080/user/grader-prompt?user_id=native_sdk_chat",
+                .url = apiUrl(model, model.allocator, "/user/grader-prompt"),
                 .method = .PUT,
-                .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+                .headers = jsonHeaders(model, model.allocator),
                 .body = prompt_body,
                 .response = .buffered,
                 .on_response = Effects.responseMsg(.grader_prompt_saved),
@@ -2935,9 +3066,9 @@ fn saveSettingsModel(model: *Model, fx: *Effects, idx: usize) void {
     const fetch_key = model.allocFetchKey();
     fx.fetch(.{
         .key = fetch_key,
-        .url = "http://127.0.0.1:8080/settings?user_id=native_sdk_chat",
+        .url = apiUrl(model, model.allocator, "/settings"),
         .method = .PATCH,
-        .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+        .headers = jsonHeaders(model, model.allocator),
         .body = body,
         .response = .buffered,
         .on_response = Effects.responseMsg(.model_selected),
@@ -3316,16 +3447,17 @@ fn queueHistoryFetch(model: *Model, chat: *Chat, fx: *Effects) void {
     const fetch_key = model.allocFetchKey();
     chat.fetch_key = fetch_key;
     chat.history_loading = true;
-    const url = std.fmt.allocPrint(
+    const path = std.fmt.allocPrint(
         model.allocator,
-        "http://127.0.0.1:8080/conversation/turns?user_id=native_sdk_chat&session_id={s}&limit=50",
+        "/conversation/turns?session_id={s}&limit=50",
         .{chat.sessionId()},
     ) catch return;
+    const url = apiUrl(model, model.allocator, path);
     fx.fetch(.{
         .key = fetch_key,
         .url = url,
         .method = .GET,
-        .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+        .headers = acceptJsonHeaders(model, model.allocator),
         .response = .buffered,
         .on_response = Effects.responseMsg(.chat_history_loaded),
     });
@@ -3360,7 +3492,11 @@ const ChatApp = native_sdk.UiApp(Model, Msg);
 // ── View builders (Zig view replacing markup) ──────────────────────────────
 
 pub fn buildView(ui: *AppUi, model: *const Model) AppUi.Node {
-    const right_panel: AppUi.Node = if (model.settings.visible)
+    if (model.launch_state != .connected) return buildLaunchPanel(ui, model);
+
+    const right_panel: AppUi.Node = if (model.tools.visible)
+        buildToolsPage(ui, model)
+    else if (model.settings.visible)
         buildSettingsPanel(ui, model)
     else
         buildChatPanel(ui, model);
@@ -3396,6 +3532,65 @@ pub fn buildView(ui: *AppUi, model: *const Model) AppUi.Node {
     }, .{split});
     root.widget.layout.padding = .{ .top = 0, .right = 0, .bottom = 0, .left = 0 };
     return root;
+}
+
+fn buildLaunchPanel(ui: *AppUi, model: *const Model) AppUi.Node {
+    const title: []const u8 = switch (model.launch_state) {
+        .starting => "Starting Assistant",
+        .first_run => "Make Assistant yours",
+        .unavailable => "Assistant needs attention",
+        .connected => "Assistant",
+    };
+    var nodes: [10]AppUi.Node = undefined;
+    var count: usize = 0;
+    nodes[count] = ui.text(.{ .size = .heading }, title);
+    count += 1;
+    switch (model.launch_state) {
+        .starting => {
+            nodes[count] = ui.text(.{ .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, "Connecting to the local Assistant sidecar…");
+            count += 1;
+        },
+        .first_run => {
+            nodes[count] = ui.text(.{ .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, "Paste an API key, scan for a local model, or enter a custom endpoint.");
+            count += 1;
+            nodes[count] = ui.el(.textarea, .{
+                .text = model.first_run_key_value,
+                .placeholder = "Paste API key…",
+                .on_input = AppUi.inputMsg(.first_run_key_input),
+                .height = 44,
+                .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
+            }, .{});
+            count += 1;
+            nodes[count] = ui.row(.{ .gap = 8, .cross = .center }, .{
+                ui.button(.{ .on_press = .first_run_submit, .variant = .primary, .min_width = 132 }, "Continue"),
+                ui.button(.{ .variant = .ghost, .min_width = 132 }, "Scan local models"),
+                ui.button(.{ .variant = .ghost, .min_width = 132 }, "Custom endpoint"),
+            });
+            count += 1;
+            nodes[count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, "Check likely providers only runs after you review and consent to the candidates.");
+            count += 1;
+            if (model.first_run_status.len > 0) {
+                nodes[count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, model.first_run_status);
+                count += 1;
+            }
+        },
+        .unavailable => {
+            const copy = if (model.launch_error.len > 0) model.launch_error else "The local sidecar is unavailable.";
+            nodes[count] = ui.text(.{ .style_tokens = .{ .foreground = .destructive }, .wrap = true }, copy);
+            count += 1;
+            nodes[count] = ui.button(.{ .variant = .primary, .min_width = 132 }, "Reconnect");
+            count += 1;
+        },
+        .connected => {},
+    }
+    return ui.column(.{
+        .grow = 1,
+        .main = .center,
+        .cross = .center,
+        .padding = 32,
+        .gap = 14,
+        .style_tokens = .{ .background = .background },
+    }, nodes[0..count]);
 }
 
 fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
@@ -3517,7 +3712,7 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
         chat_count += 1;
     }
 
-    var sidebar_children: [5]AppUi.Node = undefined;
+    var sidebar_children: [6]AppUi.Node = undefined;
     var sidebar_count: usize = 0;
 
     // Top section (transparent — no container blocks; only the search
@@ -3545,6 +3740,22 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
             ui.text(.{ .size = .sm, .grow = 1, .style_tokens = .{ .foreground = .text_muted } }, "No chats found"),
         }));
     }
+    sidebar_count += 1;
+
+    sidebar_children[sidebar_count] = ui.column(.{ .gap = 4, .padding = 12 }, .{
+        ui.row(.{ .gap = 8, .padding = 8, .cross = .center, .on_press = .settings_tools, .style_tokens = .{ .radius = .md } }, .{
+            ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "wrench"),
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = if (model.tools.visible) .text else .text_muted } }, "Tools"),
+        }),
+        ui.row(.{ .gap = 8, .padding = 8, .cross = .center, .style_tokens = .{ .radius = .md } }, .{
+            ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "folder"),
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Skills"),
+        }),
+        ui.row(.{ .gap = 8, .padding = 8, .cross = .center, .style_tokens = .{ .radius = .md } }, .{
+            ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "git-branch"),
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Subagents"),
+        }),
+    });
     sidebar_count += 1;
 
     // Settings + theme toggle
@@ -3806,6 +4017,16 @@ pub fn addHistoryMessage(chat: *Chat, allocator: std.mem.Allocator, item: std.js
         addMessage(chat, allocator, role_str, content_str);
         chat._messages[chat.msg_count - 1].collapsed = true;
         chat._messages[chat.msg_count - 1].timestamp = extractTimestamp(item, allocator);
+    } else if (std.mem.eql(u8, role_str, "context")) {
+        if (item.object.get("metadata")) |metadata| if (metadata == .object) {
+            const event_type = jsonString(metadata.object.get("event_type") orelse metadata.object.get("type") orelse return) orelse return;
+            if (std.mem.eql(u8, event_type, "context_compressed")) {
+                if (contextCompressedLabel(allocator, metadata.object)) |label| {
+                    addMessage(chat, allocator, "system", label);
+                    chat._messages[chat.msg_count - 1].timestamp = extractTimestamp(item, allocator);
+                }
+            }
+        };
     } else {
         const trimmed = std.mem.trim(u8, content_str, " \n\r\t");
         if (trimmed.len == 0) return;
@@ -3910,9 +4131,9 @@ fn isOAuth2Service(model: *const Model) bool {
 /// user cancels; a failed browser open does not stop the poll (the user
 /// can still complete authorization in another browser).
 fn startOAuthBrowserFlow(model: *Model, fx: *Effects) void {
-    const url = std.fmt.allocPrint(
+    const path = std.fmt.allocPrint(
         model.allocator,
-        "http://127.0.0.1:8080/auth/login?service={s}&user_id=native_sdk_chat",
+        "/auth/login?service={s}",
         .{model.tools.connect_service},
     ) catch {
         model.tools.connecting = false;
@@ -3920,7 +4141,7 @@ fn startOAuthBrowserFlow(model: *Model, fx: *Effects) void {
         model.tools.connect_error = "Failed to prepare authorization URL";
         return;
     };
-    openSystemBrowser(url) catch {
+    openSystemBrowser(connectorUrl(model, model.allocator, path)) catch {
         model.tools.connect_error = "Could not open your browser — authorize manually at the login URL";
     };
     model.tools.poll_ticks = 0;
@@ -4302,16 +4523,11 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         ui.column(.{ .gap = 4 }, .{
             ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "About"),
             ui.text(.{}, "Assistant"),
-            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Backend: http://127.0.0.1:8080"),
-            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "User: native_sdk_chat"),
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Backend: configured by desktop bootstrap"),
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Identity: managed by Assistant"),
         }),
     });
     content_count += 1;
-    }
-
-    if (model.settings.section == .tools) {
-        content_children[content_count] = buildToolsSection(ui, model);
-        content_count += 1;
     }
 
     const sidebar = ui.el(.card, .{
@@ -4335,13 +4551,7 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                 .width = 104,
                 .padding = 12,
             }, "General"),
-            ui.button(.{
-                .on_press = .settings_tools,
-                .variant = if (model.settings.section == .tools) .primary else .ghost,
-                .size = .sm,
-                .width = 104,
-                .padding = 12,
-            }, "Tools"),
+
         }),
     });
 
@@ -4367,6 +4577,23 @@ fn buildSettingsPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         .style_tokens = .{ .background = .surface },
     }, .{
         ui.column(.{ .gap = 12 }, children_slice),
+    });
+}
+
+fn buildToolsPage(ui: *AppUi, model: *const Model) AppUi.Node {
+    return ui.scroll(.{
+        .grow = 1,
+        .max_width = 768,
+        .padding = 12,
+        .style_tokens = .{ .background = .surface },
+    }, .{
+        ui.column(.{ .gap = 12 }, .{
+            ui.column(.{ .gap = 2, .padding = 16, .style_tokens = .{ .background = .surface } }, .{
+                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, upperAscii(ui.arena, "Utilities")),
+                ui.text(.{ .size = .heading }, "Tools"),
+            }),
+            buildToolsSection(ui, model),
+        }),
     });
 }
 
@@ -4627,7 +4854,10 @@ fn buildComposerBar(ui: *AppUi, model: *const Model) AppUi.Node {
 
     const ci = &chat.context_info;
     const tokens_text = std.fmt.allocPrint(ui.arena, "{d} in / {d} out", .{ ci.input_tokens, ci.output_tokens }) catch "";
-    const freshness_style: canvas.ColorTokenName = if (std.mem.eql(u8, ci.freshness, "live")) .success else .text_muted;
+    const provider_label = if (model.available_model_count > 0)
+        model.available_models[model.selected_model_idx].provider_display
+    else
+        "Provider";
 
     // ONE unified inner surface for every control — textarea + model +
     // tokens + send share the same fill, so the bar reads as one piece.
@@ -4647,7 +4877,7 @@ fn buildComposerBar(ui: *AppUi, model: *const Model) AppUi.Node {
             ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "•"),
             ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, tokens_text),
             ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "•"),
-            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = freshness_style } }, ci.freshness),
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, provider_label),
             ui.spacer(1),
             send_button,
         }),
@@ -4788,7 +5018,6 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
             // (fade + 8px rise, ~90ms between nodes, ~270ms total). This is
             // the first-time tier — delight is allowed. Reduced motion:
             // fade only, no rise.
-            const e0 = smoothstep(model.empty_entrance);
             const e1 = smoothstep(model.empty_entrance - 0.15);
             const e2 = smoothstep(model.empty_entrance - 0.3);
             const rise: f32 = if (model.settings.reduced_motion) 0.0 else 8.0;
@@ -4811,24 +5040,11 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                 }
             }.build;
             const heading = ui.text(.{ .size = .heading }, "How can I help?");
-            const eyebrow = ui.text(.{
-                .size = .sm,
-                .padding = 8,
-                .style_tokens = .{ .foreground = .accent, .background = .surface_subtle, .radius = .md },
-            }, "YOUR ASSISTANT");
-            const subtitle = ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Ask me anything, or try one of these:");
+            const subtitle = ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Start with one of these prompts, or write your own.");
             const suggestions = ui.row(.{ .gap = 8 }, .{
-                ui.button(.{ .on_press = .suggestion_inbox, .variant = .ghost, .style = .{ .radius = 999 } }, "Triage my inbox"),
-                ui.button(.{ .on_press = .suggestion_summary, .variant = .ghost, .style = .{ .radius = 999 } }, "Draft a weekly summary"),
-                ui.button(.{ .on_press = .suggestion_contacts, .variant = .ghost, .style = .{ .radius = 999 } }, "Find contacts in marketing"),
-            });
-            // Quick-action chips: icon-only buttons mirroring the activity
-            // rail's actions (site hero mock: globe/search/flask). Same
-            // preset-prompt path as the rail rows.
-            const chips = ui.row(.{ .gap = 8 }, .{
-                ui.button(.{ .on_press = .quick_action_browse, .variant = .ghost, .icon = "external-link", .style = .{ .radius = 999 } }, ""),
-                ui.button(.{ .on_press = .quick_action_files, .variant = .ghost, .icon = "file-text", .style = .{ .radius = 999 } }, ""),
-                ui.button(.{ .on_press = .quick_action_research, .variant = .ghost, .icon = "git-branch", .style = .{ .radius = 999 } }, ""),
+                ui.button(.{ .on_press = .suggestion_inbox, .variant = .ghost, .style = .{ .radius = 999 } }, "Plan my day"),
+                ui.button(.{ .on_press = .suggestion_summary, .variant = .ghost, .style = .{ .radius = 999 } }, "Draft a note"),
+                ui.button(.{ .on_press = .suggestion_contacts, .variant = .ghost, .style = .{ .radius = 999 } }, "Explore an idea"),
             });
             children[child_count] = ui.column(.{
                 .grow = 1,
@@ -4838,11 +5054,9 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                 .main = .center,
                 .style_tokens = .{ .background = .background },
             }, .{
-                fade_node(ui, e0, rise, 1.0, eyebrow),
                 fade_node(ui, e1, rise, if (model.settings.reduced_motion) 1.0 else 0.96, heading),
                 fade_node(ui, e2, rise, 1.0, subtitle),
                 fade_node(ui, e2, rise, 1.0, suggestions),
-                fade_node(ui, e2, rise, 1.0, chips),
             });
         }
     } else {
@@ -5261,31 +5475,31 @@ fn initFx(model: *Model, fx: *Effects) void {
     // std threaded Io can panic with ISCONN on that race.
     fx.fetch(.{
         .key = sessions_key,
-        .url = "http://127.0.0.1:8080/conversation/sessions?user_id=native_sdk_chat",
+        .url = apiUrl(model, model.allocator, "/conversation/sessions"),
         .method = .GET,
-        .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+        .headers = acceptJsonHeaders(model, model.allocator),
         .response = .buffered,
         .on_response = Effects.responseMsg(.sessions_loaded),
     });
 }
 
-fn fetchModels(fx: *Effects) void {
+fn fetchModels(model: *Model, fx: *Effects) void {
     fx.fetch(.{
         .key = models_key,
-        .url = "http://127.0.0.1:8080/models?user_id=native_sdk_chat",
+        .url = apiUrl(model, model.allocator, "/providers/models"),
         .method = .GET,
-        .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+        .headers = acceptJsonHeaders(model, model.allocator),
         .response = .buffered,
         .on_response = Effects.responseMsg(.models_loaded),
     });
 }
 
-fn fetchSettingsCatalog(fx: *Effects) void {
+fn fetchSettingsCatalog(model: *Model, fx: *Effects) void {
     fx.fetch(.{
         .key = settings_key,
-        .url = "http://127.0.0.1:8080/settings/model-catalog?user_id=native_sdk_chat&max_models_per_provider=20&max_providers=64",
+        .url = apiUrl(model, model.allocator, "/settings/model-catalog?max_models_per_provider=20&max_providers=64"),
         .method = .GET,
-        .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+        .headers = acceptJsonHeaders(model, model.allocator),
         .response = .buffered,
         .on_response = Effects.responseMsg(.settings_loaded),
     });
@@ -5297,16 +5511,17 @@ fn fetchActiveChatHistory(model: *Model, fx: *Effects) void {
     chat.history_loading = true;
     const init_fetch_key = chat.id + 1000;
     chat.fetch_key = init_fetch_key;
-    const url = std.fmt.allocPrint(
+    const path = std.fmt.allocPrint(
         model.allocator,
-        "http://127.0.0.1:8080/conversation/turns?user_id=native_sdk_chat&session_id={s}&limit=50",
+        "/conversation/turns?session_id={s}&limit=50",
         .{chat.sessionId()},
     ) catch return;
+    const url = apiUrl(model, model.allocator, path);
     fx.fetch(.{
         .key = init_fetch_key,
         .url = url,
         .method = .GET,
-        .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+        .headers = acceptJsonHeaders(model, model.allocator),
         .response = .buffered,
         .on_response = Effects.responseMsg(.history_loaded),
     });
@@ -5357,6 +5572,13 @@ pub fn main(init: std.process.Init) !void {
     });
     app_state.model = initialModel();
     app_state.model.allocator = allocator;
+    if (init.environ_map.get("NATIVE_ASSISTANT_BASE_URL")) |base_url| {
+        const token = init.environ_map.get("NATIVE_ASSISTANT_LAUNCH_TOKEN") orelse "";
+        configureBackend(&app_state.model, allocator, base_url, token) catch {
+            app_state.model.launch_state = .unavailable;
+            app_state.model.launch_error = "Could not read Assistant connection settings";
+        };
+    }
 
     // Stress-test mode: seed a synthetic transcript of N messages so the
     // virtual list can be exercised at scale without a backend.
