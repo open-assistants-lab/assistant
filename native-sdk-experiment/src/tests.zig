@@ -103,6 +103,135 @@ fn sendAndStartStream(model: *Model, fx: *Effects, text: []const u8) u64 {
     return model.activeChat().fetch_key;
 }
 
+fn expectHeader(headers: []const std.http.Header, name: []const u8, value: []const u8) !void {
+    for (headers) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, name) and std.mem.eql(u8, header.value, value)) return;
+    }
+    return error.HeaderNotFound;
+}
+
+test "D3 API requests use configured bootstrap base URL and bearer token without identity query" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    try main.configureBackend(&model, arena, "http://127.0.0.1:49152", "launch-token");
+    var fx = noopFx(arena);
+
+    main.update(&model, .{ .input_changed = .{ .insert_text = "hello" } }, &fx);
+    main.update(&model, .send_message, &fx);
+
+    const request = fx.pendingFetchAt(0).?;
+    try testing.expectEqualStrings("http://127.0.0.1:49152/v1/message/stream", request.url);
+    try testing.expect(std.mem.indexOf(u8, request.body, "user_id") == null);
+    try testing.expect(std.mem.indexOf(u8, request.body, "workspace_id") == null);
+    try expectHeader(request.headers, "Authorization", "Bearer launch-token");
+}
+
+test "D3 successful context compression renders token reduction and failed compression is silent" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    const fk = sendAndStartStream(&model, &fx, "summarize context");
+    const chat = model.activeChat();
+
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"context_compressed\",\"data\":{\"status\":\"succeeded\",\"before\":{\"tokens\":46000},\"after\":{\"tokens\":9000}}}" } }, &fx);
+    try testing.expectEqualStrings("system", chat._messages[chat.msg_count - 1].role);
+    try testing.expectEqualStrings("Context updated · 46k → 9k tokens", chat._messages[chat.msg_count - 1].content);
+
+    const before_count = chat.msg_count;
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"context_compressed\",\"data\":{\"status\":\"failed\",\"before\":{\"tokens\":8000},\"after\":{\"tokens\":4000}}}" } }, &fx);
+    try testing.expectEqual(before_count, chat.msg_count);
+}
+
+test "D3 history reload renders persisted context compression events in order" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    const chat = model.activeChat();
+
+    const item_json = "{\"role\":\"context\",\"content\":\"ignored old copy\",\"metadata\":{\"event_type\":\"context_compressed\",\"status\":\"succeeded\",\"before\":{\"tokens\":46000},\"after\":{\"tokens\":9000}},\"timestamp\":\"2026-01-01T12:34:56Z\"}";
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena, item_json, .{});
+    defer parsed.deinit();
+    main.addHistoryMessage(chat, arena, parsed.value);
+
+    try testing.expectEqual(@as(usize, 1), chat.msg_count);
+    try testing.expectEqualStrings("Context updated · 46k → 9k tokens", chat._messages[0].content);
+}
+
+test "D3 launch states render starting first-run and unavailable recovery" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+
+    model.launch_state = .starting;
+    var tree = try buildTree(arena, &model);
+    _ = try expectByText(tree.root, .text, "Starting Assistant");
+
+    model.launch_state = .first_run;
+    tree = try buildTree(arena, &model);
+    _ = try expectByText(tree.root, .text, "Make Assistant yours");
+    _ = try expectByText(tree.root, .button, "Scan local models");
+    _ = try expectByText(tree.root, .button, "Custom endpoint");
+
+    model.launch_state = .unavailable;
+    model.launch_error = "Launch token missing.";
+    tree = try buildTree(arena, &model);
+    _ = try expectByText(tree.root, .text, "Assistant needs attention");
+    _ = try expectByText(tree.root, .button, "Reconnect");
+}
+
+test "D3 first-run API key submit uses provider classification contract" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    try main.configureBackend(&model, arena, "http://127.0.0.1:49152", "launch-token");
+    model.launch_state = .first_run;
+    var fx = noopFx(arena);
+
+    main.update(&model, .{ .first_run_key_input = .{ .insert_text = "sk-ant-test" } }, &fx);
+    main.update(&model, .first_run_submit, &fx);
+
+    const request = fx.pendingFetchAt(0).?;
+    try testing.expectEqualStrings("http://127.0.0.1:49152/v1/providers/classify-key", request.url);
+    try testing.expect(std.mem.indexOf(u8, request.body, "sk-ant-test") != null);
+    try expectHeader(request.headers, "Authorization", "Bearer launch-token");
+}
+
+test "D3 connected empty state has only text starter prompts" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+
+    const tree = try buildTree(arena, &model);
+    _ = try expectByText(tree.root, .text, "How can I help?");
+    try testing.expect(findTextContaining(tree.root, "YOUR ASSISTANT") == null);
+    try testing.expect(findButtonContaining(tree.root, "Browse") == null);
+    try testing.expect(findButtonContaining(tree.root, "Files") == null);
+    try testing.expect(findButtonContaining(tree.root, "Research") == null);
+    _ = try expectByText(tree.root, .button, "Plan my day");
+    _ = try expectByText(tree.root, .button, "Draft a note");
+    _ = try expectByText(tree.root, .button, "Explore an idea");
+}
+
 test "enter sends the message and clears the draft" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -143,7 +272,7 @@ test "send message adds user message and starts streaming" {
     try testing.expectEqualStrings("", model.inputText());
     try testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
     const request = fx.pendingFetchAt(0).?;
-    try testing.expectEqualStrings("http://127.0.0.1:8080/message/stream", request.url);
+    try testing.expectEqualStrings("http://assistant.invalid/v1/message/stream", request.url);
     try testing.expect(std.mem.indexOf(u8, request.body, "ollama-cloud:deepseek-v4-flash:0731") != null);
 }
 
@@ -589,7 +718,7 @@ test "title generation fires after first exchange" {
     // Title generation should have fired (stream + history reconcile + title = 3)
     try testing.expectEqual(@as(usize, 3), fx.pendingFetchCount());
     const request = fx.pendingFetchAt(2).?;
-    try testing.expectEqualStrings("http://127.0.0.1:8080/conversation/title", request.url);
+    try testing.expectEqualStrings("http://assistant.invalid/v1/conversation/title", request.url);
     try testing.expect(std.mem.indexOf(u8, request.body, chat.sessionId()) != null);
 }
 
@@ -756,7 +885,7 @@ test "approve clears pending" {
     try testing.expect(chat.streaming);
     try testing.expectEqual(@as(usize, 2), fx.pendingFetchCount());
     const request = fx.pendingFetchAt(1).?;
-    try testing.expectEqualStrings("http://127.0.0.1:8080/message/approve", request.url);
+    try testing.expectEqualStrings("http://assistant.invalid/v1/message/approve", request.url);
     try testing.expect(std.mem.indexOf(u8, request.body, "abc123") != null);
 }
 
@@ -846,7 +975,7 @@ test "reject clears pending" {
     try testing.expectEqualStrings("", chat.pending_tool);
     try testing.expectEqual(@as(usize, 2), fx.pendingFetchCount());
     const request = fx.pendingFetchAt(1).?;
-    try testing.expectEqualStrings("http://127.0.0.1:8080/message/reject", request.url);
+    try testing.expectEqualStrings("http://assistant.invalid/v1/message/reject", request.url);
     try testing.expect(std.mem.indexOf(u8, request.body, "abc123") != null);
 }
 
@@ -928,7 +1057,7 @@ test "typing dots render while streaming" {
     try testing.expectEqual(@as(usize, 5), countKind(tree.root, .panel));
 }
 
-test "empty state renders suggestions and quick-action chips" {
+test "empty state renders text starter prompts without quick-action chips" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -937,26 +1066,12 @@ test "empty state renders suggestions and quick-action chips" {
     model.allocator = arena;
 
     const tree = try buildTree(arena, &model);
-    _ = findButtonContaining(tree.root, "Triage my inbox") orelse return error.WidgetNotFound;
-    // Icon-only chips: buttons with no label text. The empty state has three
-    // (browse / files / research) plus the rail collapse chevron and the
-    // composer's Send + model buttons — assert at least three empty-label
-    // buttons exist.
-    var empty_label_buttons: usize = 0;
-    var stack: [64]canvas.Widget = undefined;
-    var count: usize = 1;
-    stack[0] = tree.root;
-    while (count > 0) {
-        count -= 1;
-        const w = stack[count];
-        if (w.kind == .button and w.text.len == 0) empty_label_buttons += 1;
-        for (w.children) |child| {
-            if (count + 1 >= stack.len) break;
-            stack[count] = child;
-            count += 1;
-        }
-    }
-    try testing.expect(empty_label_buttons >= 3);
+    _ = findButtonContaining(tree.root, "Plan my day") orelse return error.WidgetNotFound;
+    _ = findButtonContaining(tree.root, "Draft a note") orelse return error.WidgetNotFound;
+    _ = findButtonContaining(tree.root, "Explore an idea") orelse return error.WidgetNotFound;
+    try testing.expect(findButtonContaining(tree.root, "Browse") == null);
+    try testing.expect(findButtonContaining(tree.root, "Files") == null);
+    try testing.expect(findButtonContaining(tree.root, "Research") == null);
 }
 
 test "theme: dark tokens have teal accent" {
@@ -1149,6 +1264,45 @@ test "draft preservation: switching chats preserves per-chat draft" {
     try testing.expectEqualStrings("draft2", model.inputText());
 }
 
+test "D3 sidebar restores top-level utility navigation" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+
+    const tree = try buildTree(arena, &model);
+    _ = try expectByText(tree.root, .text, "Tools");
+    _ = try expectByText(tree.root, .text, "Skills");
+    _ = try expectByText(tree.root, .text, "Subagents");
+    _ = try expectByText(tree.root, .text, "Settings");
+}
+
+test "D3 top-level Tools opens tools page and settings no longer contains Tools tab" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+
+    main.update(&model, .settings_tools, &fx);
+    try testing.expect(model.tools.visible);
+    try testing.expect(!model.settings.visible);
+    var tree = try buildTree(arena, &model);
+    _ = try expectByText(tree.root, .text, "UTILITIES");
+    _ = try expectByText(tree.root, .button, "Built-in");
+    _ = try expectByText(tree.root, .button, "Connections");
+
+    main.update(&model, .open_settings, &fx);
+    tree = try buildTree(arena, &model);
+    try testing.expect(!model.tools.visible);
+    try testing.expect(model.settings.visible);
+    try testing.expect(findByText(tree.root, .button, "Tools") == null);
+}
+
 test "settings catalog response parses grouped providers and models" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -1192,7 +1346,7 @@ test "settings open fetches dedicated model catalog endpoint" {
     main.update(&model, .open_settings, &fx);
 
     const request = fx.pendingFetchAt(0).?;
-    try testing.expectEqualStrings("http://127.0.0.1:8080/settings/model-catalog?user_id=native_sdk_chat&max_models_per_provider=20&max_providers=64", request.url);
+    try testing.expectEqualStrings("http://assistant.invalid/v1/settings/model-catalog?max_models_per_provider=20&max_providers=64", request.url);
 }
 
 test "locked settings model opens API key modal instead of saving" {
