@@ -22,6 +22,26 @@ SKIP=0
 
 BACKEND=""
 APP=""
+FRONTEND_SUITE_PORT="${FRONTEND_SUITE_PORT:-$((18080 + (RANDOM % 20000)))}"
+API_BASE_URL="${FRONTEND_SUITE_BACKEND_URL:-http://127.0.0.1:${FRONTEND_SUITE_PORT}}"
+API_AUTH_TOKEN="${FRONTEND_SUITE_LAUNCH_TOKEN:-}"
+
+api_curl() {
+  if [ -n "$API_AUTH_TOKEN" ]; then
+    curl -s --max-time 15 -H "Authorization: Bearer $API_AUTH_TOKEN" "$@"
+  else
+    curl -s --max-time 15 "$@"
+  fi
+}
+
+api_curl_fail() {
+  if [ -n "$API_AUTH_TOKEN" ]; then
+    curl -sf --max-time 15 -H "Authorization: Bearer $API_AUTH_TOKEN" "$@"
+  else
+    curl -sf --max-time 15 "$@"
+  fi
+}
+
 trap 'cleanup' EXIT
 
 GREEN='\033[0;32m'
@@ -165,37 +185,35 @@ print(m.group(1) if m else '')
 }
 
 start_backend() {
-  # E2E-round fix: never kill a backend we didn't spawn. If the port is held,
-  # fail loudly instead of nuking the operator's server. Set
-  # FRONTEND_SUITE_STEAL_PORT=1 to restore the old take-over behavior.
-  local holders="$(lsof -ti:8080 2>/dev/null | tr '\n' ' ')"
-  if [ -n "$holders" ] && [ "${FRONTEND_SUITE_STEAL_PORT:-0}" != "1" ]; then
-    echo "FATAL: port 8080 already held by PID(s): $holders" >&2
-    echo "Stop them manually, or re-run with FRONTEND_SUITE_STEAL_PORT=1 to allow takeover." >&2
-    exit 1
+  if [ -z "${FRONTEND_SUITE_BACKEND_URL:-}" ]; then
+    local holders="$(lsof -ti:${FRONTEND_SUITE_PORT} 2>/dev/null | tr '\n' ' ')"
+    if [ -n "$holders" ] && [ "${FRONTEND_SUITE_STEAL_PORT:-0}" != "1" ]; then
+      echo "FATAL: configured test port ${FRONTEND_SUITE_PORT} already held by PID(s): $holders" >&2
+      echo "Set FRONTEND_SUITE_PORT to a free port, or FRONTEND_SUITE_STEAL_PORT=1 to allow takeover." >&2
+      exit 1
+    fi
+    if [ -n "$holders" ]; then
+      lsof -ti:${FRONTEND_SUITE_PORT} | xargs kill -9 2>/dev/null || true
+      sleep 1
+    fi
+    API_PORT="$FRONTEND_SUITE_PORT" uv run assistant http > /tmp/assistant_frontend_suite.log 2>&1 &
+    BACKEND=$!
   fi
-  if [ -n "$holders" ]; then
-    lsof -ti:8080 | xargs kill -9 2>/dev/null || true
-    sleep 1
-  fi
-  uv run assistant http > /tmp/assistant_frontend_suite.log 2>&1 &
-  BACKEND=$!
   # Poll health for up to 30s (startup can be slow after a busy run).
   for i in $(seq 1 30); do
-    if curl -sf --max-time 15 http://127.0.0.1:8080/health > /dev/null 2>&1; then
+    if api_curl_fail "$API_BASE_URL/health" > /dev/null 2>&1; then
       break
     fi
     sleep 1
   done
-  curl -sf --max-time 15 http://127.0.0.1:8080/health > /dev/null || { echo "FAIL: backend not healthy"; exit 1; }
-  # Clear the app user's sessions so the sidebar starts empty and tests are
-  # deterministic (sessions accumulate across runs otherwise).
-  curl -s --max-time 15 -X DELETE "http://127.0.0.1:8080/conversation?user_id=native_sdk_chat" > /dev/null
+  api_curl_fail "$API_BASE_URL/health" > /dev/null || { echo "FAIL: backend not healthy: $API_BASE_URL"; exit 1; }
+  # Clear sessions so the sidebar starts empty and tests are deterministic.
+  api_curl -X DELETE "$API_BASE_URL/v1/conversation" > /dev/null
 }
 
 start_app() {
   rm -rf .zig-cache/native-sdk-automation
-  native dev -Dautomation=true > /tmp/native_frontend_suite.log 2>&1 &
+  NATIVE_ASSISTANT_BASE_URL="$API_BASE_URL" NATIVE_ASSISTANT_LAUNCH_TOKEN="$API_AUTH_TOKEN" native dev -Dautomation=true > /tmp/native_frontend_suite.log 2>&1 &
   APP=$!
   sleep 5
   if ! native automate wait --timeout-ms 15000 > /dev/null 2>&1; then
@@ -209,7 +227,7 @@ start_app() {
     done
     sleep 1
     rm -rf .zig-cache/native-sdk-automation
-    native dev -Dautomation=true > /tmp/native_frontend_suite.log 2>&1 &
+    NATIVE_ASSISTANT_BASE_URL="$API_BASE_URL" NATIVE_ASSISTANT_LAUNCH_TOKEN="$API_AUTH_TOKEN" native dev -Dautomation=true > /tmp/native_frontend_suite.log 2>&1 &
     APP=$!
     sleep 5
     native automate wait --timeout-ms 15000 > /dev/null 2>&1
@@ -533,9 +551,9 @@ test_suggestions() {
     native automate assert --timeout-ms 5000 'role=text name="How can I help' > /dev/null 2>&1
   fi
   SNAPSHOT=$(native automate snapshot)
-  INBOX=$(locate_widget button "Triage my inbox")
-  SUMMARY=$(locate_widget button "Draft a weekly summary")
-  CONTACTS=$(locate_widget button "Find contacts in marketing")
+  INBOX=$(locate_widget button "Plan my day")
+  SUMMARY=$(locate_widget button "Draft a note")
+  CONTACTS=$(locate_widget button "Explore an idea")
 
   # Helper: press a suggestion, then assert the textbox line in the snapshot
   # contains the expected draft text (value= attribute).
@@ -555,9 +573,9 @@ test_suggestions() {
     fi
   }
 
-  try_suggestion "$INBOX" "Triage my inbox" "Triage my inbox"
-  try_suggestion "$SUMMARY" "Draft a weekly summary" "Draft a weekly summary"
-  try_suggestion "$CONTACTS" "Find contacts in marketing" "Find contacts in marketing"
+  try_suggestion "$INBOX" "Plan my day" "Plan my day"
+  try_suggestion "$SUMMARY" "Draft a note" "Draft a note"
+  try_suggestion "$CONTACTS" "Explore an idea" "Explore an idea"
 
   cleanup
 }
@@ -627,30 +645,16 @@ test_settings() {
 # with the "Tools" label on a child text — located like Settings.
 test_tools() {
   echo ""
-  echo "=== 8. Tools Section in Settings: open, tabs, close ==="
+  echo "=== 8. Top-level Tools: open, tabs, close ==="
 
   start_backend
   start_app
 
-  # Navigation: Settings → Tools section (the Tools page now lives inside
-  # Settings; there is no sidebar Tools row anymore).
+  # Navigation: Top-level Tools page (Built-in tools + Connections).
   SNAPSHOT=$(native automate snapshot)
-  SETTINGS=$(find_pressable_by_child_text "Settings")
-  if [ -z "$SETTINGS" ]; then
-    fail "Settings pressable row not found"
-    cleanup
-    return 1
-  fi
-  native automate widget-click main-canvas "$SETTINGS" > /dev/null 2>&1
-  if native automate assert --timeout-ms 3000 'role=button name="Tools"' > /dev/null 2>&1; then
-    pass "settings opens with a Tools section button"
-  else
-    fail "settings did not open (no Tools section button)"
-  fi
-  SNAPSHOT=$(native automate snapshot)
-  TOOLS_BTN=$(locate_widget button Tools)
+  TOOLS_BTN=$(find_pressable_by_child_text "Tools")
   if [ -z "$TOOLS_BTN" ]; then
-    fail "Tools section button not found"
+    fail "Tools sidebar row not found"
     cleanup
     return 1
   fi
@@ -682,7 +686,7 @@ test_tools() {
   native automate widget-action main-canvas "$TG_TOGGLE" press > /dev/null 2>&1
   # Wait for the PATCH + list refetch, then verify the backend flipped it off
   sleep 2
-  ENABLED=$(curl -s 'http://127.0.0.1:8080/tools/time_get?user_id=native_sdk_chat&workspace_id=personal' | python3 -c "import sys,json; print(json.load(sys.stdin).get('enabled'))")
+  ENABLED=$(api_curl "$API_BASE_URL/v1/tools/time_get" | python3 -c "import sys,json; print(json.load(sys.stdin).get('enabled'))")
   if [ "$ENABLED" = "False" ]; then
     pass "tool toggle disables time_get (backend enabled=false)"
   else
@@ -693,7 +697,7 @@ test_tools() {
   TG_TOGGLE=$(find_sibling_button "time_get")
   native automate widget-action main-canvas "$TG_TOGGLE" press > /dev/null 2>&1
   sleep 2
-  ENABLED=$(curl -s 'http://127.0.0.1:8080/tools/time_get?user_id=native_sdk_chat&workspace_id=personal' | python3 -c "import json,sys; print(json.load(sys.stdin).get('enabled'))")
+  ENABLED=$(api_curl "$API_BASE_URL/v1/tools/time_get" | python3 -c "import json,sys; print(json.load(sys.stdin).get('enabled'))")
   if [ "$ENABLED" = "True" ]; then
     pass "tool toggle re-enables time_get (backend enabled=true)"
   else
@@ -724,9 +728,9 @@ test_tools() {
   # api_key connect flow: pick the first non-connected api_key connector,
   # open its credential form, verify the form renders, then Cancel to leave
   # the catalog untouched. Label is derived from the catalog (dynamic).
-  API_NAME=$(curl -s 'http://127.0.0.1:8080/connectors/catalog?user_id=native_sdk_chat' | python3 -c "import sys,json; d=json.load(sys.stdin); c=next((c for c in d if c['auth_type']=='api_key' and not c['connected']), None); print(c['name'] if c else '')")
-  API_DISPLAY=$(curl -s 'http://127.0.0.1:8080/connectors/catalog?user_id=native_sdk_chat' | python3 -c "import sys,json; d=json.load(sys.stdin); c=next((c for c in d if c['auth_type']=='api_key' and not c['connected']), None); print(c['display'] if c else '')")
-  API_LABEL=$(curl -s 'http://127.0.0.1:8080/connectors/catalog?user_id=native_sdk_chat' | python3 -c "import sys,json; d=json.load(sys.stdin); c=next((c for c in d if c['auth_type']=='api_key' and not c['connected']), None); print(c['required_fields'][0]['label'] if c and c.get('required_fields') else '')")
+  API_NAME=$(api_curl "$API_BASE_URL/connectors/catalog?user_id=default_user" | python3 -c "import sys,json; d=json.load(sys.stdin); c=next((c for c in d if c['auth_type']=='api_key' and not c['connected']), None); print(c['name'] if c else '')")
+  API_DISPLAY=$(api_curl "$API_BASE_URL/connectors/catalog?user_id=default_user" | python3 -c "import sys,json; d=json.load(sys.stdin); c=next((c for c in d if c['auth_type']=='api_key' and not c['connected']), None); print(c['display'] if c else '')")
+  API_LABEL=$(api_curl "$API_BASE_URL/connectors/catalog?user_id=default_user" | python3 -c "import sys,json; d=json.load(sys.stdin); c=next((c for c in d if c['auth_type']=='api_key' and not c['connected']), None); print(c['required_fields'][0]['label'] if c and c.get('required_fields') else '')")
   if [ -n "$API_NAME" ] && [ -n "$API_LABEL" ]; then
     SNAPSHOT=$(native automate snapshot)
     BTN=$(find_sibling_button "$API_DISPLAY")
@@ -758,7 +762,7 @@ test_tools() {
   # open a system browser on a dev machine; in CI the open either fails
   # silently or is caught — the assertion is the waiting state, and Cancel
   # stops the poll. Full E2E is manual.)
-  OAUTH_DISPLAY=$(curl -s 'http://127.0.0.1:8080/connectors/catalog?user_id=native_sdk_chat' | python3 -c "import sys,json; d=json.load(sys.stdin); c=next((c for c in d if c['auth_type']=='oauth2' and not c['connected'] and not any(not f.get('optional', False) for f in c.get('required_fields', []))), None); print(c['display'] if c else '')")
+  OAUTH_DISPLAY=$(api_curl "$API_BASE_URL/connectors/catalog?user_id=default_user" | python3 -c "import sys,json; d=json.load(sys.stdin); c=next((c for c in d if c['auth_type']=='oauth2' and not c['connected'] and not any(not f.get('optional', False) for f in c.get('required_fields', []))), None); print(c['display'] if c else '')")
   if [ -n "$OAUTH_DISPLAY" ]; then
     SNAPSHOT=$(native automate snapshot)
     OAUTH_BTN=$(find_sibling_button "$OAUTH_DISPLAY")
@@ -799,7 +803,7 @@ test_tools() {
   fi
 
   # Reduced-motion path: Settings → General → Reduced motion On → close
-  # Settings → Tools section opens fine (entrance jumps straight to settled;
+  # Top-level Tools page opens fine (entrance jumps straight to settled;
   # the assertion is the panel still renders — same stance as the theme test)
   # → Escape closes again.
   SNAPSHOT=$(native automate snapshot)
@@ -817,24 +821,24 @@ test_tools() {
           if [ -n "$RM_TOGGLE" ]; then
             native automate widget-action main-canvas "$RM_TOGGLE" press > /dev/null 2>&1
             sleep 1
-            # Switch to the Tools section (settings stays open)
+            # Switch to the top-level Tools page.
             SNAPSHOT=$(native automate snapshot)
-            TOOLS_BTN=$(locate_widget button Tools)
+            TOOLS_BTN=$(find_pressable_by_child_text "Tools")
             if [ -n "$TOOLS_BTN" ]; then
               native automate widget-click main-canvas "$TOOLS_BTN" > /dev/null
               if native automate assert --timeout-ms 3000 'role=text name="time_get"' > /dev/null 2>&1; then
-                pass "tools section opens with reduced motion"
+                pass "top-level tools opens with reduced motion"
               else
-                fail "tools section failed with reduced motion"
+                fail "top-level tools failed with reduced motion"
               fi
               native automate widget-key main-canvas Escape > /dev/null 2>&1
               if native automate assert --timeout-ms 3000 'role=textbox name="Message"' > /dev/null 2>&1; then
-                pass "escape closes settings with reduced motion"
+                pass "escape closes tools with reduced motion"
               else
-                fail "escape did not close settings with reduced motion"
+                fail "escape did not close tools with reduced motion"
               fi
             else
-              fail "Tools section button not found for reduced-motion path"
+              fail "Tools sidebar row not found for reduced-motion path"
             fi
           else
             fail "reduced motion toggle not found"
@@ -850,24 +854,24 @@ test_tools() {
     fi
   fi
 
-  # Re-open Settings → Tools section for the toggle-close check
+  # Re-open top-level Tools for the toggle-close check
   SNAPSHOT=$(native automate snapshot)
-  SETTINGS=$(find_pressable_by_child_text "Settings")
-  native automate widget-click main-canvas "$SETTINGS" > /dev/null
+  TOOLS_BTN=$(find_pressable_by_child_text "Tools")
+  native automate widget-click main-canvas "$TOOLS_BTN" > /dev/null
   if native automate assert --timeout-ms 3000 'role=button name="Built-in"' > /dev/null 2>&1; then
     pass "tools section reopens after escape close"
   else
     fail "tools section did not reopen after escape close"
   fi
 
-  # Toggle close (press the sidebar Settings row again)
+  # Toggle close (press the sidebar Tools row again)
   SNAPSHOT=$(native automate snapshot)
-  SETTINGS=$(find_pressable_by_child_text "Settings")
-  native automate widget-click main-canvas "$SETTINGS" > /dev/null 2>&1
+  TOOLS_BTN=$(find_pressable_by_child_text "Tools")
+  native automate widget-click main-canvas "$TOOLS_BTN" > /dev/null 2>&1
   if native automate assert --timeout-ms 3000 'role=textbox name="Message"' > /dev/null 2>&1; then
-    pass "settings closes and shows chat"
+    pass "tools closes and shows chat"
   else
-    fail "settings did not close"
+    fail "tools did not close"
   fi
 
   cleanup
@@ -920,14 +924,11 @@ YAML
   start_app
 
   SNAPSHOT=$(native automate snapshot)
-  SETTINGS=$(find_pressable_by_child_text "Settings")
-  native automate widget-click main-canvas "$SETTINGS" > /dev/null 2>&1
-  if native automate assert --timeout-ms 3000 'role=button name="Tools"' > /dev/null 2>&1; then
-    SNAPSHOT=$(native automate snapshot)
-    TOOLS_BTN=$(locate_widget button Tools)
+  TOOLS_BTN=$(find_pressable_by_child_text "Tools")
+  if [ -n "$TOOLS_BTN" ]; then
     native automate widget-click main-canvas "$TOOLS_BTN" > /dev/null 2>&1
   else
-    fail "settings did not open for connect-form test"
+    fail "Tools sidebar row not found for connect-form test"
     cleanup
     return 1
   fi
@@ -1105,7 +1106,7 @@ test_model() {
   # Seed a second provider key BEFORE the app starts (the app loads the
   # model catalog at startup) so the model cycle has a different keyed
   # model to move to — cycling skips providers without keys.
-  curl -s --max-time 15 -X POST "http://127.0.0.1:8080/settings/api-keys?user_id=native_sdk_chat" \
+  api_curl -X POST "$API_BASE_URL/v1/settings/api-keys" \
     -H "Content-Type: application/json" \
     -d '{"provider":"openai","api_key":"sk-test-cycle"}' > /dev/null
 
