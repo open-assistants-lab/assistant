@@ -75,7 +75,30 @@ invariant; model history derived from log; no checkpoints (round-time
 preserved); fork/resume/replay derive from the stream | Schema — **Phase 0** (P0-T9); capture/derivation — **Phase 1** (P1-T10..T12); fork/resume — **Phase 3** |
 | R-PL1 | **Selective pluggability**: strategic seams at package boundaries
 (sandbox, session log, providers, tools, skills, persistence); agent loop
-stays concrete | Seams formalized at SDK extraction — **Phase 2/3** |
+stays concrete | Seams kept as in-repo design boundaries; **no package
+extraction** — PyPI dropped (deployment-first, 2026-08-26) |
+| R-A2A | **A2A protocol adoption** — Agent Cards, outbound delegation,
+inbound task acceptance; MCP + A2A simultaneously (MCP = tools, A2A =
+agent collaboration) | **Phase 3** (T3.8, spec §6.5a) |
+| H1 | **Tiered HITL approval** — per-tool risk tiers (autonomous reads /
+show-then-auto-send / explicit approval / hard block); 93% approval-fatigue
+stat makes binary HITL unusable at scale (§8.1) | Tiered profiles — **Phase 1** |
+| H2 | **Per-run tool-call budget** (avalanche prevention) | `RunConfig` — **Phase 1/2** |
+| H3 | **Injection sanitization at ingestion boundaries** — external content
+(email/web/docs) passes strict-schema triage before entering model context
+(#1 cited tool-boundary failure mode) | **Phase 1** (with P1-T3) |
+| H4 | **Eval-on-deploy regression gate** — persona/kit evals run on
+default-model change (silent provider upgrades regress quality) | **Phase 1** |
+| H5 | **Model routing per kit/task complexity** (frontier for high-stakes,
+cheap for high-volume — price-war bifurcation) | **Phase 2** (pricing lever) |
+| H6 | **Failure→constraint loop** — review-queue flags auto-surface as
+rubric/skill updates in the kit factory | **Phase 1** (with P1-T8) |
+| H7 | **Success-triggered skill drafts + compounding metric** — complex
+task success auto-drafts a SKILL.md (→ review queue); task-duration trend
+per recurring workflow surfaced on the owner dashboard (Hermes-style
+compounding, review-gated); **outcome-conditioned refinement on re-runs**
+(load skill → refine by outcome — Phase 2) | Drafts — **Phase 1** (with P1-T8); metric + refinement —
+**Phase 2** (dashboard D1-1) |
 
 ## 4. Knowledge ingestion (Phase 1 core)
 
@@ -122,7 +145,9 @@ sources ──adapters──▶ normalized corpus ──LLM triage──▶ skil
 ```
 
 Non-negotiables: read-only at ingest; nothing auto-commits; gaps surfaced as
-interview questions rather than silently ignored.
+interview questions rather than silently ignored; **external content passes a
+sanitization/strict-schema triage step before entering model context (H3)** —
+prompt injection at tool boundaries is the #1 cited agent failure mode.
 
 ### 4.5 Main-agent profile bootstrapping (kit runtime)
 
@@ -174,22 +199,39 @@ architecture" (true today: isolation, audit, self-host) with a funded path to
 
 ## 6. Packaging, sandboxing & deployment
 
-### 6.1 OSS packaging posture
+### 6.1 Distribution posture — deployment-first (PyPI dropped)
 
-Extract the SDK into a self-contained PyPI package (Phase 9 work). Imports
-from `src.app_logging` / `src.config` / `src.storage.paths` / `src.skills`
-must be replaced by package-local config, logging, and paths conventions
-(e.g. `~/.assistant/`). Adopters bring their own auth: the package ships an
-`IdentityResolver` seam plus reference implementations (shared-secret,
-per-user keys), never dictating identity. Auth ships **present-but-off** —
-operator chooses the trust boundary.
+**Decision (2026-08-26): Docker is the distribution. No PyPI package is
+published or planned.** The earlier "pip install → ready-to-customize agent"
+goal is superseded by "`docker run` + mount a `PROFILE.md` + env" — onboarding
+via a deployment artifact with one trust boundary, not a package import.
 
-| Install | Includes |
-|---|---|
-| `assistant` (core) | AgentLoop, providers, registry, files, web, time, skills, sessions, HITL, memory-lite (SQLite/FTS5) |
-| `assistant[memory-vector]` | ChromaDB (heavy native deps — optional) |
-| `assistant[email]` / `assistant[browser]` / `assistant[mcp]` / `assistant[subagents]` | Heavy integrations as extras |
-| `assistant[server]` | FastAPI + SSE/WS (hosted-API edition) |
+Reasons: (a) no current consumer imports the Python engine — firms deploy the
+server (Motion A), subscribers use the hosted product (Motion B), partners
+integrate via the HTTP/SSE/WS API + TS SDK + `PROFILE.md` (Motion C);
+(b) the repo currently packages the whole monorepo as `assistant-sdk`, so a
+PyPI publish today would ship the wrong artifact and force the S3-1 extraction
+before it earns its keep; (c) dropping it removes a full workstream (agents
+consume the product via API, not Python imports — and OSS tinkerers clone).
+
+What remains: **module hygiene stays a design discipline** — the seams
+(`IdentityResolver`, `SandboxBackend`, session log, registries) remain in-repo
+boundaries (§6.5) so a package split, if ever reversed, needs no refactor. The
+TS SDK npm preview (P0-T6) is **retained** — it is the *client* artifact for
+integrations, not the engine.
+
+| Channel | Distributes | Consumers |
+|---|---|---|
+| Docker images | The running product | Firms, hosted tier, VPC/enterprise, partners (self-host) |
+| npm `assistant-client@0.1.0-preview` | Typed client for integrations | Partner frontends, native/web clients |
+| git clone | Source (OSS development) | Self-hosters, contributors |
+| ~~PyPI~~ | ~~engine package~~ | ❌ dropped 2026-08-26 — revisit only if a consumer demands an importable Python engine |
+
+**Production config requirements (deployment-first):** `CONNECTKIT_VAULT_KEY`
+(else each per-user vault mints an ephemeral Fernet key and OAuth refresh
+tokens are lost on restart), `API_PUBLIC_URL` (OAuth redirect base),
+`DEFAULT_GWS_CLIENT_ID/SECRET` or per-user connector creds, `EA_API_KEY` on
+non-localhost (auth spectrum, §6.2).
 
 ### 6.2 Tool trust tiers (single-container defaults)
 
@@ -211,18 +253,56 @@ mechanism ships in all cases; deployment config decides.
 Never build the sandbox itself — build the integration layer. A sandbox is
 security-critical commodity; our value is the `code_execute` *wrapper*
 (agent-facing tool, workspace path policy, env scrub, limits, file-lifecycle
-wiring into files_read/versions), which is also our OSS artifact.
+wiring into files_read/versions).
 
-**Adopt dsh's sandbox seam (R-SB1):** define a `SandboxBackend` interface
-(Service Definition / Provider / Consumer split) and route **every
-process-spawning tool** through it — `shell_execute`, `code_execute`, CLI
-adapters, future terminal — so no tool can forget to sandbox. Backends are
-implementations behind the seam, swappable per deployment and per agent
-(`isolate` realm concept):
+**OSS trajectory (2026-08-26 — honest framing):** the wrapper's adoption
+vehicle is **Assistant itself** — sandbox libraries don't get adopted as
+libraries (E2B/Daytona = services; bubblewrap = only-tool-for-the-job;
+LangChain backends = framework-bound). The **pattern** is the contribution:
+the `execute()`-only contract, the soft/hard ladder, the no-root rule, and
+the UID-drop pattern are documented here and in blog posts for others to
+copy. The soft tier is ~200 lines of stdlib Python — the value is knowing
+what to build, not the artifact. Extraction stays a cheap *option* (zero-
+import discipline keeps it a directory move), triggered only by external
+pull — never a roadmap item. This avoids the permanent maintenance tax of a
+public security-critical package (every vulnerability report is yours
+forever) for an audience that may not exist.
+
+**Adopt dsh's sandbox seam (R-SB1) + LangChain's `execute()`-only contract:**
+define a `SandboxBackend` interface (Service Definition / Provider / Consumer
+split) and route **every process-spawning tool** through it — `shell_execute`,
+`code_execute`, CLI adapters, future terminal — so no tool can forget to
+sandbox. Backends are implementations behind the seam, swappable per deployment
+and per agent (`isolate` realm concept).
+
+**The `execute()`-only contract (LangChain-validated):** the **only method a
+backend must implement is `execute(command) → {output, exit_code, truncated}`**
+— every other filesystem operation (`read`, `write`, `edit`, `ls`, `glob`,
+`grep`) is *derived* by the base class, which constructs scripts and runs them
+via `execute()`. Adding a new provider = implementing one method. The
+`code_execute` tool is **conditionally available** — if no backend is
+configured, the tool is filtered out and the agent never sees it.
+
+**Lifecycle:** sandboxes are **session-scoped** (default) — created on first
+`code_execute` for a session, reused on follow-up turns, TTL-expired when
+idle. **User-scoped** sandboxes persist across sessions for state that must
+survive (agent-built tables, installed packages). Document the mapping
+(`session_id → sandbox_id`) so follow-up turns resolve to the same sandbox.
+
+**Security boundaries (LangChain-validated):**
+
+✅ Sandboxes protect: local files, env vars, credentials, other processes.
+
+❌ Sandboxes DON'T protect: **context injection** (attacker controls the
+agent's input → instructs it to run commands *inside* the sandbox), **network
+exfiltration** (unless blocked), **secrets in the prompt**. Mitigation: scrub
+env at injection, never put secrets in the prompt, block network where the
+provider supports it (H3 sanitization, egress policy).
 
 | Backend | What it is | Threat model | When |
 |---|---|---|---|
 | **Soft** (subprocess + cwd/env/timeout caps) | Guardrails, not isolation | Trusted user, untrusted code | Phase 2 |
+| **Soft+UID** (per-user OS account drop: `os.setuid/setgid` in `preexec_fn`, per-user homes, data-dir chowns) | Adds kernel-enforced filesystem/env/process isolation between *trusted* users — Unix permissions block cross-user reads and signals | Trusted users who collide by accident | Optional Phase-2/2.5 refinement |
 | **Hard** (bubblewrap / runc / nsjail per task) | OS-level isolation per execution | Untrusted tenants in single container | Phase 3 |
 | **MicroVM** (Firecracker / Kata / remote E2B) | Separate kernel per task — strongest practical isolation | Untrusted at scale; snapshot/resume for agent sessions | Commercial tier |
 
@@ -242,6 +322,15 @@ the enterprise isolation product tier, not the default. Scaling rule: shard
 by user (consistent hashing), never replicas of the same user (single-writer
 stores + in-memory caches). Loop-cache eviction (LRU, idle-only) bounds memory
 in single-container mode.
+
+**Security rule — no agent runs as root (non-negotiable):**
+the assistant process (parent) runs as root or CAP_SETUID to manage UID drops,
+but **every agent subprocess — including admins' — drops to a non-root UID via
+`preexec_fn` before exec.** The admin's elevated capabilities come from
+admin-level *app permissions* (user management, policy editing, deployment),
+not from the agent's runtime privileges. If the admin's agent ran as root:
+prompt injection → root shell → full container compromise → all users' data
+exposed. The UID-drop is uniform — no exceptions for any role.
 
 ### 6.4 Event-sourced session log (R-SL1)
 
@@ -272,6 +361,8 @@ it.
   `fork` was deferred by HybridDB (checkpoint/rollback covers the rewind
   workflow) — B7 fork/resume stays app-level until a consumer demands it.
 
+  workflow) — B7 fork/resume stays app-level until a consumer demands it.
+
 ### 6.5 Selective pluggability (R-PL1)
 
 Adopt the *philosophy* selectively, not the full plugin-everything refactor.
@@ -279,17 +370,143 @@ Strategic seams at package boundaries; the agent loop stays concrete.
 
 | Seam | Status | Formalize at |
 |---|---|---|
-| LLM provider | ✅ exists | SDK extraction |
-| Tool registry | ✅ exists | SDK extraction |
-| Skills | ✅ exists | SDK extraction |
-| MCP bridge | ✅ exists | SDK extraction |
+| LLM provider | ✅ exists | in-repo seam (design discipline) |
+| Tool registry | ✅ exists | in-repo seam |
+| Skills | ✅ exists | in-repo seam |
+| MCP bridge | ✅ exists | in-repo seam |
 | Sandbox backend | 🔴 new (R-SB1) | Phase 2 |
 | Session log | 🔴 new (R-SL1) | Phase 0/1 (schema P0-T9; derivation P1-T10..T12) |
-| Session persistence | 🟡 partial | SDK extraction |
+| Session persistence | 🟡 partial | in-repo seam |
 
 Decision: interfaces defined now (cheap), implementations later; full
 plugin-everything deferred until a partner demands it or a Python-native
-composability framework (e.g. Ouroboros) matures.
+composability framework (e.g. Ouroboros) matures. **No PyPI / package
+extraction** — the seams are in-repo design boundaries, not a release surface
+(deployment-first, 2026-08-26).
+
+Decision: interfaces defined now (cheap), implementations later; full
+plugin-everything deferred until a partner demands it or a Python-native
+composability framework (e.g. Ouroboros) matures. **No PyPI / package
+extraction** — the seams are in-repo design boundaries, not a release surface
+(deployment-first, 2026-08-26).
+
+### 6.5a Protocol stack — A2A adoption (2026-08-26)
+
+The agent interoperability landscape has converged into a **three-layer
+stack** under Linux Foundation governance (Agentic AI Foundation —
+Anthropic, Google, Microsoft, AWS). We adopt all three layers:
+
+| Layer | Protocol | Our status | When |
+|---|---|---|---|
+| **Tool Integration** (agent → capabilities) | **MCP** | ✅ shipped (mcp_bridge, mcp_manager) | Phase 0 |
+| **Agent Coordination** (inter-agent) | **A2A** | 🔜 adopt | Phase 3 |
+| **Identity / Trust** (cross-cutting) | **OAuth 2.1 + Agent Cards** | ✅ seam exists (IdentityResolver) | Phase 0/3 |
+
+**A2A adoption (Phase 3, Motion C):**
+- **Agent Card**: expose each Assistant agent's capabilities as an A2A Agent
+  Card (JSON discovery endpoint) — partners' agents can find and delegate to
+  us
+- **Outbound delegation**: our agents can delegate tasks to remote
+  A2A-speaking agents (partner ecosystems, vertical agents) — same task
+  lifecycle as our SUB-1/SUB-2, different transport (HTTP/SSE/JSON-RPC)
+- **Inbound acceptance**: our agents accept tasks from remote A2A agents
+  (routed through H1 middleware + capabilities tiers)
+- **Not ACP**: ACP (IBM/AGNTCY) is a lighter REST alternative — we don't need
+  both; A2A covers the task lifecycle and artifact exchange that partners
+  need
+- **Not ANP**: decentralized DID-based agent identity is architecturally
+  compelling but not production-ready — watch, don't build
+
+**Strategic statement:** MCP for tools/context within one agent; A2A for
+collaboration between agents; HybridDB for versioned trust. Three standards,
+one engine, zero proprietary protocols.
+
+### 6.6 Data topology — one HybridDB per user + fundamental tools
+
+**Decision (2026-08-26): one HybridDB instance per user; domains live as
+namespaced versioned tables. Not one DB per tool.**
+
+- Why per-user (not per-tool): one instance = **one semantic index spanning
+  all domains** ("everything I know about Alice" spans email + contacts +
+  notes in a single query), one journal/queue, one backup/exit path (A6),
+  and matches the single-writer-per-user rule. Per-tool stores chop the
+  user's world into islands and force a fan-out search layer.
+- Tables get domain prefixes (`contacts`, `todos`, `knowledge`, `email`,
+  `session_events`). All versioned (`versioned=True, hash_chain=True`).
+- **Growth → archive, not split:** heavy domains archive to Parquet
+  (JSONL for the git-review view) and prune chain-safely. **Escape hatch:**
+  a domain that outgrows the shared store moves to its own HybridDB instance
+  — safe because tools are thin consumers over tables, never over paths.
+
+**The two-layer tool model:**
+
+| Layer | What | Examples |
+|---|---|---|
+| **Fundamental tools** (built-in) | Workspace files, web search/fetch, agent-browser, memory + hybrid query, `code_execute` (sandbox) | the agent's hands and eyes |
+| **Domain tools** (thin, HybridDB-backed) | `email_search/get`, `contact_upsert`, `knowledge_query` — thin consumers over versioned tables | G5+ |
+| **Agent-built tools** | via `code_execute`: agents write workspace scripts over their own tables; the kit factory packages the good ones | self-extension |
+
+**How the agent uses it:**
+- **Governed process definitions (the maintained layer):** business-editable
+  definitions per process (policy rules + workflow steps + data bindings +
+  HIL tier + tests — one artifact, GoRules-JDM principle generalized to
+  processes). The platform **compiles** each definition to: the LLM knowledge
+  section, the middleware enforcement (deterministic rules), and the
+  workflow/skill content. **The ontology view (objects/links) is DERIVED**
+  from these definitions + data introspection — never separately maintained
+  (correction from the business-process review: business people maintain
+  *processes*, not semantic models).
+- **System prompt:** the conditional **"Your Data"** section is generated from
+  the compiled definitions + introspection — which versioned tables exist,
+  the process rules in prose, and that history/diff/rollback are available —
+  never advertising absent tables (same conditional-governance pattern as
+  `_MEMORY_TOOL_GUIDANCE`)
+- **Skills/kits:** kits ship **starter process definitions** (the vertical's
+  standard processes, business-editable); customer review refines them
+- **Search:** one semantic index per user spanning all domains →
+  cross-domain recall is a single query
+- **Trust tiers (H1)** apply per process definition and domain table via
+  capabilities — versioned data inherits the approval ladder
+
+### 6.7 Research note — Open SWE / production coding-agent convergence (2026-08-26)
+
+LangChain's Open SWE (MIT, on Deep Agents/LangGraph) productizes patterns
+three production internal coding agents converged on independently: Stripe
+Minions, Ramp Inspect, Coinbase Cloudbot. Convergence = validated
+requirements. Full comparison table in the source post; mapping to
+Assistant below.
+
+**Validated (already our design — no action):** isolated sandboxes with
+full permissions inside the boundary (= §6.3 ladder); curated toolsets
+(= capabilities filtering + schema budget; Stripe curates ~500, Open SWE
+ships ~15); subagent orchestration with isolated child contexts (= SB2
+V2); composition-vs-own-engine is a legitimate choice (Stripe forked,
+Coinbase scratch-built — no verdict against our own engine); mid-run
+message injection via queue-check middleware (= SB2-3 completion bus +
+SubagentContext instruction drain — human follow-ups and subagent
+completions should share this path long-term); "sandbox auto-recreate if
+unreachable" → adopt as behavior for session-scoped sandboxes.
+
+**Adopted (3 patterns):**
+1. **Deterministic completion backstops (H8)** — model-driven
+   orchestration is flexible, middleware is reliable; pair them. If the
+   agent finishes without the critical step (draft saved? file version
+   changed? artifact present?), middleware catches it. Complements
+   RubricMiddleware (model-graded) with a deterministic net.
+2. **Context pre-hydration at trigger time** — assemble full context
+   (email thread, memory, knowledge entries) into the prompt BEFORE the
+   loop starts; never make the agent discover requirements via tool
+   calls. Applies to every trigger-sourced run (email events, scheduled
+   check-ins, subagent wake via SB2-3).
+3. **Deterministic session derivation + ack→work→report** — external
+   invocations derive session IDs from the source (email thread-id →
+   session-id) so follow-ups continue the same conversation; surfaces
+   acknowledge receipt before working (Linear 👀 pattern → email ack).
+
+**Skipped:** cloud sandbox providers (Modal/Daytona/Runloop — opposite of
+deployment-first; ladder covers it self-hosted); Deep Agents composition
+(own engine); pre-warmed sandboxes (T3.5 container-tier optimization note
+only).
 
 ## 7. Phased roadmap
 
@@ -300,13 +517,14 @@ composability framework (e.g. Ouroboros) matures.
   trusted-network with shared-secret
 - Audit-log export endpoint per user
 - `/v1` route aliasing
-- Publish TS SDK to npm as **`0.1.0-preview`** (explicit non-frozen contract);
-  live-server integration smoke tests; stable release after a partner has
-  exercised both transports (SSE + WS) for ~a month
+- Publish TS SDK to npm as **`0.1.0-preview`** (explicit non-frozen contract;
+  distribution is deployment-first — see §6.1); live-server integration smoke
+  tests; stable release after a partner has exercised both transports (SSE +
+  WS) for ~a month
 - **Main-agent-from-profile bootstrap (K1, §4.5)**: `load_main_agent_profile()`
   composition layer — a user-level PROFILE.md instantiates the *main* loop.
-  Foundational runtime for kits, Motion-C partners, and the pip package's
-  `create_agent(profile)` entry point
+  Foundational runtime for kits, Motion-C partners, and the
+  `create_agent(profile)` entry point (K1-API surface; no PyPI — §6.1)
 - **Session-event schema (R-SL1 foundation, P0-T9)**: `SessionEvent` schema as
   the CaptureBus substrate — audit (A3), metering (P2), and model-context
   derivation (P1) all read one stream; no checkpoints
@@ -351,10 +569,6 @@ composability framework (e.g. Ouroboros) matures.
 - Pricing live: seats (firms) / subscriptions (SMB) / platform fee (partners)
 - **Production per-user key→identity auth** (hosted tier opens): key table,
   server-side key→user mapping, body `user_id` validated against caller's key
-- **SDK extraction begins** (Phase 9 pulled forward for Motion C): decouple
-  `src/sdk` from `src.app_logging`/`src.config`/`src.storage`/`src.skills`;
-  package-local paths (~/.assistant/), IdentityResolver seam, extras split per
-  §6.1
 - **Rungs:** Operations
 - **Gate:** 3–5 paying customers across ≥2 motions; month-one retention; one
   customer presenting their ROI dashboard unprompted. Seed raise follows.
@@ -371,10 +585,24 @@ composability framework (e.g. Ouroboros) matures.
   per-agent sandbox selection (`isolate` realm)
 - **Fork / resume / replay from the session log (R-SL1)**: product features
   derived from the event stream
+- **Shared sessions (multiple humans, one agent)**: trusted-team collaboration
+  — participants share one agent's session context (OpenClaw 2.0-confirmed
+  model: usability features, **not** a security boundary; per-user data
+  isolation remains via container-per-user or per-user stores). R-SL1's
+  event-sourced log provides per-participant identity tagging and the shared
+  context substrate. Ownership layers (creator/owner/participants) for
+  session accountability.
+- **Backup / persistence / restore**: per-user backup API (wraps HybridDB
+  atomic backup + workspace files + vault), scheduled backup job (daily,
+  rolling retention), export API (JSONL/Parquet per table — rides the
+  session log and audit exports), restore + verification. Per-user stores
+  make backup per-user (no cross-user coordination). Shared sessions back
+  up via the org-level store (Phase 3 tenancy).
 - Partner program formalized: Vertical Starter Kit repo, kit versioning &
   distribution (seed-hash refresh pattern generalized)
-- **SDK extraction completes**: PyPI `assistant` core + `assistant[server]`
-  hosted-edition packaging; `pip install` → running agent demo
+- **SDK extraction completed, replaced by deployment packaging (PyPI dropped
+  2026-08-26)**: partners onboard via Docker image + `PROFILE.md` + kits — no
+  `pip install` path; module seams stay in-repo (§6.5)
 - **Rungs:** Identity complete, Isolation begun
 - **Gate:** first partner running their product atop our engine with isolated
   sub-tenants; one 50+ staff account onboarded via SSO unaided.
@@ -406,6 +634,67 @@ composability framework (e.g. Ouroboros) matures.
   Differentiation: personal-data primitives (email/contacts/memory), privacy-
   first self-host with local models, packaged vertical patterns.
   Even Anthropic's managed offering excludes ZDR/HIPAA coverage.
+
+### 8.1 Deep-dive refresh (2026-08-26) — memory, pricing, sandbox, HITL
+
+**Agent memory (the fragmented layer):** Mem0 (~48K★, general-purpose), Zep
+(temporal KG, 63.8% LongMemEval), LangMem, Letta (~18K★, 83.2%) compete on
+*retrieval quality*; analysts predict consolidation by Q1 2027, survivors =
+"strongest self-hosting story and lowest latency". **None offer versioning,
+tamper-evidence, or audit** — and the market's stated open question is
+verbatim our product: *"where does your company's knowledge live, who
+maintains it, and how does the agent participate in that loop without quietly
+rewriting things humans haven't reviewed?"* Our answer is the two-OSS-product
+stack: **CoreMem** (zero-LLM memory semantics — compiler, dreaming, search)
++ **HybridDB 0.6.0** (versioned, tamper-evident, hybrid-searchable storage).
+We do not compete on retrieval benchmarks; we own versioning + audit +
+self-host + files-first AI-readability. (The comparison literature itself
+calls out a "5th path — plain markdown + semantic search — small teams
+overlook": ours is that, with versioning and audit.)
+
+**Metered economics arrived (validates metering-first, M1):** Anthropic
+replaced flat-rate with per-user, non-poolable Agent Credits (May 2026);
+DeepSeek's price war is bifurcating frontier-vs-routine workloads; Zendesk
+pilots **outcome-based pricing** (pay per resolution) — a watch-option that
+only verifiable agents can sell (our rubric/eval layer is the prerequisite).
+Model routing per task complexity (H5) is now a confirmed cost *and* product
+feature.
+
+**Sandbox ladder validated by Anthropic's own containment patterns:**
+gVisor microVMs (claude.ai), OS sandboxing (Claude Code — bubblewrap/Seatbelt,
+our Phase-3 hard sandbox), full VM with credentials-never-enter-guest
+(Cowork — our container-per-user). Their weakest layer was their own custom
+code, not the kernel layers — confirming our discipline: soft sandbox =
+guardrails for trusted users, never a security boundary; hard isolation =
+untrusted tenants.
+
+**Approval fatigue is the HITL risk:** users approve **93% of permission
+prompts**; auto-classifiers cut prompts 84% but missed ~17% of risky commands.
+→ Tiered HITL (H1: autonomous reads / show-then-auto-send / explicit /
+hard-block) with deterministic risk rules — not approve-everything fatigue.
+
+**Hermes Agent (Nous Research) — the #1-agent validation (Aug 2026):**
+Hermes hit #1 on OpenRouter (224B tokens/day vs OpenClaw's 186B) on three
+architectural bets that match our roadmap 1:1: (1) **persistent memory with
+cross-session recall** (SQLite + FTS5 + summarization — "the agent curates its
+own memory"); (2) **the self-improving loop** — task success auto-generates a
+skill file, compounding to 2–3× task speedups within weeks; (3) model
+agnostism (200+ models, one key) on a $5-VPS persistent runtime. **Two
+lessons to adopt:** (a) *success-triggered skill drafts* — draft the skill on
+task success (H7), not only from failures; (b) **make compounding felt** —
+task-duration trend per recurring workflow on the owner dashboard (D1) is the
+renewal argument in the user's own numbers. **Deliberate difference kept:**
+Hermes's self-improving loop rewrites itself *without review* — the market's
+stated trust question ("who reviews agent rewrites?") is exactly where our
+review-gated, versioned compounding (kit factory + HybridDB 0.6.0 + tiered
+HITL) is the compliance-grade answer. Also validates deployment-first: single
+install, self-host, no lock-in — and the OpenRouter daily-velocity signal is
+the health metric our versioning layer enables for the same race.
+
+**MCP contested as protocol layer** (A2A, AGENTS.md, CUA contesting): the MCP
+bridge stays one transport seam among several (already the design) — never an
+architectural bet. Injection at tool boundaries remains the #1 cited failure
+mode at boundaries → H3 sanitization is the mitigation.
 
 ## 8a. Review notes (2026-08-24)
 
@@ -439,6 +728,10 @@ Inline `> **REVIEW:**` annotations are placed at the relevant sections above.
 - **Native vision / image ingestion** (business-card extraction for Motion B)
   — non-goal for v1; route via sidecar OCR/vision service or partner
   integration feeding structured text into the existing pipeline
+- **Native platform vision** — succeeding at retrieval benchmarks vs
+  Mem0/Zep/Letta is also judged a lower priority than the trust/audit
+  differentiator; CoreMem+HybridDB compete on versioning/audit/self-host, not
+  on memory-retrieval leaderboard scores
 - **Image generation** (raster brochure/billboard art) — non-goal; ship
   HTML/SVG-native design output, integrate an image-gen API as a custom tool
   only when a customer demands it
@@ -459,6 +752,9 @@ Inline `> **REVIEW:**` annotations are placed at the relevant sections above.
 - **Unit economics unvalidated**: token cost as % of subscription unknown per
   motion; pricing hypothesis per tier must be tested in Phase 2 pilot before
   seed raise
+- **Approval fatigue (H1)**: binary approve/reject flows train users to
+  rubber-stamp (93% approval rate in the field); tiered risk-tier profiles are
+  the mitigation — ship H1 with the Phase-1 kits, measure override rates
 - **Telemetry centralization vs isolation (gap found in review)**: D1 dashboard
   ("cost per seat", hours saved across staff) and Phase 3 RBAC admin views need
   centralized usage events, but usage lives in per-user SQLite/Chroma by design.
