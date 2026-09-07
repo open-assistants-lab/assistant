@@ -1059,19 +1059,54 @@ test_search() {
     return
   fi
 
-  native automate widget-action main-canvas "$SEARCH" set_text "$TERM" > /dev/null
-  sleep 1
-  SNAPSHOT=$(native automate snapshot)
-  N=$(count_listitems)
-  if [ "$N" = "1" ]; then
-    pass "search shows matching chat"
-  else
-    fail "search did not show matching chat (listitems=$N, term='$TERM')"
-  fi
-  # The non-matching chat is hidden — still exactly one listitem.
-  if [ "$N" = "1" ]; then
+  # Defensive clear BEFORE typing: the app's set_text handler APPENDS via
+  # insert_text, and the app process persists across suite sections/runs —
+  # a leftover search_query makes the accumulated query unmatchable
+  # (listitems=0). Backspace past any prior content first.
+  #
+  # Rename race: the backend renames chats with LLM-generated titles
+  # ASYNCHRONOUSLY — a term derived from fallback titles ("Reply exactly: …")
+  # can stop matching seconds later. Retry: clear → re-derive from CURRENT
+  # titles → type → count, up to 3 times.
+  clear_search() {
+    native automate widget-action main-canvas "$SEARCH" focus > /dev/null
+    for i in $(seq 1 80); do
+      native automate widget-key main-canvas backspace > /dev/null
+    done
+    sleep 1
+  }
+  SEARCH_OK=0
+  for attempt in 1 2 3; do
+    clear_search
+    SNAPSHOT=$(native automate snapshot)
+    T1=$(echo "$SNAPSHOT" | grep -oE 'role=listitem name="[^"]*"' | sed -n '1p' | sed 's/role=listitem name="//;s/"$//')
+    T2=$(echo "$SNAPSHOT" | grep -oE 'role=listitem name="[^"]*"' | sed -n '2p' | sed 's/role=listitem name="//;s/"$//')
+    TERM=""
+    if ! echo "$T2" | grep -qF "$T1"; then
+      TERM="$T1"
+    else
+      for w in $T1; do
+        if [ "${#w}" -ge 4 ] && ! echo "$T2" | grep -qF "$w"; then
+          TERM="$w"
+          break
+        fi
+      done
+    fi
+    [ -z "$TERM" ] && continue
+    native automate widget-action main-canvas "$SEARCH" set_text "$TERM" > /dev/null
+    sleep 1
+    SNAPSHOT=$(native automate snapshot)
+    N=$(count_listitems)
+    if [ "$N" = "1" ]; then
+      pass "search shows matching chat (attempt $attempt)"
+      SEARCH_OK=1
+      break
+    fi
+  done
+  if [ "$SEARCH_OK" = "1" ]; then
     pass "search hides non-matching chat"
   else
+    fail "search did not show matching chat after retries (listitems=$N, term='$TERM')"
     fail "search did not hide non-matching chat (listitems=$N)"
   fi
 
@@ -1079,6 +1114,11 @@ test_search() {
   # (the input handler appends) and delete_backward removes one char, so
   # send one backspace per character of the query.
   native automate widget-action main-canvas "$SEARCH" focus > /dev/null
+  # Clear past any accumulated query (defensive: 80 backspaces, same
+  # rationale as the pre-typing clear).
+  for i in $(seq 1 80); do
+    native automate widget-key main-canvas backspace > /dev/null
+  done
   for i in $(seq 1 ${#TERM}); do
     native automate widget-key main-canvas backspace > /dev/null
   done
