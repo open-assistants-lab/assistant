@@ -147,3 +147,22 @@ From the 3-surface hunt (auth/governance/billing) after P0+P1 fixes
 - Key scopes accepted but unenforced beyond admin gate.
 - WS handshake per-user key AuthMessage duplicates the resolver decision
   (consider unifying into the resolver seam).
+
+## 6. Session handoff (2026-09-09) — open items for the next session
+
+- **P1 regression — provider_options test red:** tests/api/test_provider_options.py
+  ::test_provider_options_reach_provider_chat fails (KeyError 'po' — the run
+  config carries no provider options at spy time) even SOLO, after the desktop
+  D1+D2 work merged. The desktop branch's run_service.py changes (session-log
+  replay, provider_options plumbing) interact with the stamp path. Debug:
+  trace _run -> _stamp_provider_options -> rc.provider_options at _run_impl
+  time for /v1/message with provider_options in desktop-vs-hosted modes.
+  NOTE: an earlier partial fix (worker timeout) was REVERTED — test files are
+  at committed state; desktop_env still restores only 6 tracked env names.
+- **#15 full-suite completion** (in-flight, not started): desktop fixture full
+  env capture/restore, WS-hang quarantine, network-test gating, slowest-10.
+  Subagent worker TIMED OUT mid-fix with partial broken edits — REVERTED.
+- **#16 config-level tools trim** (ToolsConfig.disabled globs) — NOT started.
+- Subagent runner: fixed via pi reinstall + models-store.json (glm-5.3-flash
+  reasoning:false) + settings (defaultModel deepseek pin, thinking off,
+  scope widened). If subagents fail again, check pi version first.
