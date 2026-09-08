@@ -64,7 +64,13 @@ class Logger:
 
         public_key = os.environ.get("LANGFUSE_PUBLIC_KEY") or config.public_key
         secret_key = os.environ.get("LANGFUSE_SECRET_KEY") or config.secret_key
-        host = os.environ.get("LANGFUSE_HOST") or config.host
+        # Respect the name users copy directly off the Langfuse setup page
+        # (LANGFUSE_BASE_URL); LANGFUSE_HOST remains the legacy alias.
+        host = (
+            os.environ.get("LANGFUSE_BASE_URL")
+            or os.environ.get("LANGFUSE_HOST")
+            or config.host
+        )
 
         # Set tracing environment from config or env var
         if config.environment:
