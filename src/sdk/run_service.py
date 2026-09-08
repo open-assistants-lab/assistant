@@ -520,8 +520,42 @@ class RunService:
         try:
             # Run-level trace root covering the whole stream (agent + grader).
             with LangfuseTracer.trace_run(self._user_id, session_id):
-                async for event in self._run_stream(session_id, prompt, model, provider_keys, lock, rubric, mode, on_stream_end=on_stream_end, provider_options=provider_options):
-                    yield event
+                # Issue #17: the SSE consumer drives each generator step in a
+                # NEW asyncio task (ensure_future per event), so a plain
+                # `async for` here would resume `_run_stream` in a task whose
+                # context lacks the trace root — every observation escaped to
+                # an orphan root trace. Pump instead: one task created INSIDE
+                # the trace_run context carries the root to the whole body.
+                queue: asyncio.Queue[Any] = asyncio.Queue()
+
+                async def _pump() -> None:
+                    try:
+                        async for event in self._run_stream(
+                            session_id, prompt, model, provider_keys, lock,
+                            rubric, mode, on_stream_end=on_stream_end,
+                            provider_options=provider_options,
+                        ):
+                            await queue.put(event)
+                    except Exception as exc:
+                        await queue.put(exc)
+                    finally:
+                        await queue.put(None)
+
+                pump = asyncio.create_task(_pump())
+                try:
+                    while True:
+                        item = await queue.get()
+                        if item is None:
+                            break
+                        if isinstance(item, Exception):
+                            raise item
+                        yield item
+                finally:
+                    pump.cancel()
+                    try:
+                        await pump
+                    except (asyncio.CancelledError, Exception):
+                        pass
         finally:
             await self._registry.release(session_key(self._user_id, session_id))
 
