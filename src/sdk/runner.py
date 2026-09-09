@@ -694,6 +694,23 @@ async def create_sdk_loop(
                 )
                 return SummaryPersistenceResult(status=PersistenceStatus.FAILED)
 
+    # Issue #18 defect 2: the summarization trigger must account for the
+    # FULL request payload — tool schemas + system prompt ride every model
+    # call but are not part of the conversation-message estimate.
+    payload_overhead = int(
+        (len(_get_system_prompt(user_id)) + sum(len(json.dumps(t.parameters)) if getattr(t, "parameters", None) else 0 for t in core_tool_defs))
+        / 3.3
+    )
+
+    def _prune_context(session_id: str, keep_messages: int) -> int:
+        """Issue #18 defect 3 escape hatch: mark the oldest store rows
+        excluded from model context (include_in_model_context=False) so a
+        session stuck on an oversized payload recovers WITHOUT an LLM."""
+        from src.sdk.messages import get_message_store
+
+        store = get_message_store(user_id)
+        return store.mark_context_excluded(session_id, keep_messages)
+
         middlewares.append(
             SummarizationMiddleware(
                 model=summarization_model,
@@ -703,6 +720,8 @@ async def create_sdk_loop(
                 prompt_file=summary_config.prompt_file,
                 user_id=user_id,
                 summary_sink=_persist_summary,
+                payload_overhead_tokens=payload_overhead,
+                context_pruner=_prune_context,
             )
         )
 

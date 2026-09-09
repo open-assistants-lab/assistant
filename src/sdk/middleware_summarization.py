@@ -299,6 +299,8 @@ class SummarizationMiddleware(Middleware):
         trim_tokens_to_summarize: int | None = _DEFAULT_TRIM_TOKEN_LIMIT,
         summary_sink: SummarySink | None = None,
         summary_provider_factory: SummaryProviderFactory | None = None,
+        payload_overhead_tokens: int = 0,
+        context_pruner: Any | None = None,
     ) -> None:
         self.model = model
         self.trigger = trigger
@@ -307,6 +309,14 @@ class SummarizationMiddleware(Middleware):
         self._summary_sink = summary_sink
         self._summary_provider_factory = summary_provider_factory
         self._summary_provider: Any | None = None
+        # Issue #18 defect 2: the trigger must account for the FULL request
+        # payload — tool schemas + system prompt ride every call but are not
+        # part of the conversation-message token estimate.
+        self.payload_overhead_tokens = max(0, int(payload_overhead_tokens))
+        # Issue #18 defect 3: escape hatch — callable(session_id, keep_messages)
+        # that marks the oldest store rows excluded from model context
+        # (include_in_model_context=False) WITHOUT needing an LLM summary.
+        self.context_pruner = context_pruner
         # Degraded-summary stash (audit B14): when the persistence sink
         # fails, the generated summary is cached here keyed by session so a
         # later successful sink can persist it — preserving the incremental
@@ -377,7 +387,7 @@ class SummarizationMiddleware(Middleware):
         if not isinstance(context, CompressionContext):
             return None
         try:
-            total_tokens = self.token_counter(messages)
+            total_tokens = self.token_counter(messages) + self.payload_overhead_tokens
         except Exception as exc:
             result = self._result_without_artifact(
                 context,
@@ -398,9 +408,53 @@ class SummarizationMiddleware(Middleware):
                 )
             else:
                 result = await self._compress(messages, context)
+        logger.debug(
+            "summarization.trigger_eval",
+            {
+                "conversation_tokens": self.token_counter(messages),
+                "payload_overhead_tokens": self.payload_overhead_tokens,
+                "total_tokens": total_tokens,
+                "status": result.telemetry.status.value
+                if hasattr(result, "telemetry")
+                else "unknown",
+            },
+            user_id=self.user_id,
+        )
         update: dict[str, Any] = {"extra": {"_compression_result": result}}
         if result.compressed and result.artifact is not None:
             update["messages"] = self._materialize_messages(result.artifact.replacement_messages)
+        elif (
+            result.telemetry.status is CompressionStatus.FAILED
+            and self.context_pruner is not None
+            and self.payload_overhead_tokens > 0
+        ):
+            # Issue #18 defect 3 escape hatch: the summary LLM call failed
+            # (likely with the same oversized context that triggered this).
+            # Force-trim the oldest store rows (include_in_model_context=False)
+            # and the in-memory state to the keep boundary — the session
+            # recovers without an LLM, degrading to lossy history.
+            keep_messages = (
+                self.keep[1] if self.keep[0] == "messages" else _DEFAULT_MESSAGES_TO_KEEP
+            )
+            try:
+                pruned = self.context_pruner(context.session_id, keep_messages)
+                update["messages"] = messages[-keep_messages:]
+                logger.warning(
+                    "summarization.forced_trim",
+                    {
+                        "session_id": context.session_id,
+                        "kept": keep_messages,
+                        "pruned_rows": pruned,
+                        "error_code": result.telemetry.error_code,
+                    },
+                    user_id=self.user_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "summarization.forced_trim_failed",
+                    {"error_type": type(exc).__name__},
+                    user_id=self.user_id,
+                )
         return update
 
     # -- Trigger evaluation --

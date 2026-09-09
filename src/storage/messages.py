@@ -1105,6 +1105,41 @@ class MessageStore:
                 cur.execute("ROLLBACK")
                 raise
 
+    def mark_context_excluded(self, session_id: str, keep_messages: int) -> int:
+        """Issue #18 escape hatch: mark all non-summary rows except the newest
+        `keep_messages` as include_in_model_context=False so get_messages_
+        with_summary compacts hard without an LLM summary. Full history stays
+        in the store (audit/memory). Returns the number of rows marked."""
+        session_id = self._require_session_id(session_id)
+        keep_messages = max(1, int(keep_messages))
+        with self._core.db._connect() as cur:
+            cur.execute("BEGIN IMMEDIATE")
+            try:
+                rows = cur.execute(
+                    "SELECT rowid FROM messages "
+                    "WHERE session_id = ? AND role NOT IN ('summary', 'tool') "
+                    "ORDER BY rowid DESC",
+                    [session_id],
+                ).fetchall()
+                if len(rows) <= keep_messages:
+                    cur.execute("COMMIT")
+                    return 0
+                cutoff_rowid = rows[keep_messages - 1][0]
+                cur.execute(
+                    "UPDATE messages SET metadata = json_set("
+                    "COALESCE(metadata, '{}'), '$.include_in_model_context', "
+                    "json('false')) "
+                    "WHERE session_id = ? AND rowid < ? AND role NOT IN ('summary')",
+                    [session_id, cutoff_rowid],
+                )
+                marked = cur.rowcount
+                cur.execute("COMMIT")
+                self._invalidate_summary_cache(session_id)
+                return int(marked)
+            except Exception:
+                cur.execute("ROLLBACK")
+                raise
+
     def has_summary(self, session_id: str) -> bool:
         session_id = self._require_session_id(session_id)
         return self._newest_valid_summary(self._read_scoped_rows(session_id)) is not None
