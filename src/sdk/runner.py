@@ -711,6 +711,7 @@ async def create_sdk_loop(
         store = get_message_store(user_id)
         return store.mark_context_excluded(session_id, keep_messages)
 
+    if summary_config.enabled:
         middlewares.append(
             SummarizationMiddleware(
                 model=summarization_model,
@@ -725,9 +726,14 @@ async def create_sdk_loop(
             )
         )
 
-        # M4-1: durable approval gating — wired only when governance.enabled
-        # (disabled = zero runtime change; the middleware's own guard_tool_call
-        # is also inert when disabled).
+    # M4-1: durable approval gating — wired only when governance.enabled
+    # (disabled = zero runtime change; the middleware's own guard_tool_call
+    # is also inert when disabled). Registered INDEPENDENTLY of summarization
+    # (issue #20): governance must not depend on a summarization setting or
+    # on which branch a future edit happens to sit inside.
+    from src.sdk.governance import governance_enabled as _governance_enabled
+
+    if _governance_enabled():
         from src.sdk.middleware_hitl import HITLMiddleware
 
         middlewares.append(HITLMiddleware(user_id=user_id))
