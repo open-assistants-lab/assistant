@@ -1,14 +1,13 @@
 """M4 governance unit tests: tiers, durable pendings, receipts (issue #6)."""
 
-from pathlib import Path
 
 import pytest
 
 from src.sdk.governance import (
     GovernanceService,
-    Tier,
     get_governance_service,
 )
+from src.sdk.middleware_hitl import HITLMiddleware
 
 
 @pytest.fixture()
@@ -72,7 +71,6 @@ class TestDurablePendings:
         """Simulated restart: a NEW service instance over the same data root
         still sees the pending proposal (durable SQLite)."""
         pid = svc.create_pending("u1", "jobs_add", {"title": "x"})
-        import src.sdk.governance as gov
 
         fresh = GovernanceService()
         row = fresh.get_pending("u1", pid)
@@ -343,7 +341,6 @@ class TestReplayResume:
 
     async def test_replay_with_session_log(self, svc, monkeypatch, tmp_path):
         import src.sdk.governance as gov
-        from src.sdk.governance import Tier
 
         monkeypatch.setattr(gov, "governance_enabled", lambda: True)
         self._seed_run_events(monkeypatch, tmp_path, "ru", "sess-1")
@@ -400,15 +397,11 @@ class TestSessionLogParity:
     """Review P1-1: the REAL executed result reaches the session log."""
 
     def test_approve_execute_logs_real_result(self, svc, tmp_path, monkeypatch):
-        import json as _json
 
         import src.sdk.governance as gov
-        from src.sdk.governance import GovernanceService
         from src.sdk.session_events import (
             SessionEventStore,
-            session_log_enabled,
         )
-        from src.storage.paths import DataPaths
 
         monkeypatch.setattr(gov, "governance_enabled", lambda: True)
         monkeypatch.setattr(gov, "session_log_enabled", lambda: True)
@@ -531,3 +524,140 @@ class TestOverrideCounting:
         assert svc.approve("u1", pid) is True  # human approves early
         stats = {s["tool"]: s for s in svc.tool_stats("u1")}
         assert stats["auto_tool"]["overrides"] == 1
+
+
+
+class _CountingHITL(HITLMiddleware):
+    """HITLMiddleware that records every guard dispatch (issue #19)."""
+
+    def __init__(self, user_id: str = "term_user") -> None:
+        super().__init__(user_id=user_id)
+        self.guard_calls: list[str] = []
+
+    async def guard_tool_call(self, tool_name, tool_input):  # type: ignore[override]
+        self.guard_calls.append(tool_name)
+        return await super().guard_tool_call(tool_name, tool_input)
+
+
+class _ToolCallProvider:
+    """Provider that proposes one tool call, then finishes."""
+
+    def __init__(self, tool_name: str, arguments: dict | None = None) -> None:
+        self._tool_name = tool_name
+        self._arguments = dict(arguments or {})
+        self._n = 0
+
+    async def chat(self, messages, tools=None, **kwargs):
+        from src.sdk.messages import Message
+
+        self._n += 1
+        if self._n == 1:
+            return Message.assistant(
+                "",
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "name": self._tool_name,
+                        "arguments": dict(self._arguments),
+                    }
+                ],
+            )
+        return Message.assistant("done")
+
+
+class TestBlockedCallTerminal:
+    """Issue #19 discriminator (non-stream): a governance-blocked tool call
+    is terminal on BOTH the parallel-safe (batch) and sequential (single)
+    executors — one guard evaluation, zero tool-body calls, one synthetic
+    tool result, and the blocked call is never recorded as executed."""
+
+    @pytest.fixture()
+    def gov_env(self, tmp_path, monkeypatch):
+        import src.storage.paths as paths_mod
+        from src.config import reload_settings
+
+        monkeypatch.setattr(
+            paths_mod.DataPaths,
+            "root",
+            property(lambda self: tmp_path / "root"),
+            raising=False,
+        )
+        import src.sdk.governance as gov
+
+        monkeypatch.setattr(gov, "_services", {})
+        monkeypatch.setattr(gov, "_metering_lock_holder", None, raising=False)
+        monkeypatch.setenv("GOVERNANCE_ENABLED", "true")
+        monkeypatch.setenv("GOVERNANCE_TIERS", '{"explicit_tool": "explicit"}')
+        reload_settings()
+        yield
+        monkeypatch.undo()
+        paths_mod._paths_cache.clear()
+        reload_settings()
+
+    @staticmethod
+    def _loop(monkeypatch, gov_env, *, destructive: bool, mw: _CountingHITL):
+        from src.sdk.loop import AgentLoop, RunConfig
+        from src.sdk.messages import Message  # noqa: F401
+        from src.sdk.tools import ToolDefinition
+
+        executions: list[str] = []
+
+        async def body(**kwargs):
+            executions.append("ran")
+            return "EXECUTED-BODY"
+
+        from src.sdk.tools import ToolAnnotations
+
+        td = ToolDefinition(
+            name="explicit_tool",
+            description="gated tool",
+            function=body,
+            annotations=ToolAnnotations(destructive=destructive),
+        )
+        loop = AgentLoop(
+            provider=_ToolCallProvider("explicit_tool"),
+            tools=[td],
+            user_id="term_user",
+            run_config=RunConfig(max_llm_calls=3),
+            middlewares=[mw],
+        )
+        loop._flow_model = "test-model"
+        return loop, executions
+
+    @pytest.mark.asyncio
+    async def test_batch_path_blocked_call_is_terminal(
+        self, gov_env, monkeypatch
+    ):
+        """Parallel-safe (default annotations) path: one guard dispatch,
+        zero body executions, exactly one tool result, nothing recorded."""
+        from src.sdk.loop import AgentLoop  # noqa: F401
+        from src.sdk.messages import Message
+
+        mw = _CountingHITL(user_id="term_user")
+        loop, executions = self._loop(monkeypatch, gov_env, destructive=False, mw=mw)
+        await loop.run([Message.user("go")])
+
+        assert executions == []
+        assert mw.guard_calls == ["explicit_tool"]
+        tool_msgs = [m for m in loop.state.messages if m.role == "tool"]
+        assert len(tool_msgs) == 1
+        assert "awaiting explicit human approval" in tool_msgs[0].content
+        assert loop.state.extra.get("_executed_tool_calls", []) == []
+
+    @pytest.mark.asyncio
+    async def test_sequential_path_blocked_call_is_terminal(
+        self, gov_env, monkeypatch
+    ):
+        """Destructive (sequential) executor: same terminal contract."""
+        from src.sdk.messages import Message
+
+        mw = _CountingHITL(user_id="term_user")
+        loop, executions = self._loop(monkeypatch, gov_env, destructive=True, mw=mw)
+        await loop.run([Message.user("go")])
+
+        assert executions == []
+        assert mw.guard_calls == ["explicit_tool"]
+        tool_msgs = [m for m in loop.state.messages if m.role == "tool"]
+        assert len(tool_msgs) == 1
+        assert "awaiting explicit human approval" in tool_msgs[0].content
+        assert loop.state.extra.get("_executed_tool_calls", []) == []

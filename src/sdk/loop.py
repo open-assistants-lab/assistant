@@ -175,6 +175,30 @@ class RunConfig:
 DUPLICATE_TOOL_FINAL_MAX_TOKENS = 200
 
 
+@dataclass(slots=True)
+class _PreparedToolCall:
+    """Terminal authorization outcome for one tool-call dispatch (issue #19).
+
+    Produced by ``AgentLoop._prepare_tool_call`` — the single shared stage
+    running input guardrails, copy-and-transform middleware wrapping, and
+    governance guards BEFORE either executor (batch/sequential, stream/
+    non-stream) may run a tool body.
+
+    Exactly one field is set:
+    - ``call``: execution permitted (arguments transformed on a copy)
+    - ``blocked_result``: terminal verdict — the tool body must NEVER run,
+      the call must never be recorded as executed, and no retry may occur.
+    """
+
+    call: ToolCall | None = None
+    blocked_result: ToolResult | None = None
+    blocked_by: str = ""  # "guardrail" | "governance"
+
+    @property
+    def blocked(self) -> bool:
+        return self.blocked_result is not None
+
+
 class CostTracker:
     """Tracks token usage and estimated cost per invocation."""
 
@@ -803,26 +827,29 @@ class AgentLoop:
             return tc
         return ToolCall(id=tc.id, name=tc.name, arguments=args)
 
-    async def _execute_single_tool(self, tc: ToolCall, state: AgentState) -> None:
-        """Execute a single tool call with guardrails, hooks, and middleware, add result to state."""
+    async def _prepare_tool_call(self, tc: ToolCall) -> _PreparedToolCall:
+        """Single shared authorization stage (issue #19).
+
+        Order (fixed by the design): input guardrails -> copy-and-transform
+        middleware wrapping -> governance ``guard_tool_call``. A blocked
+        outcome is TERMINAL: the caller must yield/return the blocked result
+        and must not execute the tool body, record the call as executed, or
+        re-dispatch it. Emit-only on middleware errors (parity with the
+        previous inline blocks).
+        """
         try:
             await self._check_tool_guardrails(tc, "input", tc.arguments)
         except GuardrailTripwire as e:
-            state.add_message(
-                Message.tool_result(
-                    tool_call_id=tc.id,
+            return _PreparedToolCall(
+                blocked_result=ToolResult(
                     content=json.dumps({"error": f"Tool input blocked: {e.result.message}"}),
-                    name=tc.name,
-                )
+                    is_error=True,
+                ),
+                blocked_by="guardrail",
             )
-            return
 
-        # PreToolUse hooks removed — hooks were never wired into production
-        # and the shell-subprocess model is wrong for streaming.
-        # Use middleware (_add_middleware) for tool interception instead.
-
-        # Copy-then-transform (batch-path parity, audit B17): middleware sees
-        # and mutates a copy; the ToolCall embedded in persisted history keeps
+        # Copy-then-transform (audit B17, Task-19 review F1): middleware
+        # mutates a copy; the ToolCall embedded in persisted history keeps
         # the model's original arguments.
         tc_exec = ToolCall(id=tc.id, name=tc.name, arguments=dict(tc.arguments))
         for mw in self.middlewares:
@@ -832,12 +859,37 @@ class AgentLoop:
                 mw_name = getattr(mw, "name", type(mw).__name__)
                 logger.warning(f"wrap_tool_call error in {mw_name} for {tc.name}", exc_info=True)
 
-        # M4-1 governance gate (issue #6): a middleware may REPLACE execution
-        # with a synthetic ToolResult (hard_block refusal / pending ack).
+        # M4-1 governance gate (issues #6/#12/#19): a middleware may REPLACE
+        # execution with a synthetic ToolResult (hard_block refusal / pending
+        # ack). One dispatch, one guard evaluation.
         guard_result = await self._run_guards(tc_exec)
         if guard_result is not None:
-            result = guard_result
-        elif self.trace_provider:
+            return _PreparedToolCall(blocked_result=guard_result, blocked_by="governance")
+        return _PreparedToolCall(call=tc_exec)
+
+    async def _execute_single_tool(self, tc: ToolCall, state: AgentState) -> None:
+        """Execute a single tool call with guardrails, hooks, and middleware, add result to state."""
+        prepared = await self._prepare_tool_call(tc)
+        if prepared.blocked:
+            blocked = prepared.blocked_result
+            assert blocked is not None
+            if prepared.blocked_by == "governance" and blocked.is_error:
+                result_content = json.dumps({"error": blocked.content})
+            else:
+                result_content = blocked.content
+            state.add_message(
+                Message.tool_result(
+                    tool_call_id=tc.id,
+                    content=result_content,
+                    name=tc.name,
+                )
+            )
+            return
+
+        tc_exec = prepared.call
+        assert tc_exec is not None
+
+        if self.trace_provider:
             async with self.trace_provider.start_span(SpanType.TOOL_EXECUTION, tc.name) as span:
                 result = await self._execute_tool(tc_exec)
                 span.set_meta("result_length", len(result.content))
@@ -865,6 +917,9 @@ class AgentLoop:
                 name=tc.name,
             )
         )
+        # Issue #19: only a PERMITTED, executed call enters the duplicate
+        # guard's executed-set. Blocked calls returned before this point.
+        AgentLoop._record_executed_tools([tc], state)
 
     async def _execute_tool_batch(self, tool_calls: list[ToolCall], state: AgentState) -> None:
         """Execute a batch of parallel-safe tool calls concurrently via asyncio.gather().
@@ -874,36 +929,24 @@ class AgentLoop:
         """
 
         async def _run_one(tc: ToolCall) -> Message:
-            try:
-                await self._check_tool_guardrails(tc, "input", tc.arguments)
-            except GuardrailTripwire as e:
-                return Message.tool_result(
-                    tool_call_id=tc.id,
-                    content=json.dumps({"error": f"Tool input blocked: {e.result.message}"}),
-                    name=tc.name,
-                )
-
-            tc_args = dict(tc.arguments)
-            for mw in self.middlewares:
-                try:
-                    tc_args = mw.wrap_tool_call(tc.name, tc_args)
-                except Exception:
-                    mw_name = getattr(mw, "name", type(mw).__name__)
-                    logger.warning(f"wrap_tool_call error in {mw_name} for {tc.name}", exc_info=True)
-
-            # M4-1 governance gate: guard may replace execution entirely.
-            guard_result = await self._run_guards(ToolCall(id=tc.id, name=tc.name, arguments=tc_args))
-            if guard_result is not None:
-                result_content = guard_result.content
-                if guard_result.is_error:
-                    result_content = json.dumps({"error": result_content})
+            prepared = await self._prepare_tool_call(tc)
+            if prepared.blocked:
+                blocked = prepared.blocked_result
+                assert blocked is not None
+                if prepared.blocked_by == "guardrail":
+                    result_content = blocked.content
+                elif blocked.is_error:
+                    result_content = json.dumps({"error": blocked.content})
+                else:
+                    result_content = blocked.content
                 return Message.tool_result(
                     tool_call_id=tc.id,
                     content=result_content,
                     name=tc.name,
                 )
 
-            tc_with_args = ToolCall(id=tc.id, name=tc.name, arguments=tc_args)
+            tc_with_args = prepared.call
+            assert tc_with_args is not None
 
             if self.trace_provider:
                 async with self.trace_provider.start_span(SpanType.TOOL_EXECUTION, tc.name) as span:
@@ -926,6 +969,9 @@ class AgentLoop:
             except GuardrailTripwire as e:
                 result_content = json.dumps({"error": f"Tool output blocked: {e.result.message}"})
 
+            # Issue #19: only a PERMITTED, executed call enters the duplicate
+            # guard's executed-set. Blocked calls must never be recorded.
+            AgentLoop._record_executed_tools([tc], state)
             return Message.tool_result(
                 tool_call_id=tc.id,
                 content=result_content,
@@ -965,51 +1011,32 @@ class AgentLoop:
         yield StreamChunk.tool_input_start(
             tool=tc.name, call_id=tc.id, args=tc.arguments
         )
-        try:
-            await self._check_tool_guardrails(tc, "input", tc.arguments)
-        except GuardrailTripwire as e:
-            blocked_result = json.dumps({"error": f"Tool input blocked: {e.result.message}"})
+        prepared = await self._prepare_tool_call(tc)
+        if prepared.blocked:
+            blocked_res = prepared.blocked_result
+            assert blocked_res is not None
+            if prepared.blocked_by == "governance":
+                blocked = json.dumps(
+                    {"governance": "blocked", "tool": tc.name,
+                     "result": blocked_res.content or ""}
+                )
+                is_error = False
+            else:
+                blocked = blocked_res.content
+                is_error = True
             state.add_message(
-                Message.tool_result(tool_call_id=tc.id, content=blocked_result, name=tc.name)
+                Message.tool_result(tool_call_id=tc.id, content=blocked, name=tc.name)
             )
             yield StreamChunk.tool_result_event(
-                tool=tc.name, call_id=tc.id,                 result_preview=blocked_result[:2000], is_error=True
+                tool=tc.name, call_id=tc.id, result_preview=blocked[:2000], is_error=is_error
             )
             yield StreamChunk.tool_end(
-                tool=tc.name, call_id=tc.id, result_preview=blocked_result[:2000]
+                tool=tc.name, call_id=tc.id, result_preview=blocked[:2000]
             )
             return
 
-        # Copy-then-transform (audit B17, Task-19 review F1): the ToolCall is
-        # persisted via assistant_msg.tool_calls — middleware must transform a
-        # copy so history keeps the model's original arguments.
-        tc_exec = ToolCall(id=tc.id, name=tc.name, arguments=dict(tc.arguments))
-        for mw in self.middlewares:
-            try:
-                tc_exec.arguments = mw.wrap_tool_call(tc_exec.name, tc_exec.arguments)
-            except Exception:
-                mw_name = getattr(mw, "name", type(mw).__name__)
-                logger.warning(f"wrap_tool_call error in {mw_name} for {tc.name}", exc_info=True)
-
-        # M4-1 review (issue #12): run governance guards on the streaming
-        # path too — a non-None guard result replaces execution (synthetic
-        # refusal / pending ack), never running the tool body.
-        guard_result = await self._run_guards(tc_exec)
-        if guard_result is not None:
-            blocked = json.dumps(
-                {"governance": "blocked", "tool": tc_exec.name,
-                 "result": guard_result.content or ""}
-            )
-            state.add_message(
-                Message.tool_result(tool_call_id=tc_exec.id, content=blocked, name=tc_exec.name)
-            )
-            yield StreamChunk.tool_result_event(
-                tool=tc_exec.name, call_id=tc_exec.id, result_preview=blocked[:2000]
-            )
-            yield StreamChunk.tool_end(
-                tool=tc_exec.name, call_id=tc_exec.id, result_preview=blocked[:2000]
-            )
-            return
+        tc_exec = prepared.call
+        assert tc_exec is not None
 
         if self.trace_provider:
             async with self.trace_provider.start_span(
@@ -1041,6 +1068,9 @@ class AgentLoop:
                 name=tc.name,
             )
         )
+        # Issue #19: only a PERMITTED, executed call enters the duplicate
+        # guard's executed-set. Blocked calls returned before this point.
+        AgentLoop._record_executed_tools([tc], state)
         preview = result_content[:2000] if result_content else ""
         yield StreamChunk.tool_result_event(tool=tc.name, call_id=tc.id, result_preview=preview, is_error=result.is_error)
         yield StreamChunk.tool_end(tool=tc.name, call_id=tc.id, result_preview=preview)
@@ -1060,33 +1090,24 @@ class AgentLoop:
             )
 
         async def _run_one(tc: ToolCall) -> tuple[ToolCall, str, bool]:
-            # Bug-hunt P2 (ordering): input guardrails FIRST — a call that
-            # violates a guardrail must not leave a durable governance
-            # proposal behind (execute_approved does not re-run guardrails).
-            try:
-                await self._check_tool_guardrails(tc, "input", tc.arguments)
-            except GuardrailTripwire as e:
-                return tc, json.dumps({"error": f"Tool input blocked: {e.result.message}"}), True
-            # M4-1 review (issue #12): governance guards on the streaming
-            # batch path as well.
-            guard_result = await self._run_guards(
-                ToolCall(id=tc.id, name=tc.name, arguments=dict(tc.arguments))
-            )
-            if guard_result is not None:
-                return tc, json.dumps(
-                    {"governance": "blocked", "tool": tc.name,
-                     "result": guard_result.content or ""}
-                ), True
+            # Shared terminal authorization (issue #19): input guardrails,
+            # then middleware wrapping, then governance guards. A blocked
+            # outcome is terminal — never executed, never recorded.
+            prepared = await self._prepare_tool_call(tc)
+            if prepared.blocked:
+                blocked_res = prepared.blocked_result
+                assert blocked_res is not None
+                if prepared.blocked_by == "governance":
+                    content = json.dumps(
+                        {"governance": "blocked", "tool": tc.name,
+                         "result": blocked_res.content or ""}
+                    )
+                else:
+                    content = blocked_res.content
+                return tc, content, True
 
-            tc_args = dict(tc.arguments)
-            for mw in self.middlewares:
-                try:
-                    tc_args = mw.wrap_tool_call(tc.name, tc_args)
-                except Exception:
-                    mw_name = getattr(mw, "name", type(mw).__name__)
-                    logger.warning(f"wrap_tool_call error in {mw_name} for {tc.name}", exc_info=True)
-
-            tc_with_args = ToolCall(id=tc.id, name=tc.name, arguments=tc_args)
+            tc_with_args = prepared.call
+            assert tc_with_args is not None
 
             if self.trace_provider:
                 async with self.trace_provider.start_span(SpanType.TOOL_EXECUTION, tc.name) as span:
@@ -1110,6 +1131,9 @@ class AgentLoop:
                 result_content = json.dumps({"error": f"Tool output blocked: {e.result.message}"})
                 return tc, result_content, True
 
+            # Issue #19: only a PERMITTED, executed call enters the duplicate
+            # guard's executed-set. Blocked calls must never be recorded.
+            AgentLoop._record_executed_tools([tc], state)
             return tc, result_content, result.is_error
 
         results = await asyncio.gather(*[_run_one(tc) for tc in tool_calls], return_exceptions=True)
@@ -1822,7 +1846,8 @@ class AgentLoop:
                 self.timings.add(
                     "tool_exec", (time.monotonic() - _t_tool) * 1000.0
                 )
-                self._record_executed_tools(parallel_safe, state)
+                # Issue #19: recording moved into the executor (permitted
+                # calls only — blocked calls must never be recorded).
                 # A steer delivered after the batch cancels remaining tools
                 if self._drain_steer(state):
                     for tc in sequential:
@@ -1844,7 +1869,6 @@ class AgentLoop:
                 self.timings.add(
                     "tool_exec", (time.monotonic() - _t_tool) * 1000.0
                 )
-                self._record_executed_tools([tc], state)
                 if self._drain_steer(state):
                     # Cancel remaining tools in this batch
                     for remaining in sequential[idx + 1 :]:
@@ -2350,7 +2374,8 @@ class AgentLoop:
                     self.timings.add(
                         "tool_exec", (time.monotonic() - _t_tool) * 1000.0
                     )
-                    self._record_executed_tools(parallel_safe, state)
+                    # Issue #19: recording moved into the executor (permitted
+                    # calls only — blocked calls must never be recorded).
                     # A steer delivered after the batch cancels remaining tools
                     if self._drain_steer(state):
                         for tc in sequential:
@@ -2386,7 +2411,6 @@ class AgentLoop:
                     self.timings.add(
                         "tool_exec", (time.monotonic() - _t_tool) * 1000.0
                     )
-                    self._record_executed_tools([tc], state)
                     if self._drain_steer(state):
                         # Cancel remaining tools in this batch
                         for remaining in sequential[idx + 1 :]:
