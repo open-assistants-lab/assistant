@@ -76,15 +76,29 @@ exporters:
 
 Cheap in steady state, deep forensics on anomaly — the Hud pattern, without eBPF.
 
-**Exporter approach — two options, both proven.** The ziiCloud sync daemon
-(`sync_ziicloud_gongchaaus/telemetry.py`) ships a **hand-rolled OTLP exporter**:
-builds `ExportMetricsServiceRequest` protobuf directly and POSTs it — no OTel SDK,
-no auto-instrumentation, ~200 lines, full control, negligible dependency weight.
-For **T1 metrics-only** that is the better fit (we already have `requests` and
-`protobuf` via other deps). For **OB-2 spans** the SDK earns its weight
-(context propagation, auto-instrumentation for FastAPI/SQLAlchemy/httpx, batch
-exporter, tail-sampling attributes). Decision: hand-rolled for T1, SDK for spans —
-their implementation is the reference for the former.
+**Exporter approach — DECIDED 2026-09-11: use the OTel SDK for everything.**
+The SDK is **already installed** as a transitive dependency of `langfuse` 4.14.1
+(`opentelemetry-sdk` 1.39.1, `-api`, `-exporter-otlp-proto-http`, `-proto`,
+`-semantic-conventions`), so the dependency-weight objection is void — the only new
+packages are the instrumentation shims (`-instrumentation-fastapi`, `-sqlalchemy`,
+`-httpx`, `-asyncio`). Decisive reason: **Langfuse v4 is OTel-native and accepts
+`tracer_provider` / `span_exporter`** — one shared `TracerProvider` with two
+span processors (Langfuse + ClickStack OTLP) means **the same trace IDs in both
+systems**, which is the join key the two-layer design depends on. Hand-rolling
+spans would mean hand-rolling context propagation — the part that actually breaks.
+
+The SDK also gives us for free: auto-instrumentation covering most of the OB-2 span
+inventory, batch export with retry/backoff, flush-on-shutdown, and correct resource
+semantic conventions.
+
+**Note (supersedes the earlier hand-rolled recommendation):** the ziiCloud sync
+daemon's hand-rolled exporter (`sync_ziicloud_gongchaaus/telemetry.py`) remains a
+valid **reference for a no-SDK path** — useful if a minimal customer deployment
+ever needs metrics without the langfuse dependency. Keep it as a fallback pattern,
+not the primary mechanism.
+
+**Pin note:** langfuse requires `opentelemetry-sdk>=1.33.1,<2`; declare our OTel
+deps **explicitly** (1.39.x) so they survive if langfuse ever drops them.
 
 Also borrowed from their setup: `argMax(Value, TimeUnix)` for latest-gauge reads,
 `service.version`-style resource attributes (`deployment.environment`,
@@ -385,3 +399,35 @@ One endpoint, one token, server-side fan-out with server-side credentials.
 - Revoked token → 401; consent off → local token deleted + server-side revocation
 - Traces land in ClickStack carrying `instance.id` + `consent.tier`
 - No ClickStack or Langfuse credential exists anywhere in the shipped image
+
+## 11. Remote ClickStack VM — verified state (2026-09-11)
+
+Deployment source of truth: `~/Library/Mobile Documents/com~apple~CloudDocs/Agents/clickstack_gongchatea_com_au`
+(live: `/home/eddy/clickstack` on `172.105.184.203`, user `eddy`).
+
+**Verified in sync** — Caddyfile and docker-compose.yml hashes match repo ↔ VM exactly.
+No drift to reconcile.
+
+| Check | Value |
+|---|---|
+| Containers | 5/5 healthy (app, caddy, ch-server, db, otel-collector), up 5–6 weeks |
+| Memory | 2.6 GiB / 3.8 GiB used (1.2 GiB available) — watch if data volume grows |
+| Disk | 29 GB / 79 GB used (46 GB free) |
+| OTel data | ~128 MiB total (otel_metrics_sum 62 MiB, otel_traces 50 MiB, gauge 7.5 MiB, logs 4 MiB) |
+| TTL | **changed 30 → 90 days** on all 8 `otel_*` tables (2026-09-11) |
+
+**Why the TTL change:** version-baseline comparison (the Hud value) needs the
+*previous* version's data to still exist when the next one ships. At 30 days and
+monthly releases, the baseline expires exactly when it's needed. Cost is negligible
+(~400 MiB for 90 days vs 46 GB free). Re-apply if the collector recreates the schema
+on an image upgrade.
+
+**Ingest path (Caddyfile):** `/v1/{traces,metrics,logs}` → `basic_auth` (otel:<pass>)
+→ `reverse_proxy otel-collector:4318` with `header_up Authorization {$OTEL_BEARER_TOKEN}`.
+Caddy strips the client Authorization and injects the collector's bearer token
+(pushed by HyperDX via OpAMP). Collector ports 4317/4318 are intentionally **not**
+published — the Caddy route is the only path.
+
+**Not needed for our work:** no new source, connection, or collector config —
+the collector accepts any `service.name`. Dashboards/alerts for `assistant.*`
+metrics come later (OB-3), using the same `argMax(Value, TimeUnix)` pattern.
