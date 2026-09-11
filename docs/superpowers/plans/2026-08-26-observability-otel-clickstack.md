@@ -91,12 +91,6 @@ The SDK also gives us for free: auto-instrumentation covering most of the OB-2 s
 inventory, batch export with retry/backoff, flush-on-shutdown, and correct resource
 semantic conventions.
 
-**Note (supersedes the earlier hand-rolled recommendation):** the ziiCloud sync
-daemon's hand-rolled exporter (`sync_ziicloud_gongchaaus/telemetry.py`) remains a
-valid **reference for a no-SDK path** — useful if a minimal customer deployment
-ever needs metrics without the langfuse dependency. Keep it as a fallback pattern,
-not the primary mechanism.
-
 **VERIFIED 2026-09-11 — shared provider works, with one consequence to handle.**
 A smoke test configured one `TracerProvider` with a ClickStack OTLP exporter and
 passed it to `Langfuse(tracer_provider=...)`. Result:
