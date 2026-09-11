@@ -10,6 +10,26 @@ value without eBPF, achieved with semantic spans + tail sampling + version basel
 
 ---
 
+## 0. Contents
+
+| § | Topic |
+|---|---|
+| 1 | Complement boundary — Langfuse vs ClickStack |
+| 2 / 2a | Span inventory / logs decision |
+| 3 / 3a | Sampling + ingest topology / provider ownership |
+| 4 | Version baselines |
+| 5 | Alerts → agent |
+| 6 / 6a | Privacy & tenancy rules / debugging spans |
+| 7 | Profiling decision |
+| 8 | Phased tasks (OB-1..OB-11) |
+| 9 | Open questions |
+| 10 | Vendor ingest gateway (OB-9, deferred) |
+| 11 | Remote ClickStack VM — verified state |
+| 12 | Admin → vendor bug reporting (OB-10) |
+| 13 | Deployment shapes — no native-only features |
+| 14 | Frontend bug tracing (OB-11) |
+| 15 | Performance budget & verification |
+
 ## 1. The complement boundary (non-overlap rule)
 
 **Langfuse owns agent semantics. ClickStack owns physical execution. If Langfuse
@@ -45,6 +65,14 @@ no prompts, no completions, no message content of any kind.
 Auto-instrumentation for free coverage: `opentelemetry-instrumentation-fastapi`,
 `-sqlalchemy`, `-httpx`. Manual spans only for `sandbox.exec`, `scheduler.cycle`,
 `background.job`, and the middleware hook that matters.
+
+**LLM call physics come free (non-obvious).** The non-overlap rule gives Langfuse the
+generations, so ClickStack has no LLM span — which looks like a hole for "why was the
+run slow" when the answer *is* the model call. It isn't: httpx instrumentation emits
+an `http.client` span to the provider host (`api.anthropic.com`, `openai.com`,
+`generativelanguage.googleapis.com`), giving the physical view — connection time,
+latency, status, retries — correlated by the same `trace_id`. No extra work needed,
+but it must be stated so nobody adds a duplicate LLM span later.
 
 ### 2a. Logs — decision (2026-09-11)
 
@@ -172,8 +200,19 @@ metrics.
 
 ## 4. Version baselines — the actual Hud feature (highest value, lowest cost)
 
-1. Bake `service.version` = git SHA (short) into the Docker image at build time;
-   set `deployment.commit`, `deployment.channel` (stable/preview) as resource attrs.
+1. Bake version attributes into the Docker image at build time. **Convention
+   (resolved 2026-09-11 — the earlier draft overloaded `service.version` with both
+   semver and SHA):**
+
+   | Attribute | Value | Purpose |
+   |---|---|---|
+   | `service.version` | **semver** (`1.4.2`) | Human-facing release; matches Langfuse `version` |
+   | `deployment.commit` | **short git SHA** | Exact build; the *grouping key* for baseline queries |
+   | `deployment.channel` | `stable` \| `preview` | Distinguishes release tracks |
+
+   Langfuse's trace `version` is set to **semver** so its release filter matches the
+   human release; baseline queries group by `deployment.commit` (exact) and display
+   `service.version` (readable).
 2. Baseline queries per signal, comparing version N against N-1:
    - tool error rate by version
    - p95 duration of `sandbox.exec` / `db.query` / `http.client` by version
@@ -219,6 +258,26 @@ deployment a stable hash *is* that user, so hashing buys nothing. Use a
 **session-scoped opaque ID** that rotates and cannot be correlated across sessions.
 `user_id` is never a span attribute.
 
+**Rule 2b — the vendor channel must MASK `user_id`, not assume it is absent
+(2026-09-11).** Rule 2a is currently **violated by existing code**: `langfuse_tracer.py`
+sets `user_id` via `propagate_attributes(...)`, which is correct for the *admin's own*
+Langfuse (they own that data) but unacceptable in the **vendor** channel — under T2 we
+would receive per-user identifiers.
+
+So the rule is per-destination, not global:
+
+| Destination | `user_id` | Why |
+|---|---|---|
+| Admin's own Langfuse / ClickStack | **kept** | The operator's data; they may legitimately want per-user drill-down |
+| **Vendor channel (ours)** | **stripped** | Rule 2a; we must never hold a stable user identifier |
+
+**Implementation:** a vendor-channel filtering `SpanProcessor` that strips
+`langfuse.user.id` / `user_id` attributes before export — the same mechanism already
+required to drop Langfuse-scoped spans from the ClickStack exporter (§3). Masking
+happens **once, at the vendor boundary**, not scattered across call sites.
+**Test required (R-PRIV-1):** export a span carrying `user_id` to the vendor processor
+and assert it is absent on the wire.
+
 **Rule 3 — operator observability ≠ customer audit trail.** Langfuse/ClickStack is
 *our* engineering visibility (and the operator's, if they self-host the stack). The
 versioned audit trail is the *customer's* trust artifact. Different audiences,
@@ -242,6 +301,25 @@ configuration required** from the admin. The admin's `.env` is a separate option
 channel for their own tracing. The OTel collector fans out: one pipeline, two
 exporters (admin OTLP if configured + vendor OTLP if consented). Langfuse accepts
 OTLP, so both destinations ride the same spans — no double instrumentation.
+
+**Unresolved mechanism — how T2 reaches our Langfuse (2026-09-11).** The ClickStack
+side is solved (Caddy basic auth, §6 Rule 4.6). The **Langfuse** side is not: a
+Langfuse client needs `public_key`/`secret_key`, and baking **our** keys into the
+image is the same class of mistake as shipping a shared ClickStack key — which Rule
+4.3 forbids.
+
+| Option | Verdict |
+|---|---|
+| Vendor Langfuse keys in the image | ❌ same defect as a shared ingest key |
+| Per-instance Langfuse keys minted at consent | ✅ correct, but it is OB-9 (gateway) work |
+| **Interim: T2 vendor destination = our ClickStack only** | ✅ **decided** |
+
+**Interim decision:** until OB-9 lands, **T2 sends traces to our ClickStack only**
+(via the verified Caddy path); the vendor Langfuse destination is deferred with the
+gateway. Consequence to accept: semantic-layer lookup at the vendor is unavailable in
+the interim — ClickStack spans + the admin's own Langfuse cover most of it, and §12's
+bundle can carry the semantic trace from *their* instance. This must be restated when
+OB-9 is picked up (its topology diagram already shows the Langfuse fan-out).
 
 **Consent tiers (T1/T2, agreed 2026-08-26):**
 
@@ -272,6 +350,20 @@ service agreement.
 1. **Vendor endpoints are constants in the image**, not env vars — rotating an
    endpoint must not require customer config edits, and it must not be possible
    to point the vendor channel elsewhere by accident.
+
+   **Partner/white-label builds must not ship them at all (2026-09-11).** "Partner
+decides via env var" is *not* a sufficient gate: a partner who copies
+   `CONSENT_OBSERVABILITY=true` from a sample config would silently send **their
+   clients'** data to us — the exact relationship §6's topology table forbids. So
+   partner builds are gated at **build time**, not runtime:
+
+   | Build | Vendor endpoints | Effect |
+   |---|---|---|
+   | First-party | present | Consent flag can enable them |
+   | **Partner / white-label** | **absent from the image** | Consent flag is inert; the partner must ship their own build |
+
+   Implement as a build arg (e.g. `--build-arg VENDOR_OBSERVABILITY=off`) that
+   compiles the constants out, not as a runtime check a partner could flip.
 2. **Consent flags gate the exporter:** `CONSENT_USAGE_STATS` (T1),
    `CONSENT_OBSERVABILITY` (T2).
 3. **Per-instance tokens, never a shared static key.** A single ingestion key
@@ -858,3 +950,47 @@ one-commit revert.
 | ClickStack unreachable | Exporter retries with backoff, queue fills, spans dropped. **App unaffected.** Set `OTEL_EXPORTER_OTLP_TIMEOUT=5` (not the 10 s default) so retries don't accumulate |
 | Ring-buffer DB locked / disk full | Errors swallowed; span path continues |
 | Ring-buffer file grows | Row + time caps evict; never unbounded |
+
+## 16. Second self-review — gaps closed (2026-09-11)
+
+Findings from the second pass, all addressed in place above:
+
+| # | Gap | Severity | Where fixed |
+|---|---|---|---|
+| 1 | **Rule 2a was contradicted by existing code** — `langfuse_tracer.py` sets `user_id`, which would flow to us under T2 | **Privacy contradiction** | §6 **Rule 2b**: per-destination rule (admin keeps it, vendor channel strips it) + vendor-boundary masking processor + R-PRIV-1 test |
+| 2 | **T2 → "our Langfuse" had no credential mechanism** — shipping vendor Langfuse keys repeats the shared-key defect | **Unresolved mechanism** | §6: interim decision — **T2 sends to our ClickStack only** until OB-9 mints per-instance keys |
+| 3 | **Partner builds could enable the vendor channel via env var**, sending their clients' data to us | **Trust boundary** | §6 Rule 4.1: partner/white-label builds ship with vendor endpoints **compiled out** (build arg, not runtime check) |
+| 4 | Bundle "sends it" — no transport, no file permissions | Security | §12: bundle written `0600` to the data dir; transport is the **admin's choice** (email/ticket); we deliberately do **not** build an upload endpoint |
+| 5 | **Reconnect: gap *detection* ≠ *recovery*** — `seq` tells the client it missed events but the "UI stuck" symptom remains | Product | §14: recovery path required — bounded server-side replay buffer **or** a state-resync endpoint; decision recorded |
+| 6 | `service.version` overloaded (semver vs SHA); `deployment.commit` duplicated it; Langfuse `version` ambiguous | Correctness of baselines | §4: explicit convention table (semver / short SHA / channel) + which key groups baselines |
+| 7 | No LLM span in ClickStack looked like a hole for "the model call was slow" | Non-obvious | §2: httpx `http.client` span to the provider host supplies LLM physics — stated so nobody adds a duplicate LLM span |
+| 8 | 860 lines, no way in; no definition of success | Usability | §0 contents table; §17 success criteria |
+
+### R-PRIV-1 — privacy invariant tests (new requirement)
+
+Beyond "disabled = zero export" (OB-5):
+
+1. **Content invariant:** walk every span attribute on the vendor path and assert no
+   fixture content marker appears (email body, file content, prompt text, tool arguments).
+2. **Identity invariant:** a span carrying `user_id` must arrive at the vendor processor
+   **without it** (Rule 2b).
+3. **Tier invariant:** a T1 token posting to `/v1/traces` returns 403 (OB-9), and the T1
+   payload contains no span data.
+
+These are cheap tests over a fixture run and they are the ones that actually protect the
+trust posture — a regression here is not a bug, it is a broken promise.
+
+## 17. What success looks like
+
+The investment is justified when these become true, in order:
+
+| Milestone | Evidence |
+|---|---|
+| **Baseline works** | A version regression is detected by a delta alert before a customer reports it |
+| **First trace-only diagnosis** | A real bug is diagnosed from traces **without asking the customer for logs** |
+| **Admin self-service** | An admin answers their own "why was it slow" from *their* Langfuse/ClickStack without contacting us |
+| **Frontend class closed** | A "UI is stuck" report is diagnosed from contract-violation events rather than guessed at |
+| **Support latency drops** | Median time-to-diagnosis for reported bugs falls measurably (the D1-1 dashboard can carry this) |
+
+If after ~a quarter none of these hold, the plan is over-built and should be cut back
+to OB-1/OB-2 + the ring buffer — which is the honest counterfactual to keep in view.
