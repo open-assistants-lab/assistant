@@ -117,9 +117,36 @@ per-user HybridDB audit store remains the only place content lives.
 versioned audit trail is the *customer's* trust artifact. Different audiences,
 retention, and privacy rules; never conflate them in docs or code paths.
 
-**Rule 4 — product telemetry (topology 3): OFF by default, consent-driven.**
+**Rule 4 — two independent observability channels (2026-08-26, corrected model).**
 
-Default depends on who holds the customer's data:
+There are **two channels**, not one endpoint choice. Both may be active simultaneously
+(fan-out), and neither implies the other.
+
+| | **Vendor channel** (ours) | **Admin channel** (theirs) |
+|---|---|---|
+| Purpose | Support/debugging on our side, product improvement | The deployer tracing *their own* deployment |
+| Endpoints | **Baked into the app** — never in `.env` | Set in `.env` (`LANGFUSE_BASE_URL`, `OTEL_EXPORTER_OTLP_*`) |
+| Gated by | **Consent** (explicit flag) | Nothing — their stack, their choice |
+| Default | Off (no consent → nothing sent) | Off (nothing configured → nothing sent) |
+| Reader | Us | The admin |
+
+**Consequence:** consent given → the app sends to our Langfuse/ClickStack with **zero
+configuration required** from the admin. The admin's `.env` is a separate optional
+channel for their own tracing. The OTel collector fans out: one pipeline, two
+exporters (admin OTLP if configured + vendor OTLP if consented). Langfuse accepts
+OTLP, so both destinations ride the same spans — no double instrumentation.
+
+**Consent tiers (T1/T2, agreed 2026-08-26):**
+
+| Tier | What flows | Destination | Consent prompt |
+|---|---|---|---|
+| **T1 — usage stats** | Aggregate metrics: counts, timings, error classes, versions, tool names | Our ClickStack | "Send anonymous usage statistics" |
+| **T2 — full observability** | Traces incl. prompts, tool calls, session structure | Our Langfuse + ClickStack | "Send full traces so we can support and debug your deployment" — explicit, informed, DPA-covered |
+
+T1 is the easy yes for everyone; T2 is what makes support possible (you cannot debug
+a customer's failing agent run from counters). Both off by default, both fail-closed.
+
+**Default depends on who holds the customer's data:**
 
 | Topology | Data holder | Default | Rationale |
 |---|---|---|---|
@@ -132,6 +159,34 @@ Default depends on who holds the customer's data:
 GDPR gap requiring DPAs with every self-hosted customer. Opt-in with explicit
 consent is dramatically simpler. Hosted deployments are already covered by the
 service agreement.
+
+**Vendor channel implementation rules (2026-08-26):**
+
+1. **Vendor endpoints are constants in the image**, not env vars — rotating an
+   endpoint must not require customer config edits, and it must not be possible
+   to point the vendor channel elsewhere by accident.
+2. **Consent flags gate the exporter:** `CONSENT_USAGE_STATS` (T1),
+   `CONSENT_OBSERVABILITY` (T2).
+3. **Per-instance tokens, never a shared static key.** A single ingestion key
+   across all customers has no per-customer revocation, no attribution, and a
+   fleet-wide blast radius if leaked. Mint a per-instance token at consent time
+   (revocable, attributable), sent as Bearer to a dedicated ingest host. The
+   shared ClickStack ingestion key is for our own dogfooding only.
+4. **Instance identity:** anonymous instance UUID + version on every batch, so a
+   support ticket can locate the customer's traces ("instance abc123, 14:32Z").
+5. **Fail-closed both directions:** vendor endpoint without consent → refuse to
+   start. Consent given but endpoint unreachable (firewalled corporate network) →
+   do not crash; degrade to the local ring buffer and surface status in UI/CLI:
+   *"Support data: enabled, last delivery failed — outbound HTTPS may be
+   blocked."* Legal/enterprise customers will block it and must see why.
+6. **Ingest path (verified 2026-08-26):** `https://clickstack.gongchatea.com.au/v1/traces`
+   exists but is gated by **Caddy Basic auth** (`realm="restricted"`) — neither
+   the MCP token nor the ingestion key authenticates in any scheme tried
+   (Bearer/raw/x-hyperdx-ingest-key/x-api-key/Basic/query-param, 10 basic-auth
+   combinations). Collector ports 4317/4318 are closed externally (internal-only).
+   Unblock by: (a) supplying the Caddy basic-auth creds, (b) adding a Bearer
+   rule for the ingest path, or (c) — preferred — building the per-instance
+   token + dedicated ingest host from rule 3.
 
 **Design (consent, not configuration):**
 1. Consent prompt at onboarding — first run in native app/CLI:

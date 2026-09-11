@@ -545,19 +545,37 @@ timings, counts, error types, command *classes* only) — the per-user
 HybridDB audit store remains the only place content lives. Operator
 observability ≠ customer audit trail; never conflate.
 
-**Product telemetry (topology 3) — OFF by default, consent-driven.**
-Default depends on who holds the data: **self-hosted = OFF** (consent prompt
-opt-in — they chose self-hosting *because* data doesn't leave; default-on
-would also make us a *processor without a DPA* → GDPR gap), **hosted by us
-= ON** (disclosed, toggleable — service agreement already covers it),
-**partner-embedded = OFF, partner decides** (never create a direct data
-relationship with a partner's customers). Telemetry is **metrics, not
-spans** — `{instance_id, version, platform, deployment, providers_used,
-tool_counts, error_classes, sessions, latency_buckets}`, no content/IDs/
-paths/prompts ever. Consent prompt at onboarding + anonymous resettable
-instance ID + **published payload schema** (`docs/telemetry.md`) +
-`telemetry preview`/`disable` commands + 90-day aggregate retention.
-Couples to D1 (email-mining privacy posture) — decide together.
+**Product telemetry (topology 3) — OFF by default, consent-driven, two channels.**
+There are **two independent channels**, not one endpoint choice: the **vendor
+channel** (ours — endpoints **baked into the image, never in `.env`**; gated by
+explicit consent; consent given → data flows with *zero configuration* from the
+admin) and the **admin channel** (theirs — configured in `.env` via
+`LANGFUSE_BASE_URL` / `OTEL_EXPORTER_OTLP_*`; for the deployer tracing their own
+deployment). Both may run simultaneously — the OTel collector fans out one
+pipeline to two exporters; Langfuse accepts OTLP so both destinations ride the
+same spans.
+
+**Consent tiers:** **T1** = aggregate usage stats (counts, timings, error
+classes, versions, tool names) → our ClickStack; **T2** = full traces (prompts,
+tool calls, session structure) → our Langfuse + ClickStack, explicit/informed/
+DPA-covered. T1 is the easy yes; T2 is what makes support possible. Both off by
+default, both fail-closed. Vendor endpoints are constants (not env); consent
+flags `CONSENT_USAGE_STATS` / `CONSENT_OBSERVABILITY` gate the exporters;
+**per-instance tokens minted at consent time** (never a shared static key — no
+per-customer revocation, no attribution, fleet-wide blast radius); anonymous
+instance UUID + version per batch for support lookups; firewall degradation
+degrades to the local ring buffer with visible status, never a crash.
+
+**Default by topology:** **self-hosted = OFF** (consent prompt opt-in — they
+chose self-hosting *because* data doesn't leave; default-on would also make us a
+*processor without a DPA* → GDPR gap), **hosted by us = ON** (disclosed,
+toggleable — service agreement already covers it), **partner-embedded = OFF,
+partner decides** (never create a direct data relationship with a partner's
+customers). Metrics-not-spans applies to T1; T2 sends spans by explicit consent.
+Consent prompt at onboarding + anonymous resettable instance ID + **published
+payload schema** (`docs/telemetry.md`) + `telemetry preview`/`disable` commands +
+90-day aggregate retention. Couples to D1 (email-mining privacy posture) —
+decide together.
 
 **Debugging spans — local by default, exported by choice.** Three modes,
 none ambient: (1) **local ring buffer** (always on, bounded/rotated, never
