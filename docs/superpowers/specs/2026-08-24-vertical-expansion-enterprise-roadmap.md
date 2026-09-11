@@ -543,11 +543,34 @@ third party; must fail closed. ClickStack inherits the same rule (no
 vendor default endpoint, ever). **Content never enters spans** (IDs,
 timings, counts, error types, command *classes* only) — the per-user
 HybridDB audit store remains the only place content lives. Operator
-observability ≠ customer audit trail; never conflate. Any future fleet
-telemetry = opt-in, aggregate-only, separate flag.
+observability ≠ customer audit trail; never conflate.
+
+**Product telemetry (topology 3) — OFF by default, consent-driven.**
+Default depends on who holds the data: **self-hosted = OFF** (consent prompt
+opt-in — they chose self-hosting *because* data doesn't leave; default-on
+would also make us a *processor without a DPA* → GDPR gap), **hosted by us
+= ON** (disclosed, toggleable — service agreement already covers it),
+**partner-embedded = OFF, partner decides** (never create a direct data
+relationship with a partner's customers). Telemetry is **metrics, not
+spans** — `{instance_id, version, platform, deployment, providers_used,
+tool_counts, error_classes, sessions, latency_buckets}`, no content/IDs/
+paths/prompts ever. Consent prompt at onboarding + anonymous resettable
+instance ID + **published payload schema** (`docs/telemetry.md`) +
+`telemetry preview`/`disable` commands + 90-day aggregate retention.
+Couples to D1 (email-mining privacy posture) — decide together.
+
+**Debugging spans — local by default, exported by choice.** Three modes,
+none ambient: (1) **local ring buffer** (always on, bounded/rotated, never
+egresses — the black-box recorder that turns "reproduce the bug" into
+"export the last hour"); (2) **export-on-demand** (`telemetry export` →
+user-inspected bundle; the *only* mode that may include payload content,
+chosen per file by the user); (3) **live support session**
+(`telemetry diagnose --ttl 24h`, opt-in, revocable, metadata spans only).
+Stack-trace scrubber: exception messages can carry PII — scrub
+emails/paths/tokens, keep type + frames.
 
 **Plan:** `docs/superpowers/plans/2026-08-26-observability-otel-clickstack.md`
-(OB-1..OB-5, ~1 week; OB-6 profiling deferred).
+(OB-1..OB-7, ~1.5–2 weeks; OB-8 profiling deferred).
 
 ## 7. Phased roadmap
 

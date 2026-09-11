@@ -117,9 +117,67 @@ per-user HybridDB audit store remains the only place content lives.
 versioned audit trail is the *customer's* trust artifact. Different audiences,
 retention, and privacy rules; never conflate them in docs or code paths.
 
-**Rule 4 — any future fleet telemetry is opt-in and aggregate-only.** If we ever
-want cross-customer product telemetry, it is a separate flag, a separate endpoint,
-counts/timings only, documented in DEPLOYMENT.md, and off by default.
+**Rule 4 — product telemetry (topology 3): OFF by default, consent-driven.**
+
+Default depends on who holds the customer's data:
+
+| Topology | Data holder | Default | Rationale |
+|---|---|---|---|
+| Self-hosted (their Docker) | Them | **OFF** — consent prompt opt-in | They chose self-hosting *because* data doesn't leave; default-on contradicts the purchase reason |
+| Hosted by us (Motion B hosted / Phase 3 multi-tenant) | **Us** | **ON** (disclosed, toggleable) | We already hold the data under the service agreement; aggregate usage stats are normal |
+| Partner-embedded (Motion C) | Partner's client | **OFF** — partner decides | Vendor must not create a direct data relationship with a partner's customers |
+
+**Legal rationale (decisive):** in a self-hosted deployment the customer is the
+*controller*; default-on egress makes the vendor a *processor without a DPA* — a
+GDPR gap requiring DPAs with every self-hosted customer. Opt-in with explicit
+consent is dramatically simpler. Hosted deployments are already covered by the
+service agreement.
+
+**Design (consent, not configuration):**
+1. Consent prompt at onboarding — first run in native app/CLI:
+   *"Help improve Assistant — send anonymous usage statistics? You can see
+exactly what we send."* [Yes / No / Show me the data]
+2. Anonymous instance ID — random UUID stored locally, resettable
+   (`assistant telemetry reset`); never derived from user_id/hostname/license.
+3. **Metrics, not spans** — product telemetry must NOT ride the OTel span
+   pipeline. Separate aggregate-metrics payload:
+   `{instance_id, version, platform, deployment, providers_used,
+tool_counts, error_classes, sessions, latency_buckets}` — no content, no
+   IDs, no paths, no email data, no prompts. Ever.
+4. **Publish the schema** — exact payload in `docs/telemetry.md` + repo.
+   "Read the JSON we send" is a trust feature.
+5. **Local preview** — `assistant telemetry preview` prints what would be sent;
+   `assistant telemetry disable` turns it off.
+6. **Retention** — 90 days, aggregate only; no per-instance drill-down beyond
+   diagnostics (see §6a).
+
+**D1 coupling:** this is the same class of decision as D1 (email-mining privacy
+posture per persona tier). Decide them together or the posture becomes
+inconsistent and hard to explain.
+
+## 6a. Debugging spans — local by default, exported by choice
+
+Product telemetry is metrics-only, but debugging needs spans. Three modes, none
+ambient:
+
+| Mode | What | Egress | When |
+|---|---|---|---|
+| **1. Local ring buffer** (default, always on) | OTel spans to a bounded local file (last 1h / last 500 spans), rotated, in the data dir | **None — never leaves** | Always (black-box recorder) |
+| **2. Export-on-demand** | `assistant telemetry export --last 1h` → bundle the user inspects before attaching to a ticket | User action, per file | Customer reports a bug |
+| **3. Live support session** | `assistant telemetry diagnose --ttl 24h` streams spans for a scoped window | Opt-in, TTL-bounded, revocable, visible | Hard cases, customer asks us to look |
+
+**Why the ring buffer is the key move:** it turns "enable diagnostics,
+reproduce, hope" into "export the last hour and attach it" — the failure is
+already recorded, no ambient egress, and the customer reviews the file before
+sending. Strictly better than remote debugging *and* better for privacy.
+
+**Content rule:** modes 1–3 carry metadata spans only (timings, tool names,
+error classes, stack frames, IDs — same scrub as OB-2). If a bug genuinely needs
+payload content, that is **mode 2 only**: the export bundle may optionally
+include content, generated locally, inspected and attached by the user. Content
+never streams automatically, even in a live session. Stack-trace scrubber:
+exception *messages* can carry PII ("email to john@firm.com not found") — scrub
+emails/paths/tokens, keep exception type + frame locations.
 
 ## 7. Profiling decision record (2026-08-26)
 
@@ -149,9 +207,12 @@ pipeline, storage, retention policy, and UI. That's the real price, not the inst
 | **OB-3** Version attributes + baseline queries + HyperDX delta alerts | git SHA in image build, 3 baseline queries, 1 alert | 1d |
 | **OB-4** Alert → webhook → TriggerRegistry → agent investigation | wire the loop end-to-end | 0.5d |
 | **OB-5** Privacy hardening | fail-closed host requirement (Langfuse + OTel), DEPLOYMENT.md privacy section, test that disabled = zero export | 0.5d |
-| **OB-6** (deferred) Profiling | per §7, only on trigger | — |
+| **OB-6** Product telemetry (topology 3) — metrics only, OFF by default, consent prompt, published schema (`docs/telemetry.md`), `telemetry preview/reset/disable` commands, anonymous instance ID | per §6 Rule 4 | 1–1.5d |
+| **OB-7** Debugging spans — local ring buffer (bounded, rotated, never egresses), `telemetry export` bundle (user-inspected, optional content), `telemetry diagnose --ttl` live session, stack-trace PII scrubber | per §6a | 1.5–2d |
+| **OB-8** (deferred) Profiling | per §7, only on trigger | — |
 
-Total for OB-1..OB-5: **~1 week** — the 90% of Hud that is worth having.
+Total for OB-1..OB-7: **~1.5–2 weeks** — the 90% of Hud that is worth having,
+plus a debugging story better than most vendors'.
 
 ## 9. Open questions
 
