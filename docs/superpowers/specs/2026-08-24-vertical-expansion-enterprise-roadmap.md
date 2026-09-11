@@ -508,6 +508,47 @@ deployment-first; ladder covers it self-hosted); Deep Agents composition
 (own engine); pre-warmed sandboxes (T3.5 container-tier optimization note
 only).
 
+### 6.8 Observability — OTel + ClickStack complementing Langfuse (2026-08-26)
+
+**Decision:** two observability layers with a strict non-overlap rule —
+**Langfuse owns agent semantics** (generations, tokens, cost, tool calls as
+semantic events, rubric scores, evals), **ClickStack/OTel owns physical
+execution** (HTTP/WS lifecycle, DB queries, sandbox exec, outbound HTTP,
+scheduler cycles, process metrics, version correlation). Joined by
+trace_id: semantic layer says *what the agent tried*, physical layer says
+*why it was slow or broken*. ~8 spans, not 15 — anything Langfuse already
+shows is an OTel non-goal (also reduces PII surface).
+
+**Hud/ClickHouse learn ("runtime code sensor")** — adopt the *value*
+without eBPF: tail-based sampling (cheap aggregate in steady state,
+full-detail escalation on error/slow traces) + `service.version` = git SHA
+with **baseline deltas instead of static thresholds** ("error rate on
+v1.4.2 is 2.3× v1.4.1") + HyperDX alert → webhook → TriggerRegistry →
+agent investigates. ~1 week total; this is the 90% of Hud worth having.
+
+**Profiling (eBPF) — not now.** Parca agent requires a **privileged
+container** (contradicts the no-root discipline; can read all host process
+memory), is Linux-only, and has **poor Python fidelity** (native stacks
+surface `_PyEval_EvalFrameDefault`, not Python frames). If profiling is
+ever needed: **Pyroscope Python SDK first** (real Python frames, macOS dev,
+no privileges, ~2–4h), Parca only for mixed-language Linux fleets, OTel
+Profiles signal when stable. Trigger = a production question spans cannot
+answer.
+
+**Trust rule (non-negotiable):** self-hosted deployments phone home to
+nobody by default. Langfuse today is `enabled=False` + empty keys + no-op
+tracer ✅. **Footgun to fix:** `LangfuseConfig.host` defaults to
+`cloud.langfuse.com` — enabling without setting a host ships data to a
+third party; must fail closed. ClickStack inherits the same rule (no
+vendor default endpoint, ever). **Content never enters spans** (IDs,
+timings, counts, error types, command *classes* only) — the per-user
+HybridDB audit store remains the only place content lives. Operator
+observability ≠ customer audit trail; never conflate. Any future fleet
+telemetry = opt-in, aggregate-only, separate flag.
+
+**Plan:** `docs/superpowers/plans/2026-08-26-observability-otel-clickstack.md`
+(OB-1..OB-5, ~1 week; OB-6 profiling deferred).
+
 ## 7. Phased roadmap
 
 ### Phase 0 — Trust foundation (weeks 1–3)
