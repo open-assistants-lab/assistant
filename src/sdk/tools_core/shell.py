@@ -163,7 +163,7 @@ def shell_execute(command: str, user_id: str =  DEFAULT_USER_ID, workspace_id: s
             output += f"\nSTDERR: {result.stderr}"
 
         max_output = config["max_output_kb"] * 1024
-        if len(output) > max_output:
+        if result.stdout_truncated or len(output) > max_output:
             # Spill the full output to a file the agent can read back via
             # files_read (Pi-style: truncate in context, keep full output
             # recoverable). The file lives under the workspace files dir so

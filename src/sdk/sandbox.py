@@ -82,6 +82,11 @@ class SandboxResult:
     stdout: str = ""
     stderr: str = ""
     timed_out: bool = False
+    # Issue #15 follow-up: the sandbox clamps captured output to
+    # max_output_bytes; the tool must know when that happened so the
+    # user-facing spill predicate stays reachable (a tool limit smaller
+    # than the capture limit never triggers on len(output) alone).
+    stdout_truncated: bool = False
 
 
 @runtime_checkable
@@ -269,10 +274,16 @@ class SoftSandboxBackend:
                 env=env,
                 preexec_fn=_preexec,
             )
+            # Issue #15: capture a bounded headroom (8× the tool-facing
+            # limit, matching the child's RLIMIT_FSIZE multiple) so the
+            # tool's spill-to-file predicate can recover the FULL output.
+            # Clamping at the tool limit made spill unreachable.
+            capture_cap = lim.max_output_bytes * 8
             return SandboxResult(
                 proc.returncode,
-                proc.stdout[: lim.max_output_bytes],
+                proc.stdout[:capture_cap],
                 proc.stderr[: lim.max_output_bytes],
+                stdout_truncated=len(proc.stdout) > lim.max_output_bytes,
             )
         except subprocess.TimeoutExpired as e:
             out = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
@@ -440,10 +451,15 @@ class BwrapSandboxBackend:
                 env=env,
                 preexec_fn=_preexec,
             )
+            # Issue #15: capture headroom (8×, matching RLIMIT_FSIZE) so
+            # the tool's spill predicate stays reachable and the spill file
+            # holds the full output.
+            capture_cap = lim.max_output_bytes * 8
             return SandboxResult(
                 proc.returncode,
-                proc.stdout[: lim.max_output_bytes],
+                proc.stdout[:capture_cap],
                 proc.stderr[: lim.max_output_bytes],
+                stdout_truncated=len(proc.stdout) > lim.max_output_bytes,
             )
         except subprocess.TimeoutExpired:
             return SandboxResult(-1, timed_out=True)
