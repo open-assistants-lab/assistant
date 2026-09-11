@@ -16,6 +16,10 @@ class MCPServerConfig(BaseModel):
     args: list[str] = Field(default_factory=list, description="Arguments to pass to command")
     env: dict[str, str] = Field(default_factory=dict, description="Environment variables")
     url: str | None = Field(default=None, description="URL for HTTP transport servers")
+    headers: dict[str, str] = Field(
+        default_factory=dict,
+        description="HTTP headers for remote servers (e.g. Authorization: Bearer ...)",
+    )
     transport: str = Field(default="stdio", description="Transport type: 'stdio' or 'http'")
 
 

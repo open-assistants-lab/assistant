@@ -288,7 +288,7 @@ class MCPManager:
             url = server_config.url or "http://localhost:8000/mcp"
 
             read_stream, write_stream, _ = await exit_stack.enter_async_context(
-                streamablehttp_client(url)
+                streamablehttp_client(url, headers=server_config.headers or None)
             )
             session = await exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
         else:

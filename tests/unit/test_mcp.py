@@ -6,6 +6,29 @@ from unittest.mock import AsyncMock, MagicMock, patch
 class TestMCPConfig:
     """Tests for MCP config loading."""
 
+    def test_http_server_headers_parsed(self):
+        """Remote HTTP servers carry auth headers (e.g. ClickStack MCP bearer)."""
+        from src.sdk.tools_core.mcp_config import MCPConfig
+
+        config = MCPConfig(
+            **{
+                "mcpServers": {
+                    "clickstack": {
+                        "url": "https://clickstack.example.com/api/mcp",
+                        "type": "http",
+                        "headers": {"Authorization": "Bearer tok-123"},
+                    }
+                }
+            }
+        )
+        server = config.mcpServers["clickstack"]
+        assert server.url == "https://clickstack.example.com/api/mcp"
+        assert server.headers == {"Authorization": "Bearer tok-123"}
+        # stdio servers default to no headers
+        from src.sdk.tools_core.mcp_config import MCPServerConfig
+
+        assert MCPServerConfig(command="python").headers == {}
+
     def test_load_config_missing_file(self, tmp_path):
         """Test loading config when file doesn't exist."""
         from src.sdk.tools_core.mcp_config import load_mcp_config
