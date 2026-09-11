@@ -21,15 +21,11 @@ import pytest
 @pytest.fixture()
 def desktop_env(tmp_path, monkeypatch):
     """Isolated desktop environment: temp data root, desktop-server mode."""
-    tracked_env = (
-        "DEPLOYMENT_MODE",
-        "DEPLOYMENT_DATA_ROOT",
-        "DEPLOYMENT_DATA_PATH",
-        "SOLO_BYPASS",
-        "DESKTOP_LAUNCH_TOKEN",
-        "API_KEY",
-    )
-    original_env = {name: os.environ.get(name) for name in tracked_env}
+    # Suite-reliability Task 2: desktop_main() deliberately overwrites
+    # os.environ directly. Track the FULL mapping — a fixed name list goes
+    # stale the first time desktop code writes a new key (issue #15's
+    # combined-suite interference class).
+    original_env = dict(os.environ)
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("DEPLOYMENT_MODE", "desktop-server")
@@ -42,14 +38,39 @@ def desktop_env(tmp_path, monkeypatch):
 
     settings_module._config = None
     yield home
-    # desktop_main() deliberately overwrites os.environ directly; restore the
-    # fixture's original process state before another module is collected.
-    for name, value in original_env.items():
-        if value is None:
-            os.environ.pop(name, None)
-        else:
-            os.environ[name] = value
+    # Restore the exact process state IN PLACE: desktop_main() writes
+    # os.environ directly, so remove keys added during the fixture and
+    # reapply every captured value (assignment preserves the os.environ
+    # object — replacing the mapping breaks os.environ semantics).
+    for key in tuple(os.environ):
+        if key not in original_env:
+            os.environ.pop(key)
+    os.environ.update(original_env)
     settings_module._config = None
+
+
+# Suite-reliability Task 2 regression: a desktop test that simulates the
+# desktop code path writing an UNTRACKED key directly (desktop_main-style
+# os.environ writes outside the fixture's setenv calls). The next test in
+# the module observes post-teardown state: the sentinel must be gone.
+
+
+def test_desktop_fixture_restores_untracked_env_keys(desktop_env):
+    """Simulate desktop_main()'s direct os.environ writes with an untracked
+    key; the fixture's full-snapshot teardown must remove it."""
+    os.environ["DESKTOP_UNTRACKED_SENTINEL"] = "leak-probe"
+    # Exercise the desktop settings path too, so the fixture teardown runs
+    # after real desktop-env mutation (mirrors desktop_main under test).
+    from src.http import desktop
+
+    with patch.object(desktop, "run_desktop_server"):
+        desktop.apply_desktop_settings()
+
+
+def test_untracked_desktop_env_keys_do_not_leak():
+    """Runs AFTER the fixture teardown of the previous test: a key written
+    directly by desktop code must not survive the desktop_env fixture."""
+    assert "DESKTOP_UNTRACKED_SENTINEL" not in os.environ
 
 
 def _wait_rendezvous(system_dir: Path, timeout: float = 20.0) -> dict:
