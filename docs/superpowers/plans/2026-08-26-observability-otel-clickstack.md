@@ -264,6 +264,7 @@ pipeline, storage, retention policy, and UI. That's the real price, not the inst
 | **OB-5** Privacy hardening | fail-closed host requirement (Langfuse + OTel), DEPLOYMENT.md privacy section, test that disabled = zero export | 0.5d |
 | **OB-6** Product telemetry (topology 3) — metrics only, OFF by default, consent prompt, published schema (`docs/telemetry.md`), `telemetry preview/reset/disable` commands, anonymous instance ID | per §6 Rule 4 | 1–1.5d |
 | **OB-7** Debugging spans — local ring buffer (bounded, rotated, never egresses), `telemetry export` bundle (user-inspected, optional content), `telemetry diagnose --ttl` live session, stack-trace PII scrubber | per §6a | 1.5–2d |
+| **OB-9** Vendor ingest gateway (per-instance tokens at consent time) — see §10 | per §10 | 1–2d |
 | **OB-8** (deferred) Profiling | per §7, only on trigger | — |
 
 Total for OB-1..OB-7: **~1.5–2 weeks** — the 90% of Hud that is worth having,
@@ -279,3 +280,73 @@ plus a debugging story better than most vendors'.
    version before OB-1.
 3. Retention: OTel spans (ClickHouse) vs Langfuse traces (its own schema) — align
    retention windows so the trace_id join doesn't break for one layer first.
+
+## 10. Vendor ingest gateway — per-instance tokens at consent time (OB-9)
+
+**Principle: never ship a shared ingestion key.** The customer gets a token minted
+for *their instance*; the ClickStack/Langfuse credentials stay server-side. The
+gateway is also the fix for the Caddy basic-auth blocker (§6 Rule 4.6): the only
+public ingest surface becomes one Bearer-authenticated route.
+
+### Topology
+
+```
+app (customer)                vendor                         backends
+  │                             │                               │
+  │ POST /v1/register ────────► mint token (tier T1|T2)         │
+  │ ◄──── {token, expires_at}   │                               │
+  │                             │                               │
+  │ POST /v1/traces ──────────► validate + tier-enforce         │
+  │  Authorization: Bearer <t>  stamp instance.id/consent.tier ─┼─► ClickStack collector
+  │                             │                               └─► Langfuse OTLP
+```
+
+One endpoint, one token, server-side fan-out with server-side credentials.
+
+### Endpoints (FastAPI — same stack we already run)
+
+| Route | Purpose |
+|---|---|
+| `POST /v1/register` | Mint token: `{instance_id, version, platform, tier, consent_at}` → `{token, expires_at}` |
+| `POST /v1/refresh` | Rotate (old token valid for a short grace window) |
+| `DELETE /v1/register` | Revoke (consent off) |
+| `POST /v1/{traces,logs,metrics}` | Validate → tier-check → stamp → forward |
+| `GET /healthz` | Liveness |
+
+### Rules
+
+1. **Token = opaque random (32B urlsafe)**, stored **sha256-hashed** in the gateway
+   DB (`instance_id, token_hash, tier, created_at, last_seen, revoked_at`). A DB leak
+   must not yield usable tokens. Signed JWTs only if lookup ever becomes a bottleneck
+   (it won't for a long time).
+2. **Tier is enforced server-side.** A T1 token posting to `/v1/traces` → **403**.
+   Client-side gating is a suggestion; consent is only real if the server enforces it.
+3. **Token lives in app state, never `.env`**: `data/private/observability.json`
+   (0600) — `{instance_id, token, tier, consent_at, expires_at}`. `.env` stays the
+   admin channel's config, preserving the two-channel separation.
+4. **Stamping**: gateway adds `instance.id`, `consent.tier`, `client.version` as
+   resource attributes so the vendor's ClickStack can attribute/filter per instance.
+5. **Registration abuse control**: rate-limit per IP; one active token per
+   `instance_id` (re-register rotates); require a valid first batch within N minutes
+   or discard the token; optional activation code for enterprise/partner deploys.
+6. **Per-token rate limit** on ingest (one runaway client cannot flood the vendor).
+7. **Client behavior**: consent toggle → register/revoke; `401` on ingest →
+   re-register once, then disable the vendor channel and surface status; registration
+   failure → exponential backoff, status visible, local ring buffer unaffected.
+8. **Revocation works both ways**: customer revokes (consent off) *and* vendor can
+   revoke a token without customer action (support/abuse).
+
+### Rejected alternatives
+
+| Option | Why not |
+|---|---|
+| Shared ingestion key in the image | No per-customer revocation or attribution; fleet-wide blast radius if leaked |
+| Per-customer ClickHouse users directly | Leaks vendor topology; couples customer tokens to ClickStack config |
+| Client → ClickStack **and** Langfuse directly | Two credentials client-side; Langfuse keys would have to ship |
+
+### Acceptance
+
+- T1 token → `/v1/traces` returns 403; T2 token → accepted and visible in Langfuse
+- Revoked token → 401; consent off → local token deleted + server-side revocation
+- Traces land in ClickStack carrying `instance.id` + `consent.tier`
+- No ClickStack or Langfuse credential exists anywhere in the shipped image
