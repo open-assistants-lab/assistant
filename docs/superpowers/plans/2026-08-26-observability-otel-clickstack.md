@@ -432,12 +432,13 @@ pipeline, storage, retention policy, and UI. That's the real price, not the inst
 | **OB-6** Product telemetry (topology 3) — OTLP metrics, OFF by default, consent prompt, published schema (`docs/telemetry.md`), `telemetry preview/reset/disable` commands, anonymous instance ID, **tokens/cost by provider+model** | per §6 Rule 4 | 1–1.5d |
 | **OB-7** Debugging spans — local SQLite `SpanProcessor` ring buffer (bounded, rotated, never egresses), `telemetry export` bundle (user-inspected, optional content), `telemetry diagnose --ttl` live session, stack-trace PII scrubber | per §6a | 1.5–2d |
 | **OB-10** Admin → vendor bug reporting — error reference IDs, `assistant support bundle` (both layers, preview + toggles), documented bundle format, T2 prompt reframing | per §12 | 1d |
+| **OB-11** Frontend bug tracing — envelope `run_id`/`trace_id`/`seq` (additive), `POST /v1/client-events`, contract-violation catalogue, client capture in the native app, bundle integration | per §14 | 1–2d |
 | **OB-8** (DEFERRED) Profiling | per §7, only on trigger | — |
 | **OB-9** (DEFERRED 2026-09-11) Vendor ingest gateway — per-instance tokens at consent time | per §10 | 1–2d |
 
-**Total for active scope (OB-1..OB-7 + OB-10): 9.5–13.5 days ≈ 2–2.5 weeks** — the 90%
-of Hud that is worth having, plus a debugging and bug-reporting story better than most
-vendors'. (OB-8/OB-9 are deferred and excluded.)
+**Total for active scope (OB-1..OB-7 + OB-10 + OB-11): 10.5–15.5 days ≈ 2.5–3 weeks** —
+the 90% of Hud that is worth having, plus debugging, bug-reporting, and frontend-failure
+tracing that most vendors don't have. (OB-8/OB-9 are deferred and excluded.)
 
 ## 9. Open questions
 
@@ -671,3 +672,107 @@ in the Zig app, the contract has leaked.)
 `GET /v1/instance` and the telemetry/support endpoints sit **behind `API_KEY`** —
 instance ID + version is fingerprinting material and should not be world-readable on
 an exposed deployment.
+
+## 14. Frontend bug tracing (OB-11)
+
+**The failure mode this closes:** when a client fails to render a completed run, the
+**server trace shows success** — `done` emitted, run completed, no errors. Server-side
+observability actively lies about frontend failures, so today a rendering bug gets
+misattributed to the model.
+
+### Verified gaps (2026-09-11)
+
+1. **No correlation ID on the wire.** `run_service.py` generates `run_id` per run and
+   stores it in message metadata, but the WS/SSE envelope carries only `session_id`.
+   The client has no ID it can quote.
+2. **`/ui/track` is not telemetry.** It appends to an in-memory
+   `deque(maxlen=100)` (`src/sdk/ui_state.py`), lost on restart, never persisted or
+   exported — a UI *state* store with a different lifecycle.
+3. **The native app emits nothing.** No tracking calls in the Zig source.
+
+### Enabler: correlation IDs on the wire
+
+Server generates `run_id` (exists) **and** the OTel `trace_id` (from the span
+context); every server→client event carries them — minimum `text_start`,
+`tool_result`, `interrupt`, `done`, `error`. Add a **monotonic `seq` per run** so a
+client can detect *missed* events after a reconnect (otherwise gaps are invisible).
+
+**Must be additive** — the native app and the TS SDK (`clients/typescript/`) are both
+consumers; unknown fields must be ignored, and existing clients must keep working.
+
+### Three classes of frontend bug
+
+| Class | Examples | Value |
+|---|---|---|
+| **Client errors** | exceptions, crashes, failed render | ✅ |
+| **Contract violations** | see catalogue below | ✅ **highest** — the "UI is stuck" class |
+| **Performance / latency** | WS round-trip, render time, event-loop stalls | 🟡 optional, later |
+
+### Contract-violation catalogue
+
+These are invisible from the server and map directly to user symptoms:
+
+- unknown event type received (protocol drift / version skew)
+- `tool_result` with no matching `tool_input_start` / `tool_call`
+- `tool_input_end` without `tool_input_start`; `text_delta` after `text_end`
+- stream ended (WS close / SSE EOF) without `done` or `error`
+- `interrupt` received but never answered before timeout
+- chunk parse failure (malformed JSON / unexpected shape)
+- **gap detected** — `seq` jumped (events lost during reconnect)
+- duplicate `done`; `usage` missing on a completed run
+
+**Version skew is a first-class cause:** every client event carries the **client
+version and the server version**, and the server flags mismatches explicitly.
+
+### Aggregation: client → local server → existing machinery
+
+```
+native app / web dashboard / partner UI
+        │  POST /v1/client-events   (localhost or same origin)
+        ▼
+   local server ──► same ring buffer (§6a) ──► same support bundle (§12) ──► same consent gate (§6)
+```
+
+The client needs **no OTel SDK** — the native app just POSTs JSON to a server it
+already talks to. One redaction point, one bundle containing **both sides**, one
+consent decision.
+
+**Signal type:** client events are discrete, point-in-time → OTLP **logs** (with
+`trace_id` correlation), not spans. Local always; to the vendor only under **T2**
+(metadata-only, so they could later be argued into T1). T1 stays pure aggregate metrics.
+
+### Capture / never capture
+
+| Capture | Never capture |
+|---|---|
+| client + server version, platform | message text, typed input, rendered content |
+| run/trace ID, `seq` | file names, email subjects |
+| event type, violation kind | `user_id` (Rule 2a — session-scoped rotating ID only) |
+| error type + scrubbed message, durations | click streams, navigation paths |
+
+### Explicitly NOT full RUM
+
+No session replay, no heatmaps, no click-stream analytics, no per-user attribution,
+no geography. RUM is browser-centric (our primary client is native Zig, so no SDK
+applies) and its core features are exactly what our trust posture forbids. The scope
+here is **debugging support**, not product/UX optimisation. If RUM-grade data is ever
+wanted for the web dashboard, the path is the OTel browser SDK into our existing OTLP
+pipeline — not needed now.
+
+### Do not extend `/ui/track`
+
+Different lifecycle and contract (in-memory, 100-event cap, no retention). A separate
+`/v1/client-events` with explicit retention keeps both honest.
+
+### Task scope
+
+1. Envelope additions: `run_id`, `trace_id`, `seq` (additive; native app + TS SDK
+   tolerate unknown fields) + server-side emit
+2. `POST /v1/client-events` — validated, scrubbed, into the local ring buffer;
+   forwarded as OTLP logs under T2
+3. Client-side capture in the native app: error hook + contract-violation detectors
+   (the catalogue above)
+4. Contract-violation catalogue implemented as explicit checks, not string matching
+5. Client events included in the support bundle (§12) and `telemetry preview`
+6. Tests: synthetic violations produce the expected client event; unknown envelope
+   fields don't break existing clients
