@@ -520,7 +520,7 @@ pipeline, storage, retention policy, and UI. That's the real price, not the inst
 | **OB-2** Semantic spans (`sandbox.exec`, `scheduler.cycle`, `background.job`, middleware hook) + PII scrub policy in code + **noise filter R-PERF-2** | manual spans + attribute policy + tests asserting no content leaks. **Acceptance: R-PERF-3 holds** | 2–3d |
 | **OB-3** Version attributes + baseline queries + HyperDX delta alerts | git SHA in image build, 3 baseline queries, 1 alert, `assistant.*` dashboard | 1d |
 | **OB-4** Alert → webhook → TriggerRegistry → agent investigation | wire the loop end-to-end **+ add the second HyperDX webhook destination on the VM** (§5) | 0.5d |
-| **OB-5** Privacy hardening | fail-closed host requirement (Langfuse + OTel), DEPLOYMENT.md privacy section, test that disabled = zero export | 0.5d |
+| **OB-5** Privacy hardening — fail-closed host requirement (Langfuse + OTel), DEPLOYMENT.md privacy section, disabled = zero export, **+ R-PRIV-1 invariants (content / identity / tier, §16)** | per §6, §16 | 0.5d |
 | **OB-6** Product telemetry (topology 3) — OTLP metrics, OFF by default, consent prompt, published schema (`docs/telemetry.md`), `telemetry preview/reset/disable` commands, anonymous instance ID, **tokens/cost by provider+model** | per §6 Rule 4 | 1–1.5d |
 | **OB-7** Debugging spans — local SQLite `SpanProcessor` ring buffer (bounded, rotated, never egresses), `telemetry export` bundle (user-inspected, optional content), `telemetry diagnose --ttl` live session, stack-trace PII scrubber. **Acceptance: R-PERF-1 (§15) — never fsync per span** | per §6a, §15 | 1.5–2d |
 | **OB-10** Admin → vendor bug reporting — error reference IDs, `assistant support bundle` (both layers, preview + toggles), documented bundle format, T2 prompt reframing | per §12 | 1d |
@@ -692,6 +692,20 @@ content-triggered bugs. A support bundle contains:
 | Semantic trace (**optional**) | **Their** Langfuse, via the app's keys | The app already holds their keys, so it can assemble this *for* them |
 | Content (**optional, explicit**) | Conversation store | Second confirmation; never default |
 
+**Transport and file security (2026-09-11):**
+- Written **`0600`** to the data dir, alongside `telemetry preview` output — the same
+  trust treatment as the ring buffer. Never world-readable, never in a shared temp dir.
+- **Transport is the admin's choice** (email, support ticket, their own upload). We
+  deliberately do **not** build a vendor upload endpoint: it would be another public
+  ingest surface needing auth, rate limiting, and DPA coverage — i.e. a second gateway.
+  If one is ever added, it goes **through OB-9**, not beside it.
+- Because the bundle may contain content (opt-in), it is never written to a path the
+  app serves or syncs by default.
+
+**Preview parity:** `assistant support bundle --dry-run` prints the exact section list
+and sizes without writing, mirroring `telemetry preview`. The admin must be able to see
+what would leave before anything is created.
+
 The optional-semantic-trace row is the useful property: because the app has the
 admin's Langfuse credentials, **it can assemble a rich bundle from both layers even
 when they live on the admin's own infrastructure** — no T2 required, no access grant.
@@ -813,6 +827,23 @@ These are invisible from the server and map directly to user symptoms:
 - **gap detected** — `seq` jumped (events lost during reconnect)
 - duplicate `done`; `usage` missing on a completed run
 
+### Detection ≠ recovery (decision required)
+
+`seq` tells the client it **missed** events. It does not restore them, so the
+user-visible symptom ("the reply never appeared", "the tool card spins forever") is
+**not** fixed by detection alone. Two options:
+
+| Option | Mechanism | Cost |
+|---|---|---|
+| **State resync** | `GET /v1/runs/{run_id}/state` returns the run's current state (status, accumulated text, tool calls + results) so the client can repaint | Small endpoint, reuses existing state; **preferred** |
+| Event replay buffer | Server keeps the last N events per run; client reconnects with `last_seq` and receives the tail | Server-side memory per active run; more moving parts |
+
+**Decision (2026-09-11): state resync.** It fixes the symptom directly, needs no
+per-run buffer, and works for the SSE case too (where reconnection is a fresh request).
+Replay stays a documented non-goal until a case appears that resync cannot express.
+This also bounds what the client must implement: on reconnect → detect gap via `seq` →
+resync → continue, instead of reconstructing from a stream.
+
 **Version skew is a first-class cause:** every client event carries the **client
 version and the server version**, and the server flags mismatches explicitly.
 
@@ -865,9 +896,11 @@ Different lifecycle and contract (in-memory, 100-event cap, no retention). A sep
 3. Client-side capture in the native app: error hook + contract-violation detectors
    (the catalogue above)
 4. Contract-violation catalogue implemented as explicit checks, not string matching
-5. Client events included in the support bundle (§12) and `telemetry preview`
-6. Tests: synthetic violations produce the expected client event; unknown envelope
-   fields don't break existing clients
+5. **`GET /v1/runs/{run_id}/state`** — state resync so a detected gap can be *repaired*,
+   not just reported (detection ≠ recovery)
+6. Client events included in the support bundle (§12) and `telemetry preview`
+7. Tests: synthetic violations produce the expected client event; unknown envelope
+   fields don't break existing clients; a `seq` gap triggers resync, not a stuck UI
 
 ## 15. Performance budget & verification (2026-09-11)
 
