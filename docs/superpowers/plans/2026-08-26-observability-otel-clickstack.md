@@ -97,6 +97,22 @@ valid **reference for a no-SDK path** — useful if a minimal customer deploymen
 ever needs metrics without the langfuse dependency. Keep it as a fallback pattern,
 not the primary mechanism.
 
+**VERIFIED 2026-09-11 — shared provider works, with one consequence to handle.**
+A smoke test configured one `TracerProvider` with a ClickStack OTLP exporter and
+passed it to `Langfuse(tracer_provider=...)`. Result:
+
+- OTel span `verify-shared-provider` and Langfuse generation `verify-langfuse-gen`
+  both landed in ClickStack with the **same `TraceId`** (`e5178c20…cf6f6`) — the join
+  key works exactly as designed.
+- **Consequence:** because Langfuse uses our provider, its semantic spans are exported
+  to ClickStack too. That duplicates prompt/completion content into the physical layer
+  and breaks the §1 boundary (and would leak T2 content into ClickStack).
+- **Required at implementation:** filter the ClickStack exporter to drop
+  Langfuse-scoped spans (match on instrumentation scope, e.g. `langfuse`), keeping
+  the shared trace context so correlation survives. Langfuse's `should_export_span`
+  / `mask_otel_spans` control the Langfuse side; a filtering `SpanProcessor`
+  controls the ClickStack side. Same trace ID, different span sets per layer.
+
 **Pin note:** langfuse requires `opentelemetry-sdk>=1.33.1,<2`; declare our OTel
 deps **explicitly** (1.39.x) so they survive if langfuse ever drops them.
 
