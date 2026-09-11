@@ -283,11 +283,14 @@ service agreement.
    A **short, human-copyable ID** (8 chars base32, e.g. `k7m2p9qx` — *not* a
    36-char UUID), stable across upgrades, resettable via `assistant telemetry reset`.
 
-   **Surfaced in four places** (an admin must never have to hunt for it):
-   `assistant telemetry status`; Settings → General → About in the native app;
-   **every user-facing error line** — `Error — instance k7m2p9qx · ref e5178c20`,
-   so a screenshot alone carries both identifiers; and the support bundle /
-   `telemetry preview`.
+   **Surfaced in five places** (an admin must never have to hunt for it):
+   `assistant telemetry status`; `GET /v1/instance`; **the startup banner**
+   (`Assistant 1.4.2 · instance k7m2p9qx · observability: admin=off vendor=T1 local=on`
+   — the cheapest discoverability win for headless Docker: `docker compose logs app | head`
+   answers "what do I quote in a bug report?"); the web dashboard status panel;
+   and **every user-facing error line** — `Error — instance k7m2p9qx · ref e5178c20`,
+   so a screenshot alone carries both identifiers. The native app shows it in
+   Settings → General → About as one client among several.
 
    **Stamped in both observability layers:**
    - **OTel Resource** (`instance.id`, `service.version`) on the shared provider →
@@ -334,9 +337,14 @@ service agreement.
    (per-instance tokens) lands. Track as a known gap, not a design.
 
 **Design (consent, not configuration):**
-1. Consent prompt at onboarding — first run in native app/CLI:
+1. Consent prompt at onboarding — first run in the web UI / native app / CLI:
    *"Help improve Assistant — send anonymous usage statistics? You can see
 exactly what we send."* [Yes / No / Show me the data]
+   **Consent must never *depend* on a prompt:** env vars
+   (`CONSENT_USAGE_STATS` / `CONSENT_OBSERVABILITY`) are the source of truth, and
+   every UI is a convenience layer over them. Headless and partner-embedded
+   deployments have no prompt at all — the partner sets env vars and decides for
+   their clients (§6 default-by-topology).
 2. Anonymous instance ID — random UUID stored locally, resettable
    (`assistant telemetry reset`); never derived from user_id/hostname/license.
 3. **Metrics via OTLP, not a bespoke payload (2026-09-11)** — T1 rides the OTel
@@ -609,9 +617,57 @@ Cheapest high-value item in the plan.
 ### Task scope
 
 1. Error reference IDs on all user-facing errors (short, copyable, trace-derived)
-2. `assistant support bundle` (CLI + a "Report a problem" affordance in the native app):
-   assembles the table above from both layers, shows a **preview with per-section
+2. `assistant support bundle` **as an API first** (`POST /v1/support/bundle`,
+   streams the archive) plus a CLI wrapper and a "Report a problem" affordance in
+   the web dashboard / native app — all thin clients of the same endpoint. For
+   Docker this is the difference between one `curl -H "Authorization: Bearer $KEY"
+   ... -o bundle.zip` and needing `docker compose exec`.
+   Assembles the table above from both layers, shows a **preview with per-section
    toggles**, writes the bundle; content off by default behind a second confirmation
 3. Bundle format documented so the admin can verify exactly what leaves their machine
    — same trust principle as `telemetry preview`
 4. T2 consent prompt rewritten to the "let us look it up" framing (§6)
+
+## 13. Deployment shapes — no native-only features (2026-09-11)
+
+Docker is the distribution, so **the observability surface is the HTTP API + CLI;
+every frontend is a thin client.** The native app is one client among several, never
+a requirement. (Same discipline as the frontend decision: if a capability exists only
+in the Zig app, the contract has leaked.)
+
+### Surface per deployment shape
+
+| Feature | HTTP API | CLI | Web dashboard (D1-1) | Native app | Partner UI (Motion C) |
+|---|---|---|---|---|---|
+| Instance ID / version | `GET /v1/instance` | `telemetry status` | status panel | Settings → About | their own surface |
+| Consent state + toggle | `GET/POST /v1/telemetry/consent` | `telemetry enable/disable` | toggle | onboarding + settings | **env var only** — partner decides |
+| Payload preview | `GET /v1/telemetry/preview` | `telemetry preview` | — | — | — |
+| Error reference | error JSON + `X-Error-Ref` header | stderr | toast | toast | their rendering |
+| Support bundle | `POST /v1/support/bundle` | `support bundle` | button | button | their support flow |
+| Diagnose session | `POST /v1/telemetry/diagnose` | `telemetry diagnose` | — | — | — |
+| Status (consent, last delivery) | `GET /v1/telemetry/status` | `telemetry status` | panel | settings | their own |
+| Local ring buffer | in-process | — | — | — | — |
+
+### Shape-specific notes
+
+- **Docker + web UI** — the dashboard is the admin's control panel: instance ID,
+  version, consent state, last-delivery status ("Support data: enabled, last delivery
+  failed — outbound HTTPS may be blocked"), and the bundle button.
+- **Docker headless / API-only** — no prompt, no UI. Env vars are consent, the
+  **startup banner** is discovery, and `POST /v1/support/bundle` is the report path.
+  Never require `docker compose exec` for support.
+- **Docker + CLI** — everything works from the CLI; `docker compose logs app | head`
+  gives instance ID + version + observability state.
+- **Solo WAN (browser)** — identical to Docker + web UI; no client install.
+- **Partner-embedded (white-label)** — **API-first is a requirement, not a nicety.**
+  Partners must be able to implement their own support flow on top of our endpoints;
+  a native-app-only bundle would leave them unable to support their own clients.
+  Consent is the partner's decision via env vars — we never prompt their users.
+- **Ring buffer works in every shape** — it is an in-process `SpanProcessor` writing
+  to the data dir (which Docker already mounts as a volume). No frontend dependency.
+
+### Auth note
+
+`GET /v1/instance` and the telemetry/support endpoints sit **behind `API_KEY`** —
+instance ID + version is fingerprinting material and should not be world-readable on
+an exposed deployment.
