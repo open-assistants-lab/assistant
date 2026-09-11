@@ -982,8 +982,15 @@ async def ws_conversation(websocket: WebSocket) -> None:
                         pending_container[0] = None
                         break
                     if raw is None:
+                        # Reader sentinel: the socket is closed. The sentinel
+                        # was consumed HERE, so a plain break would return to
+                        # the outer main loop awaiting control_queue.get() on
+                        # a dead queue — a permanently blocked handler (the
+                        # mismatched-call-id WS hang, issue #15). Propagate
+                        # the disconnect instead; the outer try/except logs
+                        # and the finally cleans up.
                         pending_container[0] = None
-                        break
+                        raise WebSocketDisconnect()
                 try:
                     data = json.loads(raw)
                 except json.JSONDecodeError:

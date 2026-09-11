@@ -32,9 +32,19 @@ def _store(tmp_path, name="m.db") -> MeteringStore:
 
 
 def _sink_count() -> int:
-    from src.sdk.audit import default_capture_bus
+    """Count the metering sink's membership on the shared bus only.
 
-    return len(default_capture_bus._sinks)
+    default_capture_bus is process-global: other suites subscribe their own
+    sinks, so counting every sink is collection-order dependent. The
+    teardown contract is observable through the metering module's own sink fn.
+    """
+    from src.sdk.audit import default_capture_bus
+    from src.storage import metering as metering_mod
+
+    fn = getattr(metering_mod, "_metering_sink_fn", None)
+    if fn is None:
+        return 0
+    return 1 if fn in getattr(default_capture_bus, "_sinks", ()) else 0
 
 
 class TestMeteringStore:

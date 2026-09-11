@@ -333,7 +333,7 @@ async def test_direct_loop_construction_sites_wire_audit_store(tmp_path, monkeyp
         def __init__(self, *a, **k):
             pass
 
-        async def run(self, messages):  # noqa: ARG002
+        async def run(self, messages, *, cost_tracker=None):  # noqa: ARG002
             return []
 
     def _fake_create_model_from_config(*a, **k):

@@ -227,7 +227,9 @@ async def test_create_sdk_loop_uses_user_level_runtime_context(monkeypatch, tmp_
             return tmp_path / "Tools"
 
         def workspace_tools_dir(self):
-            raise AssertionError("workspace tools must not be used by cached loop runtime")
+            # Since 6e35a92 this is the deployment-shared base
+            # (data_root/Tools), scanned before the per-user override dir.
+            return tmp_path / "SharedTools"
 
         def user_mcp_config(self):
             return tmp_path / ".mcp.json"
@@ -271,7 +273,10 @@ async def test_create_sdk_loop_uses_user_level_runtime_context(monkeypatch, tmp_
         loop = await runner.create_sdk_loop(user_id="u", workspace_id="ws1")
 
     assert loop.workspace_id == "personal"
-    assert seen_prompt_args == [("u", None)]
+    # a07d8a0 builds the system prompt twice per loop creation: once for the
+    # issue-#18 payload-overhead estimate and once for the AgentLoop itself.
+    # Every call must still be user-level (workspace_id stays None).
+    assert seen_prompt_args == [("u", None), ("u", None)]
 
 
 def test_reset_sdk_loop_without_session_removes_all_user_loops_explicitly(monkeypatch):

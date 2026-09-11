@@ -101,7 +101,10 @@ def test_formula_cells_stored_raw_not_stored(xlsx_formulas: Path, app_name: str)
     # Stronger: open the sqlite file and check raw value is the formula string.
     from src.storage.paths import get_paths
 
-    app_db = get_paths().apps_dir() / "books" / "app.db"
+    # Read the UNIQUE app created by this test — a hardcoded "books" path
+    # reads whatever app happens to exist in the ambient user store
+    # (order/environment dependent; caused the full-suite failure).
+    app_db = get_paths().apps_dir() / app_name / "app.db"
     conn = sqlite3.connect(app_db)
     try:
         (stored,) = conn.execute("SELECT total FROM calc").fetchone()

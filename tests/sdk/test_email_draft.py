@@ -65,7 +65,7 @@ def test_append_draft_issues_imap_append_to_drafts(one_account):
              "imap_host": "imap.example.com", "imap_port": 993},
             msg,
         )
-    ssl_cls.assert_called_once_with("imap.example.com", 993)
+    ssl_cls.assert_called_once_with("imap.example.com", 993, timeout=15)
     args, _ = conn.append.call_args
     assert args[0] == "Drafts"
     assert "Draft" in args[1]

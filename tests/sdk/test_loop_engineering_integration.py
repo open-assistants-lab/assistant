@@ -18,11 +18,14 @@ async def test_ws_passes_rubric_to_runner(monkeypatch):
     import src.config.settings as _cfg
     _cfg._config = None
 
-    monkeypatch.setenv("VERIFICATION_ENABLED", "true")
-    monkeypatch.setenv("VERIFICATION_DEFAULT_RUBRIC", "- Response is non-empty")
-
+    # Config contract: yaml init kwargs beat nested env vars (audit E22 —
+    # only API_HOST/API_PORT/AGENT_MODEL are explicit env fix-ups), so
+    # VERIFICATION_ENABLED=true cannot override the yaml-enabled=False.
+    # Enable verification on the singleton instead.
     from src.config import get_settings
     s = get_settings()
+    s.verification.enabled = True
+    _cfg._config = s
     assert s.verification.enabled is True
     assert s.verification.default_rubric == "- Response is non-empty"
 
@@ -89,8 +92,11 @@ async def test_sse_stream_resolves_rubric_from_settings(monkeypatch):
     import src.config.settings as _cfg
     _cfg._config = None
 
-    monkeypatch.setenv("VERIFICATION_ENABLED", "true")
-    monkeypatch.setenv("VERIFICATION_DEFAULT_RUBRIC", "- Non-empty")
+    # yaml beats env (audit E22) — enable on the singleton directly.
+    from src.config import get_settings
+    s = get_settings()
+    s.verification.enabled = True
+    _cfg._config = s
     monkeypatch.setattr(
         "src.config.user_settings_store.UserSettingsStore.load_grader_prompt",
         lambda self: GraderPromptResponse(

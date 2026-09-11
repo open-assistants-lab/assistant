@@ -15,7 +15,16 @@ def reset_settings():
     set DEPLOYMENT_EA_ROOT / DEPLOYMENT_DATA_PATH.
     """
     saved = {}
-    for var in ("DEPLOYMENT_EA_ROOT", "DEPLOYMENT_DATA_PATH", "DEPLOYMENT_MODE"):
+    for var in (
+        "DEPLOYMENT_EA_ROOT",
+        "DEPLOYMENT_DATA_PATH",
+        "DEPLOYMENT_DATA_ROOT",
+        "DEPLOYMENT_MODE",
+    ):
+        # DEPLOYMENT_DATA_ROOT too: tests/api's session-scoped fixture sets it
+        # and its teardown only runs at session end, so sdk tests inherit it
+        # (long tmp root inflated the skills-context header budget and broke
+        # the description-budget assertions — full-suite order dependence).
         saved[var] = os.environ.pop(var, None)
     from src.config.settings import reload_settings
     from src.storage.paths import _paths_cache

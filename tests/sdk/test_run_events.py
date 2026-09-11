@@ -295,6 +295,9 @@ def test_run_event_schema_has_exact_canonical_discriminator_values() -> None:
         "done",
         "error",
         "interrupt",
+        "user_prompt",
+        "system_prompt",
+        "injection",
     }
 
 
