@@ -424,13 +424,13 @@ pipeline, storage, retention policy, and UI. That's the real price, not the inst
 
 | Task | Scope | Est. |
 |---|---|---|
-| **OB-1** OTel SDK wiring — explicit deps (`opentelemetry-sdk`, `-exporter-otlp-proto-http`, `-instrumentation-{fastapi,sqlalchemy,httpx}`), `src/sdk/observability.py` get-or-create provider (§3a), ClickStack span processor **filtered to drop Langfuse-scoped spans**, startup ordering before any Langfuse client | per §3, §3a | 1–2d |
-| **OB-2** Semantic spans (`sandbox.exec`, `scheduler.cycle`, `background.job`, middleware hook) + PII scrub policy in code | manual spans + attribute policy + tests asserting no content leaks | 2–3d |
+| **OB-1** OTel SDK wiring — explicit deps (`opentelemetry-sdk`, `-exporter-otlp-proto-http`, `-instrumentation-{fastapi,sqlalchemy,httpx}`), `src/sdk/observability.py` get-or-create provider (§3a), ClickStack span processor **filtered to drop Langfuse-scoped spans**, startup ordering before any Langfuse client. **Acceptance: R-PERF-3 budget (§15); baseline captured first** | per §3, §3a, §15 | 1–2d |
+| **OB-2** Semantic spans (`sandbox.exec`, `scheduler.cycle`, `background.job`, middleware hook) + PII scrub policy in code + **noise filter R-PERF-2** | manual spans + attribute policy + tests asserting no content leaks. **Acceptance: R-PERF-3 holds** | 2–3d |
 | **OB-3** Version attributes + baseline queries + HyperDX delta alerts | git SHA in image build, 3 baseline queries, 1 alert, `assistant.*` dashboard | 1d |
 | **OB-4** Alert → webhook → TriggerRegistry → agent investigation | wire the loop end-to-end **+ add the second HyperDX webhook destination on the VM** (§5) | 0.5d |
 | **OB-5** Privacy hardening | fail-closed host requirement (Langfuse + OTel), DEPLOYMENT.md privacy section, test that disabled = zero export | 0.5d |
 | **OB-6** Product telemetry (topology 3) — OTLP metrics, OFF by default, consent prompt, published schema (`docs/telemetry.md`), `telemetry preview/reset/disable` commands, anonymous instance ID, **tokens/cost by provider+model** | per §6 Rule 4 | 1–1.5d |
-| **OB-7** Debugging spans — local SQLite `SpanProcessor` ring buffer (bounded, rotated, never egresses), `telemetry export` bundle (user-inspected, optional content), `telemetry diagnose --ttl` live session, stack-trace PII scrubber | per §6a | 1.5–2d |
+| **OB-7** Debugging spans — local SQLite `SpanProcessor` ring buffer (bounded, rotated, never egresses), `telemetry export` bundle (user-inspected, optional content), `telemetry diagnose --ttl` live session, stack-trace PII scrubber. **Acceptance: R-PERF-1 (§15) — never fsync per span** | per §6a, §15 | 1.5–2d |
 | **OB-10** Admin → vendor bug reporting — error reference IDs, `assistant support bundle` (both layers, preview + toggles), documented bundle format, T2 prompt reframing | per §12 | 1d |
 | **OB-11** Frontend bug tracing — envelope `run_id`/`trace_id`/`seq` (additive), `POST /v1/client-events`, contract-violation catalogue, client capture in the native app, bundle integration | per §14 | 1–2d |
 | **OB-8** (DEFERRED) Profiling | per §7, only on trigger | — |
@@ -776,3 +776,85 @@ Different lifecycle and contract (in-memory, 100-event cap, no retention). A sep
 5. Client events included in the support bundle (§12) and `telemetry preview`
 6. Tests: synthetic violations produce the expected client event; unknown envelope
    fields don't break existing clients
+
+## 15. Performance budget & verification (2026-09-11)
+
+**Starting point (verified):** tracing is **currently off** — `.env` has no
+`LANGFUSE_ENABLED`, so `LangfuseConfig.enabled=False` and the tracer is a no-op with
+no OTel import in the request path. This plan *introduces* the cost rather than adding
+to an existing one, so it must be measured rather than assumed.
+
+### Cost model
+
+| Component | Cost | Notes |
+|---|---|---|
+| SDK + exporter import | **~275 ms** (measured) | Startup only |
+| Auto-instrumentation imports | ~100–300 ms | Startup only |
+| Span creation | ~1–5 µs each | contextvars + timestamps |
+| FastAPI instrumentation | **1–3%** per request | One ASGI span |
+| SQLAlchemy instrumentation | **2–5%** on DB-heavy paths | A span per query |
+| httpx instrumentation | negligible | Dominated by network |
+| **Batch export (both exporters)** | **0% request latency** | Background thread, batched ~5s, bounded queue, drops rather than blocks |
+| Memory | **+40–70 MB RSS** | SDK + two processor queues (~4 MB each) + ring buffer |
+| Export bandwidth | a few KB/batch, gzip | ~100 MB/month worst case |
+
+**Structural point:** exporters are **off the critical path**. `BatchSpanProcessor`
+owns its thread and a bounded queue; a slow or unreachable ClickStack causes **drops,
+never backpressure** into request handling.
+
+### Requirement R-PERF-1 — the ring buffer must never fsync per span
+
+The single implementation detail that decides whether this is free or painful:
+
+| Implementation | Per-span cost | A 150-span run |
+|---|---|---|
+| Naive: `INSERT` + commit per span | **1–10 ms** (fsync) | **+0.15–1.5 s** ❌ |
+| Required: background writer, batched transactions, WAL, `synchronous=NORMAL` | ~µs (queue append) | invisible ✅ |
+
+**Mandatory:**
+- Background writer thread; batch flush every ~500 ms or ~100 spans
+- SQLite `journal_mode=WAL`, `synchronous=NORMAL`
+- **Swallow write errors** — a full disk or locked DB must never raise into the span path
+- Bounded by **both** a row cap and a time cap; eviction must not block
+
+### Requirement R-PERF-2 — noise filtering (volume, not latency)
+
+Auto-instrumentation captures everything. The following are excluded by default or
+handled deliberately, otherwise they bury the signal and inflate storage:
+
+| Noise source | Frequency | Handling |
+|---|---|---|
+| `/health`, `/health/ready` probes | every 10 s → ~17k spans/day | **Excluded** |
+| Subagent work-queue heartbeat | every 5 s → ~17k spans/day | **Excluded** |
+| Scheduler polling cycles | periodic | Excluded unless the cycle does real work |
+| Long-lived WS/SSE connection spans | open for minutes–hours | Kept, but **excluded from p95 latency baselines** (they skew duration stats) |
+
+Implement as a filtering `SpanProcessor` (or `should_export_span`-style predicate) on
+the ClickStack exporter — not as scattered conditionals at call sites.
+
+### Why the LLM-bound argument mostly saves us
+
+A typical agent turn spends 1–30 s in model calls; 5 ms of tracing is ~0.1% of a
+5-second turn. The overhead is only visible in high-frequency *local* loops — exactly
+where R-PERF-2 applies.
+
+### Requirement R-PERF-3 — budget (acceptance for OB-1/OB-2)
+
+| Metric | Budget | How measured |
+|---|---|---|
+| p50/p95 of a representative agent run | **< 5%** vs. baseline | Same scenario, before/after, ≥20 runs |
+| RSS | **< +70 MB** | Steady state after 10 min |
+| Startup | **< +1 s** | Cold start, timed |
+| Spans per run | measured and stable | Catches instrumentation noise regressions |
+
+**Baseline must be captured before OB-1 lands.** "We added tracing and it's slow now"
+is expensive to unwind after the fact; a before/after measurement makes it a
+one-commit revert.
+
+### Failure-mode performance
+
+| Failure | Behaviour |
+|---|---|
+| ClickStack unreachable | Exporter retries with backoff, queue fills, spans dropped. **App unaffected.** Set `OTEL_EXPORTER_OTLP_TIMEOUT=5` (not the 10 s default) so retries don't accumulate |
+| Ring-buffer DB locked / disk full | Errors swallowed; span path continues |
+| Ring-buffer file grows | Row + time caps evict; never unbounded |
