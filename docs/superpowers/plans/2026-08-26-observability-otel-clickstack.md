@@ -1,6 +1,7 @@
 # Observability: OTel + ClickStack complementing Langfuse (2026-08-26)
 
-**Status:** planned (not started)
+**Status:** planned — implementation not started; **verified groundwork complete 2026-09-11**
+(SDK presence, shared-provider trace-ID sharing, live ClickStack ingest, VM retention)
 **Owner:** platform engineering
 **Spec refs:** §6.1 distribution posture (deployment-first), §6.4 session log / audit,
 §6.7 Open SWE research note (H8 deterministic backstops, version baselines)
@@ -32,7 +33,7 @@ no prompts, no completions, no message content of any kind.
 
 | Span | Key attributes | Why ClickStack owns it |
 |---|---|---|
-| `http.request` (WS/SSE/REST) | route, status, duration, user_id (hashed), session_id | Server lifecycle Langfuse doesn't see |
+| `http.request` (WS/SSE/REST) | route, status, duration, **session-scoped opaque ID** (rotating; never `user_id` — see Rule 2) | Server lifecycle Langfuse doesn't see |
 | `db.query` | db (sqlite/hybriddb/chroma), operation class, duration, rows | Pool waits + lock contention are invisible in Langfuse |
 | `sandbox.exec` | backend (soft/hard), command *class* (python/shell), duration, exit code, cpu/mem peak | Unique to us; never the command string |
 | `http.client` | host (gmail.googleapis.com, graph.microsoft.com, models.dev), status, duration | External dependency health |
@@ -45,38 +46,91 @@ Auto-instrumentation for free coverage: `opentelemetry-instrumentation-fastapi`,
 `-sqlalchemy`, `-httpx`. Manual spans only for `sandbox.exec`, `scheduler.cycle`,
 `background.job`, and the middleware hook that matters.
 
-## 3. Collector config sketch (tail sampling = Hud's escalation behavior)
+### 2a. Logs — decision (2026-09-11)
 
-```yaml
-# otel-collector.yaml (sketch)
-receivers:
-  otlp: { protocols: { grpc: {}, http: {} } }
-processors:
-  tail_sampling:
-    decision_wait: 10s
-    policies:
-      - name: keep-errors      # escalate: full detail on anomaly
-        type: status_code
-        status_code: { status_codes: [ERROR] }
-      - name: keep-slow        # escalate: full detail on anomaly
-        type: latency
-        latency: { threshold_ms: 2000 }
-      - name: sample-rest      # steady state: cheap aggregate
-        type: probabilistic
-        probabilistic: { sampling_percentage: 1 }
-  attributes/scrub:
-    actions:
-      - key: user_id          # hash before export
-        action: hash
-      - key: tool.arguments   # never exported
-        action: delete
-exporters:
-  clickhouse: { endpoint: tcp://clickhouse:9000, database: otel }
+**App logs stay local** (`data/logs/*.jsonl` + the per-user audit store); they are
+**not** shipped to `otel_logs`. Rationale: our JSONL logs can carry content (tool
+results, error bodies), and Rule 2 forbids content in the observability layer —
+shipping them would need a scrubbing layer we don't have. The physical layer's job
+is spans + metrics.
+
+**Revisit if** we need operational (non-content) log correlation in HyperDX: then add
+`opentelemetry-instrumentation-logging` with an explicit **allowlist** of log events
+and fields, never a blanket logging bridge.
+
+## 3. Sampling, ingest topology, and provider ownership
+
+### Ingest topology (real — replaces the earlier collector sketch)
+
+```
+app / SDK ──HTTPS──► Caddy  /v1/{traces,metrics,logs}  (basic auth)
+                       └─► reverse_proxy otel-collector:4318
+                             (Authorization rewritten to the OpAMP bearer token)
+                                  └─► ClickHouse
 ```
 
-Cheap in steady state, deep forensics on anomaly — the Hud pattern, without eBPF.
+Collector ports 4317/4318 are intentionally **not** published; the Caddy route is the
+only path. Full details in §11.
 
-**Exporter approach — DECIDED 2026-09-11: use the OTel SDK for everything.**
+**Correction (self-review 2026-09-11):** an earlier draft of this section sketched a
+`tail_sampling` processor plus a `clickhouse` exporter in `otel-collector.yaml`.
+**That is not implementable** — the ClickStack collector is **OpAMP-managed by
+HyperDX** (config pushed to `/etc/otel/supervisor-data/effective.yaml`); edits are
+overwritten on the next sync. The sketch was fiction.
+
+### Sampling — deferred
+
+| Mechanism | Where | Tradeoff |
+|---|---|---|
+| Client-side sampler (`ParentBased` + `TraceIdRatio`) | Our SDK | Cheap; decides at span **start**, so it **cannot** "keep errors" |
+| Self-managed collector in front | A container we own | Full tail sampling; second moving part + another hop |
+| No sampling | — | Simplest; correct at current volume |
+
+**Decision: no sampling now.** The entire OTel dataset is ~128 MiB against 46 GB free —
+sampling would optimise a non-problem and add a component. **Trigger to revisit:**
+sustained ingest > ~5 GiB / 90 days, or a vendor-channel volume/cost problem. Then:
+client-side first (cheapest), self-managed collector only if error-retention is
+genuinely required.
+
+### 3a. Provider ownership — OB-1's core requirement (verified 2026-09-11)
+
+Three verified facts make this the delicate part of the integration:
+
+1. `trace.set_tracer_provider()` is **write-once** — first caller wins.
+2. Langfuse v4 **attaches to an existing provider** rather than replacing it:
+   `_init_tracer_provider` checks `isinstance(get_tracer_provider(), ProxyTracerProvider)`;
+   if a real provider exists it only adds its processor.
+3. There are **two** existing `Langfuse(...)` sites — `src/app_logging.py:83` (Logger
+   init) and `src/sdk/langfuse_tracer.py:53` — and **neither passes `tracer_provider`**.
+
+So whichever initialises first determines the global provider. **Required: one
+`src/sdk/observability.py` with a get-or-create helper:**
+
+```python
+def configure_observability() -> TracerProvider:
+    current = trace.get_tracer_provider()
+    if isinstance(current, ProxyTracerProvider):      # nobody set one yet
+        provider = TracerProvider(resource=_resource())   # service.name, service.version=git SHA
+        trace.set_tracer_provider(provider)
+    else:                                              # Langfuse (or another lib) won
+        provider = current
+    provider.add_span_processor(_clickstack_processor())   # filtered, see below
+    provider.add_span_processor(_ring_buffer_processor())  # §6a — always local
+    return provider
+```
+
+Called **once at startup, before any Langfuse client is constructed** —
+ordering-independent by construction.
+
+**Caveats:**
+- `sample_rate` / `id_generator` passed to `Langfuse()` are **ignored** when a global
+  provider exists (Langfuse logs a warning) — configure sampling on the provider.
+- `LangfuseResourceManager` is a singleton per `public_key`, so the two clients share
+  one resource manager → **one** Langfuse processor, no duplicate export.
+- The ClickStack processor must **drop Langfuse-scoped spans** (see the consequence
+  note below).
+
+### Exporter approach — DECIDED 2026-09-11: use the OTel SDK for everything.
 The SDK is **already installed** as a transitive dependency of `langfuse` 4.14.1
 (`opentelemetry-sdk` 1.39.1, `-api`, `-exporter-otlp-proto-http`, `-proto`,
 `-semantic-conventions`), so the dependency-weight objection is void — the only new
@@ -136,6 +190,14 @@ HyperDX alert on a version regression → webhook → **existing TriggerRegistry
 issue or opens a draft. Pairs with H8 (deterministic backstops) and H6
 (failure→constraint): production behavior feeds back into the constraint library.
 
+**Verified 2026-09-11:** the entry point exists — `POST /webhooks/{trigger_id}` in
+`src/http/routers/webhooks.py` fires `AgentEvent(trigger_type="webhook")`.
+
+**VM-side prerequisite (self-review 2026-09-11):** HyperDX's alert currently POSTs to
+the Telegram bridge (`172.105.168.22:8081`). Adding our TriggerRegistry as a
+destination is a **second webhook configured on the ClickStack VM**, not purely local
+code — budget it in OB-4.
+
 ## 6. Privacy & tenancy rules (non-negotiable)
 
 **Rule 1 — self-hosted deployments phone home to nobody by default.**
@@ -151,6 +213,11 @@ issue or opens a draft. Pairs with H8 (deterministic backstops) and H6
 **Rule 2 — content never enters spans.** IDs, timings, counts, error types, command
 *classes*. No email bodies, no file contents, no tool arguments, no prompts. The
 per-user HybridDB audit store remains the only place content lives.
+
+**Rule 2a — no `user_id` in spans (2026-09-11).** In a single-user self-hosted
+deployment a stable hash *is* that user, so hashing buys nothing. Use a
+**session-scoped opaque ID** that rotates and cannot be correlated across sessions.
+`user_id` is never a span attribute.
 
 **Rule 3 — operator observability ≠ customer audit trail.** Langfuse/ClickStack is
 *our* engineering visibility (and the operator's, if they self-host the stack). The
@@ -180,7 +247,7 @@ OTLP, so both destinations ride the same spans — no double instrumentation.
 
 | Tier | What flows | Destination | Consent prompt |
 |---|---|---|---|
-| **T1 — usage stats** | Aggregate metrics: counts, timings, error classes, versions, tool names | Our ClickStack | "Send anonymous usage statistics" |
+| **T1 — usage stats** | Aggregate metrics: counts, timings, error classes, versions, tool names, **tokens + cost by provider and model** | Our ClickStack | "Send anonymous usage statistics" |
 | **T2 — full observability** | Traces incl. prompts, tool calls, session structure | Our Langfuse + ClickStack | "Send full traces so we can support and debug your deployment" — explicit, informed, DPA-covered |
 
 T1 is the easy yes for everyone; T2 is what makes support possible (you cannot debug
@@ -247,11 +314,18 @@ service agreement.
 exactly what we send."* [Yes / No / Show me the data]
 2. Anonymous instance ID — random UUID stored locally, resettable
    (`assistant telemetry reset`); never derived from user_id/hostname/license.
-3. **Metrics, not spans** — product telemetry must NOT ride the OTel span
-   pipeline. Separate aggregate-metrics payload:
+3. **Metrics via OTLP, not a bespoke payload (2026-09-11)** — T1 rides the OTel
+   **metrics** pipeline (SDK meter API), never the span pipeline. Signals:
    `{instance_id, version, platform, deployment, providers_used,
-tool_counts, error_classes, sessions, latency_buckets}` — no content, no
-   IDs, no paths, no email data, no prompts. Ever.
+tokens_by_provider_model, cost_by_provider_model, tool_counts, error_classes,
+provider_errors, sessions, latency_buckets}` — no content, no IDs, no paths, no
+   email data, no prompts. Ever.
+
+   **Provider AND model, always together.** The same model name can be served by
+   different providers (`ollama:` vs `openai:` routes differ in cost, latency, and
+   failure mode), so every token/cost/error metric carries `gen_ai.provider.name`
+   **and** `gen_ai.request.model`. Rollups by provider alone *and* by model alone
+   must both be derivable. (Feeds H5 model routing + the D1-1 dashboard.)
 4. **Publish the schema** — exact payload in `docs/telemetry.md` + repo.
    "Read the JSON we send" is a trust feature.
 5. **Local preview** — `assistant telemetry preview` prints what would be sent;
@@ -278,6 +352,13 @@ ambient:
 reproduce, hope" into "export the last hour and attach it" — the failure is
 already recorded, no ambient egress, and the customer reviews the file before
 sending. Strictly better than remote debugging *and* better for privacy.
+
+**Mechanism (OB-7):** no file exporter ships with the installed set (only
+`-otlp-proto-{http,grpc}`), so the ring buffer is a **custom `SpanProcessor`**.
+Preferred: a small **local SQLite** table (we already run SQLite everywhere) with a
+row cap + time cap, queryable by `assistant telemetry export`; JSONL-to-rotating-file
+is the fallback if SQLite proves heavy. It is registered on the shared provider
+**unconditionally** — local capture is independent of consent and of the exporters.
 
 **Content rule:** modes 1–3 carry metadata spans only (timings, tool names,
 error classes, stack frames, IDs — same scrub as OB-2). If a bug genuinely needs
@@ -310,29 +391,34 @@ pipeline, storage, retention policy, and UI. That's the real price, not the inst
 
 | Task | Scope | Est. |
 |---|---|---|
-| **OB-1** OTel SDK + auto-instrumentation + collector + ClickStack wiring | deps, config, collector, tail sampling, exporter; verify Langfuse OTLP fan-out (or keep Langfuse SDK path as-is) | 1–2d |
+| **OB-1** OTel SDK wiring — explicit deps (`opentelemetry-sdk`, `-exporter-otlp-proto-http`, `-instrumentation-{fastapi,sqlalchemy,httpx}`), `src/sdk/observability.py` get-or-create provider (§3a), ClickStack span processor **filtered to drop Langfuse-scoped spans**, startup ordering before any Langfuse client | per §3, §3a | 1–2d |
 | **OB-2** Semantic spans (`sandbox.exec`, `scheduler.cycle`, `background.job`, middleware hook) + PII scrub policy in code | manual spans + attribute policy + tests asserting no content leaks | 2–3d |
-| **OB-3** Version attributes + baseline queries + HyperDX delta alerts | git SHA in image build, 3 baseline queries, 1 alert | 1d |
-| **OB-4** Alert → webhook → TriggerRegistry → agent investigation | wire the loop end-to-end | 0.5d |
+| **OB-3** Version attributes + baseline queries + HyperDX delta alerts | git SHA in image build, 3 baseline queries, 1 alert, `assistant.*` dashboard | 1d |
+| **OB-4** Alert → webhook → TriggerRegistry → agent investigation | wire the loop end-to-end **+ add the second HyperDX webhook destination on the VM** (§5) | 0.5d |
 | **OB-5** Privacy hardening | fail-closed host requirement (Langfuse + OTel), DEPLOYMENT.md privacy section, test that disabled = zero export | 0.5d |
-| **OB-6** Product telemetry (topology 3) — metrics only, OFF by default, consent prompt, published schema (`docs/telemetry.md`), `telemetry preview/reset/disable` commands, anonymous instance ID | per §6 Rule 4 | 1–1.5d |
-| **OB-7** Debugging spans — local ring buffer (bounded, rotated, never egresses), `telemetry export` bundle (user-inspected, optional content), `telemetry diagnose --ttl` live session, stack-trace PII scrubber | per §6a | 1.5–2d |
-| **OB-9** Vendor ingest gateway (per-instance tokens at consent time) — see §10 | per §10 | 1–2d |
-| **OB-8** (deferred) Profiling | per §7, only on trigger | — |
+| **OB-6** Product telemetry (topology 3) — OTLP metrics, OFF by default, consent prompt, published schema (`docs/telemetry.md`), `telemetry preview/reset/disable` commands, anonymous instance ID, **tokens/cost by provider+model** | per §6 Rule 4 | 1–1.5d |
+| **OB-7** Debugging spans — local SQLite `SpanProcessor` ring buffer (bounded, rotated, never egresses), `telemetry export` bundle (user-inspected, optional content), `telemetry diagnose --ttl` live session, stack-trace PII scrubber | per §6a | 1.5–2d |
+| **OB-8** (DEFERRED) Profiling | per §7, only on trigger | — |
+| **OB-9** (DEFERRED 2026-09-11) Vendor ingest gateway — per-instance tokens at consent time | per §10 | 1–2d |
 
-Total for OB-1..OB-7: **~1.5–2 weeks** — the 90% of Hud that is worth having,
-plus a debugging story better than most vendors'.
+**Total for active scope (OB-1..OB-7): 8.5–12.5 days ≈ 2–2.5 weeks** — the 90% of
+Hud that is worth having, plus a debugging story better than most vendors'.
+(OB-8/OB-9 are deferred and excluded.)
 
 ## 9. Open questions
 
 1. Does the self-hosted ClickStack run **inside** each customer deployment (per-tenant,
    local-only) or only on the operator's own fleet? Per Rule 1 the former is the
    distribution shape; the latter is for us.
-2. Langfuse OTLP ingestion vs its native SDK path — one collector fanning out to both,
-   or keep the existing `LangfuseTracer` SDK path? Verify against the deployed Langfuse
-   version before OB-1.
-3. Retention: OTel spans (ClickHouse) vs Langfuse traces (its own schema) — align
-   retention windows so the trace_id join doesn't break for one layer first.
+2. ~~Langfuse OTLP ingestion vs native SDK path~~ — **RESOLVED 2026-09-11**: shared
+   `TracerProvider` via get-or-create; verified matching trace IDs; Langfuse attaches
+   to a pre-existing provider. See §3a.
+3. Retention alignment: ClickStack side is now **90 days** (2026-09-11, §11).
+   Langfuse's own retention is still unverified — check the deployed instance before
+   relying on the trace_id join beyond 90 days.
+4. Cross-UI linking: correlation is by trace_id, but there is no hyperlink between
+   HyperDX and Langfuse. Cheap version = a URL template in each direction; not
+   required for OB-1.
 
 ## 10. Vendor ingest gateway — per-instance tokens at consent time (OB-9) — **DEFERRED 2026-09-11**
 
