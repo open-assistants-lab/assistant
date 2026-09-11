@@ -56,9 +56,9 @@ def test_provider_options_reach_provider_chat(client, monkeypatch, capture):
 
     orig = loop_mod.AgentLoop._run_impl
 
-    async def spy_run_impl(self, messages):
+    async def spy_run_impl(self, messages, *, cost_tracker=None):
         seen["po"] = dict(self.run_config.provider_options or {})
-        return await orig(self, messages)
+        return await orig(self, messages, cost_tracker=cost_tracker)
 
     monkeypatch.setattr(loop_mod.AgentLoop, "_run_impl", spy_run_impl)
 
