@@ -71,3 +71,6 @@ results/
 clients/typescript/node_modules/
 clients/typescript/dist/
 .DS_Store
+
+# MCP server config (contains tokens)
+.mcp.json

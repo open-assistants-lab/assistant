@@ -179,14 +179,27 @@ service agreement.
    do not crash; degrade to the local ring buffer and surface status in UI/CLI:
    *"Support data: enabled, last delivery failed — outbound HTTPS may be
    blocked."* Legal/enterprise customers will block it and must see why.
-6. **Ingest path (verified 2026-08-26):** `https://clickstack.gongchatea.com.au/v1/traces`
-   exists but is gated by **Caddy Basic auth** (`realm="restricted"`) — neither
-   the MCP token nor the ingestion key authenticates in any scheme tried
-   (Bearer/raw/x-hyperdx-ingest-key/x-api-key/Basic/query-param, 10 basic-auth
-   combinations). Collector ports 4317/4318 are closed externally (internal-only).
-   Unblock by: (a) supplying the Caddy basic-auth creds, (b) adding a Bearer
-   rule for the ingest path, or (c) — preferred — building the per-instance
-   token + dedicated ingest host from rule 3.
+6. **Ingest path — VERIFIED WORKING 2026-09-11 (gateway deferred).** Decision:
+   **direct ingestion for now** (OB-9 gateway deferred by owner). The public route
+   is Caddy **Basic auth**, credentials `otel:<password>` — *not* the ingestion key
+   and not Bearer. Source of truth: the ziiCloud sync daemon's systemd unit
+   (`sync_ziicloud_gongchaaus/ziicloud-pos-sync.service`).
+
+   | Setting | Value |
+   |---|---|
+   | Endpoint | `https://clickstack.gongchatea.com.au` (+ `/v1/{metrics,traces,logs}`) |
+   | Protocol | `http/protobuf` (JSON also accepted) |
+   | Headers | `Authorization: Basic <base64(otel:...)>` |
+   | Service name | `OTEL_SERVICE_NAME` (e.g. `assistant`) |
+
+   Verified end-to-end: `POST /v1/metrics` → `200 {"partialSuccess":{}}` → metric
+   (`pi.test.gauge = 42.5`, service `pi-otel-test`) queryable via the ClickStack MCP.
+   Collector ports 4317/4318 are closed externally — the Caddy route is the only path.
+
+   **Consequence while deferred:** the shared Basic credential is in every sender's
+   env, so per-instance revocation/attribution/tier-enforcement do not exist yet.
+   Acceptable for our own dogfooding; **must not ship to customers** until OB-9
+   (per-instance tokens) lands. Track as a known gap, not a design.
 
 **Design (consent, not configuration):**
 1. Consent prompt at onboarding — first run in native app/CLI:
@@ -281,7 +294,13 @@ plus a debugging story better than most vendors'.
 3. Retention: OTel spans (ClickHouse) vs Langfuse traces (its own schema) — align
    retention windows so the trace_id join doesn't break for one layer first.
 
-## 10. Vendor ingest gateway — per-instance tokens at consent time (OB-9)
+## 10. Vendor ingest gateway — per-instance tokens at consent time (OB-9) — **DEFERRED 2026-09-11**
+
+> **Owner decision (2026-09-11): defer the gateway; ingest directly to ClickStack
+> and Langfuse for now.** Direct ingestion is verified working (see §6 Rule 4.6).
+> The gateway design below stays as the target state for customer-facing consent —
+> it is required before T1/T2 ships to anyone but us, because the shared Basic
+> credential cannot be revoked, attributed, or tier-enforced.
 
 **Principle: never ship a shared ingestion key.** The customer gets a token minted
 for *their instance*; the ClickStack/Langfuse credentials stay server-side. The
