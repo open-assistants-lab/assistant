@@ -34,6 +34,8 @@ def _registry_fetch_stub() -> None:
 
 _registry_fetch_stub.__test_stub__ = True  # type: ignore[attr-defined]
 
-import src.sdk.registry as _registry_mod
+# The import must stay after the env setup above (E402 expected): the stub
+# only exists to be bound onto the module object once it is imported.
+import src.sdk.registry as _registry_mod  # noqa: E402
 
 _registry_mod._fetch_api = _registry_fetch_stub
