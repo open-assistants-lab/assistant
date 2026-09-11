@@ -76,6 +76,22 @@ exporters:
 
 Cheap in steady state, deep forensics on anomaly — the Hud pattern, without eBPF.
 
+**Exporter approach — two options, both proven.** The ziiCloud sync daemon
+(`sync_ziicloud_gongchaaus/telemetry.py`) ships a **hand-rolled OTLP exporter**:
+builds `ExportMetricsServiceRequest` protobuf directly and POSTs it — no OTel SDK,
+no auto-instrumentation, ~200 lines, full control, negligible dependency weight.
+For **T1 metrics-only** that is the better fit (we already have `requests` and
+`protobuf` via other deps). For **OB-2 spans** the SDK earns its weight
+(context propagation, auto-instrumentation for FastAPI/SQLAlchemy/httpx, batch
+exporter, tail-sampling attributes). Decision: hand-rolled for T1, SDK for spans —
+their implementation is the reference for the former.
+
+Also borrowed from their setup: `argMax(Value, TimeUnix)` for latest-gauge reads,
+`service.version`-style resource attributes (`deployment.environment`,
+`host.name`), and a documented metrics reference (`docs/CLICKSTACK_METRICS.md`)
+with naming convention + alert thresholds — a good template for `assistant.*`
+metrics.
+
 ## 4. Version baselines — the actual Hud feature (highest value, lowest cost)
 
 1. Bake `service.version` = git SHA (short) into the Docker image at build time;
