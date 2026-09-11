@@ -248,7 +248,7 @@ OTLP, so both destinations ride the same spans — no double instrumentation.
 | Tier | What flows | Destination | Consent prompt |
 |---|---|---|---|
 | **T1 — usage stats** | Aggregate metrics: counts, timings, error classes, versions, tool names, **tokens + cost by provider and model** | Our ClickStack | "Send anonymous usage statistics" |
-| **T2 — full observability** | Traces incl. prompts, tool calls, session structure | Our Langfuse + ClickStack | "Send full traces so we can support and debug your deployment" — explicit, informed, DPA-covered |
+| **T2 — full observability** | Traces incl. prompts, tool calls, session structure | Our Langfuse + ClickStack | **"Let us look it up for you"** — with T2 on a bug report is a *timestamp*, not an export: no attachments, no reproduction, no waiting. Explicit, informed, DPA-covered |
 
 T1 is the easy yes for everyone; T2 is what makes support possible (you cannot debug
 a customer's failing agent run from counters). Both off by default, both fail-closed.
@@ -279,8 +279,33 @@ service agreement.
    fleet-wide blast radius if leaked. Mint a per-instance token at consent time
    (revocable, attributable), sent as Bearer to a dedicated ingest host. The
    shared ClickStack ingestion key is for our own dogfooding only.
-4. **Instance identity:** anonymous instance UUID + version on every batch, so a
-   support ticket can locate the customer's traces ("instance abc123, 14:32Z").
+4. **Instance identity — discoverable by the admin, stamped in both layers.**
+   A **short, human-copyable ID** (8 chars base32, e.g. `k7m2p9qx` — *not* a
+   36-char UUID), stable across upgrades, resettable via `assistant telemetry reset`.
+
+   **Surfaced in four places** (an admin must never have to hunt for it):
+   `assistant telemetry status`; Settings → General → About in the native app;
+   **every user-facing error line** — `Error — instance k7m2p9qx · ref e5178c20`,
+   so a screenshot alone carries both identifiers; and the support bundle /
+   `telemetry preview`.
+
+   **Stamped in both observability layers:**
+   - **OTel Resource** (`instance.id`, `service.version`) on the shared provider →
+     present on every span → queryable in ClickStack as
+     `ResourceAttributes['instance.id']`.
+   - **Langfuse trace attributes** via the existing `propagate_attributes(...)` call
+     in `langfuse_tracer.py` (which already sets `user_id`, `session_id`, `tags`):
+     add `metadata={"instance_id": ...}`, `tags=[..., f"instance:{id}"]`
+     (UI-filterable), and `version=<git sha>` — matching ClickStack's
+     `service.version` so both layers filter by release identically.
+
+   **Why both:** resource attributes alone are **not surfaced in the Langfuse UI** —
+   trace-level fields are what make "find everything for this instance" a click
+   rather than an API call. Without the tag, an instance-ID lookup in Langfuse is
+   impractical.
+
+   **Consequence of reset:** regenerating the ID breaks correlation with past
+   reports — that is the privacy-correct trade, and `reset` should say so.
 5. **Fail-closed both directions:** vendor endpoint without consent → refuse to
    start. Consent given but endpoint unreachable (firewalled corporate network) →
    do not crash; degrade to the local ring buffer and surface status in UI/CLI:
@@ -398,12 +423,13 @@ pipeline, storage, retention policy, and UI. That's the real price, not the inst
 | **OB-5** Privacy hardening | fail-closed host requirement (Langfuse + OTel), DEPLOYMENT.md privacy section, test that disabled = zero export | 0.5d |
 | **OB-6** Product telemetry (topology 3) — OTLP metrics, OFF by default, consent prompt, published schema (`docs/telemetry.md`), `telemetry preview/reset/disable` commands, anonymous instance ID, **tokens/cost by provider+model** | per §6 Rule 4 | 1–1.5d |
 | **OB-7** Debugging spans — local SQLite `SpanProcessor` ring buffer (bounded, rotated, never egresses), `telemetry export` bundle (user-inspected, optional content), `telemetry diagnose --ttl` live session, stack-trace PII scrubber | per §6a | 1.5–2d |
+| **OB-10** Admin → vendor bug reporting — error reference IDs, `assistant support bundle` (both layers, preview + toggles), documented bundle format, T2 prompt reframing | per §12 | 1d |
 | **OB-8** (DEFERRED) Profiling | per §7, only on trigger | — |
 | **OB-9** (DEFERRED 2026-09-11) Vendor ingest gateway — per-instance tokens at consent time | per §10 | 1–2d |
 
-**Total for active scope (OB-1..OB-7): 8.5–12.5 days ≈ 2–2.5 weeks** — the 90% of
-Hud that is worth having, plus a debugging story better than most vendors'.
-(OB-8/OB-9 are deferred and excluded.)
+**Total for active scope (OB-1..OB-7 + OB-10): 9.5–13.5 days ≈ 2–2.5 weeks** — the 90%
+of Hud that is worth having, plus a debugging and bug-reporting story better than most
+vendors'. (OB-8/OB-9 are deferred and excluded.)
 
 ## 9. Open questions
 
@@ -527,3 +553,65 @@ published — the Caddy route is the only path.
 **Not needed for our work:** no new source, connection, or collector config —
 the collector accepts any `service.name`. Dashboards/alerts for `assistant.*`
 metrics come later (OB-3), using the same `argMax(Value, TimeUnix)` pattern.
+
+## 12. Admin → vendor bug reporting (OB-10)
+
+**Purpose:** turn "something went wrong" into an artifact we can act on, without
+requiring the admin to understand the observability stack.
+
+### Two paths
+
+| Path | Mechanism | Admin effort | What we get |
+|---|---|---|---|
+| **T2 consent on** | Admin reports *"instance k7m2p9qx, ~14:32 UTC"* | **None** — no attachment | We query our Langfuse + ClickStack directly: full correlated evidence |
+| **T2 consent off** | Admin exports a **support bundle** and sends it | Moderate — review + send | Only what the bundle contains |
+
+**With T2, observability *is* the bug-report channel** — the report is a pointer and
+we already hold the evidence. Without T2 the stack is not the reporting mechanism at
+all; the bundle is, and the stack only contributes spans to it.
+
+### Verified constraint: no programmatic trace sharing
+
+Langfuse's Python API exposes only `get`, `list`, `delete`, `delete_multiple` on
+`trace` — **no share-link method**. So "click to share this trace with support"
+cannot be built from inside the app; handoff must be **lookup** or **bundle**.
+
+### The bundle is bigger than spans
+
+Spans alone are often insufficient — Rule 2 excludes exactly what explains
+content-triggered bugs. A support bundle contains:
+
+| Component | Source | Notes |
+|---|---|---|
+| Instance ID, version, git SHA, platform | App | Attribution + regression lookup |
+| Timestamp window + session/conversation ID | App | Lets us join later if T2 is enabled |
+| Local spans (ring buffer window) | OTel `SpanProcessor` (§6a) | Physical layer |
+| Recent errors + stack traces | Local logs | **Redacted** — exception messages carry PII |
+| Config (redacted) | Settings | Providers/models, feature flags |
+| Semantic trace (**optional**) | **Their** Langfuse, via the app's keys | The app already holds their keys, so it can assemble this *for* them |
+| Content (**optional, explicit**) | Conversation store | Second confirmation; never default |
+
+The optional-semantic-trace row is the useful property: because the app has the
+admin's Langfuse credentials, **it can assemble a rich bundle from both layers even
+when they live on the admin's own infrastructure** — no T2 required, no access grant.
+
+### Error reference IDs — the missing bridge
+
+Every user-facing error carries a short ref derived from the trace ID
+(`Error — instance k7m2p9qx · ref e5178c20`). This:
+- identifies the exact local trace/span,
+- makes `assistant support bundle --ref e5178c20` pull the *right* window instead of
+  "last hour, hope",
+- gives a support ticket something resolvable to quote even from a screenshot.
+
+Cheapest high-value item in the plan.
+
+### Task scope
+
+1. Error reference IDs on all user-facing errors (short, copyable, trace-derived)
+2. `assistant support bundle` (CLI + a "Report a problem" affordance in the native app):
+   assembles the table above from both layers, shows a **preview with per-section
+   toggles**, writes the bundle; content off by default behind a second confirmation
+3. Bundle format documented so the admin can verify exactly what leaves their machine
+   — same trust principle as `telemetry preview`
+4. T2 consent prompt rewritten to the "let us look it up" framing (§6)
