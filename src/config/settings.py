@@ -196,6 +196,19 @@ class LangfuseConfig(_BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LANGFUSE_")
 
 
+class OtelConfig(_BaseSettings):
+    """Admin-channel OTLP export configuration (OB-0).
+
+    Empty endpoint = no exporter is ever constructed (fail-closed).
+    Vendor/telemetry consent channels are out of scope here.
+    """
+
+    endpoint: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
+
+    model_config = SettingsConfigDict(env_prefix="OTEL_")
+
+
 class LoggingConfig(_BaseSettings):
     """Logging configuration."""
 
@@ -211,6 +224,7 @@ class ObservabilityConfig(_BaseSettings):
 
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     langfuse: LangfuseConfig = Field(default_factory=LangfuseConfig)
+    otel: OtelConfig = Field(default_factory=OtelConfig)
 
 
 class AuthConfig(_BaseSettings):
@@ -593,6 +607,48 @@ def validate_model_reference(
     return provider.lower(), model
 
 
+_DEFAULT_LANGFUSE_HOST = "https://cloud.langfuse.com"
+
+
+def _resolve_langfuse_host(config: AppConfig) -> str:
+    """Effective explicit Langfuse host, or "" when none was configured.
+
+    Mirrors app_logging's resolution order; LANGFUSE_BASE_URL (the name
+    users copy off the Langfuse setup page) is primary, LANGFUSE_HOST the
+    legacy alias. The cloud default sentinel counts as NOT configured —
+    treating it as configured is the footgun this validation exists to close.
+    """
+    host = (
+        os.environ.get("LANGFUSE_BASE_URL")
+        or os.environ.get("LANGFUSE_HOST")
+        or config.langfuse.host
+        or ""
+    )
+    if host.strip() == _DEFAULT_LANGFUSE_HOST:
+        return ""
+    return host.strip()
+
+
+def validate_observability_settings(config: AppConfig) -> None:
+    """Fail closed on an ambiguous Langfuse destination (OB-0).
+
+    An operator who enables Langfuse with credentials but configures no
+    host would silently ship traces to cloud.langfuse.com (the SDK
+    default). Refuse to boot instead; the fix is one env var.
+    Disabled or key-less Langfuse needs no host and always passes.
+    """
+    lf = config.langfuse
+    if not (lf.enabled and lf.public_key and lf.secret_key):
+        return
+    if not _resolve_langfuse_host(config):
+        raise ValueError(
+            "LANGFUSE is enabled with credentials but no host is configured: "
+            "set LANGFUSE_BASE_URL (or legacy LANGFUSE_HOST, or "
+            "observability.langfuse.host in config.yaml). Refusing to "
+            "default to cloud.langfuse.com."
+        )
+
+
 def validate_startup_model_references(config: AppConfig) -> None:
     """Validate effective deployment model references at application startup.
 
@@ -691,6 +747,13 @@ def get_settings() -> AppConfig:
             val = os.environ.get(env_key)
             if val:
                 setattr(_config.oidc, field_name, val)
+        # OB-0: fail closed on an ambiguous Langfuse destination before any
+        # client can be constructed against the cloud default.
+        try:
+            validate_observability_settings(_config)
+        except ValueError:
+            _config = None  # don't cache a half-validated singleton
+            raise
     return _config
 
 

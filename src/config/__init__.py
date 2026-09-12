@@ -8,12 +8,14 @@ from src.config.settings import (
     LangfuseConfig,
     MemoryConfig,
     ObservabilityConfig,
+    OtelConfig,
     SkillsConfig,
     StoreConfig,
     SummarizationConfig,
     ToolsConfig,
     get_settings,
     reload_settings,
+    validate_observability_settings,
 )
 
 __all__ = [
@@ -24,10 +26,12 @@ __all__ = [
     "LangfuseConfig",
     "MemoryConfig",
     "ObservabilityConfig",
+    "OtelConfig",
     "SkillsConfig",
     "StoreConfig",
     "SummarizationConfig",
     "ToolsConfig",
     "get_settings",
     "reload_settings",
+    "validate_observability_settings",
 ]
