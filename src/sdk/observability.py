@@ -28,7 +28,60 @@ from typing import Any
 
 from src.config import AppConfig
 
+try:
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+        OTLPSpanExporter,
+    )
+    from opentelemetry.sdk.trace import ReadableSpan
+    from opentelemetry.sdk.trace.export import (
+        BatchSpanProcessor,
+        SpanExporter,
+        SpanExportResult,
+    )
+except Exception:  # pragma: no cover - otel ships with langfuse
+    OTLPSpanExporter = None  # type: ignore[assignment,misc]
+    ReadableSpan = None  # type: ignore[assignment,misc]
+    BatchSpanProcessor = None  # type: ignore[assignment,misc]
+    SpanExporter = None  # type: ignore[assignment,misc]
+    SpanExportResult = None  # type: ignore[assignment,misc]
+
 logger = logging.getLogger("src.sdk.observability")
+
+# Physical-layer attribute allowlist (spec §Destination routing). Only these
+# keys survive to the admin OTLP destination; everything else — prompts,
+# tool arguments/results, message content, unknown instrumentation attrs —
+# is dropped at the exporter. Extend deliberately, never wholesale.
+ALLOWED_PHYSICAL_ATTRIBUTES = frozenset(
+    {
+        # release identity (version baselines)
+        "service.version",
+        "deployment.commit",
+        "deployment.environment",
+        "instance.id",
+        # HTTP server lifecycle
+        "http.request.method",
+        "http.route",
+        "http.response.status_code",
+        "url.path",
+        "url.scheme",
+        # database operation class (never db.statement)
+        "db.system",
+        "db.operation",
+        # sandbox / background work
+        "sandbox.backend",
+        "sandbox.exit_code",
+        "scheduler.cycle_type",
+        "background.job_type",
+        # model identity (provider+model are not content)
+        "gen_ai.provider.name",
+        "gen_ai.request.model",
+        # errors: type only, never the message
+        "error.type",
+    }
+)
+
+# Instrumentation scopes whose spans never belong in the physical layer.
+DEFAULT_DROPPED_SCOPES = ("langfuse",)
 
 _state: dict[str, Any] = {
     "provider": None,
@@ -63,6 +116,98 @@ def _reset_langfuse_singleton() -> None:  # pragma: no cover - test hook point
 def _register_owned_processor(processor: Any) -> None:
     """Register a processor this module owns and must shut down (Task 3+)."""
     _state["owned_processors"].append(processor)
+
+
+class FilteringSpanExporter(SpanExporter):
+    """Admin-destination exporter: physical spans only, allowlisted attrs.
+
+    Exporter-side filtering (spec: never mutate the immutable ReadableSpan):
+    spans whose instrumentation scope matches ``dropped_scopes`` (e.g.
+    ``langfuse``) are dropped entirely; every other span is forwarded as a
+    NEW ReadableSpan carrying only ``allowed_attributes``. The shared trace
+    ID survives — it is the join key between the semantic and physical
+    layers.
+
+    Delegate failures are swallowed and counted: a dead OTLP endpoint must
+    never raise into the span path (spec: exporters are off the critical
+    path; drops, never backpressure).
+    """
+
+    def __init__(
+        self,
+        delegate: Any,
+        allowed_attributes: frozenset[str] | None = None,
+        dropped_scopes: tuple[str, ...] = DEFAULT_DROPPED_SCOPES,
+    ) -> None:
+        super().__init__()
+        self._delegate = delegate
+        self._allowed = allowed_attributes or ALLOWED_PHYSICAL_ATTRIBUTES
+        self._dropped_scopes = dropped_scopes
+        self.failure_count = 0
+
+    def _is_dropped(self, span: Any) -> bool:
+        scope_name = (
+            getattr(getattr(span, "instrumentation_scope", None), "name", "") or ""
+        )
+        return any(
+            scope_name == scope or scope_name.startswith(scope + ".")
+            for scope in self._dropped_scopes
+        )
+
+    def _filtered_copy(self, span: Any) -> Any:
+        attrs = {
+            key: value
+            for key, value in (getattr(span, "attributes", None) or {}).items()
+            if key in self._allowed
+        }
+        # Build a NEW immutable ReadableSpan — original is untouched.
+        return ReadableSpan(
+            name=span.name,
+            context=span.context,
+            parent=span.parent,
+            resource=span.resource,
+            attributes=attrs,
+            events=span.events,
+            links=span.links,
+            kind=span.kind,
+            instrumentation_scope=span.instrumentation_scope,
+            start_time=span.start_time,
+            end_time=span.end_time,
+            status=span.status,
+        )
+
+    def export(self, spans: Any) -> Any:
+        forwarded = []
+        try:
+            for span in spans:
+                if self._is_dropped(span):
+                    continue
+                forwarded.append(self._filtered_copy(span))
+        except Exception as exc:  # filtering must never raise
+            self.failure_count += 1
+            logger.warning(
+                "observability.export_filter_failed", {"error": str(exc)}
+            )
+            return SpanExportResult.FAILURE
+        if not forwarded:
+            return SpanExportResult.SUCCESS
+        try:
+            return self._delegate.export(forwarded)
+        except Exception as exc:
+            self.failure_count += 1
+            logger.warning(
+                "observability.export_delegate_failed",
+                {"error": str(exc), "dropped_spans": len(forwarded)},
+            )
+            return SpanExportResult.FAILURE
+
+    def shutdown(self) -> None:
+        try:
+            self._delegate.shutdown()
+        except Exception as exc:
+            logger.warning(
+                "observability.export_delegate_shutdown_failed", {"error": str(exc)}
+            )
 
 
 def configure_observability(settings: AppConfig) -> Any | None:
@@ -103,6 +248,26 @@ def configure_observability(settings: AppConfig) -> Any | None:
 
     _state["provider"] = provider
     _state["owns_provider"] = owns
+
+    # Admin OTLP export (Task 3): built ONLY for an explicit non-empty
+    # endpoint. Empty endpoint = no exporter exists = zero outbound requests.
+    otel_cfg = getattr(getattr(settings, "observability", None), "otel", None)
+    endpoint = str(getattr(otel_cfg, "endpoint", "") or "")
+    if endpoint and OTLPSpanExporter is not None and BatchSpanProcessor is not None:
+        delegate = OTLPSpanExporter(
+            endpoint=endpoint,
+            headers=dict(getattr(otel_cfg, "headers", None) or {}),
+            timeout=5,  # spec R-PERF: retries must not accumulate
+        )
+        exporter = FilteringSpanExporter(delegate)
+        processor = BatchSpanProcessor(exporter, export_timeout_millis=5000)
+        provider.add_span_processor(processor)
+        _register_owned_processor(processor)
+    elif endpoint:
+        logger.warning(
+            "observability.otel_exporter_unavailable", {"endpoint_set": True}
+        )
+
     return provider
 
 
