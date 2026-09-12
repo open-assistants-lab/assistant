@@ -45,16 +45,31 @@ class LangfuseTracer:
     _client: Any | None = None  # langfuse.Langfuse singleton
 
     @classmethod
-    def init(cls, public_key: str, secret_key: str, host: str) -> None:
-        """Initialize Langfuse client. Called once on startup."""
+    def init(
+        cls,
+        public_key: str,
+        secret_key: str,
+        host: str,
+        tracer_provider: Any | None = None,
+    ) -> None:
+        """Initialize Langfuse client. Called once on startup.
+
+        ``tracer_provider`` (OB-0): the shared SDK TracerProvider from
+        src.sdk.observability — passing it keeps Langfuse spans on the same
+        trace IDs as any other destination and prevents Langfuse from
+        creating a second global provider. None preserves legacy behavior.
+        """
         try:
             from langfuse import Langfuse
 
-            cls._client = Langfuse(
-                public_key=public_key,
-                secret_key=secret_key,
-                base_url=host,
-            )
+            client_kwargs: dict[str, Any] = {
+                "public_key": public_key,
+                "secret_key": secret_key,
+                "base_url": host,
+            }
+            if tracer_provider is not None:
+                client_kwargs["tracer_provider"] = tracer_provider
+            cls._client = Langfuse(**client_kwargs)
             # OTel's detach() swallows the cross-context ValueError itself and
             # logs a full traceback; silence that expected teardown noise.
             stdlib_logging.getLogger("opentelemetry.context").addFilter(

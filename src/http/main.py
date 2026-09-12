@@ -60,6 +60,15 @@ load_dotenv(REPO_ROOT / ".env")
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Lifespan context manager — SDK runtime."""
+    # OB-0: own the OTel provider slot BEFORE any logger/Langfuse construction
+    # (write-once; ordering-independent degradation if someone else won it).
+    from src.sdk import observability as _observability
+
+    try:
+        _observability.configure_observability(get_settings())
+    except Exception as _obs_exc:  # never block startup on telemetry
+        print(f"observability: configure failed ({_obs_exc})")
+
     desktop_mode = desktop_mode_active()
     warn_unknown_model_providers(get_settings())
     _token_refresh_task: asyncio.Task[Any] | None = None
@@ -131,6 +140,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from src.sdk.providers.factory import close_all_providers
 
         await close_all_providers()
+    except Exception:
+        pass
+
+    # OB-0: flush/shut down owned telemetry processors exactly once, after
+    # all run traffic has drained.
+    try:
+        _observability.shutdown_observability()
     except Exception:
         pass
 

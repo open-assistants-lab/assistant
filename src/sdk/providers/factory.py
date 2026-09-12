@@ -523,20 +523,11 @@ def _maybe_wrap_langfuse(provider: LLMProvider) -> LLMProvider:
     if getattr(provider, "_langfuse_wrapped", False):
         return provider
     from src.config import get_settings
+    from src.sdk.observability import ensure_langfuse_initialized
 
     lf_settings = get_settings()
-    if (
-        lf_settings.langfuse.enabled
-        and lf_settings.langfuse.public_key
-        and lf_settings.langfuse.secret_key
-    ):
+    if ensure_langfuse_initialized(lf_settings):
         from src.sdk.langfuse_tracer import LangfuseTracer
-        if not LangfuseTracer.is_enabled():
-            LangfuseTracer.init(
-                public_key=lf_settings.langfuse.public_key,
-                secret_key=lf_settings.langfuse.secret_key,
-                host=lf_settings.langfuse.host,
-            )
         if LangfuseTracer.is_enabled():
             provider = LangfuseTracer.wrap_provider(provider)
             provider._langfuse_wrapped = True  # type: ignore[attr-defined]

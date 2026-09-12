@@ -2,7 +2,6 @@
 
 import json
 import logging as stdlib_logging
-import os
 import time
 import uuid
 from collections.abc import Generator
@@ -49,52 +48,10 @@ class Logger:
         if self.enabled:
             self.json_dir.mkdir(parents=True, exist_ok=True)
 
-        # Langfuse
-        self.langfuse: Any = None
-        self.langfuse_handler: Any = None
-        self._init_langfuse()
-
-    def _init_langfuse(self) -> None:
-        """Initialize Langfuse with callback handler."""
-        settings = get_settings()
-        config = settings.langfuse
-
-        if not config.enabled:
-            return
-
-        public_key = os.environ.get("LANGFUSE_PUBLIC_KEY") or config.public_key
-        secret_key = os.environ.get("LANGFUSE_SECRET_KEY") or config.secret_key
-        # Respect the name users copy directly off the Langfuse setup page
-        # (LANGFUSE_BASE_URL); LANGFUSE_HOST remains the legacy alias.
-        host = (
-            os.environ.get("LANGFUSE_BASE_URL")
-            or os.environ.get("LANGFUSE_HOST")
-            or config.host
-        )
-
-        # Set tracing environment from config or env var
-        if config.environment:
-            os.environ["LANGFUSE_TRACING_ENVIRONMENT"] = config.environment
-
-        if public_key and secret_key:
-            try:
-                from langfuse import Langfuse
-
-                self.langfuse = Langfuse(
-                    public_key=public_key,
-                    secret_key=secret_key,
-                    host=host if host and host != "https://cloud.langfuse.com" else None,
-                )
-                self.langfuse_handler = None
-                self.info(
-                    "logger",
-                    {
-                        "event": "langfuse_initialized",
-                        "environment": os.environ.get("LANGFUSE_TRACING_ENVIRONMENT", "default"),
-                    },
-                )
-            except Exception as e:
-                self.warning("logger", {"event": "langfuse_init_failed", "error": str(e)})
+        # OB-0: the Logger never constructed anything with its old Langfuse
+        # client (logging is JSONL-only), yet its early import won OTel's
+        # write-once provider slot away from the shared lifecycle. Langfuse
+        # initialization now lives solely in src.sdk.observability.
 
     def _redact(self, data: dict[str, Any]) -> dict[str, Any]:
         """Redact sensitive fields from data."""

@@ -824,25 +824,17 @@ async def create_sdk_loop(
         user_id=user_id,
     )
 
-    # Wrap with Langfuse if enabled
+    # Wrap with Langfuse if enabled — OB-0: single init path via
+    # src.sdk.observability (shared provider, fail-closed host resolution).
     lf_settings = get_settings()
-    if (
-        lf_settings.langfuse.enabled
-        and lf_settings.langfuse.public_key
-        and lf_settings.langfuse.secret_key
-    ):
+    from src.sdk.observability import ensure_langfuse_initialized
+
+    if ensure_langfuse_initialized(lf_settings):
         from src.sdk.langfuse_tracer import LangfuseTracer
 
-        if not LangfuseTracer.is_enabled():
-            LangfuseTracer.init(
-                public_key=lf_settings.langfuse.public_key,
-                secret_key=lf_settings.langfuse.secret_key,
-                host=lf_settings.langfuse.host,
-            )
-        if LangfuseTracer.is_enabled():
-            loop = LangfuseTracer.wrap_loop(
-                loop, user_id=user_id, session_id=runtime_session_id
-            )
+        loop = LangfuseTracer.wrap_loop(
+            loop, user_id=user_id, session_id=runtime_session_id
+        )
 
     return loop
 
