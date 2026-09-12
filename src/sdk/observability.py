@@ -24,6 +24,7 @@ Vendor telemetry (consent tiers, vendor endpoints) is explicitly out of scope.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -111,6 +112,8 @@ ALLOWED_RESOURCE_ATTRIBUTES = frozenset(
     }
 )
 
+_sql_instrumented_ids: set[int] = set()
+
 _state: dict[str, Any] = {
     "provider": None,
     "owns_provider": False,
@@ -163,10 +166,166 @@ def physical_span(name: str, **attributes: Any) -> Iterator[Any]:
     if provider is None:
         yield None
         return
-    with provider.get_tracer("assistant.physical").start_as_current_span(
-        name, attributes=attributes
-    ) as span:
+    tracer_override = getattr(provider, "_tracer_override", None)
+    tracer = tracer_override or provider.get_tracer("assistant.physical")
+    with tracer.start_as_current_span(name, attributes=attributes) as span:
         yield span
+
+
+def instrument_provider_http(provider: Any) -> None:
+    """Wrap a provider's httpx request seam with an ``http.client`` span.
+
+    Carries host/status/method/duration ONLY. The URL path, query string,
+    request body, and response content never enter span attributes; the
+    provider's own (semantic) spans remain the only place content is
+    recorded, and the exporter drops those at the admin destination.
+    """
+    if not physical_active() or getattr(provider, "_ob1_http_instrumented", False):
+        return
+    original_post = provider._http_client
+    provider._ob1_http_instrumented = True
+
+    class _InstrumentedClient:
+        def __init__(self, client: Any) -> None:
+            self._client = client
+
+        def __getattribute__(self, name: str) -> Any:
+            client = object.__getattribute__(self, "_client")
+            if name == "post":
+                return _wrap_post(client)
+            if name == "stream":
+                return _wrap_stream(client)
+            if name == "is_closed":
+                return getattr(client, "is_closed", False)
+            if name == "aclose":
+                return getattr(client, "aclose", None)
+            return getattr(client, name)
+
+    def _wrap_post(client: Any):
+        async def wrapped(url: str, **kwargs: Any) -> Any:
+            from urllib.parse import urlparse
+
+            host = urlparse(url).netloc
+            start = time.monotonic()
+            try:
+                response = await client.post(url, **kwargs)
+                with physical_span(
+                    "http.client",
+                    **{
+                        "http.request.method": "POST",
+                        "server.address": host,
+                        "http.response.status_code": getattr(
+                            response, "status_code", 0
+                        ),
+                        "duration_ms": round((time.monotonic() - start) * 1000, 3),
+                    },
+                ) as span:
+                    if span is not None:
+                        pass
+                return response
+            except Exception as exc:
+                with physical_span(
+                    "http.client",
+                    **{
+                        "http.request.method": "POST",
+                        "server.address": host,
+                        "error.type": type(exc).__name__,
+                        "duration_ms": round((time.monotonic() - start) * 1000, 3),
+                    },
+                ):
+                    pass
+                raise
+
+        return wrapped
+
+    def _wrap_stream(client: Any):
+        def wrapped(url: str, **kwargs: Any):
+            return client.stream(url, **kwargs)
+
+        return wrapped
+
+    provider._http_client = _InstrumentedClient(original_post)
+
+
+def instrument_sqlite_connection(conn: Any) -> Any:
+    """Return an execute-wrapping proxy for a sqlite3 connection.
+
+    Carries operation class + duration ONLY. The SQL statement text and
+    parameters never enter span attributes (Rule 2: content never enters
+    the physical layer).
+
+    ``sqlite3.Connection`` rejects attribute assignment, so instrumentation
+    is a proxy object tracked in a module registry (id-keyed) rather than
+    an attribute flag. When observability is inactive the connection is
+    returned unchanged.
+    """
+    if not physical_active() or id(conn) in _sql_instrumented_ids:
+        return conn
+    _sql_instrumented_ids.add(id(conn))
+    original_execute = conn.execute
+
+    def wrapped_execute(sql: str, *args: Any) -> Any:
+        statement = str(sql).strip().lower()
+        if statement.startswith("select"):
+            op = "select"
+        elif statement.startswith("insert"):
+            op = "insert"
+        elif statement.startswith("update"):
+            op = "update"
+        elif statement.startswith("delete"):
+            op = "delete"
+        elif statement.startswith("create"):
+            op = "create"
+        elif statement.startswith("pragma"):
+            op = "pragma"
+        else:
+            op = "other"
+        start = time.monotonic()
+        try:
+            result = original_execute(sql, *args)
+            with physical_span(
+                "db.query",
+                **{
+                    "db.system": "sqlite",
+                    "db.operation": op,
+                    "duration_ms": round((time.monotonic() - start) * 1000, 3),
+                },
+            ) as span:
+                if span is not None:
+                    pass
+            return result
+        except Exception as exc:
+            with physical_span(
+                "db.query",
+                **{
+                    "db.system": "sqlite",
+                    "db.operation": op,
+                    "error.type": type(exc).__name__,
+                    "duration_ms": round((time.monotonic() - start) * 1000, 3),
+                },
+            ):
+                pass
+            raise
+
+    proxy = _SQLiteProxy(conn, wrapped_execute)
+    return proxy
+
+
+class _SQLiteProxy:
+    """Delegating proxy so wrapped execute rides on the real connection."""
+
+    def __init__(self, conn: Any, execute: Any) -> None:
+        object.__setattr__(self, "_conn", conn)
+        object.__setattr__(self, "_wrapped_execute", execute)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(object.__getattribute__(self, "_conn"), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(object.__getattribute__(self, "_conn"), name, value)
+
+    def execute(self, sql: str, *args: Any) -> Any:
+        return object.__getattribute__(self, "_wrapped_execute")(sql, *args)
 
 
 def _register_owned_processor(processor: Any) -> None:
