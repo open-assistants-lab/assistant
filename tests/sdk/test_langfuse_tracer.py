@@ -257,3 +257,85 @@ def test_wrap_provider_uses_langfuse_name_override(monkeypatch):
 
     asyncio.run(collect())
     assert client.gen_name == "title_generation"
+
+
+def test_ensure_initialized_uses_base_url_and_shared_provider(monkeypatch):
+    """OB-0 fix round 1: RunService.trace_run reaches ensure_initialized
+    BEFORE loop construction, so the lazy path must resolve the host via
+    the BASE_URL-primary resolver and inject the shared tracer_provider —
+    never the cloud.langfuse.com sentinel and never a providerless client."""
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    import src.config.settings as _cfg
+    import src.sdk.observability as obs
+    from src.sdk.langfuse_tracer import LangfuseTracer
+
+    obs._reset_for_tests()
+    LangfuseTracer._client = None
+
+    init_calls: list[dict] = []
+
+    class FakeLangfuse:
+        def __init__(self, **kwargs):
+            init_calls.append(kwargs)
+
+        def start_as_current_observation(self, as_type=None, name=None, **kw):
+            @contextmanager
+            def _cm():
+                yield SimpleNamespace(update=lambda **k: None)
+
+            return _cm()
+
+    import langfuse as langfuse_mod
+
+    monkeypatch.setattr(langfuse_mod, "Langfuse", FakeLangfuse)
+
+    # Hermetic: propagate_attributes must not touch a live OTLP pipeline.
+    @contextmanager
+    def _fake_propagate(**kwargs):
+        yield
+
+    monkeypatch.setattr(langfuse_mod, "propagate_attributes", _fake_propagate)
+
+    # get_client() lazily constructs a REAL client from env — patch it to
+    # raise like "no global client" so _get_client() falls back to the fake
+    # singleton (no network, ever).
+    def _no_global_client():
+        raise RuntimeError("no global Langfuse client (test)")
+
+    monkeypatch.setattr(langfuse_mod, "get_client", _no_global_client)
+
+    set_providers: list = []
+    from opentelemetry import trace as otel_trace
+
+    monkeypatch.setattr(otel_trace, "set_tracer_provider", set_providers.append)
+    monkeypatch.setattr(
+        otel_trace, "get_tracer_provider", lambda: otel_trace.ProxyTracerProvider()
+    )
+
+    monkeypatch.setenv("LANGFUSE_ENABLED", "true")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lazy")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lazy")
+    monkeypatch.setenv("LANGFUSE_BASE_URL", "http://lf-primary.local")
+    monkeypatch.delenv("LANGFUSE_HOST", raising=False)
+    _cfg._config = None
+
+    try:
+        # Exercise the lazy path exactly as RunService.trace_run does.
+        with LangfuseTracer.trace_run("user-1", "session-1") as trace:
+            assert trace is not None
+        # Idempotent: a second lazy entry point must not re-initialize.
+        with LangfuseTracer.trace_span("phase") as span:
+            assert span is not None
+
+        assert len(init_calls) == 1
+        kwargs = init_calls[0]
+        assert kwargs["base_url"] == "http://lf-primary.local"
+        assert kwargs["tracer_provider"] is not None
+        assert kwargs["tracer_provider"] is obs._state["provider"]
+        assert len(set_providers) == 1
+    finally:
+        obs._reset_for_tests()
+        LangfuseTracer._client = None
+        _cfg._config = None

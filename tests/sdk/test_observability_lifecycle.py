@@ -44,6 +44,17 @@ def obs_reset(monkeypatch):
         lambda *a, **k: calls.__setitem__("flush", calls["flush"] + 1),
     )
 
+    # Never permanently consume OTel's write-once global provider slot from
+    # tests: creation is recorded, not installed; reads see a fresh proxy.
+    from opentelemetry import trace as otel_trace
+
+    monkeypatch.setattr(
+        otel_trace, "set_tracer_provider", calls["set_provider"].append
+    )
+    monkeypatch.setattr(
+        otel_trace, "get_tracer_provider", lambda: otel_trace.ProxyTracerProvider()
+    )
+
     yield obs, calls
     obs._reset_for_tests()
 

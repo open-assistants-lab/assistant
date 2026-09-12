@@ -29,7 +29,8 @@ class LogLevel(IntEnum):
 
 
 class Logger:
-    """Logger for Assistant - logs to JSONL and Langfuse."""
+    """Logger for Assistant - logs to JSONL (Langfuse tracing lives in
+    src.sdk.observability / LangfuseTracer, not here)."""
 
     # Fields to redact (sensitive data)
     REDACTED_FIELDS = {"api_key", "password", "secret", "token", "key"}

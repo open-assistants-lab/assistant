@@ -105,15 +105,21 @@ class LangfuseTracer:
         client exists before the first run-level context opens (the loop
         wrapper inits it lazily, which is too late for RunService's
         trace_run on the first run).
+
+        OB-0 fix round 1: this lazy path previously constructed the client
+        directly with the raw configured host — bypassing BASE_URL-primary
+        host resolution and shared-provider injection. It now delegates to
+        observability.ensure_langfuse_initialized, the single fail-closed
+        construction path (resolved host + shared tracer_provider). Lazy
+        imports avoid the circular import.
         """
         if cls._client is not None:
             return
         try:
             from src.config import get_settings
+            from src.sdk.observability import ensure_langfuse_initialized
 
-            lf = get_settings().langfuse
-            if lf.enabled and lf.public_key and lf.secret_key:
-                cls.init(public_key=lf.public_key, secret_key=lf.secret_key, host=lf.host)
+            ensure_langfuse_initialized(get_settings())
         except Exception:
             pass
 
