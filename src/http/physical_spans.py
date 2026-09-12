@@ -5,6 +5,12 @@ per request and nothing more. Behavior:
 
 - only ``http`` scopes are instrumented; websocket connections bypass the
   middleware entirely (long-lived connections never enter latency pools)
+- **SSE/streaming responses ARE instrumented, and their spans measure
+  CONNECTION LIFETIME** (span ends when the stream closes, not when the
+  first byte is sent). Such spans must be EXCLUDED — or explicitly
+  flagged — from request-latency baseline calculations (R-PERF-2 §noise:
+  "long-lived WS/SSE connection spans … excluded from p95 latency
+  baselines"); exclusion itself is applied at query/alert time (OB-3)
 - health probes (``/health``, ``/health/ready``) are excluded (R-PERF-2
   noise filter: ~17k spans/day otherwise)
 - attributes are restricted to the physical allowlist: method, route,

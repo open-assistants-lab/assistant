@@ -7,6 +7,10 @@ Covers:
   headers, or body content
 - websocket connections bypass the HTTP middleware entirely (no spans;
   long-lived connections never skew latency baselines)
+- NOTE on SSE/streaming: those requests DO produce spans, but the span
+  measures CONNECTION LIFETIME (until the stream closes). They must be
+  excluded/flagged from request-latency baselines at query time (OB-3);
+  these tests only assert the WS bypass, not SSE handling
 - when the OB-0 provider is NOT configured, the middleware short-circuits
   and no spans exist (instrumentation is conditional by design)
 - sandbox backends emit one ``sandbox.exec`` span with backend, command
