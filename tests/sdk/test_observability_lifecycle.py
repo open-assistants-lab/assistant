@@ -210,3 +210,83 @@ async def test_lifespan_orders_configure_before_logger(obs_reset, monkeypatch):
     assert order[0] == "configure"
     assert "logger" in order[1:]
     assert order[-1] == "shutdown"
+
+
+async def test_real_lifespan_disabled_makes_no_exporter_and_enabled_inits_once(
+    obs_reset, monkeypatch
+):
+    """OB-0 Task 4 gate: the REAL (unpatched) lifespan lifecycle.
+
+    - Disabled (empty OTEL endpoint, keyless Langfuse): zero OTLP exporter
+      construction, configure+shutdown each exactly once.
+    - Enabled explicit endpoint: exporter constructed exactly once, still
+      one configure and one shutdown — and hermetic (exporter stubbed, no
+      network).
+    """
+    obs, calls = obs_reset
+
+    import src.config.settings as settings_module
+    from src.http import main as main_mod
+
+    configure_calls = {"n": 0}
+    shutdown_calls = {"n": 0}
+    real_configure = obs.configure_observability
+    real_shutdown = obs.shutdown_observability
+
+    def counting_configure(settings):
+        configure_calls["n"] += 1
+        return real_configure(settings)
+
+    def counting_shutdown():
+        shutdown_calls["n"] += 1
+        return real_shutdown()
+
+    monkeypatch.setattr(obs, "configure_observability", counting_configure)
+    monkeypatch.setattr(obs, "shutdown_observability", counting_shutdown)
+
+    exporter_builds = {"n": 0}
+
+    class HermeticExporter(obs.OTLPSpanExporter):
+        def __init__(self, *a, **k):  # never touches the network
+            exporter_builds["n"] += 1
+            self._sent = []
+            self._shutdown = False
+
+        def export(self, spans):  # noqa: D102 - hermetic no-op
+            self._sent.append(list(spans))
+            return obs.SpanExportResult.SUCCESS
+
+        def shutdown(self):  # noqa: D102
+            self._shutdown = True
+            return True
+
+    monkeypatch.setattr(obs, "OTLPSpanExporter", HermeticExporter)
+
+    def _reload_settings_cache() -> None:
+        settings_module._config = None
+
+    # Phase A: disabled (empty endpoint; keyless Langfuse in the test env).
+    monkeypatch.delenv("OTEL_ENDPOINT", raising=False)
+    monkeypatch.setenv("LANGFUSE_ENABLED", "false")
+    _reload_settings_cache()
+    async with main_mod.lifespan(app=SimpleNamespace()):
+        pass
+    assert configure_calls["n"] == 1
+    assert shutdown_calls["n"] == 1
+    assert exporter_builds["n"] == 0
+
+    # Phase B: explicit admin endpoint → exactly one exporter build.
+    monkeypatch.setenv("OTEL_ENDPOINT", "http://127.0.0.1:9/v1/traces")
+    _reload_settings_cache()
+    obs._reset_for_tests()
+    configure_calls["n"] = 0
+    shutdown_calls["n"] = 0
+    async with main_mod.lifespan(app=SimpleNamespace()):
+        pass
+    assert configure_calls["n"] == 1
+    assert shutdown_calls["n"] == 1
+    assert exporter_builds["n"] == 1
+
+    # Restore the shared settings cache for subsequent tests in this module.
+    _reload_settings_cache()
+    settings_module.reload_settings()

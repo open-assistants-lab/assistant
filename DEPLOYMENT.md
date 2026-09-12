@@ -288,6 +288,38 @@ host) for a local model server.
   (`LOGGING_LEVEL`, `LOGGING_JSON_DIR`).
 - **Traces**: Langfuse if configured (see envs above).
 
+### Admin tracing (OB-0 foundation)
+
+Two optional, independent admin-owned channels. Both are **off unless
+explicitly configured**; an unconfigured deployment makes zero outbound
+observability requests. There is **no vendor telemetry channel** in OB-0 —
+no consent tiers, no vendor endpoints, nothing egresses to the vendor.
+
+**Langfuse (agent semantics — traces, generations, tool spans):**
+
+- `LANGFUSE_ENABLED=true` + `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY`
+  enable it.
+- **Host is required, fail-closed**: an enabled Langfuse with credentials
+  but no explicit host **refuses to start** rather than defaulting to
+  `cloud.langfuse.com`. Set `LANGFUSE_BASE_URL`
+  (`https://<your-langfuse-host>` — the same spelling Langfuse's own setup
+  page shows); legacy `LANGFUSE_HOST` is still accepted.
+
+**Admin OTLP export (physical spans to your own ClickStack/collector):**
+
+- `OTEL_ENDPOINT=<full OTLP/HTTP traces URL>` — e.g.
+  `https://clickstack.example.com/v1/traces`. Empty/unset = no exporter is
+  ever constructed.
+- `OTEL_HEADERS=<json object>` — optional auth headers for the collector.
+- Exported spans are **filtered**: Langfuse-generated semantic spans
+  (prompts, completions, tool arguments/results) are dropped at the
+  exporter; only allowlisted physical attributes (HTTP lifecycle, DB
+  operation class, sandbox/backend, scheduler/background, error *types*,
+  model identity, release identity) reach the destination. Your Langfuse
+  instance keeps the semantic view; the shared trace ID joins the two.
+- Export runs on a bounded background batch (5 s timeout); a slow or
+  unreachable collector causes **drops, never request backpressure**.
+
 ## Production hardening checklist
 
 - [ ] `API_KEY` set on any server reachable beyond localhost

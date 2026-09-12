@@ -2,6 +2,14 @@
 
 **Status:** planned — implementation not started; **verified groundwork complete 2026-09-11**
 (SDK presence, shared-provider trace-ID sharing, live ClickStack ingest, VM retention)
+**OB-0 foundation LANDED 2026-09-12** — `src/sdk/observability.py` owns one
+fail-closed provider lifecycle (`configure_observability` / `shutdown_observability`),
+Langfuse initialization is centralized and receives the shared provider (trace IDs
+join across layers), the admin OTLP exporter exists and **filters Langfuse-scoped
+semantic spans + non-allowlisted attributes at the exporter** (§3a consequence
+handled), and a disabled/unconfigured deployment performs zero outbound requests.
+OB-1 is unblocked: add auto/manual instrumentation on top of this lifecycle.
+See `docs/superpowers/specs/2026-09-12-observability-foundation-design.md`.
 **Owner:** platform engineering
 **Spec refs:** §6.1 distribution posture (deployment-first), §6.4 session log / audit,
 §6.7 Open SWE research note (H8 deterministic backstops, version baselines)
@@ -516,6 +524,7 @@ pipeline, storage, retention policy, and UI. That's the real price, not the inst
 
 | Task | Scope | Est. |
 |---|---|---|
+| **OB-0** ✅ **DONE 2026-09-12** | Foundation (was §3a prerequisite): one `TracerProvider` lifecycle in `src/sdk/observability.py`, sole Langfuse init path receiving the shared provider, fail-closed host validation, lifespan start/shutdown, admin OTLP exporter with scope + attribute filtering (drop `langfuse-sdk` spans, allowlisted physical attrs only), zero vendor egress | spec: `2026-09-12-observability-foundation-design.md` |
 | **OB-1** OTel SDK wiring — explicit deps (`opentelemetry-sdk`, `-exporter-otlp-proto-http`, `-instrumentation-{fastapi,sqlalchemy,httpx}`), `src/sdk/observability.py` get-or-create provider (§3a), ClickStack span processor **filtered to drop Langfuse-scoped spans**, startup ordering before any Langfuse client. **Acceptance: R-PERF-3 budget (§15); baseline captured first** | per §3, §3a, §15 | 1–2d |
 | **OB-2** Semantic spans (`sandbox.exec`, `scheduler.cycle`, `background.job`, middleware hook) + PII scrub policy in code + **noise filter R-PERF-2** | manual spans + attribute policy + tests asserting no content leaks. **Acceptance: R-PERF-3 holds** | 2–3d |
 | **OB-3** Version attributes + baseline queries + HyperDX delta alerts | git SHA in image build, 3 baseline queries, 1 alert, `assistant.*` dashboard | 1d |
