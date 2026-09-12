@@ -26,24 +26,21 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from src.config import AppConfig
+# opentelemetry-sdk and the OTLP HTTP exporter are direct runtime
+# dependencies (declared in pyproject.toml alongside langfuse, which itself
+# requires the OTel SDK) — no guarded fallback: an import failure here should
+# fail loudly at startup, not degrade into a broken half-observability state.
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+    OTLPSpanExporter,
+)
+from opentelemetry.sdk.trace import ReadableSpan
+from opentelemetry.sdk.trace.export import (
+    BatchSpanProcessor,
+    SpanExporter,
+    SpanExportResult,
+)
 
-try:
-    from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
-        OTLPSpanExporter,
-    )
-    from opentelemetry.sdk.trace import ReadableSpan
-    from opentelemetry.sdk.trace.export import (
-        BatchSpanProcessor,
-        SpanExporter,
-        SpanExportResult,
-    )
-except Exception:  # pragma: no cover - otel ships with langfuse
-    OTLPSpanExporter = None  # type: ignore[assignment,misc]
-    ReadableSpan = None  # type: ignore[assignment,misc]
-    BatchSpanProcessor = None  # type: ignore[assignment,misc]
-    SpanExporter = None  # type: ignore[assignment,misc]
-    SpanExportResult = None  # type: ignore[assignment,misc]
+from src.config import AppConfig
 
 logger = logging.getLogger("src.sdk.observability")
 
@@ -51,6 +48,11 @@ logger = logging.getLogger("src.sdk.observability")
 # keys survive to the admin OTLP destination; everything else — prompts,
 # tool arguments/results, message content, unknown instrumentation attrs —
 # is dropped at the exporter. Extend deliberately, never wholesale.
+#
+# Deferred to OB-1 (deliberately NOT here): filtering span *events*,
+# *links*, and per-destination *resource* attributes. OB-0 ships the
+# attribute-level boundary only; those surfaces need their own red/green
+# coverage when the physical spans that populate them exist.
 ALLOWED_PHYSICAL_ATTRIBUTES = frozenset(
     {
         # release identity (version baselines)
@@ -81,7 +83,14 @@ ALLOWED_PHYSICAL_ATTRIBUTES = frozenset(
 )
 
 # Instrumentation scopes whose spans never belong in the physical layer.
-DEFAULT_DROPPED_SCOPES = ("langfuse",)
+#
+# The REAL Langfuse v4 tracer scope is ``langfuse-sdk`` — verified against
+# ``langfuse._client.constants.LANGFUSE_TRACER_NAME`` (the test imports the
+# constant so scope drift cannot silently pass). ``langfuse`` and
+# ``langfuse.*`` remain dropped defensively (v3-style scopes, custom
+# wrappers). Keep prefix semantics: scope == entry or scope.startswith(
+# entry + ".").
+DEFAULT_DROPPED_SCOPES = ("langfuse", "langfuse-sdk")
 
 _state: dict[str, Any] = {
     "provider": None,

@@ -80,11 +80,15 @@ def test_physical_span_exported_with_trace_id_and_allowed_attrs():
 
 
 def test_langfuse_scope_span_is_dropped():
+    from langfuse._client.constants import LANGFUSE_TRACER_NAME
+
     from src.sdk.observability import FilteringSpanExporter
 
     delegate = RecordingExporter()
     exporter = FilteringSpanExporter(delegate)
-    lf_span = _make_span("langfuse", {"prompt.text": "SECRET"})
+    # The REAL Langfuse v4 instrumentation scope (verified: 'langfuse-sdk')
+    # — a stale hardcoded 'langfuse' filter must not pass this test.
+    lf_span = _make_span(LANGFUSE_TRACER_NAME, {"prompt.text": "SECRET"})
 
     result = exporter.export([lf_span])
 
@@ -157,7 +161,18 @@ def _settings_with_otel(endpoint: str) -> SimpleNamespace:
 
 def test_exporter_built_only_with_explicit_endpoint(obs_reset, monkeypatch):
     obs = obs_reset
-    constructed: list[object] = []
+    from opentelemetry import trace as otel_trace
+
+    # Never consume the real write-once global provider slot from tests:
+    # reads always see a fresh proxy, writes are recorded.
+    set_calls: list[object] = []
+    monkeypatch.setattr(
+        otel_trace, "get_tracer_provider", lambda: otel_trace.ProxyTracerProvider()
+    )
+    monkeypatch.setattr(otel_trace, "set_tracer_provider", set_calls.append)
+
+    constructed: list[dict[str, object]] = []
+    batch_kwargs: list[dict[str, object]] = []
 
     class FakeOTLPExporter:
         def __init__(self, **kwargs):
@@ -169,14 +184,31 @@ def test_exporter_built_only_with_explicit_endpoint(obs_reset, monkeypatch):
         def shutdown(self) -> None:  # pragma: no cover
             return None
 
+    class FakeBatchProcessor:
+        def __init__(self, exporter, **kwargs):
+            batch_kwargs.append(kwargs)
+
+        def shutdown(self) -> None:  # pragma: no cover
+            return None
+
     monkeypatch.setattr(obs, "OTLPSpanExporter", FakeOTLPExporter)
+    monkeypatch.setattr(obs, "BatchSpanProcessor", FakeBatchProcessor)
 
     provider_off = obs.configure_observability(_settings_with_otel(""))
     assert provider_off is not None
     assert obs._state["owned_processors"] == []
+    assert constructed == [] and batch_kwargs == []
 
     obs._reset_for_tests()
-    provider_on = obs.configure_observability(_settings_with_otel("https://otel.admin.example"))
+    provider_on = obs.configure_observability(
+        _settings_with_otel("https://otel.admin.example")
+    )
     assert provider_on is not None
     assert len(constructed) == 1
+    assert len(batch_kwargs) == 1
     assert len(obs._state["owned_processors"]) == 1
+    # Spec R-PERF: bounded retries — exporter timeout 5s (seconds), batch
+    # processor export timeout 5000ms.
+    assert constructed[0]["timeout"] == 5
+    assert batch_kwargs[0]["export_timeout_millis"] == 5000
+    assert set_calls, "provider must be installed exactly once per configure"
