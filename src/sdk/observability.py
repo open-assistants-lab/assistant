@@ -24,6 +24,8 @@ Vendor telemetry (consent tiers, vendor endpoints) is explicitly out of scope.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 # opentelemetry-sdk and the OTLP HTTP exporter are direct runtime
@@ -73,6 +75,7 @@ ALLOWED_PHYSICAL_ATTRIBUTES = frozenset(
         "db.operation",
         # sandbox / background work
         "sandbox.backend",
+        "sandbox.command_class",
         "sandbox.exit_code",
         "scheduler.cycle_type",
         "background.job_type",
@@ -136,6 +139,34 @@ def _reset_for_tests() -> None:
 
 def _reset_langfuse_singleton() -> None:  # pragma: no cover - test hook point
     """Hook point for tests that must isolate the Langfuse singleton."""
+
+
+def physical_active() -> bool:
+    """True when the OB-0 provider is configured in THIS process.
+
+    Instrumentation guards on this so an unconfigured deployment pays
+    zero observability cost (no tracer lookup, no attributes, no spans).
+    """
+    return _state["provider"] is not None
+
+
+@contextmanager
+def physical_span(name: str, **attributes: Any) -> Iterator[Any]:
+    """Open a physical-layer span under the OB-0 provider.
+
+    No-op (yields ``None``) when observability is not configured — callers
+    must tolerate the ``None`` span. Attributes passed here MUST be members
+    of ``ALLOWED_PHYSICAL_ATTRIBUTES``; the exporter drops anything else,
+    but callers should not rely on that as a scrubbing mechanism.
+    """
+    provider = _state["provider"]
+    if provider is None:
+        yield None
+        return
+    with provider.get_tracer("assistant.physical").start_as_current_span(
+        name, attributes=attributes
+    ) as span:
+        yield span
 
 
 def _register_owned_processor(processor: Any) -> None:

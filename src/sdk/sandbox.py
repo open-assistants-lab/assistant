@@ -39,6 +39,32 @@ from src.app_logging import get_logger
 
 logger = get_logger()
 
+
+def _command_class(argv: list[str]) -> str:
+    """Classify a sandbox invocation WITHOUT ever retaining the command.
+
+    For bwrap-style dispatchers the real command follows the ``--``
+    separator; classification looks only at the effective binary's basename
+    so no argument text (paths, flags, inline code) is ever recorded.
+    """
+    effective = argv
+    if "--" in argv:
+        effective = argv[argv.index("--") + 1 :]
+    base = os.path.basename(effective[0]) if effective else ""
+    if base.startswith("python"):
+        return "python"
+    if base in {"bash", "sh", "zsh", "dash", "ksh"}:
+        return "shell"
+    return "other"
+
+
+def _sandbox_span_attrs(backend: str, argv: list[str]) -> dict[str, str]:
+    """Allowlisted physical attributes for a sandbox.exec span."""
+    return {
+        "sandbox.backend": backend,
+        "sandbox.command_class": _command_class(argv),
+    }
+
 # Env allowlist: only these pass through to sandboxed processes.
 _ENV_ALLOWLIST = {
     "PATH",
@@ -148,18 +174,25 @@ class NullSandboxBackend:
         env_extra: dict[str, str] | None = None,
     ) -> SandboxResult:
         lim = limits or SandboxLimits()
-        try:
-            proc = subprocess.run(  # noqa: S603 - argv list, no shell
-                argv,
-                cwd=str(cwd),
-                capture_output=True,
-                text=True,
-                timeout=lim.timeout_seconds,
-                env=env_extra,
-            )
-            return SandboxResult(proc.returncode, proc.stdout, proc.stderr)
-        except subprocess.TimeoutExpired:
-            return SandboxResult(-1, timed_out=True)
+        from src.sdk.observability import physical_span
+
+        with physical_span("sandbox.exec", **_sandbox_span_attrs("null", argv)) as span:
+            try:
+                proc = subprocess.run(  # noqa: S603 - argv list, no shell
+                    argv,
+                    cwd=str(cwd),
+                    capture_output=True,
+                    text=True,
+                    timeout=lim.timeout_seconds,
+                    env=env_extra,
+                )
+                if span is not None:
+                    span.set_attribute("sandbox.exit_code", proc.returncode)
+                return SandboxResult(proc.returncode, proc.stdout, proc.stderr)
+            except subprocess.TimeoutExpired:
+                if span is not None:
+                    span.set_attribute("sandbox.exit_code", -1)
+                return SandboxResult(-1, timed_out=True)
 
     def validate_write_path(self, path: Path, workspace_root: Path) -> str | None:
         return None  # passthrough: no validation
@@ -264,36 +297,43 @@ class SoftSandboxBackend:
                         )
                         os._exit(78)
 
-        try:
-            proc = subprocess.run(  # noqa: S603 - argv list, no shell
-                argv,
-                cwd=str(cwd),
-                capture_output=True,
-                text=True,
-                timeout=lim.timeout_seconds,
-                env=env,
-                preexec_fn=_preexec,
-            )
-            # Issue #15: capture a bounded headroom (8× the tool-facing
-            # limit, matching the child's RLIMIT_FSIZE multiple) so the
-            # tool's spill-to-file predicate can recover the FULL output.
-            # Clamping at the tool limit made spill unreachable.
-            capture_cap = lim.max_output_bytes * 8
-            return SandboxResult(
-                proc.returncode,
-                proc.stdout[:capture_cap],
-                proc.stderr[: lim.max_output_bytes],
-                stdout_truncated=len(proc.stdout) > lim.max_output_bytes,
-            )
-        except subprocess.TimeoutExpired as e:
-            out = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-            err = (e.stderr or b"").decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
-            return SandboxResult(
-                -1,
-                str(out)[: lim.max_output_bytes],
-                str(err)[: lim.max_output_bytes],
-                timed_out=True,
-            )
+        from src.sdk.observability import physical_span
+
+        with physical_span("sandbox.exec", **_sandbox_span_attrs("soft", argv)) as span:
+            try:
+                proc = subprocess.run(  # noqa: S603 - argv list, no shell
+                    argv,
+                    cwd=str(cwd),
+                    capture_output=True,
+                    text=True,
+                    timeout=lim.timeout_seconds,
+                    env=env,
+                    preexec_fn=_preexec,
+                )
+                # Issue #15: capture a bounded headroom (8× the tool-facing
+                # limit, matching the child's RLIMIT_FSIZE multiple) so the
+                # tool's spill-to-file predicate can recover the FULL output.
+                # Clamping at the tool limit made spill unreachable.
+                capture_cap = lim.max_output_bytes * 8
+                if span is not None:
+                    span.set_attribute("sandbox.exit_code", proc.returncode)
+                return SandboxResult(
+                    proc.returncode,
+                    proc.stdout[:capture_cap],
+                    proc.stderr[: lim.max_output_bytes],
+                    stdout_truncated=len(proc.stdout) > lim.max_output_bytes,
+                )
+            except subprocess.TimeoutExpired as e:
+                out = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+                err = (e.stderr or b"").decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+                if span is not None:
+                    span.set_attribute("sandbox.exit_code", -1)
+                return SandboxResult(
+                    -1,
+                    str(out)[: lim.max_output_bytes],
+                    str(err)[: lim.max_output_bytes],
+                    timed_out=True,
+                )
 
     def validate_write_path(self, path: Path, workspace_root: Path) -> str | None:
         if path_outside_workspace(path, workspace_root):
@@ -441,28 +481,35 @@ class BwrapSandboxBackend:
                 except (OSError, ValueError):
                     pass
 
-        try:
-            proc = subprocess.run(  # noqa: S603 - argv list, no shell
-                bwrap_argv,
-                cwd=str(cwd),
-                capture_output=True,
-                text=True,
-                timeout=lim.timeout_seconds,
-                env=env,
-                preexec_fn=_preexec,
-            )
-            # Issue #15: capture headroom (8×, matching RLIMIT_FSIZE) so
-            # the tool's spill predicate stays reachable and the spill file
-            # holds the full output.
-            capture_cap = lim.max_output_bytes * 8
-            return SandboxResult(
-                proc.returncode,
-                proc.stdout[:capture_cap],
-                proc.stderr[: lim.max_output_bytes],
-                stdout_truncated=len(proc.stdout) > lim.max_output_bytes,
-            )
-        except subprocess.TimeoutExpired:
-            return SandboxResult(-1, timed_out=True)
+        from src.sdk.observability import physical_span
+
+        with physical_span("sandbox.exec", **_sandbox_span_attrs("bwrap", argv)) as span:
+            try:
+                proc = subprocess.run(  # noqa: S603 - argv list, no shell
+                    bwrap_argv,
+                    cwd=str(cwd),
+                    capture_output=True,
+                    text=True,
+                    timeout=lim.timeout_seconds,
+                    env=env,
+                    preexec_fn=_preexec,
+                )
+                # Issue #15: capture headroom (8×, matching RLIMIT_FSIZE) so
+                # the tool's spill predicate stays reachable and the spill file
+                # holds the full output.
+                capture_cap = lim.max_output_bytes * 8
+                if span is not None:
+                    span.set_attribute("sandbox.exit_code", proc.returncode)
+                return SandboxResult(
+                    proc.returncode,
+                    proc.stdout[:capture_cap],
+                    proc.stderr[: lim.max_output_bytes],
+                    stdout_truncated=len(proc.stdout) > lim.max_output_bytes,
+                )
+            except subprocess.TimeoutExpired:
+                if span is not None:
+                    span.set_attribute("sandbox.exit_code", -1)
+                return SandboxResult(-1, timed_out=True)
 
     def validate_write_path(self, path: Path, workspace_root: Path) -> str | None:
         # Kernel-enforced: only the workspace is mounted writable.

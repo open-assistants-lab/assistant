@@ -203,6 +203,13 @@ else:
         allow_credentials=False,
     )
 
+# OB-1 Task 2: physical request spans (admin OTLP only; no-op unless the
+# OB-0 provider is configured). Registered last so it wraps the whole
+# middleware stack in the span.
+from src.http.physical_spans import register_physical_http_spans  # noqa: E402
+
+register_physical_http_spans(app)
+
 
 _PUBLIC_PATHS = {
     "/health",
