@@ -33,12 +33,14 @@ from typing import Any
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
     OTLPSpanExporter,
 )
-from opentelemetry.sdk.trace import ReadableSpan
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
     SpanExporter,
     SpanExportResult,
 )
+from opentelemetry.trace import Status
 
 from src.config import AppConfig
 
@@ -91,6 +93,20 @@ ALLOWED_PHYSICAL_ATTRIBUTES = frozenset(
 # wrappers). Keep prefix semantics: scope == entry or scope.startswith(
 # entry + ".").
 DEFAULT_DROPPED_SCOPES = ("langfuse", "langfuse-sdk")
+
+# Resource-attribute allowlist (OB-1 Task 1): only release-identity fields
+# survive to the admin OTLP destination. Anything else on the resource —
+# host.name, user.id, custom deployment labels — is fingerprinting or
+# secret-carrying material and never leaves the process.
+ALLOWED_RESOURCE_ATTRIBUTES = frozenset(
+    {
+        "service.name",
+        "service.version",
+        "deployment.commit",
+        "deployment.environment",
+        "instance.id",
+    }
+)
 
 _state: dict[str, Any] = {
     "provider": None,
@@ -163,6 +179,37 @@ class FilteringSpanExporter(SpanExporter):
             for scope in self._dropped_scopes
         )
 
+    def _filtered_resource(self, resource: Any) -> Resource:
+        attrs = {
+            key: value
+            for key, value in dict(getattr(resource, "attributes", None) or {}).items()
+            if key in ALLOWED_RESOURCE_ATTRIBUTES
+        }
+        return Resource(attrs)
+
+    def _filtered_events(self, events: Any) -> tuple[Event, ...]:
+        filtered: list[Event] = []
+        for event in events or ():
+            filtered.append(
+                Event(
+                    name=event.name,
+                    timestamp=event.timestamp,
+                    attributes={
+                        key: value
+                        for key, value in dict(
+                            getattr(event, "attributes", None) or {}
+                        ).items()
+                        if key in self._allowed
+                    },
+                )
+            )
+        return tuple(filtered)
+
+    def _filtered_status(self, status: Any) -> Status:
+        # Status.description routinely carries exception messages (PII) —
+        # only the status code is physical-layer material.
+        return Status(status_code=status.status_code)
+
     def _filtered_copy(self, span: Any) -> Any:
         attrs = {
             key: value
@@ -170,19 +217,24 @@ class FilteringSpanExporter(SpanExporter):
             if key in self._allowed
         }
         # Build a NEW immutable ReadableSpan — original is untouched.
+        # Events keep name/timestamp but lose non-allowlisted attributes
+        # (exception.message/stacktrace); links are dropped entirely (no
+        # physical-layer contract exists for them yet); the resource is
+        # filtered to release-identity only; the status loses its
+        # human-readable description.
         return ReadableSpan(
             name=span.name,
             context=span.context,
             parent=span.parent,
-            resource=span.resource,
+            resource=self._filtered_resource(span.resource),
             attributes=attrs,
-            events=span.events,
-            links=span.links,
+            events=self._filtered_events(span.events),
+            links=(),
             kind=span.kind,
             instrumentation_scope=span.instrumentation_scope,
             start_time=span.start_time,
             end_time=span.end_time,
-            status=span.status,
+            status=self._filtered_status(span.status),
         )
 
     def export(self, spans: Any) -> Any:

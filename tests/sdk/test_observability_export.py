@@ -150,6 +150,165 @@ def test_mixed_batch_drops_langfuse_keeps_physical():
     assert delegate.batches[0][0].attributes == {"http.route": "/health"}
 
 
+# ---------------------------------------------------------------------------
+# OB-1 Task 1: metadata boundary — events, links, resource attrs, status.
+
+
+def _make_span_with_exception():
+    """Real ended span carrying an exception event + error status.
+
+    The exception message is PII-shaped on purpose: it must never survive
+    export. ``error.type`` (span attribute) is allowlisted and must survive.
+    """
+    from opentelemetry.sdk.trace import TracerProvider as SDKTracerProvider
+    from opentelemetry.trace import Status, StatusCode
+
+    provider = SDKTracerProvider()
+    tracer = provider.get_tracer("assistant.physical")
+    span = tracer.start_span("tool.exec", attributes={"error.type": "TimeoutError"})
+    secret_message = "email to john@firm.com not found"
+    try:
+        raise TimeoutError(secret_message)
+    except TimeoutError as exc:
+        span.record_exception(exc)
+    span.set_status(Status(StatusCode.ERROR, secret_message))
+    span.end()
+    return span, secret_message
+
+
+def test_exception_event_message_and_status_description_dropped():
+    from src.sdk.observability import FilteringSpanExporter
+
+    delegate = RecordingExporter()
+    exporter = FilteringSpanExporter(delegate)
+    span, secret_message = _make_span_with_exception()
+
+    exporter.export([span])
+
+    assert len(delegate.batches) == 1
+    exported = delegate.batches[0][0]
+
+    # Status: error code kept, human-readable description (PII carrier) gone.
+    assert exported.status.status_code == span.status.status_code
+    assert not exported.status.description
+
+    # Span attribute: allowlisted error type survives.
+    assert exported.attributes == {"error.type": "TimeoutError"}
+
+    # Event attributes: nothing non-allowlisted (exception.message,
+    # exception.stacktrace, exception.type) reaches the delegate.
+    from src.sdk.observability import ALLOWED_PHYSICAL_ATTRIBUTES
+
+    assert exported.events, "event itself is kept, attributes filtered"
+    for event in exported.events:
+        assert set(event.attributes or {}) <= set(ALLOWED_PHYSICAL_ATTRIBUTES)
+        assert not any(
+            "john@firm.com" in str(value)
+            for value in (event.attributes or {}).values()
+        )
+        assert "SECRET-" not in str(event.attributes)
+
+    # Original span untouched: filtering must never mutate the source.
+    assert span.status.description == secret_message
+    assert any(
+        "exception.message" in (e.attributes or {}) for e in span.events
+    )
+
+
+def test_links_are_dropped_entirely():
+    from opentelemetry.sdk.trace import TracerProvider as SDKTracerProvider
+    from opentelemetry.trace import Link, SpanContext
+
+    from src.sdk.observability import FilteringSpanExporter
+
+    delegate = RecordingExporter()
+    exporter = FilteringSpanExporter(delegate)
+
+    provider = SDKTracerProvider()
+    tracer = provider.get_tracer("assistant.physical")
+    link_context = SpanContext(trace_id=0x111111, span_id=0x222222, is_remote=False)
+    span = tracer.start_span(
+        "tool.exec", links=[Link(link_context, {"secret.link": "SECRET-LINK"})]
+    )
+    span.end()
+
+    exporter.export([span])
+
+    exported = delegate.batches[0][0]
+    assert exported.links == ()
+    # Original untouched.
+    assert len(span.links) == 1
+
+
+def test_resource_attributes_filtered_to_allowlist():
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider as SDKTracerProvider
+
+    from src.sdk.observability import FilteringSpanExporter
+
+    delegate = RecordingExporter()
+    exporter = FilteringSpanExporter(delegate)
+
+    provider = SDKTracerProvider(
+        resource=Resource.create(
+            {
+                "service.name": "assistant",
+                "service.version": "0.6.5",
+                "deployment.commit": "abc1234",
+                "deployment.environment": "production",
+                "host.name": "SECRET-HOST",
+                "user.id": "SECRET-USER",
+                "secret.label": "SECRET-RESOURCE",
+            }
+        )
+    )
+    tracer = provider.get_tracer("assistant.physical")
+    span = tracer.start_span("http.request", attributes={"http.route": "/v1/message"})
+    span.end()
+
+    exporter.export([span])
+
+    exported = delegate.batches[0][0]
+    resource_attrs = dict(exported.resource.attributes)
+    # Allowed version-baseline identity survives.
+    assert resource_attrs.get("service.name") == "assistant"
+    assert resource_attrs.get("service.version") == "0.6.5"
+    assert resource_attrs.get("deployment.commit") == "abc1234"
+    assert resource_attrs.get("deployment.environment") == "production"
+    # Everything else — fingerprinting or secret-carrying — is gone.
+    assert "host.name" not in resource_attrs
+    assert "user.id" not in resource_attrs
+    assert "secret.label" not in resource_attrs
+    assert not any(
+        "SECRET" in str(value) for value in resource_attrs.values()
+    )
+    # Original resource untouched.
+    assert "host.name" in dict(span.resource.attributes)
+
+
+def test_status_description_dropped_without_exception_event():
+    from opentelemetry.sdk.trace import TracerProvider as SDKTracerProvider
+    from opentelemetry.trace import Status, StatusCode
+
+    from src.sdk.observability import FilteringSpanExporter
+
+    delegate = RecordingExporter()
+    exporter = FilteringSpanExporter(delegate)
+
+    provider = SDKTracerProvider()
+    tracer = provider.get_tracer("assistant.physical")
+    span = tracer.start_span("http.request")
+    span.set_status(Status(StatusCode.ERROR, "prompt text leaked SECRET-PROMPT"))
+    span.end()
+
+    exporter.export([span])
+
+    exported = delegate.batches[0][0]
+    assert exported.status.status_code == StatusCode.ERROR
+    assert not exported.status.description
+    assert span.status.description == "prompt text leaked SECRET-PROMPT"
+
+
 def _settings_with_otel(endpoint: str) -> SimpleNamespace:
     return SimpleNamespace(
         langfuse=SimpleNamespace(enabled=False, public_key="", secret_key="", host=""),
