@@ -145,6 +145,108 @@ def test_provider_chat_emits_http_client_span_with_allowed_attrs_only(obs_env):
     assert "/api/chat" not in json.dumps(attrs, default=str)
 
 
+def test_provider_stream_emits_safe_http_client_span(obs_env):
+    """Streaming response lifecycle gets one physical HTTP span, not SSE telemetry."""
+    spans, _obs = obs_env
+    from types import SimpleNamespace
+
+    from src.sdk.observability import instrument_provider_http
+
+    class Response:
+        status_code = 207
+
+    class Stream:
+        async def __aenter__(self):
+            return Response()
+
+        async def __aexit__(self, *args):
+            return False
+
+    class Client:
+        is_closed = False
+
+        def stream(self, method, url, **kwargs):
+            assert method == "POST"
+            return Stream()
+
+    provider = SimpleNamespace(_http_client=Client())
+    instrument_provider_http(provider)
+
+    import asyncio
+
+    async def run():
+        async with provider._http_client.stream(
+            "POST",
+            "https://stream-user:stream-password@api.example.test/v1/messages?token=SECRET-QUERY",
+            json={"prompt": CONTENT_MARKER},
+        ) as response:
+            assert response.status_code == 207
+
+    asyncio.run(run())
+    attrs = next(s.attributes for s in spans if s.name == "http.client")
+    assert attrs["http.request.method"] == "POST"
+    assert attrs["server.address"] == "api.example.test"
+    assert attrs["http.response.status_code"] == 207
+    assert set(attrs) == {
+        "http.request.method",
+        "server.address",
+        "http.response.status_code",
+        "duration_ms",
+    }
+    rendered = json.dumps(attrs, default=str)
+    for forbidden in (
+        "stream-user",
+        "stream-password",
+        "SECRET-QUERY",
+        "/v1/messages",
+        CONTENT_MARKER,
+        "error.type",
+    ):
+        assert forbidden not in rendered
+
+
+def test_provider_stream_failure_emits_safe_http_client_span(obs_env):
+    """A failed stream enter remains content-free and has no error.type."""
+    spans, _obs = obs_env
+    from types import SimpleNamespace
+
+    from src.sdk.observability import instrument_provider_http
+
+    class Stream:
+        async def __aenter__(self):
+            raise RuntimeError("SECRET-STREAM-FAILURE")
+
+        async def __aexit__(self, *args):
+            raise AssertionError("unreachable")
+
+    class Client:
+        is_closed = False
+
+        def stream(self, method, url, **kwargs):
+            return Stream()
+
+    provider = SimpleNamespace(_http_client=Client())
+    instrument_provider_http(provider)
+
+    import asyncio
+
+    async def run():
+        async with provider._http_client.stream(
+            "POST", "https://leaked-user@api.example.test/private?secret=SECRET-STREAM-FAILURE"
+        ):
+            pass
+
+    with pytest.raises(RuntimeError, match="SECRET-STREAM-FAILURE"):
+        asyncio.run(run())
+    attrs = next(s.attributes for s in spans if s.name == "http.client")
+    assert attrs["http.request.method"] == "POST"
+    assert attrs["server.address"] == "api.example.test"
+    assert set(attrs) == {"http.request.method", "server.address", "duration_ms"}
+    rendered = json.dumps(attrs, default=str)
+    for forbidden in ("leaked-user", "SECRET-STREAM-FAILURE", "/private", "error.type"):
+        assert forbidden not in rendered
+
+
 def test_provider_chat_without_observability_makes_no_span(obs_env):
     spans, obs = obs_env
     from src.sdk.observability import _reset_for_tests

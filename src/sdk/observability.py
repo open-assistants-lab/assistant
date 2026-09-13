@@ -240,10 +240,64 @@ def instrument_provider_http(provider: Any) -> None:
         return wrapped
 
     def _wrap_stream(client: Any):
-        def wrapped(url: str, **kwargs: Any):
-            return client.stream(url, **kwargs)
+        def wrapped(method: str, url: str, **kwargs: Any) -> Any:
+            from urllib.parse import urlparse
+
+            # httpx's ``stream`` returns an async context manager rather than
+            # an awaitable. Preserve that API exactly while timing the entire
+            # outbound response lifecycle (connect through stream close).
+            return _InstrumentedStream(
+                client.stream(method, url, **kwargs),
+                method=str(method).upper(),
+                host=urlparse(str(url)).hostname or "",
+            )
 
         return wrapped
+
+    class _InstrumentedStream:
+        """Async-context-manager adapter that emits one safe outbound span."""
+
+        def __init__(self, stream: Any, *, method: str, host: str) -> None:
+            self._stream = stream
+            self._method = method
+            self._host = host
+            self._response: Any | None = None
+            self._start: float | None = None
+            self._emitted = False
+
+        def _emit(self) -> None:
+            if self._emitted:
+                return
+            self._emitted = True
+            attributes: dict[str, Any] = {
+                "http.request.method": self._method,
+                "server.address": self._host,
+                "duration_ms": round(
+                    (time.monotonic() - (self._start or time.monotonic())) * 1000,
+                    3,
+                ),
+            }
+            if self._response is not None:
+                attributes["http.response.status_code"] = getattr(
+                    self._response, "status_code", 0
+                )
+            with physical_span("http.client", **attributes):
+                pass
+
+        async def __aenter__(self) -> Any:
+            self._start = time.monotonic()
+            try:
+                self._response = await self._stream.__aenter__()
+                return self._response
+            except Exception:
+                self._emit()
+                raise
+
+        async def __aexit__(self, *args: Any) -> Any:
+            try:
+                return await self._stream.__aexit__(*args)
+            finally:
+                self._emit()
 
     provider._http_client = _InstrumentedClient(original_client)
     provider._ob1_http_instrumented_client = provider._http_client
