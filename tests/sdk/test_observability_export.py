@@ -67,7 +67,12 @@ def test_physical_span_exported_with_trace_id_and_allowed_attrs():
     exporter = FilteringSpanExporter(delegate)
     span = _make_span(
         "assistant.physical",
-        {"http.request.method": "GET", "prompt.text": "SECRET-PROMPT"},
+        {
+            "http.request.method": "GET",
+            "server.address": "api.example.test",
+            "duration_ms": 12.5,
+            "prompt.text": "SECRET-PROMPT",
+        },
     )
 
     result = exporter.export([span])
@@ -76,7 +81,11 @@ def test_physical_span_exported_with_trace_id_and_allowed_attrs():
     assert len(delegate.batches) == 1
     exported = delegate.batches[0][0]
     assert exported.context.trace_id == span.context.trace_id
-    assert exported.attributes == {"http.request.method": "GET"}
+    assert exported.attributes == {
+        "http.request.method": "GET",
+        "server.address": "api.example.test",
+        "duration_ms": 12.5,
+    }
 
 
 def test_langfuse_scope_span_is_dropped():

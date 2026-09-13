@@ -56,6 +56,11 @@ class GeminiProvider(LLMProvider):
             self._http_client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self.timeout),
             )
+        # Wire the physical wrapper at the actual client seam; it is inert
+        # unless the OB-0 provider is configured for admin export.
+        from src.sdk.observability import instrument_provider_http
+
+        instrument_provider_http(self)
         return self._http_client
 
     async def aclose(self) -> None:

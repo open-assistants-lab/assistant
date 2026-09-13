@@ -123,11 +123,8 @@ def test_provider_chat_emits_http_client_span_with_allowed_attrs_only(obs_env):
     async def run():
         return await provider.chat([Message.user("hello " + CONTENT_MARKER)])
 
-    # Physical span wrapper: provider instrumentation must be active.
-    from src.sdk.observability import instrument_provider_http
-
-    instrument_provider_http(provider)
-
+    # The real provider seam must install instrumentation itself; tests must
+    # not call observability helpers to create the span.
     result = asyncio.run(run())
     assert result.content == CONTENT_MARKER  # real execution happened
 
@@ -135,8 +132,14 @@ def test_provider_chat_emits_http_client_span_with_allowed_attrs_only(obs_env):
     assert http_spans, "expected an http.client physical span"
     attrs = http_spans[0].attributes
     assert attrs["http.response.status_code"] == 200
-    assert "api.example.test" in attrs["server.address"]
+    assert attrs["server.address"] == "api.example.test"
     assert attrs["http.request.method"] == "POST"
+    assert set(attrs) == {
+        "http.request.method",
+        "server.address",
+        "http.response.status_code",
+        "duration_ms",
+    }
     # Privacy: never the URL path/query, body, or response content.
     assert CONTENT_MARKER not in json.dumps(attrs, default=str)
     assert "/api/chat" not in json.dumps(attrs, default=str)
@@ -212,8 +215,63 @@ def test_sqlite_wrapper_emits_operation_class_only(obs_env, tmp_path):
     assert "INSERT INTO" not in rendered
     for s in op_spans:
         assert s.attributes.get("db.system") == "sqlite"
+        assert set(s.attributes) == {"db.system", "db.operation", "duration_ms"}
         assert "db.statement" not in s.attributes
         assert "db.params" not in s.attributes
+
+
+def test_provider_client_emits_hostname_without_credentials_or_url_parts(obs_env):
+    """The real provider seam parses hostname, never netloc/userinfo/query."""
+    spans, _obs = obs_env
+    from src.sdk.providers.ollama import OllamaCloud
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"message": {"role": "assistant", "content": "ok"}}
+
+    class FakeClient:
+        is_closed = False
+
+        async def post(self, url, **kwargs):
+            return FakeResponse()
+
+    provider = OllamaCloud(
+        base_url="https://leaked-user:leaked-password@api.example.test/private?token=SECRET-QUERY",
+        model="test-model",
+    )
+    provider._http_client = FakeClient()
+
+    import asyncio
+
+    from src.sdk.messages import Message
+
+    assert asyncio.run(provider.chat([Message.user("hello")])).content == "ok"
+    attrs = next(s.attributes for s in spans if s.name == "http.client")
+    assert attrs["server.address"] == "api.example.test"
+    rendered = json.dumps(attrs, default=str)
+    for secret in ("leaked-user", "leaked-password", "SECRET-QUERY", "/private"):
+        assert secret not in rendered
+
+
+def test_audit_store_real_sqlite_boundary_emits_safe_span(obs_env, tmp_path):
+    """AuditStore's production sqlite connection must emit physical spans."""
+    spans, _obs = obs_env
+    from src.sdk.audit import AuditEvent, AuditStore
+
+    store = AuditStore(str(tmp_path / "audit.db"))
+    store.record(AuditEvent(kind="error", detail=CONTENT_MARKER))
+
+    attrs = [s.attributes for s in spans if s.name == "db.query"]
+    assert attrs, "expected a span from the real AuditStore sqlite connection"
+    rendered = json.dumps(attrs, default=str)
+    assert CONTENT_MARKER not in rendered
+    for attrs_one in attrs:
+        assert set(attrs_one) <= {"db.system", "db.operation", "duration_ms"}
 
 
 def test_sqlite_wrapper_disabled_without_observability(obs_env, tmp_path):

@@ -69,6 +69,8 @@ ALLOWED_PHYSICAL_ATTRIBUTES = frozenset(
         "http.request.method",
         "http.route",
         "http.response.status_code",
+        "server.address",
+        "duration_ms",
         "url.path",
         "url.scheme",
         # database operation class (never db.statement)
@@ -111,8 +113,6 @@ ALLOWED_RESOURCE_ATTRIBUTES = frozenset(
         "instance.id",
     }
 )
-
-_sql_instrumented_ids: set[int] = set()
 
 _state: dict[str, Any] = {
     "provider": None,
@@ -180,10 +180,10 @@ def instrument_provider_http(provider: Any) -> None:
     provider's own (semantic) spans remain the only place content is
     recorded, and the exporter drops those at the admin destination.
     """
-    if not physical_active() or getattr(provider, "_ob1_http_instrumented", False):
+    client = provider._http_client
+    if not physical_active() or getattr(provider, "_ob1_http_instrumented_client", None) is client:
         return
-    original_post = provider._http_client
-    provider._ob1_http_instrumented = True
+    original_client = client
 
     class _InstrumentedClient:
         def __init__(self, client: Any) -> None:
@@ -205,7 +205,9 @@ def instrument_provider_http(provider: Any) -> None:
         async def wrapped(url: str, **kwargs: Any) -> Any:
             from urllib.parse import urlparse
 
-            host = urlparse(url).netloc
+            # ``hostname`` intentionally excludes a credential-bearing userinfo
+            # component, port, path, query, and fragment (unlike ``netloc``).
+            host = urlparse(str(url)).hostname or ""
             start = time.monotonic()
             try:
                 response = await client.post(url, **kwargs)
@@ -223,13 +225,12 @@ def instrument_provider_http(provider: Any) -> None:
                     if span is not None:
                         pass
                 return response
-            except Exception as exc:
+            except Exception:
                 with physical_span(
                     "http.client",
                     **{
                         "http.request.method": "POST",
                         "server.address": host,
-                        "error.type": type(exc).__name__,
                         "duration_ms": round((time.monotonic() - start) * 1000, 3),
                     },
                 ):
@@ -244,7 +245,8 @@ def instrument_provider_http(provider: Any) -> None:
 
         return wrapped
 
-    provider._http_client = _InstrumentedClient(original_post)
+    provider._http_client = _InstrumentedClient(original_client)
+    provider._ob1_http_instrumented_client = provider._http_client
 
 
 def instrument_sqlite_connection(conn: Any) -> Any:
@@ -255,13 +257,12 @@ def instrument_sqlite_connection(conn: Any) -> Any:
     the physical layer).
 
     ``sqlite3.Connection`` rejects attribute assignment, so instrumentation
-    is a proxy object tracked in a module registry (id-keyed) rather than
-    an attribute flag. When observability is inactive the connection is
+    is a proxy object rather than an attribute flag. Re-instrumenting the
+    proxy is idempotent. When observability is inactive the connection is
     returned unchanged.
     """
-    if not physical_active() or id(conn) in _sql_instrumented_ids:
+    if not physical_active() or isinstance(conn, _SQLiteProxy):
         return conn
-    _sql_instrumented_ids.add(id(conn))
     original_execute = conn.execute
 
     def wrapped_execute(sql: str, *args: Any) -> Any:
@@ -294,13 +295,12 @@ def instrument_sqlite_connection(conn: Any) -> Any:
                 if span is not None:
                     pass
             return result
-        except Exception as exc:
+        except Exception:
             with physical_span(
                 "db.query",
                 **{
                     "db.system": "sqlite",
                     "db.operation": op,
-                    "error.type": type(exc).__name__,
                     "duration_ms": round((time.monotonic() - start) * 1000, 3),
                 },
             ):

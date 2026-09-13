@@ -62,6 +62,11 @@ class AnthropicProvider(LLMProvider):
                 headers=headers,
                 timeout=httpx.Timeout(self.timeout),
             )
+        # Wire the physical wrapper at the actual client seam; it is inert
+        # unless the OB-0 provider is configured for admin export.
+        from src.sdk.observability import instrument_provider_http
+
+        instrument_provider_http(self)
         return self._http_client
 
     def get_client(self) -> httpx.AsyncClient | None:

@@ -93,7 +93,13 @@ class AuditStore:
         # check_same_thread=False + a lock: safe across the loop thread AND
         # sync test/threadpool callers (export endpoint can run on a threadpool
         # worker under some ASGI servers). The lock serializes record/export.
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        raw_conn = sqlite3.connect(db_path, check_same_thread=False)
+        # One selected production SQLite boundary (not a global monkeypatch):
+        # the proxy records operation class/duration only when OB-0 physical
+        # tracing is active, never statements, parameters, or row content.
+        from src.sdk.observability import instrument_sqlite_connection
+
+        self._conn = instrument_sqlite_connection(raw_conn)
         self._lock = threading.Lock()
         self._conn.execute(
             """
