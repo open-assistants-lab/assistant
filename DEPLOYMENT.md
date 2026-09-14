@@ -44,6 +44,39 @@ basics (data layout, backups, secrets, observability) that apply to all of them.
 
 ---
 
+## Native tool policy
+
+Control shipped native tools at deployment scope with `tools.native` in
+`config.yaml`:
+
+```yaml
+tools:
+  native:
+    mode: selected       # all | selected | none
+    enabled:
+      - files_read       # exact names and case-sensitive glob patterns
+      - files_glob_*
+```
+
+- `all` (the default) exposes all shipped native tools.
+- `selected` exposes only native names matching `enabled` patterns.
+- `none` exposes no shipped native tools, including shipped meta-tools.
+- Environment overrides are `TOOLS_NATIVE__MODE` and
+  `TOOLS_NATIVE__ENABLED`; the latter is a JSON list, for example
+  `TOOLS_NATIVE__ENABLED='["files_read","files_glob_*"]'`. Invalid mode or
+  list values fail configuration validation rather than falling back to
+  `all`.
+- The policy is a hard deployment ceiling. User/workspace capabilities can
+  further restrict native tools but cannot restore a native tool excluded by
+  this policy.
+
+Custom tools remain separate: each custom tool is defined by its own
+`TOOL.md`, which deployments may add, edit, or remove. MCP-provided tools are
+also separate from this native policy. A future generated `TOOLS.md` catalog,
+if added, will be informational only and not an authorization source.
+
+---
+
 ## Optional dependency: agent-browser CLI (browser automation)
 
 Interactive browser tools (`browser_open`, `browser_snapshot`, `browser_click`, `browser_fill`, `browser_screenshot`, `browser_eval`) and the `web-automation` skill's long-tail commands drive the **`agent-browser` CLI** (Vercel Labs, Rust binary, Chrome/Chromium via CDP). Without it, browser tools return an install hint and the agent falls back to zero-config `web_fetch`/`web_search` — only interactive browsing is unavailable.

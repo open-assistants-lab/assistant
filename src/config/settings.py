@@ -310,6 +310,28 @@ class ToolsConfig(_BaseSettings):
     model_config = SettingsConfigDict(env_prefix="TOOLS_")
 
 
+def _apply_native_tools_env_override(native: NativeToolsConfig) -> NativeToolsConfig:
+    """Return a validated native-tool policy with explicit env overrides.
+
+    YAML constructor values otherwise take precedence over nested settings, so
+    this deployment control is merged explicitly on every ``from_yaml`` path.
+    Invalid values are passed to Pydantic validation rather than ignored.
+    """
+    override: dict[str, Any] = {}
+    if "TOOLS_NATIVE__MODE" in os.environ:
+        override["mode"] = os.environ["TOOLS_NATIVE__MODE"]
+    if "TOOLS_NATIVE__ENABLED" in os.environ:
+        raw_enabled = os.environ["TOOLS_NATIVE__ENABLED"]
+        try:
+            override["enabled"] = json.loads(raw_enabled)
+        except json.JSONDecodeError:
+            # Let the typed model produce the configuration validation error.
+            override["enabled"] = raw_enabled
+    if not override:
+        return native
+    return NativeToolsConfig.model_validate({**native.model_dump(), **override})
+
+
 class SkillsConfig(_BaseSettings):
     """Skills configuration."""
 
@@ -555,43 +577,23 @@ class AppConfig(_BaseSettings):
         if path is None:
             path = Path(__file__).resolve().parents[2] / "config.yaml"
         path = Path(path)
+        data: dict[str, Any] = {}
         if not path.exists():
-            import logging
-
             logging.getLogger(__name__).warning(
                 "config.yaml not found at %s — using defaults", path
             )
-            config = cls()
-            validate_startup_model_references(config)
-            return config
-
-        with open(path) as f:
-            data = yaml.safe_load(f)
-
-        if not data:
-            config = cls()
-            validate_startup_model_references(config)
-            return config
+        else:
+            with open(path) as f:
+                loaded = yaml.safe_load(f)
+            if loaded:
+                data = loaded
 
         # Bare AGENT (set by opencode/agent runtimes) collides with the nested agent config field.
         _drop_colliding_env()
         config = cls(**data)
-        # YAML init data otherwise wins over nested environment settings.
-        # Native-tool policy is an explicit deployment control, so honor the
-        # documented nested environment spellings after YAML loading.
-        native_mode = os.environ.get("TOOLS_NATIVE__MODE")
-        if native_mode:
-            config.tools.native.mode = native_mode
-        native_enabled = os.environ.get("TOOLS_NATIVE__ENABLED")
-        if native_enabled:
-            try:
-                parsed_enabled = json.loads(native_enabled)
-            except json.JSONDecodeError:
-                parsed_enabled = None
-            if isinstance(parsed_enabled, list) and all(
-                isinstance(pattern, str) for pattern in parsed_enabled
-            ):
-                config.tools.native.enabled = parsed_enabled
+        # Native-tool policy is an explicit deployment control. Apply it after
+        # every construction path and revalidate instead of mutating models.
+        config.tools.native = _apply_native_tools_env_override(config.tools.native)
         # Langfuse behavior belongs under observability in YAML, while its
         # credentials continue to arrive through LANGFUSE_* environment vars.
         if isinstance(data.get("observability"), dict) and "langfuse" in data["observability"]:

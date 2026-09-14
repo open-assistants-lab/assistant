@@ -1,5 +1,8 @@
 from types import SimpleNamespace
 
+import pytest
+from pydantic import ValidationError
+
 from src.config.settings import AppConfig
 from src.sdk.deployment_tools import (
     filter_denied_native_tools,
@@ -40,9 +43,17 @@ def test_native_policy_selected_can_explicitly_include_meta_tools():
     assert native_tool_is_allowed("tool_reload", settings)
 
 
-def test_native_policy_env_overrides_yaml_nested_values(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "yaml_content",
+    ["tools:\n  native:\n    mode: all\n", None, ""],
+    ids=["yaml-present", "yaml-missing", "yaml-empty"],
+)
+def test_native_policy_env_overrides_apply_for_every_from_yaml_path(
+    tmp_path, monkeypatch, yaml_content
+):
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("tools:\n  native:\n    mode: all\n", encoding="utf-8")
+    if yaml_content is not None:
+        config_path.write_text(yaml_content, encoding="utf-8")
     monkeypatch.setenv("TOOLS_NATIVE__MODE", "selected")
     monkeypatch.setenv("TOOLS_NATIVE__ENABLED", '["time_get"]')
 
@@ -50,6 +61,24 @@ def test_native_policy_env_overrides_yaml_nested_values(tmp_path, monkeypatch):
 
     assert config.tools.native.mode == "selected"
     assert config.tools.native.enabled == ["time_get"]
+
+
+@pytest.mark.parametrize(
+    ("mode", "enabled"),
+    [
+        ("unexpected", '["time_get"]'),
+        ("selected", "not-json"),
+        ("selected", '["time_get", 4]'),
+    ],
+)
+def test_native_policy_invalid_env_values_fail_closed(tmp_path, monkeypatch, mode, enabled):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("tools:\n  native:\n    mode: all\n", encoding="utf-8")
+    monkeypatch.setenv("TOOLS_NATIVE__MODE", mode)
+    monkeypatch.setenv("TOOLS_NATIVE__ENABLED", enabled)
+
+    with pytest.raises(ValidationError):
+        AppConfig.from_yaml(config_path)
 
 
 def test_shipped_meta_provenance_is_identity_based_and_custom_collision_survives():
