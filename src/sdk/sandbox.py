@@ -59,7 +59,7 @@ def _command_class(argv: list[str]) -> str:
 
 
 def _sandbox_span_attrs(backend: str, argv: list[str]) -> dict[str, str]:
-    """Allowlisted physical attributes for a sandbox.exec span."""
+    """Allowlisted operational attributes for a sandbox.exec span."""
     return {
         "sandbox.backend": backend,
         "sandbox.command_class": _command_class(argv),
@@ -174,9 +174,9 @@ class NullSandboxBackend:
         env_extra: dict[str, str] | None = None,
     ) -> SandboxResult:
         lim = limits or SandboxLimits()
-        from src.sdk.observability import physical_span
+        from src.sdk.observability import operational_telemetry_span
 
-        with physical_span("sandbox.exec", **_sandbox_span_attrs("null", argv)) as span:
+        with operational_telemetry_span("sandbox.exec", **_sandbox_span_attrs("null", argv)) as span:
             try:
                 proc = subprocess.run(  # noqa: S603 - argv list, no shell
                     argv,
@@ -297,9 +297,9 @@ class SoftSandboxBackend:
                         )
                         os._exit(78)
 
-        from src.sdk.observability import physical_span
+        from src.sdk.observability import operational_telemetry_span
 
-        with physical_span("sandbox.exec", **_sandbox_span_attrs("soft", argv)) as span:
+        with operational_telemetry_span("sandbox.exec", **_sandbox_span_attrs("soft", argv)) as span:
             try:
                 proc = subprocess.run(  # noqa: S603 - argv list, no shell
                     argv,
@@ -481,9 +481,9 @@ class BwrapSandboxBackend:
                 except (OSError, ValueError):
                     pass
 
-        from src.sdk.observability import physical_span
+        from src.sdk.observability import operational_telemetry_span
 
-        with physical_span("sandbox.exec", **_sandbox_span_attrs("bwrap", argv)) as span:
+        with operational_telemetry_span("sandbox.exec", **_sandbox_span_attrs("bwrap", argv)) as span:
             try:
                 proc = subprocess.run(  # noqa: S603 - argv list, no shell
                     bwrap_argv,

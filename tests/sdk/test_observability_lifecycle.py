@@ -168,7 +168,7 @@ def test_shutdown_flushes_owned_processors_once(obs_reset):
             self.shutdowns += 1
 
     proc = FakeProcessor()
-    obs._register_owned_processor(proc)
+    obs._register_owned_operational_processor(proc)
 
     obs.shutdown_observability()
     obs.shutdown_observability()

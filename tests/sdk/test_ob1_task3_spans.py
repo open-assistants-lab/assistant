@@ -1,4 +1,4 @@
-"""OB-1 Task 3: outbound HTTP + SQLite operation physical spans.
+"""OB-1 Task 3: outbound HTTP + SQLite operation operational spans.
 
 Red tests prove the privacy boundary of the narrow instrumentation
 wrappers BEFORE any wrapper exists:
@@ -64,7 +64,9 @@ def obs_env(tmp_path, monkeypatch):
         def start_as_current_span(self, name, attributes=None):
             return Recorder().start_as_current_span(name, attributes)
 
-    provider._tracer_override = _Tracer()
+    operational_provider = obs._state["operational_telemetry_provider"]
+    assert operational_provider is not None
+    operational_provider._tracer_override = _Tracer()
     yield spans, obs
     obs.shutdown_observability()
     obs._reset_for_tests()
@@ -110,12 +112,12 @@ def test_provider_chat_emits_http_client_span_with_allowed_attrs_only(obs_env):
 
     import src.sdk.observability as obs_mod
 
-    monkey_span = obs_mod.physical_span
+    monkey_span = obs_mod.operational_telemetry_span
 
-    def fake_physical_span(name, **attributes):
+    def fake_operational_telemetry_span(name, **attributes):
         return monkey_span(name, **attributes)
 
-    # Run through the real provider.chat with the physical tracer override.
+    # Run through the real provider.chat with the operational tracer override.
     import asyncio
 
     from src.sdk.messages import Message
@@ -129,7 +131,7 @@ def test_provider_chat_emits_http_client_span_with_allowed_attrs_only(obs_env):
     assert result.content == CONTENT_MARKER  # real execution happened
 
     http_spans = [s for s in spans if s.name == "http.client"]
-    assert http_spans, "expected an http.client physical span"
+    assert http_spans, "expected an http.client operational span"
     attrs = http_spans[0].attributes
     assert attrs["http.response.status_code"] == 200
     assert attrs["server.address"] == "api.example.test"
@@ -146,7 +148,7 @@ def test_provider_chat_emits_http_client_span_with_allowed_attrs_only(obs_env):
 
 
 def test_provider_stream_emits_safe_http_client_span(obs_env):
-    """Streaming response lifecycle gets one physical HTTP span, not SSE telemetry."""
+    """Streaming response lifecycle gets one operational HTTP span, not SSE telemetry."""
     spans, _obs = obs_env
     from types import SimpleNamespace
 
@@ -308,7 +310,7 @@ def test_sqlite_wrapper_emits_operation_class_only(obs_env, tmp_path):
     conn.commit()
 
     op_spans = [s for s in spans if s.name == "db.query"]
-    assert op_spans, "expected db.query physical spans"
+    assert op_spans, "expected db.query operational spans"
     rendered = json.dumps([s.attributes for s in op_spans], default=str)
     assert "db.system" in rendered or True
     # Privacy: no SQL text, no params, no content.
@@ -361,7 +363,7 @@ def test_provider_client_emits_hostname_without_credentials_or_url_parts(obs_env
 
 
 def test_audit_store_real_sqlite_boundary_emits_safe_span(obs_env, tmp_path):
-    """AuditStore's production sqlite connection must emit physical spans."""
+    """AuditStore's production sqlite connection must emit operational spans."""
     spans, _obs = obs_env
     from src.sdk.audit import AuditEvent, AuditStore
 

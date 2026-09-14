@@ -95,7 +95,7 @@ class AuditStore:
         # worker under some ASGI servers). The lock serializes record/export.
         raw_conn = sqlite3.connect(db_path, check_same_thread=False)
         # One selected production SQLite boundary (not a global monkeypatch):
-        # the proxy records operation class/duration only when OB-0 physical
+        # the proxy records operation class/duration only when OB-0 operational
         # tracing is active, never statements, parameters, or row content.
         from src.sdk.observability import instrument_sqlite_connection
 

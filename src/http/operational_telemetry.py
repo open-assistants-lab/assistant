@@ -1,4 +1,4 @@
-"""OB-1 Task 2: physical HTTP request spans (admin destination only).
+"""OB-1 Task 2: operational HTTP request spans (admin destination only).
 
 A pure-ASGI middleware so an unconfigured deployment pays one dict lookup
 per request and nothing more. Behavior:
@@ -13,10 +13,10 @@ per request and nothing more. Behavior:
   baselines"); exclusion itself is applied at query/alert time (OB-3)
 - health probes (``/health``, ``/health/ready``) are excluded (R-PERF-2
   noise filter: ~17k spans/day otherwise)
-- attributes are restricted to the physical allowlist: method, route,
+- attributes are restricted to the operational allowlist: method, route,
   status code, path, scheme. Query strings, headers, and bodies are never
   read — content cannot leak through a path that never touches it.
-- when no OB-0 provider is configured (``physical_active()`` false), the
+- when no OB-0 provider is configured (``operational_telemetry_active()`` false), the
   middleware short-circuits: zero spans, zero tracer lookups.
 """
 
@@ -26,13 +26,13 @@ from typing import Any
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from src.sdk.observability import physical_active, physical_span
+from src.sdk.observability import operational_telemetry_active, operational_telemetry_span
 
 # Must mirror the public health routes registered in src/http/main.py.
 HEALTH_PATHS = frozenset({"/health", "/health/ready"})
 
 
-class PhysicalSpanMiddleware:
+class OperationalTelemetryMiddleware:
     """Emit one ``http.request`` span per (non-health) HTTP request."""
 
     def __init__(self, app: ASGIApp) -> None:
@@ -43,7 +43,7 @@ class PhysicalSpanMiddleware:
             await self._app(scope, receive, send)
             return
 
-        if not physical_active():
+        if not operational_telemetry_active():
             # Unconfigured deployment: zero observability cost.
             await self._app(scope, receive, send)
             return
@@ -53,7 +53,7 @@ class PhysicalSpanMiddleware:
             "url.path": scope.get("path", ""),
             "url.scheme": scope.get("scheme", "http"),
         }
-        with physical_span("http.request", **attributes) as span:
+        with operational_telemetry_span("http.request", **attributes) as span:
             async def send_wrapper(message: Message) -> None:
                 if message["type"] == "http.response.start" and span is not None:
                     span.set_attribute(
@@ -73,6 +73,6 @@ class PhysicalSpanMiddleware:
                     span.set_attribute("http.route", route_path)
 
 
-def register_physical_http_spans(app: Any) -> None:
-    """Attach the physical-span middleware to a FastAPI/Starlette app."""
-    app.add_middleware(PhysicalSpanMiddleware)
+def register_operational_http_spans(app: Any) -> None:
+    """Attach the operational-telemetry middleware to a FastAPI/Starlette app."""
+    app.add_middleware(OperationalTelemetryMiddleware)

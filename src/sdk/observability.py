@@ -57,8 +57,8 @@ logger = logging.getLogger("src.sdk.observability")
 # Deferred to OB-1 (deliberately NOT here): filtering span *events*,
 # *links*, and per-destination *resource* attributes. OB-0 ships the
 # attribute-level boundary only; those surfaces need their own red/green
-# coverage when the physical spans that populate them exist.
-ALLOWED_PHYSICAL_ATTRIBUTES = frozenset(
+# coverage when the operational spans that populate them exist.
+ALLOWED_OPERATIONAL_ATTRIBUTES = frozenset(
     {
         # release identity (version baselines)
         "service.version",
@@ -90,7 +90,7 @@ ALLOWED_PHYSICAL_ATTRIBUTES = frozenset(
     }
 )
 
-# Instrumentation scopes whose spans never belong in the physical layer.
+# Instrumentation scopes whose spans never belong in the operational telemetry.
 #
 # The REAL Langfuse v4 tracer scope is ``langfuse-sdk`` — verified against
 # ``langfuse._client.constants.LANGFUSE_TRACER_NAME`` (the test imports the
@@ -115,22 +115,24 @@ ALLOWED_RESOURCE_ATTRIBUTES = frozenset(
 )
 
 _state: dict[str, Any] = {
-    "provider": None,
-    "owns_provider": False,
+    "semantic_telemetry_provider": None,
+    "owns_semantic_telemetry_provider": False,
+    "operational_telemetry_provider": None,
+    "owned_operational_processors": [],
     "langfuse_initialized": False,
     "shutdown_done": False,
-    "owned_processors": [],
 }
 
 
 def _reset_for_tests() -> None:
     """Restore pristine module state between tests (not for production use)."""
     _state.update(
-        provider=None,
-        owns_provider=False,
+        semantic_telemetry_provider=None,
+        owns_semantic_telemetry_provider=False,
+        operational_telemetry_provider=None,
+        owned_operational_processors=[],
         langfuse_initialized=False,
         shutdown_done=False,
-        owned_processors=[],
     )
     try:
         from src.sdk.langfuse_tracer import LangfuseTracer
@@ -144,30 +146,26 @@ def _reset_langfuse_singleton() -> None:  # pragma: no cover - test hook point
     """Hook point for tests that must isolate the Langfuse singleton."""
 
 
-def physical_active() -> bool:
-    """True when the OB-0 provider is configured in THIS process.
-
-    Instrumentation guards on this so an unconfigured deployment pays
-    zero observability cost (no tracer lookup, no attributes, no spans).
-    """
-    return _state["provider"] is not None
+def operational_telemetry_active() -> bool:
+    """True only when an explicit endpoint created the operational pipeline."""
+    return _state["operational_telemetry_provider"] is not None
 
 
 @contextmanager
-def physical_span(name: str, **attributes: Any) -> Iterator[Any]:
-    """Open a physical-layer span under the OB-0 provider.
+def operational_telemetry_span(name: str, **attributes: Any) -> Iterator[Any]:
+    """Open an operational span without exposing it to semantic processors.
 
-    No-op (yields ``None``) when observability is not configured — callers
-    must tolerate the ``None`` span. Attributes passed here MUST be members
-    of ``ALLOWED_PHYSICAL_ATTRIBUTES``; the exporter drops anything else,
-    but callers should not rely on that as a scrubbing mechanism.
+    The dedicated provider retains the current OTel context as its parent, so
+    its span shares an active semantic trace ID while its processor pipeline is
+    completely independent. With no explicit operational endpoint this is a
+    true no-op: callers do no tracer lookup and create no span.
     """
-    provider = _state["provider"]
+    provider = _state["operational_telemetry_provider"]
     if provider is None:
         yield None
         return
     tracer_override = getattr(provider, "_tracer_override", None)
-    tracer = tracer_override or provider.get_tracer("assistant.physical")
+    tracer = tracer_override or provider.get_tracer("assistant.operational")
     with tracer.start_as_current_span(name, attributes=attributes) as span:
         yield span
 
@@ -181,7 +179,7 @@ def instrument_provider_http(provider: Any) -> None:
     recorded, and the exporter drops those at the admin destination.
     """
     client = provider._http_client
-    if not physical_active() or getattr(provider, "_ob1_http_instrumented_client", None) is client:
+    if not operational_telemetry_active() or getattr(provider, "_ob1_http_instrumented_client", None) is client:
         return
     original_client = client
 
@@ -211,7 +209,7 @@ def instrument_provider_http(provider: Any) -> None:
             start = time.monotonic()
             try:
                 response = await client.post(url, **kwargs)
-                with physical_span(
+                with operational_telemetry_span(
                     "http.client",
                     **{
                         "http.request.method": "POST",
@@ -226,7 +224,7 @@ def instrument_provider_http(provider: Any) -> None:
                         pass
                 return response
             except Exception:
-                with physical_span(
+                with operational_telemetry_span(
                     "http.client",
                     **{
                         "http.request.method": "POST",
@@ -281,7 +279,7 @@ def instrument_provider_http(provider: Any) -> None:
                 attributes["http.response.status_code"] = getattr(
                     self._response, "status_code", 0
                 )
-            with physical_span("http.client", **attributes):
+            with operational_telemetry_span("http.client", **attributes):
                 pass
 
         async def __aenter__(self) -> Any:
@@ -308,14 +306,14 @@ def instrument_sqlite_connection(conn: Any) -> Any:
 
     Carries operation class + duration ONLY. The SQL statement text and
     parameters never enter span attributes (Rule 2: content never enters
-    the physical layer).
+    the operational telemetry).
 
     ``sqlite3.Connection`` rejects attribute assignment, so instrumentation
     is a proxy object rather than an attribute flag. Re-instrumenting the
     proxy is idempotent. When observability is inactive the connection is
     returned unchanged.
     """
-    if not physical_active() or isinstance(conn, _SQLiteProxy):
+    if not operational_telemetry_active() or isinstance(conn, _SQLiteProxy):
         return conn
     original_execute = conn.execute
 
@@ -338,7 +336,7 @@ def instrument_sqlite_connection(conn: Any) -> Any:
         start = time.monotonic()
         try:
             result = original_execute(sql, *args)
-            with physical_span(
+            with operational_telemetry_span(
                 "db.query",
                 **{
                     "db.system": "sqlite",
@@ -350,7 +348,7 @@ def instrument_sqlite_connection(conn: Any) -> Any:
                     pass
             return result
         except Exception:
-            with physical_span(
+            with operational_telemetry_span(
                 "db.query",
                 **{
                     "db.system": "sqlite",
@@ -382,19 +380,19 @@ class _SQLiteProxy:
         return object.__getattribute__(self, "_wrapped_execute")(sql, *args)
 
 
-def _register_owned_processor(processor: Any) -> None:
-    """Register a processor this module owns and must shut down (Task 3+)."""
-    _state["owned_processors"].append(processor)
+def _register_owned_operational_processor(processor: Any) -> None:
+    """Register an operational processor owned by this lifecycle module."""
+    _state["owned_operational_processors"].append(processor)
 
 
 class FilteringSpanExporter(SpanExporter):
-    """Admin-destination exporter: physical spans only, allowlisted attrs.
+    """Admin-destination exporter: operational spans only, allowlisted attrs.
 
     Exporter-side filtering (spec: never mutate the immutable ReadableSpan):
     spans whose instrumentation scope matches ``dropped_scopes`` (e.g.
     ``langfuse``) are dropped entirely; every other span is forwarded as a
     NEW ReadableSpan carrying only ``allowed_attributes``. The shared trace
-    ID survives — it is the join key between the semantic and physical
+    ID survives — it is the join key between the semantic and operational
     layers.
 
     Delegate failures are swallowed and counted: a dead OTLP endpoint must
@@ -410,7 +408,7 @@ class FilteringSpanExporter(SpanExporter):
     ) -> None:
         super().__init__()
         self._delegate = delegate
-        self._allowed = allowed_attributes or ALLOWED_PHYSICAL_ATTRIBUTES
+        self._allowed = allowed_attributes or ALLOWED_OPERATIONAL_ATTRIBUTES
         self._dropped_scopes = dropped_scopes
         self.failure_count = 0
 
@@ -451,7 +449,7 @@ class FilteringSpanExporter(SpanExporter):
 
     def _filtered_status(self, status: Any) -> Status:
         # Status.description routinely carries exception messages (PII) —
-        # only the status code is physical-layer material.
+        # only the status code is operational-telemetry material.
         return Status(status_code=status.status_code)
 
     def _filtered_copy(self, span: Any) -> Any:
@@ -463,7 +461,7 @@ class FilteringSpanExporter(SpanExporter):
         # Build a NEW immutable ReadableSpan — original is untouched.
         # Events keep name/timestamp but lose non-allowlisted attributes
         # (exception.message/stacktrace); links are dropped entirely (no
-        # physical-layer contract exists for them yet); the resource is
+        # operational-telemetry contract exists for them yet); the resource is
         # filtered to release-identity only; the status loses its
         # human-readable description.
         return ReadableSpan(
@@ -516,62 +514,55 @@ class FilteringSpanExporter(SpanExporter):
 
 
 def configure_observability(settings: AppConfig) -> Any | None:
-    """Create (or adopt) the process-global SDK TracerProvider. Idempotent.
+    """Configure isolated semantic and optional operational telemetry pipelines.
 
-    Returns the provider, or ``None`` when observability must degrade (OTel
-    unavailable, or a foreign provider already owns the write-once slot).
-    Never raises into startup.
+    The process-global semantic provider is created/adopted once for Langfuse.
+    A separate operational provider is constructed only when ``OTEL_ENDPOINT``
+    is explicit; it alone owns the filtered ClickStack exporter. This prevents
+    operational spans from reaching Langfuse by construction.
     """
-    if _state["provider"] is not None:
-        return _state["provider"]
     try:
         from opentelemetry import trace as otel_trace
         from opentelemetry.sdk.trace import TracerProvider as SDKTracerProvider
-    except Exception as exc:  # pragma: no cover - otel ships with langfuse
+    except Exception as exc:  # pragma: no cover - direct runtime dependency
         logger.warning("observability.otel_unavailable", {"error": str(exc)})
         return None
 
-    current = otel_trace.get_tracer_provider()
-    if isinstance(current, SDKTracerProvider):
-        # Another SDK-aware component created it first; adopt, don't duplicate.
-        provider = current
-        owns = False
-    elif isinstance(current, otel_trace.ProxyTracerProvider):
-        from opentelemetry.sdk.resources import Resource
+    provider = _state["semantic_telemetry_provider"]
+    if provider is None:
+        current = otel_trace.get_tracer_provider()
+        if isinstance(current, SDKTracerProvider):
+            provider = current
+            owns = False
+        elif isinstance(current, otel_trace.ProxyTracerProvider):
+            provider = SDKTracerProvider(resource=Resource.create({"service.name": "assistant"}))
+            otel_trace.set_tracer_provider(provider)
+            owns = True
+        else:
+            logger.warning(
+                "observability.foreign_provider",
+                {"provider_type": type(current).__name__},
+            )
+            return None
+        _state["semantic_telemetry_provider"] = provider
+        _state["owns_semantic_telemetry_provider"] = owns
 
-        provider = SDKTracerProvider(
-            resource=Resource.create({"service.name": "assistant"})
-        )
-        otel_trace.set_tracer_provider(provider)
-        owns = True
-    else:
-        logger.warning(
-            "observability.foreign_provider",
-            {"provider_type": type(current).__name__},
-        )
-        return None
-
-    _state["provider"] = provider
-    _state["owns_provider"] = owns
-
-    # Admin OTLP export (Task 3): built ONLY for an explicit non-empty
-    # endpoint. Empty endpoint = no exporter exists = zero outbound requests.
     otel_cfg = getattr(getattr(settings, "observability", None), "otel", None)
     endpoint = str(getattr(otel_cfg, "endpoint", "") or "")
-    if endpoint and OTLPSpanExporter is not None and BatchSpanProcessor is not None:
+    if endpoint and _state["operational_telemetry_provider"] is None:
         delegate = OTLPSpanExporter(
             endpoint=endpoint,
             headers=dict(getattr(otel_cfg, "headers", None) or {}),
-            timeout=5,  # spec R-PERF: retries must not accumulate
+            timeout=5,
         )
         exporter = FilteringSpanExporter(delegate)
-        processor = BatchSpanProcessor(exporter, export_timeout_millis=5000)
-        provider.add_span_processor(processor)
-        _register_owned_processor(processor)
-    elif endpoint:
-        logger.warning(
-            "observability.otel_exporter_unavailable", {"endpoint_set": True}
+        operational_provider = SDKTracerProvider(
+            resource=Resource.create({"service.name": "assistant"})
         )
+        processor = BatchSpanProcessor(exporter, export_timeout_millis=5000)
+        operational_provider.add_span_processor(processor)
+        _state["operational_telemetry_provider"] = operational_provider
+        _register_owned_operational_processor(processor)
 
     return provider
 
@@ -626,12 +617,12 @@ def shutdown_observability() -> None:
         return
     _state["shutdown_done"] = True
 
-    for processor in _state["owned_processors"]:
+    for processor in _state["owned_operational_processors"]:
         try:
             processor.shutdown()
         except Exception as exc:  # never break shutdown
             logger.warning("observability.processor_shutdown_failed", {"error": str(exc)})
-    _state["owned_processors"].clear()
+    _state["owned_operational_processors"].clear()
 
     try:
         from src.sdk.langfuse_tracer import LangfuseTracer

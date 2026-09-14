@@ -1,4 +1,4 @@
-"""OB-1 Task 2: physical HTTP + sandbox spans (admin destination only).
+"""OB-1 Task 2: operational HTTP + sandbox spans (admin destination only).
 
 Covers:
 - /health and /health/ready produce NO request span (noise filter)
@@ -55,8 +55,7 @@ def obs_with_recorder():
     recorder = RecordingProcessor()
     provider = SDKTracerProvider()
     provider.add_span_processor(recorder)
-    obs._state["provider"] = provider
-    obs._state["owns_provider"] = True
+    obs._state["operational_telemetry_provider"] = provider
     yield obs, recorder
     obs._reset_for_tests()
 
@@ -73,14 +72,14 @@ def obs_inactive():
 
 
 def _mini_app():
-    """Minimal FastAPI app with the physical-span middleware registered."""
+    """Minimal FastAPI app with the operational-telemetry middleware registered."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from src.http.physical_spans import register_physical_http_spans
+    from src.http.operational_telemetry import register_operational_http_spans
 
     app = FastAPI()
-    register_physical_http_spans(app)
+    register_operational_http_spans(app)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -120,7 +119,7 @@ def test_health_routes_produce_no_request_span(obs_with_recorder):
 
 
 def test_normal_request_emits_allowlisted_attributes_only(obs_with_recorder):
-    from src.sdk.observability import ALLOWED_PHYSICAL_ATTRIBUTES
+    from src.sdk.observability import ALLOWED_OPERATIONAL_ATTRIBUTES
 
     _obs, recorder = obs_with_recorder
     app, client = _mini_app()
@@ -133,7 +132,7 @@ def test_normal_request_emits_allowlisted_attributes_only(obs_with_recorder):
     span = spans[0]
     attrs = dict(span.attributes)
     # Only allowlisted attribute KEYS survive.
-    assert set(attrs) <= ALLOWED_PHYSICAL_ATTRIBUTES
+    assert set(attrs) <= ALLOWED_OPERATIONAL_ATTRIBUTES
     assert attrs.get("http.request.method") == "GET"
     assert attrs.get("http.response.status_code") == 200
     assert attrs.get("url.path") == "/ping"
@@ -147,10 +146,10 @@ def test_websocket_connections_produce_no_http_span(obs_with_recorder):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from src.http.physical_spans import register_physical_http_spans
+    from src.http.operational_telemetry import register_operational_http_spans
 
     app = FastAPI()
-    register_physical_http_spans(app)
+    register_operational_http_spans(app)
 
     @app.websocket("/ws")
     async def ws(websocket: WebSocket) -> None:
@@ -181,7 +180,7 @@ def test_middleware_short_circuits_when_observability_inactive(obs_inactive):
 
 
 def test_sandbox_span_records_backend_class_exit_never_command(obs_with_recorder):
-    from src.sdk.observability import ALLOWED_PHYSICAL_ATTRIBUTES
+    from src.sdk.observability import ALLOWED_OPERATIONAL_ATTRIBUTES
     from src.sdk.sandbox import NullSandboxBackend, SandboxLimits
 
     _obs, recorder = obs_with_recorder
@@ -198,7 +197,7 @@ def test_sandbox_span_records_backend_class_exit_never_command(obs_with_recorder
     assert len(spans) == 1
     span = spans[0]
     attrs = dict(span.attributes)
-    assert set(attrs) <= ALLOWED_PHYSICAL_ATTRIBUTES
+    assert set(attrs) <= ALLOWED_OPERATIONAL_ATTRIBUTES
     assert attrs.get("sandbox.backend") == "null"
     assert attrs.get("sandbox.command_class") == "python"
     assert attrs.get("sandbox.exit_code") == 0
@@ -252,6 +251,6 @@ def test_no_sandbox_spans_when_observability_inactive(obs_inactive):
 
 
 def test_sandbox_command_class_is_exporter_allowlisted():
-    from src.sdk.observability import ALLOWED_PHYSICAL_ATTRIBUTES
+    from src.sdk.observability import ALLOWED_OPERATIONAL_ATTRIBUTES
 
-    assert "sandbox.command_class" in ALLOWED_PHYSICAL_ATTRIBUTES
+    assert "sandbox.command_class" in ALLOWED_OPERATIONAL_ATTRIBUTES

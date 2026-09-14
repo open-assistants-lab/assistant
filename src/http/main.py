@@ -203,13 +203,13 @@ else:
         allow_credentials=False,
     )
 
-# OB-1 Task 2: physical request spans (admin OTLP only; no-op unless the
+# OB-1 Task 2: operational request spans (admin OTLP only; no-op unless the
 # OB-0 provider is configured). Starlette runs the most-recently added
 # middleware OUTERMOST, so registering last puts the span around the whole
 # stack (incl. CORS/auth) — span duration covers full request handling.
-from src.http.physical_spans import register_physical_http_spans  # noqa: E402
+from src.http.operational_telemetry import register_operational_http_spans  # noqa: E402
 
-register_physical_http_spans(app)
+register_operational_http_spans(app)
 
 
 _PUBLIC_PATHS = {

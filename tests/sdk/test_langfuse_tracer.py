@@ -333,7 +333,7 @@ def test_ensure_initialized_uses_base_url_and_shared_provider(monkeypatch):
         kwargs = init_calls[0]
         assert kwargs["base_url"] == "http://lf-primary.local"
         assert kwargs["tracer_provider"] is not None
-        assert kwargs["tracer_provider"] is obs._state["provider"]
+        assert kwargs["tracer_provider"] is obs._state["semantic_telemetry_provider"]
         assert len(set_providers) == 1
     finally:
         obs._reset_for_tests()
