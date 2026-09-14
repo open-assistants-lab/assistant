@@ -830,7 +830,7 @@ class AgentLoop:
                 )
             td = resolved
 
-        self._registry.register(td)
+        self._register_tool_definition(td)
         self._recently_used.add(tc.name)
         tc = self._with_runtime_context(tc)
 

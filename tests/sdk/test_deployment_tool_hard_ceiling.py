@@ -66,6 +66,30 @@ async def test_lazy_custom_matching_native_glob_remains_eligible(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_lazy_loaded_native_is_tracked_and_blocked_after_deployment_disable(monkeypatch):
+    async def native() -> str:
+        return "native-result"
+
+    native_tool = _tool("files_read", native)
+    deployment_disabled = False
+    loop = AgentLoop(provider=object(), tools=[], caps_check=lambda name: True)
+    loop._tool_index = _Index(_tool("files_read"), "native")
+    loop._native_tool_deployment_disabled = lambda name: deployment_disabled and name == "files_read"
+    monkeypatch.setattr("src.sdk.native_tools.get_native_tools", lambda: [native_tool])
+
+    loaded = await loop._try_lazy_load(ToolCall(id="1", name="files_read", arguments={}))
+    assert loaded is not None
+    assert not loaded.is_error
+    assert loaded.content == "native-result"
+    assert "files_read" in loop._registered_native_tool_names
+
+    deployment_disabled = True
+    blocked = await loop._execute_tool(ToolCall(id="2", name="files_read", arguments={}))
+    assert blocked.is_error
+    assert blocked.content == "Tool is disabled: files_read"
+
+
+@pytest.mark.asyncio
 async def test_registered_disabled_native_is_rejected_without_name_blocking():
     from src.sdk.native_tools import get_native_tools
 

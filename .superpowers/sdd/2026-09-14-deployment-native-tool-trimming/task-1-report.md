@@ -46,3 +46,15 @@ timeout 180 uv run ruff check src/sdk/deployment_tools.py src/sdk/runner.py src/
 ```
 
 Result: **All checks passed.**
+
+## Final lazy-load provenance repair
+
+Lazy-load success now uses `_register_tool_definition(td)` instead of direct registry registration. The helper records built-in provenance, so a native tool loaded while allowed is rejected when a deployment `tools.disabled` pattern subsequently takes effect; custom/MCP same-name definitions remain eligible.
+
+```bash
+timeout 180 uv run pytest tests/sdk/test_deployment_tool_hard_ceiling.py tests/sdk/test_tool_lazy_load.py -q
+# 15 passed in 2.53s
+
+timeout 180 uv run ruff check src/sdk/loop.py tests/sdk/test_deployment_tool_hard_ceiling.py
+# All checks passed
+```
