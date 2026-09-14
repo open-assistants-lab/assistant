@@ -9,10 +9,44 @@ from src.sdk.tools import tool
 from src.storage.paths import DEFAULT_USER_ID
 
 _MAX_DISPLAY_RESULTS = 5
-# Policy filters must run before the public result limit. Fetch a bounded
-# candidate set so stale deployment-disabled native rows cannot crowd out
-# discoverable custom or MCP tools.
-_SEARCH_CANDIDATE_LIMIT = 50
+# HybridDB exposes ranked result prefixes via ``limit`` but has no result
+# offset/cursor. Expand that prefix in this page-sized step until the public
+# limit is filled or the finite persisted index is exhausted. This avoids an
+# arbitrary candidate cap allowing stale, deployment-disabled native rows to
+# hide custom/MCP results.
+_SEARCH_PAGE_SIZE = 50
+
+
+def _eligible_results(
+    idx: object,
+    description: str,
+    disabled_patterns: list[str],
+    capabilities: dict[object, object],
+) -> list[tuple[str, str, str]]:
+    """Return allowed ranked results without truncating before index exhaustion."""
+    max_candidates = idx.count()  # type: ignore[attr-defined]
+    if max_candidates <= 0:
+        return []
+
+    limit = min(_SEARCH_PAGE_SIZE, max_candidates)
+    while True:
+        candidates = idx.search_with_tool_types(description, limit=limit)  # type: ignore[attr-defined]
+        allowed = [
+            (name, tool_description, tool_type)
+            for name, tool_description, tool_type in candidates
+            if (
+                tool_type != "native"
+                or not any(fnmatchcase(name, pattern) for pattern in disabled_patterns)
+            )
+            and resource_enabled(capabilities, "tools", name)
+        ]
+        if (
+            len(allowed) >= _MAX_DISPLAY_RESULTS
+            or len(candidates) < limit
+            or limit >= max_candidates
+        ):
+            return allowed
+        limit = min(limit + _SEARCH_PAGE_SIZE, max_candidates)
 
 
 @tool
@@ -33,25 +67,17 @@ def tool_search(description: str, user_id: str =  DEFAULT_USER_ID) -> str:
         return "No tool index available. Tools are not configured for this session."
 
     idx = loop._tool_index
-    results = idx.search_with_tool_types(description, limit=_SEARCH_CANDIDATE_LIMIT)
-    if not results:
-        return f"No tools found matching '{description}'. Try different keywords."
 
     # Deployment native-tool trimming (#16) is a hard ceiling. The persisted
     # index can be stale before tool_reload, so filter only rows whose stored
     # provenance proves they are built-in native tools. Custom TOOL.md and MCP
     # rows remain visible even when their names match a disabled glob.
-    disabled_patterns = getattr(getattr(get_settings(), "tools", None), "disabled", [])
-    if isinstance(disabled_patterns, list):
-        results = [
-            (name, tool_description, tool_type)
-            for name, tool_description, tool_type in results
-            if tool_type != "native"
-            or not any(
-                isinstance(pattern, str) and pattern and fnmatchcase(name, pattern)
-                for pattern in disabled_patterns
-            )
-        ]
+    configured_patterns = getattr(getattr(get_settings(), "tools", None), "disabled", [])
+    disabled_patterns = [
+        pattern
+        for pattern in configured_patterns
+        if isinstance(pattern, str) and pattern
+    ] if isinstance(configured_patterns, list) else []
 
     # Audit E24-tools: never advertise capability-disabled tools — the stale
     # persisted index may still contain rows for scope=none tools.
@@ -59,11 +85,8 @@ def tool_search(description: str, user_id: str =  DEFAULT_USER_ID) -> str:
         caps = load_user_capabilities(user_id)
     except Exception:
         caps = {}
-    results = [
-        (name, desc)
-        for name, desc, _ in results
-        if resource_enabled(caps, "tools", name)
-    ]
+    results = _eligible_results(idx, description, disabled_patterns, caps)
+    results = [(name, desc) for name, desc, _ in results]
     if not results:
         return f"No tools found matching '{description}'. Try different keywords."
 

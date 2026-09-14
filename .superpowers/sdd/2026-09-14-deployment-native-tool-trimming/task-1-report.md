@@ -50,6 +50,23 @@
 - `timeout 120 uv run ruff check src/sdk/tools_core/tool_search.py tests/sdk/test_tool_search.py` → **All checks passed**.
 - `git diff --check` → passed.
 
+## Final verification after index fix round 2
+
+- `timeout 300 uv sync --extra dev --extra analytics` → resolved 187 packages; audited 159 packages; no environment package changes required.
+- `timeout 900 uv run pytest tests/ -q` → **2,894 passed, 26 skipped, 52 warnings, 0 failed** in **476.69s**.
+- `timeout 180 uv run ruff check src/config/settings.py src/sdk/runner.py src/sdk/tool_index.py src/sdk/tools_core/tool_search.py tests/sdk/test_deployment_tool_trimming.py tests/sdk/test_runner.py tests/sdk/test_tool_search.py` → **All checks passed**.
+- `git status --short` → clean. No source changes, commits, pushes, or retries occurred during this final verification.
+
+## Final-review fix round 3: exhaust ranked candidates before filtering
+
+- Replaced the fixed 50-row overfetch with `_eligible_results()`, which expands HybridDB's ranked `limit` prefix in 50-row steps until five allowed results are found or `ToolIndex.count()` proves the finite index is exhausted.
+- HybridDB provides no offset/cursor search API, so expanding its ranked prefix is the bounded pagination mechanism; the maximum is the actual persisted index count, not an arbitrary truncation.
+- Added the red boundary regression with 50 stale disabled native rows before matching custom `crm_lookup` and MCP `mcp__crm__lookup` rows. Both survive the native-only provenance filter before the public five-result cap.
+- `timeout 180 uv run pytest tests/sdk/test_tool_search.py::TestToolSearchTool::test_search_iterates_past_a_full_disabled_candidate_page -q` → red before implementation, green after.
+- `timeout 180 uv run pytest tests/sdk/test_tool_search.py tests/sdk/test_deployment_tool_trimming.py -q` → **20 passed** in **5.10s**.
+- `timeout 180 uv run ruff check src/sdk/tools_core/tool_search.py tests/sdk/test_tool_search.py` → **All checks passed**.
+- `git diff --check` → passed.
+
 ## Scope
 
 No native registry global mutation, no per-user config, and no custom/MCP filtering were added.
