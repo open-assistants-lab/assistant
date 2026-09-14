@@ -31,7 +31,7 @@ def tool_reload() -> str:
     MCP servers must be reconnected via `mcp_reload()` first — this only re-indexes
     whatever MCP tools are already registered in the bridge.
 
-    Native tools (built-in) are always available and don't need reloading.
+    Built-in native tools are deployment-managed; `tools.disabled` exclusions remain unavailable and do not need reloading.
 
     Returns:
         Summary of tools added, removed, or changed

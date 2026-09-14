@@ -35,6 +35,7 @@ from src.sdk.compression import (
     PersistenceStatus,
     SummaryPersistenceResult,
 )
+from src.sdk.deployment_tools import filter_denied_native_tools, native_tool_is_denied
 from src.sdk.loop import AgentLoop
 from src.sdk.messages import Message, StreamChunk
 from src.sdk.middleware_summarization import SummarizationMiddleware
@@ -111,8 +112,9 @@ def _current_tool_catalog(loop: AgentLoop) -> list[ToolDefinition]:
     from src.sdk.tools_core.tool_search import tool_search
     from src.sdk.tools_custom import get_custom_tools
 
-    catalog = list(get_native_tools())
-    catalog.extend((tool_search, tool_reload))
+    settings = get_settings()
+    catalog = filter_denied_native_tools(list(get_native_tools()), settings)
+    catalog.extend(filter_denied_native_tools([tool_search, tool_reload], settings))
     catalog.extend(get_custom_tools(loop.user_id or DEFAULT_USER_ID, loop.workspace_id or "personal"))
     bridge = getattr(loop, "_mcp_bridge", None)
     if bridge is not None:
@@ -128,6 +130,7 @@ def refresh_user_tool_registries(user_id: str, names: set[str] | None = None) ->
         loop._caps_check = lambda name, current_caps=caps: _resource_enabled(
             current_caps, "tools", name
         )
+        loop._native_tool_deployment_disabled = native_tool_is_denied
         catalog = {tool.name: tool for tool in _current_tool_catalog(loop)}
         targets = names if names is not None else set(catalog) | set(loop._registry.list_names())
         for name in targets:
@@ -206,8 +209,9 @@ def _get_system_prompt(user_id: str, workspace_id: str | None = None) -> str:
     user_prompt_context = _get_user_prompt_context(user_id)
     skills_context = _get_skills_context(user_id)
     caps = _load_user_capabilities(user_id)
-    memory_context = _get_memory_context(caps)
-    file_ops_guideline = _get_file_ops_guideline(caps)
+    settings = get_settings()
+    memory_context = _get_memory_context(caps, settings)
+    file_ops_guideline = _get_file_ops_guideline(caps, settings)
 
     sections = [
         user_prompt_context,
@@ -243,12 +247,12 @@ _MEMORY_TOOL_GUIDANCE: list[tuple[str, str | None, str]] = [
 ]
 
 
-def _get_memory_context(caps: dict[str, Any]) -> str:
+def _get_memory_context(caps: dict[str, Any], settings: Any | None = None) -> str:
     """Build the memory recall strategy section, listing only enabled tools."""
     lines = ["## Memory Recall Strategy", "### Tool selection"]
     any_tool = False
     for name, usage, description in _MEMORY_TOOL_GUIDANCE:
-        if not _resource_enabled(caps, "tools", name):
+        if not _resource_enabled(caps, "tools", name) or native_tool_is_denied(name, settings):
             continue
         any_tool = True
         if usage:
@@ -265,10 +269,11 @@ def _get_memory_context(caps: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _has_dedicated_file_tools(caps: dict[str, Any]) -> bool:
-    """True when any dedicated file tool is enabled for this user."""
+def _has_dedicated_file_tools(caps: dict[str, Any], settings: Any | None = None) -> bool:
+    """True when a deployment-available dedicated file tool is enabled."""
     return any(
         _resource_enabled(caps, "tools", name)
+        and not native_tool_is_denied(name, settings)
         for name in (
             "files_read",
             "files_list",
@@ -278,7 +283,7 @@ def _has_dedicated_file_tools(caps: dict[str, Any]) -> bool:
     )
 
 
-def _get_file_ops_guideline(caps: dict[str, Any]) -> str:
+def _get_file_ops_guideline(caps: dict[str, Any], settings: Any | None = None) -> str:
     """Shell-based file-ops guideline, only as a last resort.
 
     Audit drift fix: only commands actually in the shell allowlist may be
@@ -289,8 +294,10 @@ def _get_file_ops_guideline(caps: dict[str, Any]) -> str:
     must never be advertised for file inspection while files_* exists
     (persona-round regression: cat/ls attempts despite files_read on).
     """
-    has_shell = _resource_enabled(caps, "tools", "shell_execute")
-    if not (has_shell and not _has_dedicated_file_tools(caps)):
+    has_shell = _resource_enabled(caps, "tools", "shell_execute") and not native_tool_is_denied(
+        "shell_execute", settings
+    )
+    if not (has_shell and not _has_dedicated_file_tools(caps, settings)):
         return ""
     try:
         from src.sdk.tools_core.shell import _get_shell_config
@@ -307,13 +314,15 @@ def _get_file_ops_guideline(caps: dict[str, Any]) -> str:
     )
 
 
-def _build_tool_preferences(caps: dict[str, Any]) -> str:
+def _build_tool_preferences(caps: dict[str, Any], settings: Any | None = None) -> str:
     """Tool preference hints built from ENABLED tools only (audit E24 drift):
     a preference naming an unregistered tool actively pushes the model toward
     a name that will fail (or bypass scoping)."""
 
     def on(name: str) -> bool:
-        return _resource_enabled(caps, "tools", name)
+        return _resource_enabled(caps, "tools", name) and not native_tool_is_denied(
+            name, settings
+        )
 
     lines: list[str] = []
     if on("web_fetch"):
@@ -331,7 +340,7 @@ def _build_tool_preferences(caps: dict[str, Any]) -> str:
         lines.append("- For searching file contents: use **files_grep_search**, NOT shell_execute with grep.")
     if on("shell_execute"):
         lines.append("- Use shell_execute only for commands that have no dedicated tool.")
-    if on("shell_execute") and _has_dedicated_file_tools(caps):
+    if on("shell_execute") and _has_dedicated_file_tools(caps, settings):
         lines.append(
             "- File inspection rule: never use shell_execute to read, list, or search "
             "files while any files_* tool is enabled — use the dedicated tool."
@@ -518,7 +527,8 @@ async def create_sdk_loop(
     t1 = time.monotonic()
 
     caps = _load_user_capabilities(user_id)
-    tools = [td for td in get_native_tools() if _resource_enabled(caps, "tools", td.name)]
+    native_tools = filter_denied_native_tools(list(get_native_tools()), settings)
+    tools = [td for td in native_tools if _resource_enabled(caps, "tools", td.name)]
 
     t2 = time.monotonic()
     mcp_tools: list[Any] = []
@@ -780,6 +790,13 @@ async def create_sdk_loop(
     if profile_timeout is not None:
         loop.profile_timeout_seconds = profile_timeout
 
+    # Native deployment trimming is checked again by AgentLoop before a stale
+    # persisted native index row can consult the global native registry.
+    # The callback intentionally applies only after the index identifies the
+    # row as native, preserving custom/MCP tools with matching names.
+    loop._native_tool_deployment_disabled = lambda name: native_tool_is_denied(
+        name, settings
+    )
     loop._tool_index = idx
     total_in_index = idx.count()
     if total_in_index > 0:
@@ -792,7 +809,7 @@ async def create_sdk_loop(
     # Tool preference hints: steer the model toward the right tool for common tasks
     # so it doesn't default to shell_execute for things that have dedicated tools.
     # Built from enabled tools only (audit E24 drift).
-    tool_prefs = _build_tool_preferences(caps)
+    tool_prefs = _build_tool_preferences(caps, settings)
     if tool_prefs:
         loop.system_prompt = (loop.system_prompt or "") + tool_prefs
 

@@ -1,5 +1,6 @@
 """Settings module for Assistant."""
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -290,9 +291,17 @@ class CliConfig(_BaseSettings):
     model_config = SettingsConfigDict(env_prefix="CLI_")
 
 
+class NativeToolsConfig(_BaseSettings):
+    """Deployment hard ceiling for shipped native tool definitions."""
+
+    mode: Literal["all", "selected", "none"] = "all"
+    enabled: list[str] = Field(default_factory=list)
+
+
 class ToolsConfig(_BaseSettings):
     """Tools configuration."""
 
+    native: NativeToolsConfig = Field(default_factory=NativeToolsConfig)
     firecrawl_api_key: str = Field(default="", validation_alias="FIRECRAWL_API_KEY")
     firecrawl_base_url: str = Field(default="", validation_alias="FIRECRAWL_BASE_URL")
     max_retries: int = 3
@@ -567,6 +576,22 @@ class AppConfig(_BaseSettings):
         # Bare AGENT (set by opencode/agent runtimes) collides with the nested agent config field.
         _drop_colliding_env()
         config = cls(**data)
+        # YAML init data otherwise wins over nested environment settings.
+        # Native-tool policy is an explicit deployment control, so honor the
+        # documented nested environment spellings after YAML loading.
+        native_mode = os.environ.get("TOOLS_NATIVE__MODE")
+        if native_mode:
+            config.tools.native.mode = native_mode
+        native_enabled = os.environ.get("TOOLS_NATIVE__ENABLED")
+        if native_enabled:
+            try:
+                parsed_enabled = json.loads(native_enabled)
+            except json.JSONDecodeError:
+                parsed_enabled = None
+            if isinstance(parsed_enabled, list) and all(
+                isinstance(pattern, str) for pattern in parsed_enabled
+            ):
+                config.tools.native.enabled = parsed_enabled
         # Langfuse behavior belongs under observability in YAML, while its
         # credentials continue to arrive through LANGFUSE_* environment vars.
         if isinstance(data.get("observability"), dict) and "langfuse" in data["observability"]:

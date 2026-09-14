@@ -76,6 +76,10 @@ skills:
   enabled: true
 subagent: null
 tools:
+  # Shipped native tools only. Custom per-tool TOOL.md and MCP tools remain available.
+  native:
+    mode: all  # all | selected | none
+    enabled: []  # exact/glob names when mode is selected
   max_retries: 3
   timeout: 30
 verification:
