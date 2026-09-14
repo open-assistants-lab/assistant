@@ -23,6 +23,24 @@
 - `timeout 120 uv run pytest tests/sdk/test_deployment_tool_trimming.py::test_refresh_unregisters_deployment_disabled_native_tool_but_keeps_custom_and_mcp -q` → 1 passed.
 - `timeout 120 uv run ruff check tests/sdk/test_deployment_tool_trimming.py` → passed.
 
+## Release Verification
+
+- `timeout 300 uv sync --extra dev --extra analytics` → resolved 187 packages and audited 159 packages; analytics dependency is present.
+- `timeout 900 uv run pytest tests/ -q` → **2,892 passed, 26 skipped, 53 warnings, 0 failed** in **824.28s**.
+- `timeout 180 uv run ruff check src/config/settings.py src/sdk/runner.py tests/sdk/test_deployment_tool_trimming.py tests/sdk/test_runner.py` → **All checks passed**.
+- `timeout 180 uv run mypy src/config/settings.py src/sdk/runner.py` → **4 errors**, all in unchanged `src/sdk/runner.py` lines (lambda inference; missing `messages.get_message_store`; `Any` return; missing `AgentLoop.profile_timeout_seconds`). `git diff -U0 5c9e0242..HEAD` confirms no changed code at those error locations; these are pre-existing and unrelated to deployment trimming.
+- `git diff --check` → passed. No source changes, commits, or pushes were made during release verification.
+
+## Final-review fix: stale `tool_search` index rows
+
+- Added `ToolIndex.search_with_tool_types()` so `tool_search` can make policy decisions from persisted row provenance.
+- `tool_search` now filters only persisted rows whose `tool_type == "native"` and whose name matches deployment `tools.disabled` with case-sensitive `fnmatchcase` semantics.
+- Custom TOOL.md and MCP rows are deliberately retained, even if the same pattern matches their names.
+- Added a regression fixture with a stale disabled `files_read` native row plus matching `files_custom` custom and `mcp__crm__files_read` MCP rows; the native entry is not advertised and both custom/MCP entries are explicitly asserted.
+- `timeout 180 uv run pytest tests/sdk/test_tool_search.py -q` → **12 passed** in 4.87s.
+- `timeout 180 uv run ruff check src/sdk/tool_index.py src/sdk/tools_core/tool_search.py tests/sdk/test_tool_search.py` → **All checks passed**.
+- `git diff --check` → passed.
+
 ## Scope
 
 No native registry global mutation, no per-user config, and no custom/MCP filtering were added.

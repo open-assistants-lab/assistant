@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -89,6 +90,47 @@ class TestToolSearchTool:
         finally:
             _current_agent_loop.reset(token)
         idx.close()
+
+    def test_search_filters_stale_deployment_disabled_native_rows_only(self, monkeypatch):
+        """Deployment globs hide stale native rows but preserve custom and MCP rows."""
+        from src.sdk.loop import AgentLoop, _current_agent_loop
+        from src.sdk.tool_index import ToolIndex
+        from src.sdk.tools_core import tool_search as tool_search_module
+
+        idx = ToolIndex(Path(tempfile.mkdtemp()) / "idx")
+        idx.index_tool(
+            ToolDefinition(name="files_read", description="files matching native result"),
+            tool_type="native",
+        )
+        idx.index_tool(
+            ToolDefinition(name="files_custom", description="files matching custom result"),
+            tool_type="custom",
+        )
+        idx.index_tool(
+            ToolDefinition(
+                name="mcp__crm__files_read", description="files matching MCP result"
+            ),
+            tool_type="mcp",
+        )
+        monkeypatch.setattr(
+            tool_search_module,
+            "get_settings",
+            lambda: SimpleNamespace(tools=SimpleNamespace(disabled=["*files*"])),
+        )
+        monkeypatch.setattr(tool_search_module, "load_user_capabilities", lambda user_id: {})
+
+        loop = AgentLoop(provider=MagicMockProvider(), tools=[])
+        loop._tool_index = idx
+        token = _current_agent_loop.set(loop)
+        try:
+            result = tool_search_module.tool_search.invoke({"description": "files"})
+        finally:
+            _current_agent_loop.reset(token)
+            idx.close()
+
+        assert "- **files_read**:" not in result
+        assert "- **files_custom**:" in result
+        assert "- **mcp__crm__files_read**:" in result
 
     def test_search_multiple_results(self):
         from src.sdk.tool_index import ToolIndex

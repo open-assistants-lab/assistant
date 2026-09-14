@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from fnmatch import fnmatchcase
+
+from src.config import get_settings
 from src.sdk.capabilities import load_user_capabilities, resource_enabled
 from src.sdk.loop import get_current_agent_loop
 from src.sdk.tools import tool
@@ -24,9 +27,25 @@ def tool_search(description: str, user_id: str =  DEFAULT_USER_ID) -> str:
         return "No tool index available. Tools are not configured for this session."
 
     idx = loop._tool_index
-    results = idx.search(description, limit=5)
+    results = idx.search_with_tool_types(description, limit=5)
     if not results:
         return f"No tools found matching '{description}'. Try different keywords."
+
+    # Deployment native-tool trimming (#16) is a hard ceiling. The persisted
+    # index can be stale before tool_reload, so filter only rows whose stored
+    # provenance proves they are built-in native tools. Custom TOOL.md and MCP
+    # rows remain visible even when their names match a disabled glob.
+    disabled_patterns = getattr(getattr(get_settings(), "tools", None), "disabled", [])
+    if isinstance(disabled_patterns, list):
+        results = [
+            (name, tool_description, tool_type)
+            for name, tool_description, tool_type in results
+            if tool_type != "native"
+            or not any(
+                isinstance(pattern, str) and pattern and fnmatchcase(name, pattern)
+                for pattern in disabled_patterns
+            )
+        ]
 
     # Audit E24-tools: never advertise capability-disabled tools — the stale
     # persisted index may still contain rows for scope=none tools.
@@ -36,7 +55,7 @@ def tool_search(description: str, user_id: str =  DEFAULT_USER_ID) -> str:
         caps = {}
     results = [
         (name, desc)
-        for name, desc in results
+        for name, desc, _ in results
         if resource_enabled(caps, "tools", name)
     ]
     if not results:

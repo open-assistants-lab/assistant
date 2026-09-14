@@ -150,8 +150,15 @@ class ToolIndex:
             self.db.delete("tools", existing[0]["id"])
 
     def search(self, query: str, limit: int = 5) -> list[tuple[str, str]]:
+        return [(name, description) for name, description, _ in self.search_with_tool_types(query, limit)]
+
+    def search_with_tool_types(self, query: str, limit: int = 5) -> list[tuple[str, str, str]]:
+        """Return indexed results with persisted provenance for policy filters."""
         rows = self.db.search("tools", "search_text", query, mode="hybrid", limit=limit)
-        return [(r["name"], r["description"]) for r in rows]
+        return [
+            (row["name"], row["description"], str(row.get("tool_type", "")))
+            for row in rows
+        ]
 
     def get_definition(self, name: str) -> ToolDefinition | None:
         rows = self.db.query("tools", where="name = ?", params=(name,))
