@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+import src.config.settings as settings_module
 from src.config.settings import AppConfig
 from src.sdk.deployment_tools import (
     filter_denied_native_tools,
@@ -61,6 +62,27 @@ def test_native_policy_env_overrides_apply_for_every_from_yaml_path(
 
     assert config.tools.native.mode == "selected"
     assert config.tools.native.enabled == ["time_get"]
+
+
+def test_native_policy_dotenv_overrides_yaml_and_process_environment_wins(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("tools:\n  native:\n    mode: all\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        'TOOLS_NATIVE__MODE=selected\nTOOLS_NATIVE__ENABLED=["time_get"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings_module, "REPO_ROOT", tmp_path)
+    monkeypatch.delenv("TOOLS_NATIVE__MODE", raising=False)
+    monkeypatch.delenv("TOOLS_NATIVE__ENABLED", raising=False)
+
+    dotenv_config = AppConfig.from_yaml(config_path)
+    assert dotenv_config.tools.native.mode == "selected"
+    assert dotenv_config.tools.native.enabled == ["time_get"]
+
+    monkeypatch.setenv("TOOLS_NATIVE__MODE", "none")
+    process_config = AppConfig.from_yaml(config_path)
+    assert process_config.tools.native.mode == "none"
+    assert process_config.tools.native.enabled == ["time_get"]
 
 
 @pytest.mark.parametrize(

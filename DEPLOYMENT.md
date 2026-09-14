@@ -58,7 +58,7 @@ tools:
       - files_glob_*
 ```
 
-- `all` (the default) exposes all shipped native tools.
+- `all` (the default) exposes all shipped native tools permitted by the active deployment profile; for example, desktop-server still excludes its desktop-incompatible families.
 - `selected` exposes only native names matching `enabled` patterns.
 - `none` exposes no shipped native tools, including shipped meta-tools.
 - Environment overrides are `TOOLS_NATIVE__MODE` and

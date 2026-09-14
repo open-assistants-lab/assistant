@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
+from dotenv import dotenv_values
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -315,13 +316,29 @@ def _apply_native_tools_env_override(native: NativeToolsConfig) -> NativeToolsCo
 
     YAML constructor values otherwise take precedence over nested settings, so
     this deployment control is merged explicitly on every ``from_yaml`` path.
-    Invalid values are passed to Pydantic validation rather than ignored.
+    Native values in the repository ``.env`` apply when process environment
+    values are absent; process environment wins over ``.env``. Invalid values
+    are passed to Pydantic validation rather than ignored.
     """
+    dotenv = dotenv_values(REPO_ROOT / ".env")
+    effective = {
+        key: value
+        for key, value in dotenv.items()
+        if key in {"TOOLS_NATIVE__MODE", "TOOLS_NATIVE__ENABLED"} and value is not None
+    }
+    effective.update(
+        {
+            key: os.environ[key]
+            for key in ("TOOLS_NATIVE__MODE", "TOOLS_NATIVE__ENABLED")
+            if key in os.environ
+        }
+    )
+
     override: dict[str, Any] = {}
-    if "TOOLS_NATIVE__MODE" in os.environ:
-        override["mode"] = os.environ["TOOLS_NATIVE__MODE"]
-    if "TOOLS_NATIVE__ENABLED" in os.environ:
-        raw_enabled = os.environ["TOOLS_NATIVE__ENABLED"]
+    if "TOOLS_NATIVE__MODE" in effective:
+        override["mode"] = effective["TOOLS_NATIVE__MODE"]
+    if "TOOLS_NATIVE__ENABLED" in effective:
+        raw_enabled = effective["TOOLS_NATIVE__ENABLED"]
         try:
             override["enabled"] = json.loads(raw_enabled)
         except json.JSONDecodeError:
