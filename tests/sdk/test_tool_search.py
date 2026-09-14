@@ -132,6 +132,44 @@ class TestToolSearchTool:
         assert "- **files_custom**:" in result
         assert "- **mcp__crm__files_read**:" in result
 
+    def test_search_overfetches_before_filtering_deployment_disabled_native_rows(
+        self, monkeypatch
+    ):
+        """A sixth custom result remains discoverable behind five disabled native rows."""
+        from src.sdk.loop import AgentLoop, _current_agent_loop
+        from src.sdk.tools_core import tool_search as tool_search_module
+
+        class Index:
+            def __init__(self) -> None:
+                self.limit: int | None = None
+
+            def search_with_tool_types(self, description: str, limit: int):
+                self.limit = limit
+                return [
+                    (f"files_stale_{number}", "matching native result", "native")
+                    for number in range(5)
+                ] + [("crm_lookup", "matching custom result", "custom")]
+
+        idx = Index()
+        monkeypatch.setattr(
+            tool_search_module,
+            "get_settings",
+            lambda: SimpleNamespace(tools=SimpleNamespace(disabled=["files_*"])),
+        )
+        monkeypatch.setattr(tool_search_module, "load_user_capabilities", lambda user_id: {})
+
+        loop = AgentLoop(provider=MagicMockProvider(), tools=[])
+        loop._tool_index = idx
+        token = _current_agent_loop.set(loop)
+        try:
+            result = tool_search_module.tool_search.invoke({"description": "matching"})
+        finally:
+            _current_agent_loop.reset(token)
+
+        assert idx.limit is not None and idx.limit > 5
+        assert "crm_lookup" in result
+        assert "No tools found" not in result
+
     def test_search_multiple_results(self):
         from src.sdk.tool_index import ToolIndex
 

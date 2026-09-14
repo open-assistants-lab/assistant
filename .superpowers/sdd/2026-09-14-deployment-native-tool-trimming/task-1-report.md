@@ -41,6 +41,15 @@
 - `timeout 180 uv run ruff check src/sdk/tool_index.py src/sdk/tools_core/tool_search.py tests/sdk/test_tool_search.py` → **All checks passed**.
 - `git diff --check` → passed.
 
+## Final-review fix round 2: filter before presentation limit
+
+- `tool_search` now fetches a bounded 50-result candidate set, applies deployment and capability policy filters, then presents at most five results.
+- Added a regression where the first five matches are stale deployment-disabled native rows and the sixth is a matching custom tool. The custom tool is returned; the index is read-only.
+- `timeout 120 uv run pytest tests/sdk/test_tool_search.py::TestToolSearchTool::test_search_overfetches_before_filtering_deployment_disabled_native_rows -q` → red before implementation, green after.
+- `timeout 180 uv run pytest tests/sdk/test_tool_search.py -q` → **13 passed** in 4.93s.
+- `timeout 120 uv run ruff check src/sdk/tools_core/tool_search.py tests/sdk/test_tool_search.py` → **All checks passed**.
+- `git diff --check` → passed.
+
 ## Scope
 
 No native registry global mutation, no per-user config, and no custom/MCP filtering were added.

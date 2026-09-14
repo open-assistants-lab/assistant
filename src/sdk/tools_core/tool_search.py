@@ -8,6 +8,12 @@ from src.sdk.loop import get_current_agent_loop
 from src.sdk.tools import tool
 from src.storage.paths import DEFAULT_USER_ID
 
+_MAX_DISPLAY_RESULTS = 5
+# Policy filters must run before the public result limit. Fetch a bounded
+# candidate set so stale deployment-disabled native rows cannot crowd out
+# discoverable custom or MCP tools.
+_SEARCH_CANDIDATE_LIMIT = 50
+
 
 @tool
 def tool_search(description: str, user_id: str =  DEFAULT_USER_ID) -> str:
@@ -27,7 +33,7 @@ def tool_search(description: str, user_id: str =  DEFAULT_USER_ID) -> str:
         return "No tool index available. Tools are not configured for this session."
 
     idx = loop._tool_index
-    results = idx.search_with_tool_types(description, limit=5)
+    results = idx.search_with_tool_types(description, limit=_SEARCH_CANDIDATE_LIMIT)
     if not results:
         return f"No tools found matching '{description}'. Try different keywords."
 
@@ -62,7 +68,7 @@ def tool_search(description: str, user_id: str =  DEFAULT_USER_ID) -> str:
         return f"No tools found matching '{description}'. Try different keywords."
 
     lines = []
-    for name, desc in results:
+    for name, desc in results[:_MAX_DISPLAY_RESULTS]:
         truncated = desc[:200] + "..." if len(desc) > 200 else desc
         lines.append(f"- **{name}**: {truncated}")
     return "Matching tools:\n" + "\n".join(lines)
