@@ -756,11 +756,6 @@ class AgentLoop:
 
     async def _try_lazy_load(self, tc: ToolCall) -> ToolResult | None:
         """Try to lazy-load a tool from the index and reconstruct its function."""
-        # Audit E24-tools: check capabilities BEFORE consulting the index or
-        # the global registry — disabled tools are never advertised, resolved,
-        # or registered, regardless of what the persisted index contains.
-        if not self._tool_allowed(tc.name):
-            return ToolResult(content=f"Tool is disabled: {tc.name}", is_error=True)
         if self._tool_index is None:
             return None
         td = self._tool_index.get_definition(tc.name)
@@ -769,7 +764,15 @@ class AgentLoop:
         reconstruct = self._tool_index.get_reconstruct(tc.name)
         tool_type = self._tool_index.get_tool_type(tc.name) or "unknown"
 
+        # Apply the capability gate after provenance lookup so a custom or MCP
+        # tool whose *name* matches a deployment native glob remains eligible.
+        if not self._tool_allowed(tc.name):
+            return ToolResult(content=f"Tool is disabled: {tc.name}", is_error=True)
+
         if tool_type == "native":
+            deployment_disabled = getattr(self, "_native_tool_deployment_disabled", None)
+            if deployment_disabled is not None and deployment_disabled(tc.name):
+                return ToolResult(content=f"Tool is disabled: {tc.name}", is_error=True)
             # Native tools are in the global registry — look them up by name.
             from src.sdk.native_tools import get_native_tools as _get_native_tools
 

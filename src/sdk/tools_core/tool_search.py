@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from fnmatch import fnmatchcase
-
 from src.config import get_settings
 from src.sdk.capabilities import load_user_capabilities, resource_enabled
+from src.sdk.deployment_tools import native_tool_is_deployment_disabled
 from src.sdk.loop import get_current_agent_loop
 from src.sdk.tools import tool
 from src.storage.paths import DEFAULT_USER_ID
@@ -20,7 +19,7 @@ _SEARCH_PAGE_SIZE = 50
 def _eligible_results(
     idx: object,
     description: str,
-    disabled_patterns: list[str],
+    settings: object,
     capabilities: dict[object, object],
 ) -> list[tuple[str, str, str]]:
     """Return allowed ranked results without truncating before index exhaustion."""
@@ -36,7 +35,7 @@ def _eligible_results(
             for name, tool_description, tool_type in candidates
             if (
                 tool_type != "native"
-                or not any(fnmatchcase(name, pattern) for pattern in disabled_patterns)
+                or not native_tool_is_deployment_disabled(name, settings)
             )
             and resource_enabled(capabilities, "tools", name)
         ]
@@ -72,12 +71,7 @@ def tool_search(description: str, user_id: str =  DEFAULT_USER_ID) -> str:
     # index can be stale before tool_reload, so filter only rows whose stored
     # provenance proves they are built-in native tools. Custom TOOL.md and MCP
     # rows remain visible even when their names match a disabled glob.
-    configured_patterns = getattr(getattr(get_settings(), "tools", None), "disabled", [])
-    disabled_patterns = [
-        pattern
-        for pattern in configured_patterns
-        if isinstance(pattern, str) and pattern
-    ] if isinstance(configured_patterns, list) else []
+    settings = get_settings()
 
     # Audit E24-tools: never advertise capability-disabled tools — the stale
     # persisted index may still contain rows for scope=none tools.
@@ -85,7 +79,7 @@ def tool_search(description: str, user_id: str =  DEFAULT_USER_ID) -> str:
         caps = load_user_capabilities(user_id)
     except Exception:
         caps = {}
-    results = _eligible_results(idx, description, disabled_patterns, caps)
+    results = _eligible_results(idx, description, settings, caps)
     results = [(name, desc) for name, desc, _ in results]
     if not results:
         return f"No tools found matching '{description}'. Try different keywords."
