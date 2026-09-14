@@ -786,17 +786,18 @@ class AgentLoop:
         """Try to lazy-load a tool from the index and reconstruct its function."""
         if self._tool_index is None:
             return None
+        # Preserve the capability boundary before touching persisted index
+        # state. A capability-disabled tool must not be resolved or rebuilt.
+        if not self._tool_allowed(tc.name):
+            return ToolResult(content=f"Tool is disabled: {tc.name}", is_error=True)
         td = self._tool_index.get_definition(tc.name)
         if td is None:
             return None
         reconstruct = self._tool_index.get_reconstruct(tc.name)
         tool_type = self._tool_index.get_tool_type(tc.name) or "unknown"
 
-        # Apply the capability gate after provenance lookup so a custom or MCP
-        # tool whose *name* matches a deployment native glob remains eligible.
-        if not self._tool_allowed(tc.name):
-            return ToolResult(content=f"Tool is disabled: {tc.name}", is_error=True)
-
+        # Deployment globs apply only after provenance lookup, so a custom or
+        # MCP tool whose name matches a native glob remains eligible.
         if tool_type == "native":
             deployment_disabled = getattr(self, "_native_tool_deployment_disabled", None)
             if deployment_disabled is not None and deployment_disabled(tc.name):
