@@ -65,6 +65,36 @@ async def test_lazy_custom_matching_native_glob_remains_eligible(monkeypatch):
     assert result.content == "custom-result"
 
 
+@pytest.mark.asyncio
+async def test_registered_disabled_native_is_rejected_without_name_blocking():
+    from src.sdk.native_tools import get_native_tools
+
+    native = next(tool for tool in get_native_tools() if tool.name == "files_read")
+    loop = AgentLoop(provider=object(), tools=[native], caps_check=lambda name: True)
+    loop._native_tool_deployment_disabled = lambda name: name == "files_read"
+
+    result = await loop._execute_tool(ToolCall(id="1", name="files_read", arguments={}))
+
+    assert result.is_error
+    assert result.content == "Tool is disabled: files_read"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["custom", "mcp"])
+async def test_registered_non_native_name_collision_remains_allowed(source: str):
+    async def same_name() -> str:
+        return source
+
+    definition = _tool("files_read", same_name)
+    loop = AgentLoop(provider=object(), tools=[definition], caps_check=lambda name: True)
+    loop._native_tool_deployment_disabled = lambda name: name == "files_read"
+
+    result = await loop._execute_tool(ToolCall(id="1", name="files_read", arguments={}))
+
+    assert not result.is_error
+    assert result.content == source
+
+
 def test_deployment_disabled_native_tools_are_omitted_from_prompt_preferences():
     from src.sdk.runner import _build_tool_preferences, _get_memory_context
 

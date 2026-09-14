@@ -388,9 +388,14 @@ class AgentLoop:
         self._agent_call_index = 0
 
         self._registry = ToolRegistry()
+        # Deployment tool trimming is a hard ceiling for native definitions,
+        # including definitions that were registered before a config refresh.
+        # Track provenance by object identity, never name: custom/MCP tools may
+        # intentionally share a native-looking name and must remain eligible.
+        self._registered_native_tool_names: set[str] = set()
         if tools:
             for t in tools:
-                self._registry.register(t)
+                self._register_tool_definition(t)
 
         self._tool_index: Any | None = None
         self._recently_used: set[str] = set()
@@ -490,12 +495,27 @@ class AgentLoop:
             injected = True
         return injected
 
-    def register_tool(self, tool_def: ToolDefinition) -> None:
+    @staticmethod
+    def _is_native_tool_definition(tool_def: ToolDefinition) -> bool:
+        """Return whether ``tool_def`` is an exact built-in registry definition."""
+        from src.sdk.native_tools import get_native_tools
+
+        return any(tool_def is native for native in get_native_tools())
+
+    def _register_tool_definition(self, tool_def: ToolDefinition) -> None:
         if self._registry.has(tool_def.name):
             self._registry.remove(tool_def.name)
+        if self._is_native_tool_definition(tool_def):
+            self._registered_native_tool_names.add(tool_def.name)
+        else:
+            self._registered_native_tool_names.discard(tool_def.name)
         self._registry.register(tool_def)
 
+    def register_tool(self, tool_def: ToolDefinition) -> None:
+        self._register_tool_definition(tool_def)
+
     def unregister_tool(self, name: str) -> bool:
+        self._registered_native_tool_names.discard(name)
         return self._registry.remove(name)
 
     def _apply_updates(self, state: AgentState, updates: dict[str, Any] | None) -> None:
@@ -711,6 +731,14 @@ class AgentLoop:
             return ToolResult(content=f"Unknown tool: {tc.name}", is_error=True)
 
         if not self._tool_allowed(tc.name):
+            return ToolResult(content=f"Tool is disabled: {tc.name}", is_error=True)
+
+        deployment_disabled = getattr(self, "_native_tool_deployment_disabled", None)
+        if (
+            tc.name in self._registered_native_tool_names
+            and deployment_disabled is not None
+            and deployment_disabled(tc.name)
+        ):
             return ToolResult(content=f"Tool is disabled: {tc.name}", is_error=True)
 
         max_calls = getattr(self.run_config, "max_tool_calls", None)
