@@ -1,20 +1,20 @@
-# Deployment Native Tool Trimming Plan
+# Deployment Native Tool Policy Plan
 
-**Goal:** Add deployment-wide exact/glob exclusion of built-in native tools without affecting custom or MCP tools.
+**Goal:** Replace the unmerged denylist proposal with an allowlist-first native policy; custom `TOOL.md` and MCP tools remain independent.
 
 **Spec:** `docs/superpowers/specs/2026-09-14-deployment-native-tool-trimming-design.md`
 
-## Task 1: Settings and native filter
+## Task 1: Policy model and hard ceiling
 
-- [ ] Write red config tests for `tools.disabled` default, YAML patterns, and env parsing.
-- [ ] Add `ToolsConfig.disabled: list[str]` and a small, pure native-tool matcher using `fnmatchcase`.
-- [ ] Write red runner tests proving exact/glob native exclusions and that custom/MCP tools are retained.
-- [ ] Apply the filter both during loop creation and live catalog refresh; disabled native tools cannot be restored by capabilities.
-- [ ] Document `tools.disabled` in `config.yaml` and `DEPLOYMENT.md`.
-- [ ] Run focused tests, ruff, mypy as appropriate; commit.
+- [ ] Write red tests for default `all`, `none`, and `selected` exact/glob matching plus nested environment settings.
+- [ ] Add `tools.native.mode` and `tools.native.enabled`; remove the unmerged `tools.disabled` proposal entirely.
+- [ ] Centralize native-policy/provenance checks.
+- [ ] Enforce the policy at native catalog creation, refresh, persisted search, lazy load, direct registered execution, and prompt guidance.
+- [ ] Preserve matching custom `TOOL.md` and MCP definitions at every boundary.
+- [ ] Document `TOOL.md` as per-custom-tool and policy configuration in deployment/config docs.
 
-## Task 2: Review and release gate
+## Task 2: Review and release
 
-- [ ] Scoped review: settings precedence, matching semantics, custom/MCP preservation, loop-refresh behavior.
-- [ ] Full `timeout 900 uv run pytest tests/ -q` with dev+analytics extras.
-- [ ] Final review, owner approval, merge/release.
+- [ ] Scoped review of policy precedence and all enforcement boundaries.
+- [ ] Full `timeout 900 uv run pytest tests/ -q` with development and analytics extras.
+- [ ] Final review and owner merge approval.

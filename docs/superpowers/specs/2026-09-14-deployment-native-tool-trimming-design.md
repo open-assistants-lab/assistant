@@ -1,23 +1,24 @@
-# Deployment Native Tool Trimming Design
+# Deployment Native Tool Policy Design
 
 ## Goal
-Allow a deployment to remove built-in native tools from every agent tool registry, reducing prompt schema/token cost for single-purpose deployments.
+Let a deployment declare which shipped native tools may enter an agent registry. This reduces tool-schema cost and ensures future native tools are not silently exposed in single-purpose deployments.
 
 ## Configuration
-`config.yaml` supports:
 
 ```yaml
 tools:
-  disabled: [app_*, browser_*, files_*]
+  native:
+    mode: none        # all | selected | none
+    enabled: []       # case-sensitive exact/glob patterns; selected only
 ```
 
-Patterns use case-sensitive shell-style glob matching (`fnmatchcase`); exact names are therefore supported. `TOOLS_DISABLED` follows normal Pydantic list environment parsing.
+`mode: all` is the general-purpose default. `mode: none` exposes no shipped native tools. `mode: selected` exposes only native names matching `enabled` patterns, using `fnmatchcase`. Environment values use the ordinary Pydantic nested-settings form: `TOOLS_NATIVE__MODE` and JSON-list `TOOLS_NATIVE__ENABLED`.
 
 ## Boundary
-The filter applies only to definitions returned by `get_native_tools()`. It runs in the SDK runner before user capability filtering and applies to loop refresh catalogs too. It does not remove custom `TOOL.md` definitions, MCP definitions, or tool metadata API behavior outside the active agent registry.
+The policy applies to all shipped native definitions, including runner-added meta tools. It is a hard ceiling at registry creation, refresh, persisted search, lazy load, direct execution, and prompt guidance. Custom per-tool `TOOL.md` definitions and MCP tools are independent extension planes and remain available even if their names match a native pattern.
 
-## Precedence
-Deployment disable is a hard ceiling: a user/workspace capability setting cannot restore a deployment-disabled native tool. Other native tools retain existing capability behavior. No deployment pattern disables a custom tool of the same name.
+## Naming
+`TOOL.md` is the singular, per-custom-tool definition format. A future generated `TOOLS.md` catalog may be informational only; it is never an authorization source.
 
 ## Validation
-Cover empty config, exact and glob patterns, hard-ceiling precedence, live-refresh catalog behavior, and custom-tool preservation. Run focused tests, then full suite before release.
+Cover all/selected/none, exact/glob patterns, YAML/env precedence, native-only collisions, creation/refresh/search/lazy/direct execution/prompt guidance, and default-safe behavior.
