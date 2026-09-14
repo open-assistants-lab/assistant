@@ -78,6 +78,12 @@ class OpenAIProvider(LLMProvider):
         **kwargs: Any,
     ) -> Message:
         model = model or self.model
+        # The OpenAI SDK owns its httpx client internally. Attach the narrow
+        # operational hooks at the actual request seam; this is a no-op until
+        # an explicit operational endpoint creates that pipeline.
+        from src.sdk.observability import instrument_openai_provider_http
+
+        instrument_openai_provider_http(self)
         openai_msgs = [m.to_openai() for m in messages]
         tool_schemas = [t.to_openai_format() for t in tools] if tools else None
 
@@ -115,6 +121,11 @@ class OpenAIProvider(LLMProvider):
         **kwargs: Any,
     ) -> AsyncIterator[StreamChunk]:
         model = model or self.model
+        # See ``chat``: the same explicit client hooks cover stream creation
+        # and the response lifecycle without globally patching httpx.
+        from src.sdk.observability import instrument_openai_provider_http
+
+        instrument_openai_provider_http(self)
         openai_msgs = [m.to_openai() for m in messages]
         tool_schemas = [t.to_openai_format() for t in tools] if tools else None
 

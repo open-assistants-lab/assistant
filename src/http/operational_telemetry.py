@@ -1,4 +1,4 @@
-"""OB-1 Task 2: operational HTTP request spans (admin destination only).
+"""OB-1 Task 2: operational HTTP request spans (operational destination only).
 
 A pure-ASGI middleware so an unconfigured deployment pays one dict lookup
 per request and nothing more. Behavior:

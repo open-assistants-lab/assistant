@@ -13,10 +13,10 @@ Langfuse initialization path. Design goals (spec:
 - ``ensure_langfuse_initialized`` is the ONLY place a Langfuse client is
   constructed; it passes the shared provider in so trace IDs are shared.
 - ``shutdown_observability`` flushes/shuts down only processors registered
-  with THIS module (Task 3 adds the filtered admin exporter), plus the
+  with THIS module (Task 3 adds the filtered operational exporter), plus the
   Langfuse client flush, exactly once.
 - Disabled/unconfigured observability performs zero outbound requests: no
-  exporter exists until Task 3 wires an explicit admin endpoint.
+  exporter exists until Task 3 wires an explicit operational endpoint.
 
 Vendor telemetry (consent tiers, vendor endpoints) is explicitly out of scope.
 """
@@ -49,8 +49,8 @@ from src.config import AppConfig
 
 logger = logging.getLogger("src.sdk.observability")
 
-# Physical-layer attribute allowlist (spec §Destination routing). Only these
-# keys survive to the admin OTLP destination; everything else — prompts,
+# Operational-layer attribute allowlist (spec §Destination routing). Only these
+# keys survive to the operational OTLP destination; everything else — prompts,
 # tool arguments/results, message content, unknown instrumentation attrs —
 # is dropped at the exporter. Extend deliberately, never wholesale.
 #
@@ -101,7 +101,7 @@ ALLOWED_OPERATIONAL_ATTRIBUTES = frozenset(
 DEFAULT_DROPPED_SCOPES = ("langfuse", "langfuse-sdk")
 
 # Resource-attribute allowlist (OB-1 Task 1): only release-identity fields
-# survive to the admin OTLP destination. Anything else on the resource —
+# survive to the operational OTLP destination. Anything else on the resource —
 # host.name, user.id, custom deployment labels — is fingerprinting or
 # secret-carrying material and never leaves the process.
 ALLOWED_RESOURCE_ATTRIBUTES = frozenset(
@@ -176,7 +176,7 @@ def instrument_provider_http(provider: Any) -> None:
     Carries host/status/method/duration ONLY. The URL path, query string,
     request body, and response content never enter span attributes; the
     provider's own (semantic) spans remain the only place content is
-    recorded, and the exporter drops those at the admin destination.
+    recorded, and the exporter drops those at the operational destination.
     """
     client = provider._http_client
     if not operational_telemetry_active() or getattr(provider, "_ob1_http_instrumented_client", None) is client:
@@ -299,6 +299,46 @@ def instrument_provider_http(provider: Any) -> None:
 
     provider._http_client = _InstrumentedClient(original_client)
     provider._ob1_http_instrumented_client = provider._http_client
+
+
+def instrument_openai_provider_http(provider: Any) -> None:
+    """Attach local httpx hooks to an OpenAI SDK client when operational telemetry is active.
+
+    OpenAI-compatible providers own their HTTP client inside ``AsyncOpenAI``.
+    This attaches hooks to that one client instance rather than monkeypatching
+    httpx globally. Both regular and streamed SDK requests pass through the
+    hooks. The response hook records only method, hostname, status, and
+    duration; request URL userinfo/path/query and bodies are never read.
+    """
+    if not operational_telemetry_active():
+        return
+    client = getattr(getattr(provider, "_client", None), "_client", None)
+    if client is None or getattr(provider, "_ob1_openai_http_client", None) is client:
+        return
+    hooks = getattr(client, "event_hooks", None)
+    if not isinstance(hooks, dict):
+        return
+
+    async def on_request(request: Any) -> None:
+        request.extensions["assistant.operational.start"] = time.monotonic()
+
+    async def on_response(response: Any) -> None:
+        request = response.request
+        start = request.extensions.get("assistant.operational.start", time.monotonic())
+        with operational_telemetry_span(
+            "http.client",
+            **{
+                "http.request.method": str(request.method).upper(),
+                "server.address": str(request.url.host or ""),
+                "http.response.status_code": getattr(response, "status_code", 0),
+                "duration_ms": round((time.monotonic() - start) * 1000, 3),
+            },
+        ):
+            pass
+
+    hooks.setdefault("request", []).append(on_request)
+    hooks.setdefault("response", []).append(on_response)
+    provider._ob1_openai_http_client = client
 
 
 def instrument_sqlite_connection(conn: Any) -> Any:

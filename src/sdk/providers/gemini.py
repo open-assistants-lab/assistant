@@ -57,7 +57,7 @@ class GeminiProvider(LLMProvider):
                 timeout=httpx.Timeout(self.timeout),
             )
         # Wire the operational wrapper at the actual client seam; it is inert
-        # unless the OB-0 provider is configured for admin export.
+        # unless an explicit operational endpoint enables export.
         from src.sdk.observability import instrument_provider_http
 
         instrument_provider_http(self)

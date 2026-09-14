@@ -64,7 +64,7 @@ class OllamaCloud(LLMProvider):
                 timeout=httpx.Timeout(self.timeout),
             )
         # Explicitly wire the operational wrapper at the real client seam. It
-        # is a no-op when no admin OTel endpoint/provider is configured.
+        # is a no-op when no operational endpoint/provider is configured.
         from src.sdk.observability import instrument_provider_http
 
         instrument_provider_http(self)
