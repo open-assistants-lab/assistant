@@ -150,6 +150,42 @@ def test_openai_stream_production_wiring_emits_safe_operational_span(obs_env, mo
     asyncio.run(provider.aclose())
 
 
+def test_real_async_openai_private_httpx_hook_seam_is_hookable(monkeypatch):
+    """Pin the installed SDK seam used by operational instrumentation.
+
+    The test makes no requests. It proves the real ``AsyncOpenAI._client``
+    exposes the mutable httpx ``event_hooks`` mapping used by
+    ``instrument_openai_provider_http`` and restores every local mutation.
+    """
+    from openai import AsyncOpenAI
+
+    import src.sdk.observability as obs
+
+    sdk_client = AsyncOpenAI(api_key="test-key", base_url="https://api.example.test")
+    provider = SimpleNamespace(_client=sdk_client)
+    http_client = sdk_client._client
+    hooks = http_client.event_hooks
+    assert isinstance(hooks, dict)
+    assert isinstance(hooks.get("request"), list)
+    assert isinstance(hooks.get("response"), list)
+
+    original_request_hooks = list(hooks["request"])
+    original_response_hooks = list(hooks["response"])
+    monkeypatch.setattr(obs, "operational_telemetry_active", lambda: True)
+    try:
+        obs.instrument_openai_provider_http(provider)
+        assert len(hooks["request"]) == len(original_request_hooks) + 1
+        assert len(hooks["response"]) == len(original_response_hooks) + 1
+        assert provider._ob1_openai_http_client is http_client
+    finally:
+        hooks["request"][:] = original_request_hooks
+        hooks["response"][:] = original_response_hooks
+        asyncio.run(sdk_client.close())
+
+    assert hooks["request"] == original_request_hooks
+    assert hooks["response"] == original_response_hooks
+
+
 def test_openai_production_wiring_is_inert_without_endpoint(monkeypatch):
     from src.sdk import observability as obs
 
