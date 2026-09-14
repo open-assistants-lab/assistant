@@ -97,3 +97,38 @@ async def test_deployment_disable_is_a_hard_ceiling_before_capabilities(monkeypa
 
     loop = await runner.create_sdk_loop(user_id="test-user")
     assert "files_read" not in loop._registry.list_names()
+
+
+def test_refresh_unregisters_deployment_disabled_native_tool_but_keeps_custom_and_mcp(
+    monkeypatch,
+):
+    """Refresh applies the deployment ceiling to an already-live loop only."""
+    import src.sdk.runner as runner
+    from src.sdk.loop import AgentLoop
+
+    native = _tool("files_read")
+    custom = _tool("files_custom")
+    mcp = _tool("mcp__crm__files_read")
+    loop = AgentLoop(
+        provider=SimpleNamespace(provider_id="test", model="test"),
+        tools=[native, custom, mcp],
+    )
+    loop.user_id = "u"
+    loop.workspace_id = "personal"
+    loop._mcp_bridge = SimpleNamespace(get_tool_definitions=lambda: [mcp])
+
+    monkeypatch.setattr(
+        runner,
+        "get_settings",
+        lambda: SimpleNamespace(tools=SimpleNamespace(disabled=["files_*"])),
+    )
+    monkeypatch.setattr(runner, "get_native_tools", lambda: [native])
+    monkeypatch.setattr("src.sdk.tools_custom.get_custom_tools", lambda *args: [custom])
+    monkeypatch.setattr(runner, "_load_user_capabilities", lambda user_id: {})
+    monkeypatch.setattr(runner, "_resource_enabled", lambda *args: True)
+    monkeypatch.setattr(runner, "_live_user_loops", lambda user_id: [loop])
+
+    assert runner.refresh_user_tool_registries("u") == 1
+    assert "files_read" not in loop._registry.list_names()
+    assert "files_custom" in loop._registry.list_names()
+    assert "mcp__crm__files_read" in loop._registry.list_names()
