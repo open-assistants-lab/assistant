@@ -4,11 +4,20 @@
 
 **Goal:** Emit safe admin-only physical spans while meeting the documented privacy and performance bounds.
 
-**Architecture:** OB-0 remains the lifecycle/export owner. Instrumentation creates only physical spans; `FilteringSpanExporter` removes all non-allowlisted span/resource/event/status fields before OTLP serialization.
+**Architecture:** OB-0 remains the lifecycle owner. The process-global `semantic_telemetry_provider` serves Langfuse semantic spans only. A dedicated `operational_telemetry_provider` is created only for an explicit `OTEL_ENDPOINT`; it sends allowlisted runtime spans through `FilteringSpanExporter` to ClickStack. Operational spans inherit semantic context for trace correlation but never share Langfuse processors.
 
 **Tech Stack:** OpenTelemetry SDK, FastAPI, httpx, subprocess, sqlite3, pytest.
 
 **Spec:** `docs/superpowers/specs/2026-09-12-observability-physical-instrumentation-design.md`
+
+### Routing repair gate (must pass before Task 4)
+
+- [ ] Add red integration tests proving an `assistant.operational` span reaches the filtered OTLP delegate but never Langfuse, including a shared trace-ID correlation assertion.
+- [ ] Add red tests proving `operational_telemetry_span()` is a no-op and FastAPI/sandbox/provider/SQLite instrumentation creates no span when `OTEL_ENDPOINT` is empty.
+- [ ] Split lifecycle state and shutdown ownership into `semantic_telemetry_provider` and `operational_telemetry_provider`; create the latter only with an explicit endpoint.
+- [ ] Rename physical helpers/scopes to operational terminology and update focused tests/docs.
+- [ ] Add or explicitly defer OpenAI-compatible transport coverage with an accurate scope statement.
+- [ ] Re-run active-lifespan performance measurements against an explicit local OTLP stub endpoint.
 
 ## Constraints
 - Never run pytest without `timeout`.
