@@ -567,9 +567,13 @@ async def create_sdk_loop(
         if is_core_tool(td.name) or td.name in CORE_TOOL_NAMES:
             core_tool_defs.append(td)
 
-    if _resource_enabled(caps, "tools", tool_search.name):
+    if _resource_enabled(caps, "tools", tool_search.name) and not native_tool_is_denied(
+        tool_search.name, settings
+    ):
         core_tool_defs.append(tool_search)
-    if _resource_enabled(caps, "tools", tool_reload.name):
+    if _resource_enabled(caps, "tools", tool_reload.name) and not native_tool_is_denied(
+        tool_reload.name, settings
+    ):
         core_tool_defs.append(tool_reload)
 
     from src.storage.paths import get_paths as _get_paths
@@ -799,7 +803,7 @@ async def create_sdk_loop(
     )
     loop._tool_index = idx
     total_in_index = idx.count()
-    if total_in_index > 0:
+    if total_in_index > 0 and any(tool is tool_search for tool in core_tool_defs):
         tool_hint = (
             f"\n\nYou have access to {total_in_index} additional tools across all categories. "
             "Use tool_search(description='what you need') to find and load a specific tool."

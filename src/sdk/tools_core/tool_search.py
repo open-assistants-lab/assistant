@@ -70,7 +70,7 @@ def tool_search(description: str, user_id: str =  DEFAULT_USER_ID) -> str:
     # Deployment native-tool trimming (#16) is a hard ceiling. The persisted
     # index can be stale before tool_reload, so filter only rows whose stored
     # provenance proves they are built-in native tools. Custom TOOL.md and MCP
-    # rows remain visible even when their names match a disabled glob.
+    # rows remain visible even when their names match a disallowed native pattern.
     settings = get_settings()
 
     # Audit E24-tools: never advertise capability-disabled tools — the stale

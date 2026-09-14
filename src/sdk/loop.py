@@ -497,10 +497,10 @@ class AgentLoop:
 
     @staticmethod
     def _is_native_tool_definition(tool_def: ToolDefinition) -> bool:
-        """Return whether ``tool_def`` is an exact built-in registry definition."""
-        from src.sdk.native_tools import get_native_tools
+        """Return whether this exact definition is shipped native code."""
+        from src.sdk.deployment_tools import is_shipped_native_definition
 
-        return any(tool_def is native for native in get_native_tools())
+        return is_shipped_native_definition(tool_def)
 
     def _register_tool_definition(self, tool_def: ToolDefinition) -> None:
         if self._registry.has(tool_def.name):
