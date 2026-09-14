@@ -573,6 +573,13 @@ class AppConfig(_BaseSettings):
         # Bare AGENT (set by opencode/agent runtimes) collides with the nested agent config field.
         _drop_colliding_env()
         config = cls(**data)
+        # Pydantic init kwargs (the YAML mapping) win over environment values.
+        # Deployment documentation promises TOOLS_DISABLED as the override for
+        # tools.disabled, so apply that flat deployment variable explicitly.
+        # Keep this narrow rather than changing the established precedence for
+        # unrelated nested configuration.
+        if "TOOLS_DISABLED" in os.environ:
+            config.tools.disabled = ToolsConfig(_env_file=None).disabled
         # Langfuse behavior belongs under observability in YAML, while its
         # credentials continue to arrive through LANGFUSE_* environment vars.
         if isinstance(data.get("observability"), dict) and "langfuse" in data["observability"]:

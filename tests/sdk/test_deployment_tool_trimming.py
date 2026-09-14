@@ -27,6 +27,19 @@ def test_tools_disabled_accepts_yaml_style_list_and_env_json(monkeypatch):
     assert ToolsConfig(_env_file=None).disabled == ["files_*", "shell_execute"]
 
 
+def test_from_yaml_tools_disabled_env_overrides_yaml_and_unset_preserves_yaml(
+    tmp_path, monkeypatch
+):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("tools:\n  disabled: [app_*]\n", encoding="utf-8")
+
+    monkeypatch.setenv("TOOLS_DISABLED", '["files_*", "shell_execute"]')
+    assert AppConfig.from_yaml(config_file).tools.disabled == ["files_*", "shell_execute"]
+
+    monkeypatch.delenv("TOOLS_DISABLED")
+    assert AppConfig.from_yaml(config_file).tools.disabled == ["app_*"]
+
+
 def test_native_filter_supports_exact_and_case_sensitive_globs():
     from src.sdk.runner import filter_deployment_disabled_native_tools
 

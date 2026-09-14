@@ -67,6 +67,15 @@
 - `timeout 180 uv run ruff check src/sdk/tools_core/tool_search.py tests/sdk/test_tool_search.py` → **All checks passed**.
 - `git diff --check` → passed.
 
+## Final-review fix round 4: `TOOLS_DISABLED` environment precedence
+
+- Added an integration regression through `AppConfig.from_yaml()` proving the documented JSON `TOOLS_DISABLED` list overrides YAML `tools.disabled`, while an unset environment variable preserves the YAML patterns.
+- `AppConfig.from_yaml()` now applies only this documented flat deployment override after YAML construction, matching existing explicit flat environment precedence without changing unrelated nested configuration behavior.
+- Exact/case-sensitive glob handling remains in the existing runner matcher; this fix changes only configuration source precedence.
+- `timeout 120 uv run pytest tests/sdk/test_deployment_tool_trimming.py -q` → red: 1 failed before the fix; green: 8 passed after.
+- `timeout 180 uv run pytest tests/sdk/test_deployment_tool_trimming.py tests/config/test_settings_resolution.py tests/unit/test_config.py -q` → **26 passed** in **1.08s**.
+- `timeout 120 uv run ruff check src/config/settings.py tests/sdk/test_deployment_tool_trimming.py` → **All checks passed**.
+
 ## Scope
 
 No native registry global mutation, no per-user config, and no custom/MCP filtering were added.
