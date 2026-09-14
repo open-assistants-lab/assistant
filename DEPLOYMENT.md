@@ -288,7 +288,24 @@ host) for a local model server.
   (`LOGGING_LEVEL`, `LOGGING_JSON_DIR`).
 - **Traces**: Langfuse if configured (see envs above).
 
-### Observability (OB-0/OB-1)
+### Deployment tool trimming
+
+Single-purpose deployments can exclude built-in native tools from every agent
+registry, reducing model tool-schema tokens and preventing those native tools
+from being re-enabled by user capabilities:
+
+```yaml
+tools:
+  disabled: [app_*, browser_*, files_*]
+```
+
+Patterns are case-sensitive shell-style globs; exact names work too. This is a
+deployment-wide hard ceiling and applies only to built-in native tools. Custom
+`TOOL.md` tools and MCP tools remain available, even when their names match a
+pattern. Set `TOOLS_DISABLED` to a JSON list (for example,
+`["app_*", "browser_*"]`) to supply the same setting by environment.
+
+## Observability (OB-0/OB-1)
 
 Two optional, processor-isolated telemetry channels are **off unless
 explicitly configured**. Semantic telemetry and operational telemetry never

@@ -22,6 +22,7 @@ import dataclasses
 import hashlib
 import json
 import time
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, cast
 
@@ -105,13 +106,41 @@ def _live_user_loops(user_id: str) -> list[AgentLoop]:
     return list({id(loop): loop for loop in candidates}.values())
 
 
+def filter_deployment_disabled_native_tools(
+    tools: list[ToolDefinition], disabled_patterns: list[str]
+) -> list[ToolDefinition]:
+    """Remove deployment-disabled built-in tools using case-sensitive globs.
+
+    This deliberately accepts only the native catalog assembled by callers;
+    custom TOOL.md and MCP definitions are never passed through this filter.
+    """
+    patterns = tuple(pattern for pattern in disabled_patterns if pattern)
+    if not patterns:
+        return tools
+    return [
+        tool
+        for tool in tools
+        if not any(fnmatchcase(tool.name, pattern) for pattern in patterns)
+    ]
+
+
+def _deployment_disabled_native_tools(settings: Any) -> list[str]:
+    """Return validated deployment patterns without trusting mock/config shapes."""
+    patterns = getattr(getattr(settings, "tools", None), "disabled", [])
+    if not isinstance(patterns, list) or not all(isinstance(pattern, str) for pattern in patterns):
+        return []
+    return patterns
+
+
 def _current_tool_catalog(loop: AgentLoop) -> list[ToolDefinition]:
     """Build the current native, custom, and connected-MCP catalog for a live loop."""
     from src.sdk.tools_core.tool_reload import tool_reload
     from src.sdk.tools_core.tool_search import tool_search
     from src.sdk.tools_custom import get_custom_tools
 
-    catalog = list(get_native_tools())
+    catalog = filter_deployment_disabled_native_tools(
+        list(get_native_tools()), _deployment_disabled_native_tools(get_settings())
+    )
     catalog.extend((tool_search, tool_reload))
     catalog.extend(get_custom_tools(loop.user_id or DEFAULT_USER_ID, loop.workspace_id or "personal"))
     bridge = getattr(loop, "_mcp_bridge", None)
@@ -518,7 +547,10 @@ async def create_sdk_loop(
     t1 = time.monotonic()
 
     caps = _load_user_capabilities(user_id)
-    tools = [td for td in get_native_tools() if _resource_enabled(caps, "tools", td.name)]
+    native_tools = filter_deployment_disabled_native_tools(
+        list(get_native_tools()), _deployment_disabled_native_tools(settings)
+    )
+    tools = [td for td in native_tools if _resource_enabled(caps, "tools", td.name)]
 
     t2 = time.monotonic()
     mcp_tools: list[Any] = []

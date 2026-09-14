@@ -37,6 +37,7 @@ def loop_factory(monkeypatch):
     settings.memory.summarization.prompt_file = None
     settings.verification.enabled = False
     settings.langfuse.enabled = False
+    settings.tools.disabled = []
     monkeypatch.setattr(runner, "get_settings", lambda: settings)
     monkeypatch.setattr(runner, "get_native_tools", lambda: [])
     monkeypatch.setattr(runner, "_seed_default_workspace", lambda: None)
@@ -59,6 +60,7 @@ def loop_factory(monkeypatch):
         monkeypatch.setattr(runner, "get_cached_model_provider", lambda *args, **kwargs: provider)
         return await runner.create_sdk_loop(user_id=user_id, session_id=session_id)
 
+    create.settings = settings
     return create
 
 

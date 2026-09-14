@@ -291,8 +291,14 @@ class CliConfig(_BaseSettings):
 
 
 class ToolsConfig(_BaseSettings):
-    """Tools configuration."""
+    """Tools configuration.
 
+    ``disabled`` is a deployment-wide hard ceiling for built-in native tool
+    definitions. Entries are case-sensitive shell-style patterns; custom
+    TOOL.md and MCP tools are intentionally not matched here.
+    """
+
+    disabled: list[str] = Field(default_factory=list)
     firecrawl_api_key: str = Field(default="", validation_alias="FIRECRAWL_API_KEY")
     firecrawl_base_url: str = Field(default="", validation_alias="FIRECRAWL_BASE_URL")
     max_retries: int = 3

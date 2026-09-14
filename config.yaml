@@ -76,6 +76,11 @@ skills:
   enabled: true
 subagent: null
 tools:
+  # Deployment-wide hard ceiling for built-in native tools. Exact names and
+  # case-sensitive shell globs are accepted; custom TOOL.md and MCP tools are
+  # not affected. Example for a single-purpose deployment:
+  # disabled: [app_*, browser_*, files_*]
+  disabled: []
   max_retries: 3
   timeout: 30
 verification:
