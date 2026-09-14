@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Emit safe admin-only physical spans while meeting the documented privacy and performance bounds.
+**Goal:** Emit safe operational runtime spans through an isolated ClickStack pipeline while meeting the documented privacy and performance bounds.
 
 **Architecture:** OB-0 remains the lifecycle owner. The process-global `semantic_telemetry_provider` serves Langfuse semantic spans only. A dedicated `operational_telemetry_provider` is created only for an explicit `OTEL_ENDPOINT`; it sends allowlisted runtime spans through `FilteringSpanExporter` to ClickStack. Operational spans inherit semantic context for trace correlation but never share Langfuse processors.
 
@@ -12,12 +12,12 @@
 
 ### Routing repair gate (must pass before Task 4)
 
-- [ ] Add red integration tests proving an `assistant.operational` span reaches the filtered OTLP delegate but never Langfuse, including a shared trace-ID correlation assertion.
-- [ ] Add red tests proving `operational_telemetry_span()` is a no-op and FastAPI/sandbox/provider/SQLite instrumentation creates no span when `OTEL_ENDPOINT` is empty.
-- [ ] Split lifecycle state and shutdown ownership into `semantic_telemetry_provider` and `operational_telemetry_provider`; create the latter only with an explicit endpoint.
-- [ ] Rename physical helpers/scopes to operational terminology and update focused tests/docs.
-- [ ] Add or explicitly defer OpenAI-compatible transport coverage with an accurate scope statement.
-- [ ] Re-run active-lifespan performance measurements against an explicit local OTLP stub endpoint.
+- [x] Prove an `assistant.operational` span reaches the filtered OTLP delegate but never Langfuse, while retaining trace-ID correlation.
+- [x] Prove endpoint-empty `operational_telemetry_span()` and FastAPI/sandbox/provider/SQLite instrumentation are no-ops.
+- [x] Split lifecycle state and shutdown ownership into `semantic_telemetry_provider` and endpoint-gated `operational_telemetry_provider`.
+- [x] Rename helpers/scopes and deployment documentation to operational terminology.
+- [x] Cover OpenAI-compatible non-streaming and streaming transport, including the installed SDK private-seam contract.
+- [x] Run paired real-lifespan A/B measurements against an explicit local OTLP stub endpoint.
 
 ## Constraints
 - Never run pytest without `timeout`.
@@ -33,7 +33,7 @@
 - [ ] Implement filtered copies without mutating `ReadableSpan`.
 - [ ] Re-run focused export/lifecycle tests and commit `fix(observability): filter physical span metadata`.
 
-### Task 2: Add HTTP and sandbox physical spans
+### Task 2: Add HTTP and sandbox operational spans
 
 **Files:** `src/http/main.py`, `src/sdk/sandbox.py`, `src/sdk/observability.py`, focused tests.
 

@@ -288,12 +288,12 @@ host) for a local model server.
   (`LOGGING_LEVEL`, `LOGGING_JSON_DIR`).
 - **Traces**: Langfuse if configured (see envs above).
 
-### Admin tracing (OB-0 foundation)
+### Observability (OB-0/OB-1)
 
-Two optional, independent admin-owned channels. Both are **off unless
-explicitly configured**; an unconfigured deployment makes zero outbound
-observability requests. There is **no vendor telemetry channel** in OB-0 —
-no consent tiers, no vendor endpoints, nothing egresses to the vendor.
+Two optional, processor-isolated telemetry channels are **off unless
+explicitly configured**. Semantic telemetry and operational telemetry never
+share an exporter pipeline. There is **no vendor telemetry channel** — no
+consent tiers, vendor endpoints, or vendor egress.
 
 **Langfuse (agent semantics — traces, generations, tool spans):**
 
@@ -305,18 +305,19 @@ no consent tiers, no vendor endpoints, nothing egresses to the vendor.
   (`https://<your-langfuse-host>` — the same spelling Langfuse's own setup
   page shows); legacy `LANGFUSE_HOST` is still accepted.
 
-**Admin OTLP export (physical spans to your own ClickStack/collector):**
+**Operational OTLP export (runtime spans to your ClickStack/collector):**
 
 - `OTEL_ENDPOINT=<full OTLP/HTTP traces URL>` — e.g.
-  `https://clickstack.example.com/v1/traces`. Empty/unset = no exporter is
-  ever constructed.
+  `https://clickstack.example.com/v1/traces`. Empty/unset = no operational
+  provider, exporter, or operational spans are constructed.
 - `OTEL_HEADERS=<json object>` — optional auth headers for the collector.
-- Exported spans are **filtered**: Langfuse-generated semantic spans
-  (prompts, completions, tool arguments/results) are dropped at the
-  exporter; only allowlisted physical attributes (HTTP lifecycle, DB
-  operation class, sandbox/backend, scheduler/background, error *types*,
-  model identity, release identity) reach the destination. Your Langfuse
-  instance keeps the semantic view; the shared trace ID joins the two.
+- Exported operational spans are **filtered**: only allowlisted runtime
+  attributes (HTTP lifecycle, DB operation class, sandbox/backend,
+  scheduler/background, model identity, and release identity) reach the
+  destination. Prompts, completions, tool arguments/results, SQL, command
+  text, request/response content, and Langfuse semantic spans do not reach
+  it. Langfuse receives semantic telemetry only; a shared trace ID joins the
+  isolated views.
 - Export runs on a bounded background batch (5 s timeout); a slow or
   unreachable collector causes **drops, never request backpressure**.
 
