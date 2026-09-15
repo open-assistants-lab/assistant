@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.6.7 — 2026-09-15
+
+### Added
+- Deployment-native allowlist policy: `tools.native.mode: all | selected | none` with case-sensitive exact/glob `enabled` patterns.
+- Native-tool policy enforcement across registry creation, live refresh, ranked persisted search, lazy loading, direct execution, and prompt guidance.
+
+### Security and deployment
+- `mode: none` exposes no shipped native tools, including runner meta-tools; custom per-tool `TOOL.md` and MCP definitions remain independent.
+- Environment policy precedence is process environment > `.env` > YAML. Invalid native-policy configuration fails closed.
+
+### Verification
+- Full suite: 2,897 passed, 26 skipped.
+
 ## v0.6.6 — 2026-09-14
 
 ### Added
