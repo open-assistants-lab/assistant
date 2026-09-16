@@ -27,6 +27,7 @@ from typing import Any
 
 from src.app_logging import get_logger
 from src.sdk.audit import AuditEvent
+from src.sdk.governance_operations import GovernanceOperationStore
 from src.sdk.run_events import ToolResultData, ToolResultEvent
 from src.sdk.session_events import (
     get_session_event_store,
@@ -60,6 +61,7 @@ class GovernanceService:
     def __init__(self, data_root: str | None = None) -> None:
         self._paths = DataPaths() if data_root is None else DataPaths(data_root=data_root)
         self._lock = threading.Lock()
+        self.operations = GovernanceOperationStore(self._conn, self._lock)
         self._recent: list[AuditEvent] = []  # receipt ring buffer (process-local)
 
     def _db_path(self, user_id: str) -> Path:
