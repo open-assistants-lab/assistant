@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from src.sdk.governance import GovernanceService
-from src.sdk.governance_operations import OperationStatus
+from src.sdk.governance_operations import GovernanceOperationStore, OperationStatus
 from src.sdk.tools import ExternalHTTPExecutor
 
 
@@ -121,6 +121,48 @@ def test_capability_plaintext_is_not_persisted_and_uncertain_has_evidence(tmp_pa
     assert uncertain.status is OperationStatus.UNCERTAIN
     assert uncertain.error_code == "dispatch_outcome_unknown"
     assert service.operations.get_events("alice", uncertain.operation_id)[-1].kind == "uncertain"
+
+
+def test_unknown_dispatch_result_requires_current_worker_claim(tmp_path):
+    service = GovernanceService(data_root=str(tmp_path))
+    created, _ = _external(service)
+    operation = created.operation
+    service.operations.claim_dispatch("alice", operation.operation_id, "worker-1")
+
+    with pytest.raises(ValueError, match="Dispatch claim mismatch"):
+        service.operations.record_dispatch_result(
+            "alice", operation.operation_id, "stale-worker", acknowledged=None
+        )
+
+    assert service.operations.get_operation("alice", operation.operation_id).status is OperationStatus.QUEUED
+    assert service.operations.get_dispatch("alice", operation.operation_id).status == "claimed"
+    assert service.operations.get_events("alice", operation.operation_id) == []
+
+
+def test_restart_derives_same_capability_and_authenticates_callback(tmp_path):
+    service = GovernanceService(data_root=str(tmp_path))
+    created, _ = _external(service)
+    operation = created.operation
+
+    restarted = GovernanceService(data_root=str(tmp_path))
+    restored = restarted.operations.get_operation("alice", operation.operation_id)
+    assert restored is not None
+    capability = GovernanceOperationStore._callback_capability(
+        "test-operation-callback-secret",
+        restored.operation_id,
+        restored.proposal_id,
+        restored.arguments_hash,
+    )
+    assert capability == created.callback_capability
+
+    event = restarted.operations.append_callback_event(
+        "alice", restored.operation_id, capability, 1, "running", "recovered",
+        proposal_id=restored.proposal_id,
+        tool_name=restored.tool_name,
+        arguments_hash=restored.arguments_hash,
+        manifest_hash=restored.manifest_hash,
+    )
+    assert event.sequence == 1
 
 
 def test_callback_terminal_idempotency_and_dispatch_retry_key(tmp_path):

@@ -689,10 +689,12 @@ class GovernanceOperationStore:
             self._ensure_schema(conn)
             now = self._now()
             if acknowledged is None:
-                conn.execute(
+                claim = conn.execute(
                     "UPDATE operation_dispatches SET status='uncertain',updated_at=? WHERE operation_id=? AND user_id=? AND claimed_by=? AND status='claimed'",
                     (now, operation_id, user_id, worker_id),
                 )
+                if claim.rowcount != 1:
+                    raise ValueError("Dispatch claim mismatch")
                 transitioned = conn.execute(
                     "UPDATE operations SET status=?,completed_at=?,updated_at=?,error_code=?,error_detail_safe=? WHERE operation_id=? AND user_id=? AND status IN (?,?)",
                     (
