@@ -228,9 +228,13 @@ Docker Desktop, if the daemon runs on the host, set in `.env`:
 
     OLLAMA_LOCAL_BASE_URL=http://host.docker.internal:11434/v1
 
-`host.docker.internal` is Docker Desktop-specific. Linux deployments need an
-equivalent gateway mapping, for example `extra_hosts:
-["host.docker.internal:host-gateway"]` on the Compose service.
+`host.docker.internal` is Docker Desktop-specific. On Linux, `extra_hosts:
+["host.docker.internal:host-gateway"]` only maps the hostname; it cannot reach
+an Ollama daemon bound only to `127.0.0.1`. Either bind Ollama to a
+bridge-reachable host address and restrict port 11434 to the Docker bridge with
+a host firewall, or run a local reverse proxy that accepts only bridge traffic
+and forwards to Ollama's loopback listener. Do not expose Ollama publicly just
+to make it reachable from the container.
 
 `OLLAMA_BASE_URL` instead configures `ollama-cloud:<model>` and defaults to
 `https://ollama.com`; it does not select or configure the local `ollama:`

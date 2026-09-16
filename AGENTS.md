@@ -331,11 +331,12 @@ span.finish()
 provider.end_span(span)
 ```
 
-### Watch out: Ollama has two provider classes
-- `OllamaLocal` — OpenAI-compatible at `/v1/chat/completions` (localhost or custom)
-- `OllamaCloud` — Native `/api/chat` with Bearer auth (ollama.com)
+### Watch out: Ollama has two provider paths
+- `ollama:<model>` — OpenAI-compatible local path at `/v1/chat/completions`; uses `OLLAMA_LOCAL_BASE_URL` (default `http://localhost:11434/v1`).
+- `ollama-cloud:<model>` — native `/api/chat` cloud path; uses `OLLAMA_BASE_URL` and `OLLAMA_API_KEY` (default host `https://ollama.com`).
 
-Auto-detection happens in `create_model_from_config()`: if `OLLAMA_BASE_URL` points to ollama.com or `OLLAMA_API_KEY` is set, it uses `OllamaCloud`.
+The model prefix selects the path. `create_model_from_config()` does not switch an
+`ollama:` model to cloud based on `OLLAMA_BASE_URL` or `OLLAMA_API_KEY`.
 
 ### Watch out: Use module-level imports for patchable functions
 Tests that use `unittest.mock.patch` need a module-level attribute to target. `from X import Y` creates a local binding that patches can't reach. Use `import src.module as _m` and call `_m.func()` instead. Example: coordinator.py's `_paths.get_paths()` allows `patch("src.storage.paths.get_paths")` to work.

@@ -316,9 +316,15 @@ image.
 For `ollama:<model>`, use `OLLAMA_LOCAL_BASE_URL` (default:
 `http://localhost:11434/v1`). Inside a container, that default points to the
 container itself. Docker Desktop deployments that need a host-side daemon can
-use `http://host.docker.internal:11434/v1`; Linux deployments must configure an
-equivalent host gateway (for example Compose `extra_hosts`) rather than assume
-that hostname exists.
+use `http://host.docker.internal:11434/v1`.
+
+On Linux, Compose `extra_hosts: ["host.docker.internal:host-gateway"]` only
+maps the hostname; it **cannot** reach an Ollama daemon bound solely to
+`127.0.0.1`. Either bind Ollama to a bridge-reachable host address and restrict
+port 11434 to the Docker bridge with a host firewall, or run a local reverse
+proxy that accepts only bridge traffic and forwards to Ollama's loopback
+listener. Do not expose Ollama publicly merely to make it reachable from the
+container.
 
 ## Observability
 
