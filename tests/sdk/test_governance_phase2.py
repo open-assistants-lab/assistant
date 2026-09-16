@@ -60,7 +60,9 @@ def test_operation_listing_filters_by_status_and_cancel_is_durable(tmp_path) -> 
     assert service.operations.request_cancel("alice", second_operation.operation_id)
 
     queued = service.list_operations("alice", status="queued")
+    cancelled = service.list_operations("alice", status="cancelled")
 
-    assert [operation.operation_id for operation in queued] == [first_operation.operation_id, second_operation.operation_id]
+    assert [operation.operation_id for operation in queued] == [first_operation.operation_id]
+    assert [operation.operation_id for operation in cancelled] == [second_operation.operation_id]
     cancelled_request = service.request_operation_cancel("alice", second_operation.operation_id)
     assert cancelled_request.cancel_requested is True

@@ -20,6 +20,7 @@ def gov_env(monkeypatch, tmp_path):
     monkeypatch.setattr(governance, "_services", {})
     monkeypatch.setenv("GOVERNANCE_ENABLED", "true")
     monkeypatch.setenv("GOVERNANCE_OPERATION_CALLBACK_SECRET", "test-operation-secret")
+    monkeypatch.setenv("GOVERNANCE_EXTERNAL_EXECUTOR_ALLOWED_HOSTS", '["executor.internal"]')
     reload_settings()
     yield
     monkeypatch.undo()

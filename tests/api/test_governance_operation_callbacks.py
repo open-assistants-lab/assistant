@@ -17,6 +17,10 @@ def callback_secret(monkeypatch):
         "src.sdk.governance_operations.GovernanceOperationStore._callback_secret",
         staticmethod(lambda: "test-operation-callback-secret"),
     )
+    monkeypatch.setattr(
+        "src.sdk.governance_operations.GovernanceOperationStore._external_executor_allowed_hosts",
+        staticmethod(lambda: ["executor.internal"]),
+    )
 
 
 def created_external(tmp_path):
