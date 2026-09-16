@@ -84,16 +84,20 @@ class GovernanceService:
                 tier TEXT NOT NULL,
                 status TEXT NOT NULL,
                 expires_at TEXT,
-                session_id TEXT
+                session_id TEXT,
+                user_id TEXT
             )
             """
         )
-        # Migration-safe: pre-session-log DBs lack the column.
-        try:
-            conn.execute("ALTER TABLE proposals ADD COLUMN session_id TEXT")
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass
+        # Migration-safe: pre-session-log DBs lack the columns.
+        for column in ("session_id", "user_id"):
+            try:
+                conn.execute(f"ALTER TABLE proposals ADD COLUMN {column} TEXT")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
+        conn.execute("UPDATE proposals SET user_id = ? WHERE user_id IS NULL", (user_id,))
+        conn.commit()
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS tool_stats (
@@ -174,7 +178,7 @@ class GovernanceService:
         )
         with self._conn(user_id) as conn:
             conn.execute(
-                "INSERT INTO proposals VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO proposals (proposal_id, ts, tool, arguments, tier, status, expires_at, session_id, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     proposal_id,
                     datetime.now(UTC).isoformat(),
@@ -184,6 +188,7 @@ class GovernanceService:
                     "pending",
                     expiry,
                     session_id,
+                    user_id,
                 ),
             )
             # M4-2 anti-fatigue: proposals_created per tool.

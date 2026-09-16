@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import secrets
 import sqlite3
 import threading
 import uuid
@@ -123,6 +122,21 @@ class GovernanceOperationStore:
     def _arguments_hash(arguments: dict[str, Any]) -> str:
         encoded = json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _callback_capability(
+        secret: str, operation_id: str, proposal_id: str, arguments_hash: str
+    ) -> str:
+        if not secret:
+            raise ValueError("External async execution requires GOVERNANCE_OPERATION_CALLBACK_SECRET")
+        binding = f"{operation_id}:{proposal_id}:{arguments_hash}".encode()
+        return hmac.new(secret.encode(), binding, hashlib.sha256).hexdigest()
+
+    @staticmethod
+    def _callback_secret() -> str:
+        from src.config import get_settings
+
+        return str(getattr(get_settings().governance, "operation_callback_secret", "") or "")
 
     @staticmethod
     def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -544,6 +558,9 @@ class GovernanceOperationStore:
         self, user_id: str, proposal_id: str, executor: Any
     ) -> tuple[ExternalOperationCreation, bool]:
         """Atomically accept an external operation and create its durable outbox."""
+        callback_secret = self._callback_secret()
+        if not callback_secret:
+            raise ValueError("External async execution requires GOVERNANCE_OPERATION_CALLBACK_SECRET")
         with self._lock, self._conn(user_id) as conn:
             self._ensure_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
@@ -557,7 +574,8 @@ class GovernanceOperationStore:
                 assert op is not None
                 return ExternalOperationCreation(operation=op), False
             proposal = conn.execute(
-                "SELECT tool, arguments, status FROM proposals WHERE proposal_id=?", (proposal_id,)
+                "SELECT tool, arguments, status FROM proposals WHERE proposal_id=? AND user_id=?",
+                (proposal_id, user_id),
             ).fetchone()
             if proposal is None or proposal[2] not in ("pending", "approved"):
                 conn.rollback()
@@ -565,16 +583,16 @@ class GovernanceOperationStore:
             approved_now = proposal[2] == "pending"
             if approved_now:
                 cur = conn.execute(
-                    "UPDATE proposals SET status='approved' WHERE proposal_id=? AND status='pending'",
-                    (proposal_id,),
+                    "UPDATE proposals SET status='approved' WHERE proposal_id=? AND user_id=? AND status='pending'",
+                    (proposal_id, user_id),
                 )
                 if cur.rowcount != 1:
                     conn.rollback()
                     raise ValueError("Proposal approval was consumed concurrently")
             if (
                 conn.execute(
-                    "UPDATE proposals SET status='consumed' WHERE proposal_id=? AND status='approved'",
-                    (proposal_id,),
+                    "UPDATE proposals SET status='consumed' WHERE proposal_id=? AND user_id=? AND status='approved'",
+                    (proposal_id, user_id),
                 ).rowcount
                 != 1
             ):
@@ -583,7 +601,10 @@ class GovernanceOperationStore:
             now, operation_id = self._now(), uuid.uuid4().hex
             arguments = json.loads(proposal[1])
             key = uuid.uuid4().hex
-            capability = secrets.token_urlsafe(32)
+            arguments_hash = self._arguments_hash(arguments)
+            capability = self._callback_capability(
+                callback_secret, operation_id, proposal_id, arguments_hash
+            )
             conn.execute(
                 """INSERT INTO operations (operation_id,proposal_id,user_id,tool_name,arguments_json,arguments_hash,status,cancel_requested,created_at,updated_at,executor_url,manifest_hash,dispatch_idempotency_key) VALUES (?,?,?,?,?,?,?,0,?,?,?,?,?)""",
                 (
@@ -672,18 +693,29 @@ class GovernanceOperationStore:
                     "UPDATE operation_dispatches SET status='uncertain',updated_at=? WHERE operation_id=? AND user_id=? AND claimed_by=? AND status='claimed'",
                     (now, operation_id, user_id, worker_id),
                 )
-                conn.execute(
-                    "UPDATE operations SET status=?,completed_at=?,updated_at=? WHERE operation_id=? AND user_id=? AND status IN (?,?)",
+                transitioned = conn.execute(
+                    "UPDATE operations SET status=?,completed_at=?,updated_at=?,error_code=?,error_detail_safe=? WHERE operation_id=? AND user_id=? AND status IN (?,?)",
                     (
                         OperationStatus.UNCERTAIN.value,
                         now,
                         now,
+                        "dispatch_outcome_unknown",
+                        "External dispatch outcome could not be confirmed.",
                         operation_id,
                         user_id,
                         OperationStatus.QUEUED.value,
                         OperationStatus.RUNNING.value,
                     ),
                 )
+                if transitioned.rowcount == 1:
+                    sequence = conn.execute(
+                        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM operation_events WHERE operation_id=?",
+                        (operation_id,),
+                    ).fetchone()[0]
+                    conn.execute(
+                        "INSERT INTO operation_events (operation_id,sequence,timestamp,kind,message_safe) VALUES (?,?,?,?,?)",
+                        (operation_id, sequence, now, "uncertain", "External dispatch outcome could not be confirmed."),
+                    )
             else:
                 status = "dispatched" if acknowledged else "queued"
                 cur = conn.execute(
@@ -736,19 +768,53 @@ class GovernanceOperationStore:
         arguments_hash: str,
         manifest_hash: str | None = None,
     ) -> OperationEvent:
-        self._validate_callback(
-            user_id,
-            operation_id,
-            capability,
-            proposal_id=proposal_id,
-            tool_name=tool_name,
-            arguments_hash=arguments_hash,
-            manifest_hash=manifest_hash,
-        )
-        events = self.get_events(user_id, operation_id)
-        if sequence != len(events) + 1:
-            raise ValueError("Operation event sequence is not next")
-        return self.append_event(user_id, operation_id, kind, message_safe)
+        """Atomically authenticate, order, and append an executor checkpoint."""
+        with self._lock, self._conn(user_id) as conn:
+            self._ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            op = self._operation_from_row(self._select_operation(conn, user_id, operation_id))
+            cap_row = conn.execute(
+                "SELECT callback_capability_hash FROM operation_dispatches WHERE operation_id=? AND user_id=?",
+                (operation_id, user_id),
+            ).fetchone()
+            if (
+                op is None or cap_row is None
+                or not hmac.compare_digest(cap_row[0], hashlib.sha256(capability.encode()).hexdigest())
+                or proposal_id != op.proposal_id or tool_name != op.tool_name
+                or arguments_hash != op.arguments_hash or manifest_hash != op.manifest_hash
+            ):
+                conn.rollback()
+                raise PermissionError("Invalid operation callback binding")
+            existing = conn.execute(
+                "SELECT operation_id, sequence, timestamp, kind, message_safe, structured_data_safe_json "
+                "FROM operation_events WHERE operation_id=? AND sequence=?",
+                (operation_id, sequence),
+            ).fetchone()
+            if existing is not None:
+                conn.commit()
+                return OperationEvent(
+                    operation_id=existing[0], sequence=existing[1], timestamp=existing[2],
+                    kind=existing[3], message_safe=existing[4],
+                    structured_data_safe=json.loads(existing[5]) if existing[5] else None,
+                )
+            expected = conn.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM operation_events WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()[0]
+            if sequence != expected:
+                conn.rollback()
+                raise ValueError("Operation event sequence is not next")
+            timestamp = self._now()
+            conn.execute(
+                "INSERT INTO operation_events (operation_id,sequence,timestamp,kind,message_safe) VALUES (?,?,?,?,?)",
+                (operation_id, sequence, timestamp, kind, message_safe),
+            )
+            conn.execute(
+                "UPDATE operations SET updated_at=? WHERE operation_id=? AND user_id=?",
+                (timestamp, operation_id, user_id),
+            )
+            conn.commit()
+        return OperationEvent(operation_id=operation_id, sequence=sequence, timestamp=timestamp, kind=kind, message_safe=message_safe)
 
     def finish_callback(
         self,

@@ -366,6 +366,13 @@ consent tiers, vendor endpoints, or vendor egress.
 - Export runs on a bounded background batch (5 s timeout); a slow or
   unreachable collector causes **drops, never request backpressure**.
 
+### External governed operations
+
+Async tools with `annotations.executor.kind: external_http` require a deployment-held
+`GOVERNANCE_OPERATION_CALLBACK_SECRET`. It is used to derive operation-scoped callback
+capabilities and must never be stored in `TOOL.md`, callbacks, or the governance database.
+The deployment refuses external async approval when this secret is unset.
+
 ## Production hardening checklist
 
 - [ ] `API_KEY` set on any server reachable beyond localhost

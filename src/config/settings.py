@@ -119,6 +119,10 @@ class GovernanceConfig(_BaseSettings):
     # tool name -> tier: autonomous | show_then_auto_send | explicit | hard_block
     tiers: dict[str, str] = Field(default_factory=dict)
     auto_send_expiry_seconds: int = 300
+    operation_callback_secret: str = Field(
+        default="",
+        description="Required deployment secret for external governed-operation callbacks.",
+    )
 
     model_config = SettingsConfigDict(env_prefix="GOVERNANCE_")
 
