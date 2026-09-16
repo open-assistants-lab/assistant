@@ -40,7 +40,9 @@ For a tool annotation `execution_mode: async` (default `sync`):
 3. asynchronously dispatch an immutable envelope with proposal binding, arguments hash, expiry, and idempotency key;
 4. never blindly replay an external side effect after unknown outcome.
 
-Initial executor contract is external/opaque. Assistant does not parse domain manifests or steps. Executor callbacks authenticate to the assigned operation capability, may append ordered checkpoints, and must use idempotent terminal completion/failure. A restart reconciles operations through executor status or marks them `uncertain` with evidence.
+Initial executor contract is external/opaque HTTP. An async tool declares a trusted static `executor.kind: external_http` and `executor.dispatch_url` in its definition; model arguments never select a dispatch host. The approval transaction persists an immutable dispatch-outbox record with arguments hash, optional manifest hash, idempotency key, executor reference, and a *hashed* operation callback capability. The dispatcher sends the plaintext capability only in its immutable dispatch envelope.
+
+Executor callbacks authenticate with that capability and may append ordered checkpoints or terminal completion/failure. Every callback must bind the operation/proposal/tool/arguments hash and, when present, manifest hash; mismatches are rejected. Dispatch transport may retry only with the same idempotency key. A restart reclaims undelivered outbox work; any dispatched operation without confirmable state is marked `uncertain` with evidence—never blindly re-executed.
 
 ## API and access control
 
