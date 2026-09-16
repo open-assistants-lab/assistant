@@ -640,6 +640,57 @@ class GovernanceOperationStore:
         assert op is not None
         return ExternalOperationCreation(operation=op, callback_capability=capability), approved_now
 
+    def queued_dispatch_ids(self, user_id: str) -> list[str]:
+        with self._conn(user_id) as conn:
+            self._ensure_schema(conn)
+            rows = conn.execute(
+                "SELECT operation_id FROM operation_dispatches WHERE user_id=? AND status='queued' ORDER BY updated_at, operation_id",
+                (user_id,),
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def dispatch_envelope(self, user_id: str, operation_id: str) -> dict[str, Any]:
+        """Return the immutable executor envelope for an already-approved operation."""
+        with self._conn(user_id) as conn:
+            self._ensure_schema(conn)
+            op = self._operation_from_row(self._select_operation(conn, user_id, operation_id))
+            dispatch = conn.execute(
+                "SELECT manifest_hash,idempotency_key FROM operation_dispatches WHERE operation_id=? AND user_id=?",
+                (operation_id, user_id),
+            ).fetchone()
+        if op is None or dispatch is None:
+            raise ValueError("External operation does not exist")
+        token = self._callback_capability(
+            self._callback_secret(), op.operation_id, op.proposal_id, op.arguments_hash
+        )
+        return {
+            "operation_id": op.operation_id,
+            "proposal_id": op.proposal_id,
+            "tool_name": op.tool_name,
+            "arguments": op.arguments,
+            "arguments_hash": op.arguments_hash,
+            "manifest_hash": dispatch[0],
+            "idempotency_key": dispatch[1],
+            "callback_token": token,
+        }
+
+    def reconcile_claimed_dispatches(self, user_id: str) -> int:
+        """Record crash-interrupted dispatches as uncertain; never replay them."""
+        with self._conn(user_id) as conn:
+            self._ensure_schema(conn)
+            rows = conn.execute(
+                "SELECT operation_id, claimed_by FROM operation_dispatches WHERE user_id=? AND status='claimed'",
+                (user_id,),
+            ).fetchall()
+        reconciled = 0
+        for operation_id, worker_id in rows:
+            try:
+                self.record_dispatch_result(user_id, str(operation_id), str(worker_id), acknowledged=None)
+                reconciled += 1
+            except ValueError:
+                continue
+        return reconciled
+
     def get_dispatch(self, user_id: str, operation_id: str) -> DispatchClaim | None:
         with self._conn(user_id) as conn:
             self._ensure_schema(conn)
@@ -807,6 +858,12 @@ class GovernanceOperationStore:
                 conn.rollback()
                 raise ValueError("Operation event sequence is not next")
             timestamp = self._now()
+            if op.status is OperationStatus.QUEUED:
+                conn.execute(
+                    "UPDATE operations SET status=?, started_at=COALESCE(started_at, ?), updated_at=? "
+                    "WHERE operation_id=? AND user_id=? AND status=?",
+                    (OperationStatus.RUNNING.value, timestamp, timestamp, operation_id, user_id, OperationStatus.QUEUED.value),
+                )
             conn.execute(
                 "INSERT INTO operation_events (operation_id,sequence,timestamp,kind,message_safe) VALUES (?,?,?,?,?)",
                 (operation_id, sequence, timestamp, kind, message_safe),

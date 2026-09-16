@@ -320,6 +320,21 @@ class GovernanceService:
         definition = next((item for item in definitions if item.name == tool_name), None)
         return str(getattr(getattr(definition, "annotations", None), "execution_mode", "sync"))
 
+    def external_executor_for_tool(self, user_id: str, tool_name: str) -> Any | None:
+        """Return only a trusted static external executor declaration."""
+        from src.sdk.native_tools import get_native_tools
+
+        definitions = list(get_native_tools())
+        try:
+            from src.sdk.tools_custom import get_custom_tools
+
+            native_names = {definition.name for definition in definitions}
+            definitions.extend(item for item in get_custom_tools(user_id) if item.name not in native_names)
+        except Exception:
+            pass
+        definition = next((item for item in definitions if item.name == tool_name), None)
+        return getattr(getattr(definition, "annotations", None), "executor", None)
+
     def _record_async_approval(self, user_id: str, proposal_id: str, tool: str) -> None:
         """Record the approval receipt/stat only after the atomic transition."""
         self._emit_receipt(user_id, f"approved:{proposal_id}", tool="", correlation=proposal_id)
@@ -339,6 +354,17 @@ class GovernanceService:
         if approved_now:
             self._record_async_approval(user_id, proposal_id, operation.tool_name)
         return operation, approved_now
+
+    def approve_external_operation(
+        self, user_id: str, proposal_id: str, executor: Any
+    ) -> tuple[Any, bool]:
+        """Accept one external operation and create its durable dispatch outbox."""
+        created, approved_now = self.operations.approve_pending_and_create_external_operation(
+            user_id, proposal_id, executor
+        )
+        if approved_now:
+            self._record_async_approval(user_id, proposal_id, created.operation.tool_name)
+        return created, approved_now
 
     def list_operations(
         self, user_id: str, status: str | None = None
@@ -639,6 +665,20 @@ class GovernanceService:
             default_capture_bus.emit(ev)
         except Exception:
             pass
+
+
+def iter_governance_user_ids() -> list[str]:
+    """Return users with an in-memory or durable governance store.
+
+    Lifespan recovery must find queued work after a process restart, not only
+    users that happened to issue a request in this process.
+    """
+    with _lock:
+        users = set(_services)
+    root = DataPaths().root / "private" / "governance"
+    if root.is_dir():
+        users.update(path.name for path in root.iterdir() if path.is_dir())
+    return sorted(users)
 
 
 def get_governance_service(user_id: str = "default_user") -> GovernanceService:

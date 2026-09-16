@@ -9,13 +9,37 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Request
+from pydantic import BaseModel
 
 from src.http.auth import enforce_user_id, resolve_user_id
 from src.sdk.governance import get_governance_service
+from src.sdk.governance_operations import OperationStatus
 from src.storage.paths import DEFAULT_USER_ID
 
 router = APIRouter(prefix="/governance", tags=["governance"])
+
+
+class OperationCallback(BaseModel):
+    """Executor-supplied immutable operation binding and payload."""
+
+    user_id: str
+    proposal_id: str
+    tool_name: str
+    arguments_hash: str
+    manifest_hash: str | None = None
+    sequence: int | None = None
+    message_safe: str = ""
+    result: dict[str, Any] | None = None
+
+
+def _callback_service(callback: OperationCallback, operation_id: str, capability: str):
+    if not capability:
+        raise HTTPException(status_code=401, detail="Missing operation callback capability")
+    service = _svc(callback.user_id)
+    # Store methods validate the capability plus all immutable bindings. The
+    # user id is only a database locator, never authentication.
+    return service, capability
 
 
 async def execute_approved_tool(
@@ -136,7 +160,12 @@ async def approve_pending(
         "pending", "approved", "consumed"
     ):
         try:
-            operation, _approved_now = svc.approve_async_operation(user_id, proposal_id)
+            executor = svc.external_executor_for_tool(user_id, row["tool"])
+            if executor is not None:
+                created, _approved_now = svc.approve_external_operation(user_id, proposal_id, executor)
+                operation = created.operation
+            else:
+                operation, _approved_now = svc.approve_async_operation(user_id, proposal_id)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {
@@ -208,6 +237,70 @@ async def request_operation_cancel(
     if operation is None:
         raise HTTPException(status_code=404, detail="No such operation")
     return operation.model_dump(mode="json")
+
+
+@router.post("/operations/{operation_id}/events")
+async def append_operation_event(
+    operation_id: str,
+    callback: OperationCallback,
+    x_operation_capability: str = Header(default=""),
+) -> dict[str, Any]:
+    """Append an executor checkpoint; bearer user auth is deliberately irrelevant."""
+    service, capability = _callback_service(callback, operation_id, x_operation_capability)
+    if callback.sequence is None:
+        raise HTTPException(status_code=422, detail="Callback sequence is required")
+    try:
+        event = service.operations.append_callback_event(
+            callback.user_id, operation_id, capability, callback.sequence, "progress", callback.message_safe,
+            proposal_id=callback.proposal_id, tool_name=callback.tool_name,
+            arguments_hash=callback.arguments_hash, manifest_hash=callback.manifest_hash,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail="Invalid operation callback capability") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return event.model_dump(mode="json")
+
+
+async def _finish_operation_callback(
+    operation_id: str,
+    callback: OperationCallback,
+    capability: str,
+    status: OperationStatus,
+) -> dict[str, Any]:
+    service, capability = _callback_service(callback, operation_id, capability)
+    try:
+        operation = service.operations.finish_callback(
+            callback.user_id, operation_id, capability, status,
+            proposal_id=callback.proposal_id, tool_name=callback.tool_name,
+            arguments_hash=callback.arguments_hash, manifest_hash=callback.manifest_hash,
+            result=callback.result,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail="Invalid operation callback capability") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return operation.model_dump(mode="json")
+
+
+@router.post("/operations/{operation_id}/complete")
+async def complete_operation(
+    operation_id: str, callback: OperationCallback,
+    x_operation_capability: str = Header(default=""),
+) -> dict[str, Any]:
+    return await _finish_operation_callback(
+        operation_id, callback, x_operation_capability, OperationStatus.SUCCEEDED
+    )
+
+
+@router.post("/operations/{operation_id}/fail")
+async def fail_operation(
+    operation_id: str, callback: OperationCallback,
+    x_operation_capability: str = Header(default=""),
+) -> dict[str, Any]:
+    return await _finish_operation_callback(
+        operation_id, callback, x_operation_capability, OperationStatus.FAILED
+    )
 
 
 @router.post("/pendings/{proposal_id}/cancel")
