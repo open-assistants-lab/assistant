@@ -219,15 +219,22 @@ their Bearer token; data is unaffected).
   stores); more users = this same container until Phase 3 tenancy
 - Browser automation (`agent-browser`) is not in the image — disable browser tools
   per user via capabilities, or add Chromium to a custom image
-## Ollama daemon on the host (ollama: provider)
+## Ollama daemon on the host (`ollama:` provider)
 
-Containers cannot reach the host via localhost. If you run an Ollama daemon on
-the host, set in .env:
+Models configured as `ollama:<model>` use the local OpenAI-compatible `/v1`
+API and read `OLLAMA_LOCAL_BASE_URL` (not `OLLAMA_BASE_URL`). Containers cannot
+reach a host daemon through `localhost`, because it names the container. On
+Docker Desktop, if the daemon runs on the host, set in `.env`:
 
     OLLAMA_LOCAL_BASE_URL=http://host.docker.internal:11434/v1
 
-(Linux also needs `extra_hosts: ["host.docker.internal:host-gateway"]` on the
-compose service.)
+`host.docker.internal` is Docker Desktop-specific. Linux deployments need an
+equivalent gateway mapping, for example `extra_hosts:
+["host.docker.internal:host-gateway"]` on the Compose service.
+
+`OLLAMA_BASE_URL` instead configures `ollama-cloud:<model>` and defaults to
+`https://ollama.com`; it does not select or configure the local `ollama:`
+provider.
 
 ---
 

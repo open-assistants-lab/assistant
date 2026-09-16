@@ -304,15 +304,21 @@ image.
 | `API_KEY` | API key for non-localhost connections (multi-device / multi-tenant) |
 | `SOLO_BYPASS` | `true` (default): skip auth for localhost requests |
 | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` | LLM provider keys |
-| `OLLAMA_API_KEY`, `OLLAMA_BASE_URL` | Ollama cloud/local |
+| `OLLAMA_API_KEY`, `OLLAMA_BASE_URL` | Ollama Cloud (`ollama-cloud:` provider) |
+| `OLLAMA_LOCAL_BASE_URL` | Local Ollama (`ollama:` provider, OpenAI-compatible `/v1` API) |
 | `FIRECRAWL_API_KEY`, `FIRECRAWL_BASE_URL` | Web search/scraping (self-hosted base URL needs no key) |
 | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`, `LANGFUSE_ENVIRONMENT` | Trace/observability backend |
 | `CONNECTKIT_VAULT_KEY` | Set to persist OAuth tokens (Gmail/Outlook) across restarts |
 | `EMAIL_GWS_CLIENT_ID`, `EMAIL_GWS_CLIENT_SECRET`, `EMAIL_M365_CLIENT_ID` | OAuth desktop client credentials |
 
-Note: `OLLAMA_BASE_URL` defaulting to `https://ollama.com` selects the
-Ollama cloud provider; point it at `http://localhost:11434` (or your own
-host) for a local model server.
+`OLLAMA_BASE_URL` configures the `ollama-cloud:` provider and defaults to
+`https://ollama.com`; it does **not** configure the local `ollama:` provider.
+For `ollama:<model>`, use `OLLAMA_LOCAL_BASE_URL` (default:
+`http://localhost:11434/v1`). Inside a container, that default points to the
+container itself. Docker Desktop deployments that need a host-side daemon can
+use `http://host.docker.internal:11434/v1`; Linux deployments must configure an
+equivalent host gateway (for example Compose `extra_hosts`) rather than assume
+that hostname exists.
 
 ## Observability
 
