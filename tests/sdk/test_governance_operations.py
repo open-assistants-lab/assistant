@@ -62,15 +62,15 @@ def test_terminal_failure_is_idempotent(tmp_path):
     assert repeated.error_code == "executor_failed"
 
 
-def test_cancel_requested_and_uncertain_are_durable(tmp_path):
+def test_running_cancel_remains_durable_request(tmp_path):
     service = GovernanceService(data_root=str(tmp_path))
     operation = _approved_operation(service)
-
+    assert service.operations.transition("alice", operation.operation_id, OperationStatus.RUNNING)
     assert service.operations.request_cancel("alice", operation.operation_id)
     current = service.operations.get_operation("alice", operation.operation_id)
-    assert current is not None and current.cancel_requested
-    assert service.operations.transition("alice", operation.operation_id, OperationStatus.UNCERTAIN)
-    assert service.operations.get_operation("alice", operation.operation_id).status is OperationStatus.UNCERTAIN
+    assert current is not None
+    assert current.status is OperationStatus.RUNNING
+    assert current.cancel_requested
 
 
 def test_request_cancel_is_compare_and_set(tmp_path):

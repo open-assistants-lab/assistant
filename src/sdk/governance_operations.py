@@ -139,6 +139,29 @@ class GovernanceOperationStore:
         return str(getattr(get_settings().governance, "operation_callback_secret", "") or "")
 
     @staticmethod
+    def _external_executor_allowed_hosts() -> list[str]:
+        from src.config import get_settings
+
+        configured = getattr(get_settings().governance, "external_executor_allowed_hosts", [])
+        return [str(host).strip().casefold() for host in configured or [] if str(host).strip()]
+
+    @classmethod
+    def _validate_external_executor(cls, executor: Any) -> None:
+        """Fail closed unless a deployment allowlist authorizes the dispatch target."""
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(str(executor.dispatch_url))
+        host = (parsed.hostname or "").casefold()
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("External executor dispatch URL has an invalid port") from exc
+        authority = f"{host}:{port}" if port is not None else host
+        allowed = cls._external_executor_allowed_hosts()
+        if not allowed or (host not in allowed and authority not in allowed):
+            raise ValueError("External executor URL host is not deployment-allowlisted")
+
+    @staticmethod
     def _ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             """
@@ -483,16 +506,58 @@ class GovernanceOperationStore:
         ]
 
     def request_cancel(self, user_id: str, operation_id: str) -> bool:
+        """Durably request cancellation; queued work becomes terminal before dispatch.
+
+        A dispatcher claims work by moving it to ``running`` in the same
+        transaction. Therefore a queued cancellation and a dispatch claim
+        cannot both win: queued operations are cancelled with their outbox,
+        while already-running operations retain a durable cancellation request
+        for the external executor to confirm.
+        """
         with self._lock, self._conn(user_id) as conn:
             self._ensure_schema(conn)
-            cursor = conn.execute(
-                """UPDATE operations SET cancel_requested = 1, updated_at = ?
-                   WHERE operation_id = ? AND user_id = ? AND cancel_requested = 0
-                     AND status NOT IN (?, ?, ?, ?)""",
-                (self._now(), operation_id, user_id, *(status.value for status in _TERMINAL)),
-            )
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._operation_from_row(self._select_operation(conn, user_id, operation_id))
+            if current is None or current.status in _TERMINAL or current.cancel_requested:
+                conn.rollback()
+                return False
+            now = self._now()
+            if current.status is OperationStatus.QUEUED:
+                cursor = conn.execute(
+                    """UPDATE operations
+                       SET status = ?, cancel_requested = 1, completed_at = ?, updated_at = ?
+                       WHERE operation_id = ? AND user_id = ? AND status = ? AND cancel_requested = 0""",
+                    (OperationStatus.CANCELLED.value, now, now, operation_id, user_id, OperationStatus.QUEUED.value),
+                )
+                if cursor.rowcount != 1:
+                    conn.rollback()
+                    return False
+                conn.execute(
+                    """UPDATE operation_dispatches SET status = 'cancelled', updated_at = ?
+                       WHERE operation_id = ? AND user_id = ? AND status = 'queued'""",
+                    (now, operation_id, user_id),
+                )
+                sequence = conn.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM operation_events WHERE operation_id = ?",
+                    (operation_id,),
+                ).fetchone()[0]
+                conn.execute(
+                    """INSERT INTO operation_events
+                       (operation_id, sequence, timestamp, kind, message_safe)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (operation_id, sequence, now, "cancelled", "Cancelled before external dispatch."),
+                )
+            else:
+                cursor = conn.execute(
+                    """UPDATE operations SET cancel_requested = 1, updated_at = ?
+                       WHERE operation_id = ? AND user_id = ? AND status = ? AND cancel_requested = 0""",
+                    (now, operation_id, user_id, OperationStatus.RUNNING.value),
+                )
+                if cursor.rowcount != 1:
+                    conn.rollback()
+                    return False
             conn.commit()
-            return cursor.rowcount == 1
+            return True
 
     def finish(
         self,
@@ -561,6 +626,7 @@ class GovernanceOperationStore:
         callback_secret = self._callback_secret()
         if not callback_secret:
             raise ValueError("External async execution requires GOVERNANCE_OPERATION_CALLBACK_SECRET")
+        self._validate_external_executor(executor)
         with self._lock, self._conn(user_id) as conn:
             self._ensure_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
@@ -644,8 +710,10 @@ class GovernanceOperationStore:
         with self._conn(user_id) as conn:
             self._ensure_schema(conn)
             query = (
-                "SELECT operation_id FROM operation_dispatches WHERE user_id=? "
-                "AND status='queued' ORDER BY updated_at, operation_id"
+                "SELECT d.operation_id FROM operation_dispatches d "
+                "JOIN operations o ON o.operation_id = d.operation_id AND o.user_id = d.user_id "
+                "WHERE d.user_id=? AND d.status='queued' AND o.status='queued' "
+                "AND o.cancel_requested=0 ORDER BY d.updated_at, d.operation_id"
             )
             params: tuple[Any, ...] = (user_id,)
             if limit is not None:
@@ -763,12 +831,23 @@ class GovernanceOperationStore:
     def claim_dispatch(self, user_id: str, operation_id: str, worker_id: str) -> DispatchClaim:
         with self._lock, self._conn(user_id) as conn:
             self._ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
             now = self._now()
+            started = conn.execute(
+                """UPDATE operations SET status=?, started_at=COALESCE(started_at, ?), updated_at=?
+                   WHERE operation_id=? AND user_id=? AND status=? AND cancel_requested=0""",
+                (OperationStatus.RUNNING.value, now, now, operation_id, user_id, OperationStatus.QUEUED.value),
+            )
+            if started.rowcount != 1:
+                conn.rollback()
+                raise ValueError("Dispatch is not queued")
             cur = conn.execute(
-                "UPDATE operation_dispatches SET status='claimed',claimed_by=?,attempts=attempts+1,updated_at=? WHERE operation_id=? AND user_id=? AND status='queued'",
+                """UPDATE operation_dispatches SET status='claimed',claimed_by=?,attempts=attempts+1,updated_at=?
+                   WHERE operation_id=? AND user_id=? AND status='queued'""",
                 (worker_id, now, operation_id, user_id),
             )
             if cur.rowcount != 1:
+                conn.rollback()
                 raise ValueError("Dispatch is not queued")
             row = conn.execute(
                 "SELECT operation_id,idempotency_key,executor_url,manifest_hash,status FROM operation_dispatches WHERE operation_id=?",

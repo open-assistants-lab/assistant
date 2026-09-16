@@ -123,6 +123,13 @@ class GovernanceConfig(_BaseSettings):
         default="",
         description="Required deployment secret for external governed-operation callbacks.",
     )
+    external_executor_allowed_hosts: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Deployment allowlist of host or host:port values permitted for "
+            "external governed-operation dispatch. Empty fails closed."
+        ),
+    )
 
     model_config = SettingsConfigDict(env_prefix="GOVERNANCE_")
 

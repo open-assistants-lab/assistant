@@ -373,12 +373,13 @@ Async tools with `annotations.executor.kind: external_http` require a deployment
 and must never be stored in `TOOL.md`, callbacks, or the governance database. The deployment
 refuses external async approval when this secret is unset.
 
-An async governance tool may declare an `external_http` executor only in trusted
-deployment-owned tool metadata. Its `dispatch_url` must be an absolute HTTP(S) URL without
-userinfo; model arguments never choose it. Treat that URL as a privileged outbound
-integration: point it only at an allowlisted internal executor, restrict egress at the network
-layer, and never accept an untrusted/user-supplied dispatch host. The operation callback
-capability is delivered only in the immutable dispatch envelope; do not log it.
+External dispatch also fails closed unless its URL host (or exact `host:port`) is listed in
+`GOVERNANCE_EXTERNAL_EXECUTOR_ALLOWED_HOSTS` (JSON list) or
+`governance.external_executor_allowed_hosts` in configuration. Its `dispatch_url` must be an
+absolute HTTP(S) URL without userinfo; model arguments never choose it. Treat every allowed
+host as a privileged outbound integration, restrict egress at the network layer, and never
+accept an arbitrary user-supplied dispatch host. The operation callback capability is delivered
+only in the immutable dispatch envelope; do not log it.
 
 ## Production hardening checklist
 

@@ -11,10 +11,14 @@ from src.sdk.tools import ExternalHTTPExecutor
 
 
 @pytest.fixture(autouse=True)
-def _callback_secret(monkeypatch):
+def _external_executor_config(monkeypatch):
     monkeypatch.setattr(
         "src.sdk.governance_operations.GovernanceOperationStore._callback_secret",
         staticmethod(lambda: "test-operation-callback-secret"),
+    )
+    monkeypatch.setattr(
+        "src.sdk.governance_operations.GovernanceOperationStore._external_executor_allowed_hosts",
+        staticmethod(lambda: ["executor.internal"]),
     )
 
 
@@ -62,12 +66,13 @@ def test_external_binding_outbox_and_capability_are_created_once(tmp_path):
     assert repeated.callback_capability is None
 
 
-def test_external_approval_is_user_scoped_and_requires_secret(tmp_path, monkeypatch):
+def test_external_approval_is_user_scoped_requires_secret_and_allowlisted_host(tmp_path, monkeypatch):
     service = GovernanceService(data_root=str(tmp_path))
     proposal_id = service.create_pending("alice", "menu_change_execute", {})
     with pytest.raises(ValueError, match="Proposal cannot"):
         service.operations.approve_pending_and_create_external_operation(
-            "bob", proposal_id, ExternalHTTPExecutor(kind="external_http", dispatch_url="https://x")
+            "bob", proposal_id,
+            ExternalHTTPExecutor(kind="external_http", dispatch_url="https://executor.internal")
         )
     monkeypatch.setattr(
         "src.sdk.governance_operations.GovernanceOperationStore._callback_secret",
@@ -75,8 +80,58 @@ def test_external_approval_is_user_scoped_and_requires_secret(tmp_path, monkeypa
     )
     with pytest.raises(ValueError, match="GOVERNANCE_OPERATION_CALLBACK_SECRET"):
         service.operations.approve_pending_and_create_external_operation(
-            "alice", proposal_id, ExternalHTTPExecutor(kind="external_http", dispatch_url="https://x")
+            "alice", proposal_id, ExternalHTTPExecutor(kind="external_http", dispatch_url="https://executor.internal")
         )
+
+
+def test_external_approval_rejects_unallowlisted_host_and_accepts_exact_port(tmp_path, monkeypatch):
+    service = GovernanceService(data_root=str(tmp_path))
+    proposal_id = service.create_pending("alice", "menu_change_execute", {})
+    with pytest.raises(ValueError, match="deployment-allowlisted"):
+        service.operations.approve_pending_and_create_external_operation(
+            "alice", proposal_id,
+            ExternalHTTPExecutor(kind="external_http", dispatch_url="https://untrusted.internal/run"),
+        )
+    monkeypatch.setattr(
+        "src.sdk.governance_operations.GovernanceOperationStore._external_executor_allowed_hosts",
+        staticmethod(lambda: ["executor.internal:8443"]),
+    )
+    created, _ = service.operations.approve_pending_and_create_external_operation(
+        "alice", proposal_id,
+        ExternalHTTPExecutor(kind="external_http", dispatch_url="https://executor.internal:8443/run"),
+    )
+    assert created.operation.executor_url == "https://executor.internal:8443/run"
+
+
+def test_external_approval_fails_closed_without_allowlisted_hosts(tmp_path, monkeypatch):
+    service = GovernanceService(data_root=str(tmp_path))
+    proposal_id = service.create_pending("alice", "menu_change_execute", {})
+    monkeypatch.setattr(
+        "src.sdk.governance_operations.GovernanceOperationStore._external_executor_allowed_hosts",
+        staticmethod(lambda: []),
+    )
+    with pytest.raises(ValueError, match="deployment-allowlisted"):
+        service.operations.approve_pending_and_create_external_operation(
+            "alice", proposal_id,
+            ExternalHTTPExecutor(kind="external_http", dispatch_url="https://executor.internal/run"),
+        )
+
+
+def test_queued_cancel_atomically_cancels_outbox_before_dispatch(tmp_path):
+    service = GovernanceService(data_root=str(tmp_path))
+    created, _ = _external(service)
+    operation = created.operation
+
+    assert service.operations.request_cancel("alice", operation.operation_id)
+    current = service.operations.get_operation("alice", operation.operation_id)
+    assert current is not None
+    assert current.status is OperationStatus.CANCELLED
+    assert current.cancel_requested
+    assert service.operations.get_dispatch("alice", operation.operation_id).status == "cancelled"
+    assert service.operations.queued_dispatch_ids("alice") == []
+    with pytest.raises(ValueError, match="not queued"):
+        service.operations.claim_dispatch("alice", operation.operation_id, "worker")
+    assert service.operations.get_events("alice", operation.operation_id)[-1].kind == "cancelled"
 
 
 def test_callback_rejects_cross_user_capability_and_binding_mismatch(tmp_path):
@@ -142,7 +197,7 @@ def test_unknown_dispatch_result_requires_current_worker_claim(tmp_path):
             "alice", operation.operation_id, "stale-worker", acknowledged=None
         )
 
-    assert service.operations.get_operation("alice", operation.operation_id).status is OperationStatus.QUEUED
+    assert service.operations.get_operation("alice", operation.operation_id).status is OperationStatus.RUNNING
     assert service.operations.get_dispatch("alice", operation.operation_id).status == "claimed"
     assert service.operations.get_events("alice", operation.operation_id) == []
 
