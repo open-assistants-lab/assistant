@@ -8,7 +8,9 @@ transaction; it is not a subagent queue or a HybridDB index.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import secrets
 import sqlite3
 import threading
 import uuid
@@ -32,10 +34,19 @@ class OperationStatus(StrEnum):
 
 
 _TERMINAL = frozenset(
-    {OperationStatus.SUCCEEDED, OperationStatus.FAILED, OperationStatus.CANCELLED, OperationStatus.UNCERTAIN}
+    {
+        OperationStatus.SUCCEEDED,
+        OperationStatus.FAILED,
+        OperationStatus.CANCELLED,
+        OperationStatus.UNCERTAIN,
+    }
 )
 _ALLOWED_TRANSITIONS = {
-    OperationStatus.QUEUED: {OperationStatus.RUNNING, OperationStatus.CANCELLED, OperationStatus.UNCERTAIN},
+    OperationStatus.QUEUED: {
+        OperationStatus.RUNNING,
+        OperationStatus.CANCELLED,
+        OperationStatus.UNCERTAIN,
+    },
     OperationStatus.RUNNING: set(_TERMINAL),
 }
 
@@ -58,6 +69,24 @@ class GovernedOperation(BaseModel):
     result: dict[str, Any] | None = None
     error_code: str | None = None
     error_detail_safe: str | None = None
+    executor_url: str | None = None
+    manifest_hash: str | None = None
+    dispatch_idempotency_key: str | None = None
+
+
+class ExternalOperationCreation(BaseModel):
+    """New external operation and its one-time callback capability."""
+
+    operation: GovernedOperation
+    callback_capability: str | None = None
+
+
+class DispatchClaim(BaseModel):
+    operation_id: str
+    idempotency_key: str
+    executor_url: str
+    manifest_hash: str | None = None
+    status: str
 
 
 class OperationEvent(BaseModel):
@@ -114,7 +143,10 @@ class GovernanceOperationStore:
                 completed_at TEXT,
                 result_json TEXT,
                 error_code TEXT,
-                error_detail_safe TEXT
+                error_detail_safe TEXT,
+                executor_url TEXT,
+                manifest_hash TEXT,
+                dispatch_idempotency_key TEXT
             )
             """
         )
@@ -132,11 +164,28 @@ class GovernanceOperationStore:
             )
             """
         )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_operations_user_status ON operations(user_id, status)")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(operations)")}
+        for name, ddl in (
+            ("executor_url", "TEXT"),
+            ("manifest_hash", "TEXT"),
+            ("dispatch_idempotency_key", "TEXT"),
+        ):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE operations ADD COLUMN {name} {ddl}")
+        conn.execute("""CREATE TABLE IF NOT EXISTS operation_dispatches (
+            operation_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, executor_url TEXT NOT NULL,
+            manifest_hash TEXT, callback_capability_hash TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+            status TEXT NOT NULL, claimed_by TEXT, attempts INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL
+        )""")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_operations_user_status ON operations(user_id, status)"
+        )
         conn.commit()
 
     @classmethod
-    def _operation_from_row(cls, row: sqlite3.Row | tuple[Any, ...] | None) -> GovernedOperation | None:
+    def _operation_from_row(
+        cls, row: sqlite3.Row | tuple[Any, ...] | None
+    ) -> GovernedOperation | None:
         if row is None:
             return None
         return GovernedOperation(
@@ -155,14 +204,19 @@ class GovernanceOperationStore:
             result=json.loads(row[12]) if row[12] else None,
             error_code=row[13],
             error_detail_safe=row[14],
+            executor_url=row[15] if len(row) > 15 else None,
+            manifest_hash=row[16] if len(row) > 16 else None,
+            dispatch_idempotency_key=row[17] if len(row) > 17 else None,
         )
 
     @staticmethod
-    def _select_operation(conn: sqlite3.Connection, user_id: str, operation_id: str) -> tuple[Any, ...] | None:
+    def _select_operation(
+        conn: sqlite3.Connection, user_id: str, operation_id: str
+    ) -> tuple[Any, ...] | None:
         return conn.execute(
             """SELECT operation_id, proposal_id, user_id, tool_name, arguments_json,
                       arguments_hash, status, cancel_requested, created_at, started_at,
-                      updated_at, completed_at, result_json, error_code, error_detail_safe
+                      updated_at, completed_at, result_json, error_code, error_detail_safe, executor_url, manifest_hash, dispatch_idempotency_key
                FROM operations WHERE operation_id = ? AND user_id = ?""",
             (operation_id, user_id),
         ).fetchone()
@@ -279,8 +333,17 @@ class GovernanceOperationStore:
                     operation_id, proposal_id, user_id, tool_name, arguments_json, arguments_hash,
                     status, cancel_requested, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)""",
-                (operation_id, proposal_id, user_id, proposal[0], json.dumps(arguments, sort_keys=True),
-                 self._arguments_hash(arguments), OperationStatus.QUEUED.value, now, now),
+                (
+                    operation_id,
+                    proposal_id,
+                    user_id,
+                    proposal[0],
+                    json.dumps(arguments, sort_keys=True),
+                    self._arguments_hash(arguments),
+                    OperationStatus.QUEUED.value,
+                    now,
+                    now,
+                ),
             )
             row = self._select_operation(conn, user_id, operation_id)
             conn.commit()
@@ -300,7 +363,7 @@ class GovernanceOperationStore:
             self._ensure_schema(conn)
             sql = """SELECT operation_id, proposal_id, user_id, tool_name, arguments_json,
                             arguments_hash, status, cancel_requested, created_at, started_at,
-                            updated_at, completed_at, result_json, error_code, error_detail_safe
+                            updated_at, completed_at, result_json, error_code, error_detail_safe, executor_url, manifest_hash, dispatch_idempotency_key
                      FROM operations WHERE user_id = ?"""
             params: list[Any] = [user_id]
             if status is not None:
@@ -308,7 +371,9 @@ class GovernanceOperationStore:
                 params.append(OperationStatus(status).value)
             sql += " ORDER BY created_at, operation_id"
             rows = conn.execute(sql, params).fetchall()
-        return [operation for row in rows if (operation := self._operation_from_row(row)) is not None]
+        return [
+            operation for row in rows if (operation := self._operation_from_row(row)) is not None
+        ]
 
     def transition(self, user_id: str, operation_id: str, target: OperationStatus) -> bool:
         """Conditionally transition a non-terminal operation once."""
@@ -328,7 +393,8 @@ class GovernanceOperationStore:
                 args.append(now)
             args.extend([operation_id, user_id, current.status.value])
             cursor = conn.execute(
-                f"UPDATE operations SET {fields} WHERE operation_id = ? AND user_id = ? AND status = ?", args
+                f"UPDATE operations SET {fields} WHERE operation_id = ? AND user_id = ? AND status = ?",
+                args,
             )
             conn.commit()
             return cursor.rowcount == 1
@@ -361,7 +427,9 @@ class GovernanceOperationStore:
                     timestamp,
                     kind,
                     message_safe,
-                    json.dumps(structured_data_safe, sort_keys=True) if structured_data_safe else None,
+                    json.dumps(structured_data_safe, sort_keys=True)
+                    if structured_data_safe
+                    else None,
                 ),
             )
             conn.execute(
@@ -390,7 +458,11 @@ class GovernanceOperationStore:
             ).fetchall()
         return [
             OperationEvent(
-                operation_id=row[0], sequence=row[1], timestamp=row[2], kind=row[3], message_safe=row[4],
+                operation_id=row[0],
+                sequence=row[1],
+                timestamp=row[2],
+                kind=row[3],
+                message_safe=row[4],
                 structured_data_safe=json.loads(row[5]) if row[5] else None,
             )
             for row in rows
@@ -467,3 +539,241 @@ class GovernanceOperationStore:
             OperationStatus.SUCCEEDED,
             result=result,
         )
+
+    def approve_pending_and_create_external_operation(
+        self, user_id: str, proposal_id: str, executor: Any
+    ) -> tuple[ExternalOperationCreation, bool]:
+        """Atomically accept an external operation and create its durable outbox."""
+        with self._lock, self._conn(user_id) as conn:
+            self._ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT operation_id FROM operations WHERE proposal_id=? AND user_id=?",
+                (proposal_id, user_id),
+            ).fetchone()
+            if existing:
+                op = self._operation_from_row(self._select_operation(conn, user_id, existing[0]))
+                conn.commit()
+                assert op is not None
+                return ExternalOperationCreation(operation=op), False
+            proposal = conn.execute(
+                "SELECT tool, arguments, status FROM proposals WHERE proposal_id=?", (proposal_id,)
+            ).fetchone()
+            if proposal is None or proposal[2] not in ("pending", "approved"):
+                conn.rollback()
+                raise ValueError("Proposal cannot be accepted for external execution")
+            approved_now = proposal[2] == "pending"
+            if approved_now:
+                cur = conn.execute(
+                    "UPDATE proposals SET status='approved' WHERE proposal_id=? AND status='pending'",
+                    (proposal_id,),
+                )
+                if cur.rowcount != 1:
+                    conn.rollback()
+                    raise ValueError("Proposal approval was consumed concurrently")
+            if (
+                conn.execute(
+                    "UPDATE proposals SET status='consumed' WHERE proposal_id=? AND status='approved'",
+                    (proposal_id,),
+                ).rowcount
+                != 1
+            ):
+                conn.rollback()
+                raise ValueError("Proposal approval was consumed concurrently")
+            now, operation_id = self._now(), uuid.uuid4().hex
+            arguments = json.loads(proposal[1])
+            key = uuid.uuid4().hex
+            capability = secrets.token_urlsafe(32)
+            conn.execute(
+                """INSERT INTO operations (operation_id,proposal_id,user_id,tool_name,arguments_json,arguments_hash,status,cancel_requested,created_at,updated_at,executor_url,manifest_hash,dispatch_idempotency_key) VALUES (?,?,?,?,?,?,?,0,?,?,?,?,?)""",
+                (
+                    operation_id,
+                    proposal_id,
+                    user_id,
+                    proposal[0],
+                    json.dumps(arguments, sort_keys=True),
+                    self._arguments_hash(arguments),
+                    OperationStatus.QUEUED.value,
+                    now,
+                    now,
+                    executor.dispatch_url,
+                    executor.manifest_hash,
+                    key,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO operation_dispatches (operation_id,user_id,executor_url,manifest_hash,callback_capability_hash,idempotency_key,status,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    operation_id,
+                    user_id,
+                    executor.dispatch_url,
+                    executor.manifest_hash,
+                    hashlib.sha256(capability.encode()).hexdigest(),
+                    key,
+                    "queued",
+                    now,
+                ),
+            )
+            op = self._operation_from_row(self._select_operation(conn, user_id, operation_id))
+            conn.commit()
+        assert op is not None
+        return ExternalOperationCreation(operation=op, callback_capability=capability), approved_now
+
+    def get_dispatch(self, user_id: str, operation_id: str) -> DispatchClaim | None:
+        with self._conn(user_id) as conn:
+            self._ensure_schema(conn)
+            row = conn.execute(
+                "SELECT operation_id,idempotency_key,executor_url,manifest_hash,status FROM operation_dispatches WHERE operation_id=? AND user_id=?",
+                (operation_id, user_id),
+            ).fetchone()
+        return (
+            DispatchClaim(
+                operation_id=row[0],
+                idempotency_key=row[1],
+                executor_url=row[2],
+                manifest_hash=row[3],
+                status=row[4],
+            )
+            if row
+            else None
+        )
+
+    def claim_dispatch(self, user_id: str, operation_id: str, worker_id: str) -> DispatchClaim:
+        with self._lock, self._conn(user_id) as conn:
+            self._ensure_schema(conn)
+            now = self._now()
+            cur = conn.execute(
+                "UPDATE operation_dispatches SET status='claimed',claimed_by=?,attempts=attempts+1,updated_at=? WHERE operation_id=? AND user_id=? AND status='queued'",
+                (worker_id, now, operation_id, user_id),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("Dispatch is not queued")
+            row = conn.execute(
+                "SELECT operation_id,idempotency_key,executor_url,manifest_hash,status FROM operation_dispatches WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            conn.commit()
+        return DispatchClaim(
+            operation_id=row[0],
+            idempotency_key=row[1],
+            executor_url=row[2],
+            manifest_hash=row[3],
+            status=row[4],
+        )
+
+    def record_dispatch_result(
+        self, user_id: str, operation_id: str, worker_id: str, *, acknowledged: bool | None
+    ) -> GovernedOperation:
+        with self._lock, self._conn(user_id) as conn:
+            self._ensure_schema(conn)
+            now = self._now()
+            if acknowledged is None:
+                conn.execute(
+                    "UPDATE operation_dispatches SET status='uncertain',updated_at=? WHERE operation_id=? AND user_id=? AND claimed_by=? AND status='claimed'",
+                    (now, operation_id, user_id, worker_id),
+                )
+                conn.execute(
+                    "UPDATE operations SET status=?,completed_at=?,updated_at=? WHERE operation_id=? AND user_id=? AND status IN (?,?)",
+                    (
+                        OperationStatus.UNCERTAIN.value,
+                        now,
+                        now,
+                        operation_id,
+                        user_id,
+                        OperationStatus.QUEUED.value,
+                        OperationStatus.RUNNING.value,
+                    ),
+                )
+            else:
+                status = "dispatched" if acknowledged else "queued"
+                cur = conn.execute(
+                    "UPDATE operation_dispatches SET status=?,claimed_by=NULL,updated_at=? WHERE operation_id=? AND user_id=? AND claimed_by=? AND status='claimed'",
+                    (status, now, operation_id, user_id, worker_id),
+                )
+                if cur.rowcount != 1:
+                    raise ValueError("Dispatch claim mismatch")
+            op = self._operation_from_row(self._select_operation(conn, user_id, operation_id))
+            conn.commit()
+        assert op is not None
+        return op
+
+    def _validate_callback(
+        self, user_id: str, operation_id: str, capability: str, **binding: str | None
+    ) -> GovernedOperation:
+        with self._conn(user_id) as conn:
+            self._ensure_schema(conn)
+            op = self._operation_from_row(self._select_operation(conn, user_id, operation_id))
+            row = conn.execute(
+                "SELECT callback_capability_hash FROM operation_dispatches WHERE operation_id=? AND user_id=?",
+                (operation_id, user_id),
+            ).fetchone()
+        if (
+            op is None
+            or row is None
+            or not hmac.compare_digest(row[0], hashlib.sha256(capability.encode()).hexdigest())
+        ):
+            raise PermissionError("Invalid operation callback capability")
+        if (
+            binding.get("proposal_id") != op.proposal_id
+            or binding.get("tool_name") != op.tool_name
+            or binding.get("arguments_hash") != op.arguments_hash
+            or binding.get("manifest_hash") != op.manifest_hash
+        ):
+            raise PermissionError("Operation callback binding mismatch")
+        return op
+
+    def append_callback_event(
+        self,
+        user_id: str,
+        operation_id: str,
+        capability: str,
+        sequence: int,
+        kind: str,
+        message_safe: str,
+        *,
+        proposal_id: str,
+        tool_name: str,
+        arguments_hash: str,
+        manifest_hash: str | None = None,
+    ) -> OperationEvent:
+        self._validate_callback(
+            user_id,
+            operation_id,
+            capability,
+            proposal_id=proposal_id,
+            tool_name=tool_name,
+            arguments_hash=arguments_hash,
+            manifest_hash=manifest_hash,
+        )
+        events = self.get_events(user_id, operation_id)
+        if sequence != len(events) + 1:
+            raise ValueError("Operation event sequence is not next")
+        return self.append_event(user_id, operation_id, kind, message_safe)
+
+    def finish_callback(
+        self,
+        user_id: str,
+        operation_id: str,
+        capability: str,
+        status: OperationStatus,
+        *,
+        proposal_id: str,
+        tool_name: str,
+        arguments_hash: str,
+        manifest_hash: str | None = None,
+        result: dict[str, Any] | None = None,
+    ) -> GovernedOperation:
+        self._validate_callback(
+            user_id,
+            operation_id,
+            capability,
+            proposal_id=proposal_id,
+            tool_name=tool_name,
+            arguments_hash=arguments_hash,
+            manifest_hash=manifest_hash,
+        )
+        op = self.get_operation(user_id, operation_id)
+        assert op is not None
+        if op.status is OperationStatus.QUEUED:
+            self.transition(user_id, operation_id, OperationStatus.RUNNING)
+        return self.finish(user_id, operation_id, status, result=result)
