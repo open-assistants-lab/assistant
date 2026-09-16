@@ -72,6 +72,7 @@ def _parse_tool_file(tool_path: Path) -> ToolDefinition | None:
         open_world=annotations_raw.get("open_world", False) if annotations_raw else False,
         requires_approval=annotations_raw.get("requires_approval", False) if annotations_raw else False,
         execution_mode=annotations_raw.get("execution_mode", "sync") if annotations_raw else "sync",
+        executor=annotations_raw.get("executor") if annotations_raw else None,
     )
 
     def make_function(tmpl: str, install_cmds: list[str] | None, tool_dir: Path | None = None) -> Any:

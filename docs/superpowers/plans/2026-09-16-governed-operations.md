@@ -23,10 +23,15 @@
 
 ## Phase 3: External executor MVP
 
-- [ ] Define immutable dispatch envelope and operation-scoped callback capability.
-- [ ] Implement authenticated idempotent progress/complete/fail callbacks.
-- [ ] Persist proposal/tool/arguments/manifest binding and reject mismatched callbacks.
-- [ ] Reconciliation marks unresolved dispatched work `uncertain`; never blind-retries a side effect.
+### 3a: Durable external-operation state
+- [ ] Define trusted `external_http` metadata, immutable dispatch envelope, dispatch outbox, and hashed operation-scoped callback capability.
+- [ ] Persist proposal/tool/arguments/manifest binding; claim/retry dispatch with one idempotency key; reject unsafe retry/replay states.
+- [ ] Implement store-level ordered progress, idempotent terminal completion/failure, callback binding checks, and `uncertain` reconciliation transitions.
+
+### 3b: HTTP dispatch and callbacks
+- [ ] Add the bounded dispatcher and executor-authenticated progress/complete/fail callback routes.
+- [ ] Add operation read/cancel integration and reconciliation/startup wiring.
+- [ ] Prove external dispatch receives one immutable envelope; duplicate callback/approval/delivery does not create a second operation.
 
 ## Phase 4: Verification
 

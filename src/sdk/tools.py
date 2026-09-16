@@ -19,6 +19,14 @@ from typing import Any, Literal, get_type_hints
 from pydantic import BaseModel, Field
 
 
+class ExternalHTTPExecutor(BaseModel):
+    """Trusted static external executor endpoint for an async tool."""
+
+    kind: Literal["external_http"]
+    dispatch_url: str
+    manifest_hash: str | None = None
+
+
 class ToolAnnotations(BaseModel):
     """Metadata about a tool's behavior for auto-approval and UI display."""
 
@@ -33,6 +41,7 @@ class ToolAnnotations(BaseModel):
     # Issue #21: async execution is opt-in; existing tools retain synchronous
     # approval/execution behavior.
     execution_mode: Literal["sync", "async"] = "sync"
+    executor: ExternalHTTPExecutor | None = None
 
 
 class ToolResult(BaseModel):
