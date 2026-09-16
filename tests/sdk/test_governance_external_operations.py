@@ -180,3 +180,8 @@ def test_callback_terminal_idempotency_and_dispatch_retry_key(tmp_path):
                                               OperationStatus.SUCCEEDED, result={"ok": True}, **binding)
     assert service.operations.finish_callback("alice", operation.operation_id, capability,
                                               OperationStatus.SUCCEEDED, result={"ok": False}, **binding).operation_id == done.operation_id
+
+@pytest.mark.parametrize("url", ["executor.internal/run", "/relative", "ftp://executor.internal/run"])
+def test_external_executor_rejects_non_absolute_http_urls(url):
+    with pytest.raises(ValueError, match="absolute http"):
+        ExternalHTTPExecutor(kind="external_http", dispatch_url=url)

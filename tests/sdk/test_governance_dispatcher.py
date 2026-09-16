@@ -61,6 +61,53 @@ async def test_dispatch_posts_one_immutable_envelope_and_acknowledges(tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_startup_reconciliation_marks_dispatched_unfinished_operation_uncertain(tmp_path, monkeypatch):
+    service = GovernanceService(data_root=str(tmp_path))
+    created = external_operation(service)
+    service.operations.claim_dispatch("alice", created.operation.operation_id, "worker")
+    service.operations.record_dispatch_result("alice", created.operation.operation_id, "worker", acknowledged=True)
+    assert service.operations.get_dispatch("alice", created.operation.operation_id).status == "dispatched"
+    monkeypatch.setattr("src.sdk.governance_dispatcher.iter_governance_user_ids", lambda: ["alice"])
+    monkeypatch.setattr("src.sdk.governance_dispatcher.get_governance_service", lambda user_id: service)
+    await GovernedOperationDispatcher().reconcile_startup()
+    operation = service.operations.get_operation("alice", created.operation.operation_id)
+    assert operation is not None
+    assert operation.status is OperationStatus.UNCERTAIN
+    assert service.operations.get_events("alice", created.operation.operation_id)[-1].kind == "uncertain"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_once_bounds_concurrency_and_batch(tmp_path, monkeypatch):
+    service = GovernanceService(data_root=str(tmp_path))
+    for _ in range(4):
+        external_operation(service)
+    active = 0
+    peak = 0
+
+    class Response:
+        is_success = True
+
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def post(self, *_args, **_kwargs):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await __import__("asyncio").sleep(0.01)
+            active -= 1
+            return Response()
+
+    monkeypatch.setattr("src.sdk.governance_dispatcher.iter_governance_user_ids", lambda: ["alice"])
+    monkeypatch.setattr("src.sdk.governance_dispatcher.get_governance_service", lambda user_id: service)
+    monkeypatch.setattr("src.sdk.governance_dispatcher.httpx.AsyncClient", Client)
+    dispatcher = GovernedOperationDispatcher(worker_id="test", batch_size=3, max_concurrency=2)
+    assert await dispatcher.dispatch_once() == 3
+    assert peak <= 2
+
+
+@pytest.mark.asyncio
 async def test_startup_reconciliation_marks_claimed_dispatch_uncertain(tmp_path, monkeypatch):
     service = GovernanceService(data_root=str(tmp_path))
     created = external_operation(service)

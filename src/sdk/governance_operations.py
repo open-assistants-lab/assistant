@@ -640,13 +640,18 @@ class GovernanceOperationStore:
         assert op is not None
         return ExternalOperationCreation(operation=op, callback_capability=capability), approved_now
 
-    def queued_dispatch_ids(self, user_id: str) -> list[str]:
+    def queued_dispatch_ids(self, user_id: str, *, limit: int | None = None) -> list[str]:
         with self._conn(user_id) as conn:
             self._ensure_schema(conn)
-            rows = conn.execute(
-                "SELECT operation_id FROM operation_dispatches WHERE user_id=? AND status='queued' ORDER BY updated_at, operation_id",
-                (user_id,),
-            ).fetchall()
+            query = (
+                "SELECT operation_id FROM operation_dispatches WHERE user_id=? "
+                "AND status='queued' ORDER BY updated_at, operation_id"
+            )
+            params: tuple[Any, ...] = (user_id,)
+            if limit is not None:
+                query += " LIMIT ?"
+                params = (user_id, limit)
+            rows = conn.execute(query, params).fetchall()
         return [str(row[0]) for row in rows]
 
     def dispatch_envelope(self, user_id: str, operation_id: str) -> dict[str, Any]:
@@ -675,20 +680,65 @@ class GovernanceOperationStore:
         }
 
     def reconcile_claimed_dispatches(self, user_id: str) -> int:
-        """Record crash-interrupted dispatches as uncertain; never replay them."""
-        with self._conn(user_id) as conn:
+        """Compatibility alias for restart reconciliation."""
+        return self.reconcile_unfinished_dispatches(user_id)
+
+    def reconcile_unfinished_dispatches(self, user_id: str) -> int:
+        """Record claimed *and acknowledged* unfinished dispatches as uncertain.
+
+        A post/restart process cannot know whether an external executor acted,
+        so it records evidence and never requeues or replays the operation.
+        """
+        with self._lock, self._conn(user_id) as conn:
             self._ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
-                "SELECT operation_id, claimed_by FROM operation_dispatches WHERE user_id=? AND status='claimed'",
+                "SELECT operation_id FROM operation_dispatches WHERE user_id=? "
+                "AND status IN ('claimed', 'dispatched')",
                 (user_id,),
             ).fetchall()
-        reconciled = 0
-        for operation_id, worker_id in rows:
-            try:
-                self.record_dispatch_result(user_id, str(operation_id), str(worker_id), acknowledged=None)
+            reconciled = 0
+            now = self._now()
+            for (operation_id,) in rows:
+                changed = conn.execute(
+                    "UPDATE operation_dispatches SET status='uncertain', updated_at=? "
+                    "WHERE operation_id=? AND user_id=? AND status IN ('claimed', 'dispatched')",
+                    (now, operation_id, user_id),
+                )
+                if changed.rowcount != 1:
+                    continue
+                transitioned = conn.execute(
+                    "UPDATE operations SET status=?, completed_at=?, updated_at=?, error_code=?, error_detail_safe=? "
+                    "WHERE operation_id=? AND user_id=? AND status IN (?,?)",
+                    (
+                        OperationStatus.UNCERTAIN.value,
+                        now,
+                        now,
+                        "dispatch_outcome_unknown",
+                        "External dispatch outcome could not be confirmed after restart.",
+                        operation_id,
+                        user_id,
+                        OperationStatus.QUEUED.value,
+                        OperationStatus.RUNNING.value,
+                    ),
+                )
+                if transitioned.rowcount == 1:
+                    sequence = conn.execute(
+                        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM operation_events WHERE operation_id=?",
+                        (operation_id,),
+                    ).fetchone()[0]
+                    conn.execute(
+                        "INSERT INTO operation_events (operation_id,sequence,timestamp,kind,message_safe) VALUES (?,?,?,?,?)",
+                        (
+                            operation_id,
+                            sequence,
+                            now,
+                            "uncertain",
+                            "External dispatch outcome could not be confirmed after restart.",
+                        ),
+                    )
                 reconciled += 1
-            except ValueError:
-                continue
+            conn.commit()
         return reconciled
 
     def get_dispatch(self, user_id: str, operation_id: str) -> DispatchClaim | None:
@@ -838,6 +888,14 @@ class GovernanceOperationStore:
             ):
                 conn.rollback()
                 raise PermissionError("Invalid operation callback binding")
+            if op.status in (
+                OperationStatus.SUCCEEDED,
+                OperationStatus.FAILED,
+                OperationStatus.CANCELLED,
+                OperationStatus.UNCERTAIN,
+            ):
+                conn.rollback()
+                raise ValueError("Operation is terminal; progress is closed")
             existing = conn.execute(
                 "SELECT operation_id, sequence, timestamp, kind, message_safe, structured_data_safe_json "
                 "FROM operation_events WHERE operation_id=? AND sequence=?",

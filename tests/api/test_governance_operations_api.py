@@ -19,6 +19,7 @@ def gov_env(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(governance, "_services", {})
     monkeypatch.setenv("GOVERNANCE_ENABLED", "true")
+    monkeypatch.setenv("GOVERNANCE_OPERATION_CALLBACK_SECRET", "test-operation-secret")
     reload_settings()
     yield
     monkeypatch.undo()
@@ -39,14 +40,17 @@ def client(gov_env):
 def test_async_approval_returns_accepted_without_invoking_executor(client, monkeypatch) -> None:
     import src.http.routers.governance as governance_router
     from src.sdk.governance import get_governance_service
+    from src.sdk.tools import ExternalHTTPExecutor
 
-    proposal_id = get_governance_service("alice").create_pending(
-        "alice", "menu_change_execute", {"store": "HQ"}, tier="explicit"
-    )
+    service = get_governance_service("alice")
+    proposal_id = service.create_pending("alice", "menu_change_execute", {"store": "HQ"}, tier="explicit")
+    monkeypatch.setattr(service, "execution_mode_for_tool", lambda _user_id, _tool_name: "async")
     monkeypatch.setattr(
-        get_governance_service("alice"),
-        "execution_mode_for_tool",
-        lambda _user_id, _tool_name: "async",
+        service,
+        "external_executor_for_tool",
+        lambda _user_id, _tool_name: ExternalHTTPExecutor(
+            kind="external_http", dispatch_url="https://executor.internal/run"
+        ),
     )
 
     async def executor_must_not_run(*_args, **_kwargs):
@@ -70,6 +74,22 @@ def test_async_approval_returns_accepted_without_invoking_executor(client, monke
     )
     assert repeated.status_code == 200
     assert repeated.json()["operation_id"] == payload["operation_id"]
+
+
+def test_async_approval_without_external_executor_is_rejected(client, monkeypatch) -> None:
+    from src.sdk.governance import get_governance_service
+
+    service = get_governance_service("alice")
+    proposal_id = service.create_pending("alice", "menu_change_execute", {}, tier="explicit")
+    monkeypatch.setattr(service, "execution_mode_for_tool", lambda *_args: "async")
+    monkeypatch.setattr(service, "external_executor_for_tool", lambda *_args: None)
+
+    response = client.post(
+        f"/v1/governance/pendings/{proposal_id}/approve", params={"user_id": "alice"}
+    )
+    assert response.status_code == 409
+    assert "external_http executor" in response.json()["detail"]
+    assert service.get_pending("alice", proposal_id)["status"] == "pending"
 
 
 def test_operation_read_list_and_cancel_request_are_user_scoped(client) -> None:

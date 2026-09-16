@@ -161,11 +161,12 @@ async def approve_pending(
     ):
         try:
             executor = svc.external_executor_for_tool(user_id, row["tool"])
-            if executor is not None:
-                created, _approved_now = svc.approve_external_operation(user_id, proposal_id, executor)
-                operation = created.operation
-            else:
-                operation, _approved_now = svc.approve_async_operation(user_id, proposal_id)
+            if executor is None:
+                raise ValueError(
+                    "Async governance approval requires a trusted external_http executor"
+                )
+            created, _approved_now = svc.approve_external_operation(user_id, proposal_id, executor)
+            operation = created.operation
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {

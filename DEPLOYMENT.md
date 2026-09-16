@@ -373,6 +373,10 @@ Async tools with `annotations.executor.kind: external_http` require a deployment
 capabilities and must never be stored in `TOOL.md`, callbacks, or the governance database.
 The deployment refuses external async approval when this secret is unset.
 
+### Governed external operations
+
+Async governance tools may declare an `external_http` executor in trusted deployment-owned tool metadata. Its `dispatch_url` must be an absolute HTTP(S) URL; model arguments never choose it. Treat that URL as a privileged outbound integration: point it only at an allowlisted internal executor, restrict egress at the network layer, and never accept an untrusted/user-supplied dispatch host. The operation callback capability is delivered only in the immutable dispatch envelope; do not log it.
+
 ## Production hardening checklist
 
 - [ ] `API_KEY` set on any server reachable beyond localhost

@@ -59,6 +59,19 @@ async def test_callback_progress_and_completion_are_capability_authenticated(tmp
 
 
 @pytest.mark.asyncio
+async def test_callback_progress_is_rejected_after_terminal_result(tmp_path, monkeypatch):
+    service, created = created_external(tmp_path)
+    monkeypatch.setattr(router_module, "_svc", lambda user_id: service)
+    await router_module.complete_operation(
+        created.operation.operation_id, payload(created), created.callback_capability or ""
+    )
+    with pytest.raises(HTTPException) as exc:
+        await router_module.append_operation_event(
+            created.operation.operation_id, payload(created), created.callback_capability or ""
+        )
+    assert exc.value.status_code == 409
+
+
 async def test_callback_rejects_missing_capability_and_binding_mismatch(tmp_path, monkeypatch):
     service, created = created_external(tmp_path)
     monkeypatch.setattr(router_module, "_svc", lambda user_id: service)
