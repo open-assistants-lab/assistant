@@ -12,10 +12,14 @@ from src.sdk.tools import ExternalHTTPExecutor
 
 
 @pytest.fixture(autouse=True)
-def callback_secret(monkeypatch):
+def external_operation_config(monkeypatch):
     monkeypatch.setattr(
         "src.sdk.governance_operations.GovernanceOperationStore._callback_secret",
         staticmethod(lambda: "test-operation-callback-secret"),
+    )
+    monkeypatch.setattr(
+        "src.sdk.governance_operations.GovernanceOperationStore._external_executor_allowed_hosts",
+        staticmethod(lambda: ["executor.internal"]),
     )
 
 
