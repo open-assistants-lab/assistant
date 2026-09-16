@@ -7,7 +7,10 @@ import uuid
 
 import httpx
 
+from src.app_logging import get_logger
 from src.sdk.governance import get_governance_service, iter_governance_user_ids
+
+logger = get_logger()
 
 
 class GovernedOperationDispatcher:
@@ -50,7 +53,16 @@ class GovernedOperationDispatcher:
 
     async def _run(self) -> None:
         while not self._stopping.is_set():
-            await self.dispatch_once()
+            try:
+                await self.dispatch_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # A malformed row or transient database/client failure must
+                # not terminate the durable dispatcher permanently.
+                logger.error(
+                    "governance.dispatcher_cycle_failed", {"error": str(exc)}
+                )
             try:
                 await asyncio.wait_for(self._stopping.wait(), timeout=self.interval_seconds)
             except TimeoutError:
@@ -96,13 +108,17 @@ class GovernedOperationDispatcher:
                             user_id, operation_id, self.worker_id, acknowledged=None
                         )
                         return False
+                    # Only an explicit success response acknowledges receipt.
+                    # Any non-2xx response is ambiguous and becomes uncertain;
+                    # it must not be queued for automatic replay.
+                    acknowledged = True if response.is_success else None
                     service.operations.record_dispatch_result(
                         user_id,
                         operation_id,
                         self.worker_id,
-                        acknowledged=response.is_success,
+                        acknowledged=acknowledged,
                     )
-                    return response.is_success
+                    return acknowledged is True
 
             outcomes = await asyncio.gather(
                 *(dispatch_one(user_id, operation_id) for user_id, operation_id in candidates)

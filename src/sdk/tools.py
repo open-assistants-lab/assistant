@@ -39,6 +39,8 @@ class ExternalHTTPExecutor(BaseModel):
         parsed = urlsplit(value)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             raise ValueError("dispatch_url must be an absolute http(s) URL")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("dispatch_url must not contain userinfo")
         return value
 
 

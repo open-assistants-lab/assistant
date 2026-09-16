@@ -366,16 +366,19 @@ consent tiers, vendor endpoints, or vendor egress.
 - Export runs on a bounded background batch (5 s timeout); a slow or
   unreachable collector causes **drops, never request backpressure**.
 
-### External governed operations
-
-Async tools with `annotations.executor.kind: external_http` require a deployment-held
-`GOVERNANCE_OPERATION_CALLBACK_SECRET`. It is used to derive operation-scoped callback
-capabilities and must never be stored in `TOOL.md`, callbacks, or the governance database.
-The deployment refuses external async approval when this secret is unset.
-
 ### Governed external operations
 
-Async governance tools may declare an `external_http` executor in trusted deployment-owned tool metadata. Its `dispatch_url` must be an absolute HTTP(S) URL; model arguments never choose it. Treat that URL as a privileged outbound integration: point it only at an allowlisted internal executor, restrict egress at the network layer, and never accept an untrusted/user-supplied dispatch host. The operation callback capability is delivered only in the immutable dispatch envelope; do not log it.
+Async tools with `annotations.executor.kind: external_http` require a deployment-held
+`GOVERNANCE_OPERATION_CALLBACK_SECRET`. It derives operation-scoped callback capabilities
+and must never be stored in `TOOL.md`, callbacks, or the governance database. The deployment
+refuses external async approval when this secret is unset.
+
+An async governance tool may declare an `external_http` executor only in trusted
+deployment-owned tool metadata. Its `dispatch_url` must be an absolute HTTP(S) URL without
+userinfo; model arguments never choose it. Treat that URL as a privileged outbound
+integration: point it only at an allowlisted internal executor, restrict egress at the network
+layer, and never accept an untrusted/user-supplied dispatch host. The operation callback
+capability is delivered only in the immutable dispatch envelope; do not log it.
 
 ## Production hardening checklist
 

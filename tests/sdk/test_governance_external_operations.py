@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from src.sdk.governance import GovernanceService
 from src.sdk.governance_operations import GovernanceOperationStore, OperationStatus
@@ -28,6 +29,13 @@ def _external(service: GovernanceService, user_id: str = "alice"):
             manifest_hash="manifest-1",
         ),
     )
+
+
+def test_external_executor_rejects_url_userinfo():
+    with pytest.raises(ValidationError, match="userinfo"):
+        ExternalHTTPExecutor(
+            kind="external_http", dispatch_url="https://user:secret@executor.internal/run"
+        )
 
 
 def test_external_binding_outbox_and_capability_are_created_once(tmp_path):
@@ -165,17 +173,17 @@ def test_restart_derives_same_capability_and_authenticates_callback(tmp_path):
     assert event.sequence == 1
 
 
-def test_callback_terminal_idempotency_and_dispatch_retry_key(tmp_path):
+def test_callback_terminal_idempotency_and_ambiguous_dispatch_is_not_retried(tmp_path):
     service = GovernanceService(data_root=str(tmp_path))
     created, _ = _external(service)
     operation = created.operation
     capability = created.callback_capability or ""
     binding = dict(proposal_id=operation.proposal_id, tool_name=operation.tool_name,
                    arguments_hash=operation.arguments_hash, manifest_hash="manifest-1")
-    first = service.operations.claim_dispatch("alice", operation.operation_id, "w1")
+    service.operations.claim_dispatch("alice", operation.operation_id, "w1")
     service.operations.record_dispatch_result("alice", operation.operation_id, "w1", acknowledged=False)
-    second = service.operations.claim_dispatch("alice", operation.operation_id, "w2")
-    assert second.idempotency_key == first.idempotency_key
+    with pytest.raises(ValueError, match="not queued"):
+        service.operations.claim_dispatch("alice", operation.operation_id, "w2")
     done = service.operations.finish_callback("alice", operation.operation_id, capability,
                                               OperationStatus.SUCCEEDED, result={"ok": True}, **binding)
     assert service.operations.finish_callback("alice", operation.operation_id, capability,

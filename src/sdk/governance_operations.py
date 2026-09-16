@@ -789,7 +789,11 @@ class GovernanceOperationStore:
         with self._lock, self._conn(user_id) as conn:
             self._ensure_schema(conn)
             now = self._now()
-            if acknowledged is None:
+            # Only an explicit executor acknowledgement is safe. A non-2xx
+            # response is still an ambiguous delivery outcome: the remote side
+            # may have accepted and started the side effect before returning it.
+            # Never requeue/replay either that case or a transport failure.
+            if acknowledged is not True:
                 claim = conn.execute(
                     "UPDATE operation_dispatches SET status='uncertain',updated_at=? WHERE operation_id=? AND user_id=? AND claimed_by=? AND status='claimed'",
                     (now, operation_id, user_id, worker_id),

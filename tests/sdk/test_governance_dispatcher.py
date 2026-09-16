@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from src.sdk.governance import GovernanceService
@@ -108,6 +109,23 @@ async def test_dispatch_once_bounds_concurrency_and_batch(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_dispatcher_loop_survives_unexpected_cycle_error():
+    dispatcher = GovernedOperationDispatcher(interval_seconds=0.0)
+    calls = 0
+
+    async def dispatch_once() -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("unexpected cycle failure")
+        dispatcher._stopping.set()
+        return 0
+
+    dispatcher.dispatch_once = dispatch_once  # type: ignore[method-assign]
+    await dispatcher._run()
+    assert calls == 2
+
+
 async def test_startup_reconciliation_marks_claimed_dispatch_uncertain(tmp_path, monkeypatch):
     service = GovernanceService(data_root=str(tmp_path))
     created = external_operation(service)
@@ -118,3 +136,44 @@ async def test_startup_reconciliation_marks_claimed_dispatch_uncertain(tmp_path,
     operation = service.operations.get_operation("alice", created.operation.operation_id)
     assert operation is not None
     assert operation.status is OperationStatus.UNCERTAIN
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["non_2xx", "transport"])
+async def test_ambiguous_dispatch_never_requeues_or_replays(tmp_path, monkeypatch, failure):
+    service = GovernanceService(data_root=str(tmp_path))
+    created = external_operation(service)
+    posts = 0
+
+    class Response:
+        is_success = False
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, *_args, **_kwargs):
+            nonlocal posts
+            posts += 1
+            if failure == "transport":
+                raise httpx.ConnectError("connection failed")
+            return Response()
+
+    monkeypatch.setattr("src.sdk.governance_dispatcher.iter_governance_user_ids", lambda: ["alice"])
+    monkeypatch.setattr("src.sdk.governance_dispatcher.get_governance_service", lambda user_id: service)
+    monkeypatch.setattr("src.sdk.governance_dispatcher.httpx.AsyncClient", Client)
+    dispatcher = GovernedOperationDispatcher(worker_id="test")
+
+    assert await dispatcher.dispatch_once() == 0
+    assert await dispatcher.dispatch_once() == 0
+    assert posts == 1
+    operation = service.operations.get_operation("alice", created.operation.operation_id)
+    dispatch = service.operations.get_dispatch("alice", created.operation.operation_id)
+    assert operation is not None and operation.status is OperationStatus.UNCERTAIN
+    assert dispatch is not None and dispatch.status == "uncertain"
