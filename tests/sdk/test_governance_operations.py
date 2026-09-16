@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import concurrent.futures
+import sqlite3
+import threading
+
 from src.sdk.governance import GovernanceService
 from src.sdk.governance_operations import OperationStatus
 
@@ -67,6 +71,63 @@ def test_cancel_requested_and_uncertain_are_durable(tmp_path):
     assert current is not None and current.cancel_requested
     assert service.operations.transition("alice", operation.operation_id, OperationStatus.UNCERTAIN)
     assert service.operations.get_operation("alice", operation.operation_id).status is OperationStatus.UNCERTAIN
+
+
+def test_request_cancel_is_compare_and_set(tmp_path):
+    service = GovernanceService(data_root=str(tmp_path))
+    operation = _approved_operation(service)
+
+    assert service.operations.request_cancel("alice", operation.operation_id)
+    first = service.operations.get_operation("alice", operation.operation_id)
+    assert first is not None
+    assert not service.operations.request_cancel("alice", operation.operation_id)
+    second = service.operations.get_operation("alice", operation.operation_id)
+
+    assert second is not None
+    assert second.cancel_requested
+    assert second.updated_at == first.updated_at
+
+
+def test_independent_services_create_one_operation_under_concurrent_approval(tmp_path):
+    first = GovernanceService(data_root=str(tmp_path))
+    second = GovernanceService(data_root=str(tmp_path))
+    proposal_id = first.create_pending("alice", "menu_change_execute", {"store": "HQ"})
+    assert first.approve("alice", proposal_id)
+    barrier = threading.Barrier(2)
+
+    def create(service: GovernanceService):
+        barrier.wait()
+        return service.operations.approve_and_create_operation("alice", proposal_id)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        operations = list(pool.map(create, (first, second)))
+
+    assert {operation.operation_id for operation in operations} == {operations[0].operation_id}
+    assert first.get_pending("alice", proposal_id)["status"] == "consumed"
+
+
+def test_ledger_schema_preserves_legacy_proposal_data(tmp_path):
+    service = GovernanceService(data_root=str(tmp_path))
+    db_path = service._db_path("alice")  # noqa: SLF001 - legacy DB fixture
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """CREATE TABLE proposals (
+                proposal_id TEXT PRIMARY KEY, ts TEXT NOT NULL, tool TEXT NOT NULL,
+                arguments TEXT NOT NULL, tier TEXT NOT NULL, status TEXT NOT NULL,
+                expires_at TEXT, session_id TEXT
+            )"""
+        )
+        conn.execute(
+            """INSERT INTO proposals VALUES
+            ('legacy', '2026-01-01T00:00:00+00:00', 'menu_change_execute', '{}',
+             'explicit', 'approved', NULL, 'session-42')"""
+        )
+
+    assert service.operations.approve_and_create_operation("alice", "legacy").proposal_id == "legacy"
+    legacy = service.get_pending("alice", "legacy")
+    assert legacy is not None
+    assert legacy["status"] == "consumed"
+    assert legacy["session_id"] == "session-42"
 
 
 def test_operations_are_isolated_by_user(tmp_path):

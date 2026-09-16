@@ -322,7 +322,8 @@ class GovernanceOperationStore:
             self._ensure_schema(conn)
             cursor = conn.execute(
                 """UPDATE operations SET cancel_requested = 1, updated_at = ?
-                   WHERE operation_id = ? AND user_id = ? AND status NOT IN (?, ?, ?, ?)""",
+                   WHERE operation_id = ? AND user_id = ? AND cancel_requested = 0
+                     AND status NOT IN (?, ?, ?, ?)""",
                 (self._now(), operation_id, user_id, *(status.value for status in _TERMINAL)),
             )
             conn.commit()
