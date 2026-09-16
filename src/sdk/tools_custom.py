@@ -70,6 +70,8 @@ def _parse_tool_file(tool_path: Path) -> ToolDefinition | None:
         destructive=annotations_raw.get("destructive", False) if annotations_raw else False,
         idempotent=annotations_raw.get("idempotent", False) if annotations_raw else False,
         open_world=annotations_raw.get("open_world", False) if annotations_raw else False,
+        requires_approval=annotations_raw.get("requires_approval", False) if annotations_raw else False,
+        execution_mode=annotations_raw.get("execution_mode", "sync") if annotations_raw else "sync",
     )
 
     def make_function(tmpl: str, install_cmds: list[str] | None, tool_dir: Path | None = None) -> Any:

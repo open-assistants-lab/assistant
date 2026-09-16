@@ -226,10 +226,89 @@ class GovernanceOperationStore:
         assert operation is not None
         return operation
 
+    def approve_pending_and_create_operation(
+        self, user_id: str, proposal_id: str
+    ) -> tuple[GovernedOperation, bool]:
+        """Atomically approve a pending proposal and consume it into one operation.
+
+        Returns the durable operation and whether this caller made the approval
+        transition. Repeated callers return the existing operation without a
+        second approval or operation.
+        """
+        with self._lock, self._conn(user_id) as conn:
+            self._ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT operation_id FROM operations WHERE proposal_id = ? AND user_id = ?",
+                (proposal_id, user_id),
+            ).fetchone()
+            if existing is not None:
+                row = self._select_operation(conn, user_id, existing[0])
+                conn.commit()
+                operation = self._operation_from_row(row)
+                assert operation is not None
+                return operation, False
+            proposal = conn.execute(
+                "SELECT tool, arguments, status FROM proposals WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+            if proposal is None or proposal[2] not in ("pending", "approved"):
+                conn.rollback()
+                raise ValueError("Proposal cannot be accepted for async execution")
+            approved_now = proposal[2] == "pending"
+            if approved_now:
+                approved = conn.execute(
+                    "UPDATE proposals SET status = 'approved' WHERE proposal_id = ? AND status = 'pending'",
+                    (proposal_id,),
+                )
+                if approved.rowcount != 1:
+                    conn.rollback()
+                    raise ValueError("Proposal approval was consumed concurrently")
+            now = self._now()
+            operation_id = uuid.uuid4().hex
+            arguments = json.loads(proposal[1])
+            consumed = conn.execute(
+                "UPDATE proposals SET status = 'consumed' WHERE proposal_id = ? AND status = 'approved'",
+                (proposal_id,),
+            )
+            if consumed.rowcount != 1:
+                conn.rollback()
+                raise ValueError("Proposal approval was consumed concurrently")
+            conn.execute(
+                """INSERT INTO operations (
+                    operation_id, proposal_id, user_id, tool_name, arguments_json, arguments_hash,
+                    status, cancel_requested, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)""",
+                (operation_id, proposal_id, user_id, proposal[0], json.dumps(arguments, sort_keys=True),
+                 self._arguments_hash(arguments), OperationStatus.QUEUED.value, now, now),
+            )
+            row = self._select_operation(conn, user_id, operation_id)
+            conn.commit()
+        operation = self._operation_from_row(row)
+        assert operation is not None
+        return operation, approved_now
+
     def get_operation(self, user_id: str, operation_id: str) -> GovernedOperation | None:
         with self._conn(user_id) as conn:
             self._ensure_schema(conn)
             return self._operation_from_row(self._select_operation(conn, user_id, operation_id))
+
+    def list_operations(
+        self, user_id: str, status: OperationStatus | str | None = None
+    ) -> list[GovernedOperation]:
+        with self._conn(user_id) as conn:
+            self._ensure_schema(conn)
+            sql = """SELECT operation_id, proposal_id, user_id, tool_name, arguments_json,
+                            arguments_hash, status, cancel_requested, created_at, started_at,
+                            updated_at, completed_at, result_json, error_code, error_detail_safe
+                     FROM operations WHERE user_id = ?"""
+            params: list[Any] = [user_id]
+            if status is not None:
+                sql += " AND status = ?"
+                params.append(OperationStatus(status).value)
+            sql += " ORDER BY created_at, operation_id"
+            rows = conn.execute(sql, params).fetchall()
+        return [operation for row in rows if (operation := self._operation_from_row(row)) is not None]
 
     def transition(self, user_id: str, operation_id: str, target: OperationStatus) -> bool:
         """Conditionally transition a non-terminal operation once."""

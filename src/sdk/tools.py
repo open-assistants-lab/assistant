@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Callable
-from typing import Any, get_type_hints
+from typing import Any, Literal, get_type_hints
 
 from pydantic import BaseModel, Field
 
@@ -30,6 +30,9 @@ class ToolAnnotations(BaseModel):
     # M4 (issue #6): declared by the tool author; the governance tier
     # resolution maps this to "explicit" unless a settings tier overrides it.
     requires_approval: bool = False
+    # Issue #21: async execution is opt-in; existing tools retain synchronous
+    # approval/execution behavior.
+    execution_mode: Literal["sync", "async"] = "sync"
 
 
 class ToolResult(BaseModel):

@@ -27,7 +27,7 @@ from typing import Any
 
 from src.app_logging import get_logger
 from src.sdk.audit import AuditEvent
-from src.sdk.governance_operations import GovernanceOperationStore
+from src.sdk.governance_operations import GovernanceOperationStore, GovernedOperation
 from src.sdk.run_events import ToolResultData, ToolResultEvent
 from src.sdk.session_events import (
     get_session_event_store,
@@ -292,6 +292,62 @@ class GovernanceService:
                 )
                 conn.commit()
         return newly
+
+    def execution_mode_for_tool(self, user_id: str, tool_name: str) -> str:
+        """Return the declared mode for a native/custom governed tool.
+
+        Missing definitions remain synchronous so an existing proposal can
+        never silently become async because of a discovery failure.
+        """
+        from src.sdk.native_tools import get_native_tools
+
+        definitions = list(get_native_tools())
+        try:
+            from src.sdk.tools_custom import get_custom_tools
+
+            native_names = {definition.name for definition in definitions}
+            definitions.extend(
+                definition for definition in get_custom_tools(user_id)
+                if definition.name not in native_names
+            )
+        except Exception:
+            pass
+        definition = next((item for item in definitions if item.name == tool_name), None)
+        return str(getattr(getattr(definition, "annotations", None), "execution_mode", "sync"))
+
+    def _record_async_approval(self, user_id: str, proposal_id: str, tool: str) -> None:
+        """Record the approval receipt/stat only after the atomic transition."""
+        self._emit_receipt(user_id, f"approved:{proposal_id}", tool="", correlation=proposal_id)
+        with self._conn(user_id) as conn:
+            conn.execute(
+                "INSERT INTO tool_stats (tool, approvals) VALUES (?, 1)"
+                " ON CONFLICT(tool) DO UPDATE SET approvals = approvals + 1",
+                (tool,),
+            )
+            conn.commit()
+
+    def approve_async_operation(
+        self, user_id: str, proposal_id: str
+    ) -> tuple[GovernedOperation, bool]:
+        """Atomically accept an async proposal without invoking its tool body."""
+        operation, approved_now = self.operations.approve_pending_and_create_operation(user_id, proposal_id)
+        if approved_now:
+            self._record_async_approval(user_id, proposal_id, operation.tool_name)
+        return operation, approved_now
+
+    def list_operations(
+        self, user_id: str, status: str | None = None
+    ) -> list[GovernedOperation]:
+        return self.operations.list_operations(user_id, status)
+
+    def request_operation_cancel(
+        self, user_id: str, operation_id: str
+    ) -> GovernedOperation | None:
+        operation = self.operations.get_operation(user_id, operation_id)
+        if operation is None:
+            return None
+        self.operations.request_cancel(user_id, operation_id)
+        return self.operations.get_operation(user_id, operation_id)
 
     def resolve_pending(self, user_id: str, proposal_id: str) -> dict[str, Any]:
         """Lazy expiry evaluation for show_then_auto_send (read-time, no
