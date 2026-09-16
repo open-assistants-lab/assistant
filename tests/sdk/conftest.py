@@ -96,7 +96,7 @@ def mock_tool_result():
 async def cleanup_work_queue_cache():
     """Prevent cross-test work_queue DB cache contamination."""
     yield
-    from src.sdk.work_queue import _db_cache
+    from src.sdk.subagent_work_queue import _db_cache
 
     for cached_db in list(_db_cache.values()):
         await cached_db.close()

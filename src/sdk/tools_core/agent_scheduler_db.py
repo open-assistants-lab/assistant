@@ -68,7 +68,7 @@ class SchedulerNotificationDB:
         self._init_lock = asyncio.Lock()
 
     async def _get_db(self) -> aiosqlite.Connection:
-        # Double-checked locking (mirrors WorkQueueDB): concurrent first
+        # Double-checked locking (mirrors SubagentWorkQueueDB): concurrent first
         # callers must not each open their own connection (audit B10).
         if self._db is None:
             async with self._init_lock:
@@ -176,7 +176,7 @@ class SchedulerMemoryDB:
         self._init_lock = asyncio.Lock()
 
     async def _get_db(self) -> aiosqlite.Connection:
-        # Double-checked locking (mirrors WorkQueueDB): concurrent first
+        # Double-checked locking (mirrors SubagentWorkQueueDB): concurrent first
         # callers must not each open their own connection (audit B10).
         if self._db is None:
             async with self._init_lock:

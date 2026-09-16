@@ -61,7 +61,7 @@ def _task_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
-class WorkQueueDB:
+class SubagentWorkQueueDB:
     """Async SQLite work queue for subagent coordination."""
 
     def __init__(self, user_id: str, workspace_id: str = "personal"):
@@ -440,11 +440,11 @@ class WorkQueueDB:
         return SubagentResult(**data)
 
 
-_db_cache: dict[str, WorkQueueDB] = {}
+_db_cache: dict[str, SubagentWorkQueueDB] = {}
 
 
-async def get_work_queue(user_id: str, workspace_id: str = "personal") -> WorkQueueDB:
+async def get_work_queue(user_id: str, workspace_id: str = "personal") -> SubagentWorkQueueDB:
     key = user_id
     if key not in _db_cache:
-        _db_cache[key] = WorkQueueDB(user_id, workspace_id)
+        _db_cache[key] = SubagentWorkQueueDB(user_id, workspace_id)
     return _db_cache[key]
