@@ -206,7 +206,7 @@ The codebase has a **custom agent SDK** (`src/sdk/`) as its core runtime.
 | `agent_validation.py` | 65 | `validate_agent_def` — extracted from coordinator (no circular imports) |
 | `agent_profile.py` | 51 | EA-specific AgentProfile validation (models.dev + tools + skills) |
 | `subagent_models.py` | 94 | `AgentDef`, `SubagentResult`, `TaskStatus`, `TaskCancelledError`. Drops `disallowed_tools`. |
-| `work_queue.py` | 441 | `WorkQueueDB` — aiosqlite per-user SQLite work queue |
+| `work_queue.py` | 441 | `SubagentWorkQueueDB` — aiosqlite per-user SQLite work queue |
 | `coordinator.py` | 633 | `SubagentCoordinator` — PROFILE.md support, capabilities filtering |
 | `middleware_rubric.py` | ~300 | `RubricMiddleware` — verification loop (grader LLM, rubric, retry) |
 | `runner.py` | 537 | `create_sdk_loop`, `run_sdk_agent` — capabilities-filtered tool registration |
@@ -235,7 +235,7 @@ The codebase has a **custom agent SDK** (`src/sdk/`) as its core runtime.
 10. **Usage tracking**: `Message.usage` (type `Usage`) carries token counts from provider responses. Providers populate `Usage` with `input_tokens`, `output_tokens`, `reasoning_tokens`, `cache_read_tokens`, `cache_creation_tokens`. `AgentLoop` extracts usage and passes to `CostTracker.add_usage()`. Streaming uses `StreamChunk.usage_event(Usage)` before `done` event.
 11. **provider_options on RunConfig**: `RunConfig.provider_options` (dict keyed by provider_id) is now wired through `AgentLoop.run()`, `run_stream()`, and `run_single()` to all provider calls. Previously hardcoded `None`.
 12. **MCP Tool Bridge**: `MCPToolBridge` converts MCP `mcp` SDK tool objects → SDK `ToolDefinition` with namespaced names `mcp__{server}__{tool}`. Tool invocations route through `session.call_tool()`. Supports degraded-mode (partial server failures). `mcp_reload` dynamically registers/unregisters tools in the active `AgentLoop` via `register_tool()`/`unregister_tool()`.
-13. **Subagent V1 work_queue coordination**: `WorkQueueDB` (aiosqlite) per-user at `data/private/subagents/work_queue.db`. 11 columns, 2 indexes. Config frozen at invocation into `work_queue.config`. `SubagentContext` provides progress updates, doom loop detection (3x same tool+args), cancel signal, and course-correction injection. `SubagentCoordinator.invoke()` wraps `AgentLoop.run()` in `asyncio.wait_for(timeout)`. All failure modes (cancel, timeout, cost exceeded, provider error) result in terminal work_queue status.
+13. **Subagent V1 work_queue coordination**: `SubagentWorkQueueDB` (aiosqlite) per-user at `data/private/subagents/work_queue.db`. 11 columns, 2 indexes. Config frozen at invocation into `work_queue.config`. `SubagentContext` provides progress updates, doom loop detection (3x same tool+args), cancel signal, and course-correction injection. `SubagentCoordinator.invoke()` wraps `AgentLoop.run()` in `asyncio.wait_for(timeout)`. All failure modes (cancel, timeout, cost exceeded, provider error) result in terminal work_queue status.
 14. **Soft duplicate-tool-call guard** (Ralph loop, `84ca8c4`): the loop never re-executes a `(tool, args)` pair already answered this run — it injects a system-message nudge with the previous result and continues. Configurable via `RunConfig.max_duplicate_tool_nudges` (default 3); after K nudges one final call requests a brief text-only answer (~200-token cap, tool calls suppressed). Stateless apart from a counter in `state.extra`. `get_messages_with_summary` filters rows with `metadata["include_in_model_context"] == False`, and `_tool_audit_records` persists only current-run tool rows (provenance via `storage_id`/`storage_ts`). No numeric tool-call budgets — identity check only (per FR-7 non-goal).
 15. **Incremental structured summarization** (Pi-style, `2026-08-20`): `SummarizationMiddleware` writes structured checkpoints (`## Goal / Constraints & Preferences / Progress (Done/In Progress/Blocked) / Key Decisions / Next Steps / Critical Context`). On subsequent compressions it finds its own previous summary message (`source="summarization_middleware"`, both in-memory and `[SUMMARY OF PREVIOUS CONVERSATION]` storage framings) and issues an UPDATE prompt over only the new messages (`<conversation>`/`<previous-summary>` tags) — never a full re-summarize. Cut-points never split AI/Tool pairs; cutting mid-turn generates a separate turn-prefix summary (`## Original Request / ## Context for Suffix`). File ops (`files_*` tool calls) are extracted programmatically and appended as `## Files` (Read/Modified). Summary calls reject tool-call responses and retry once on transient errors (`ConnectionError`/`TimeoutError`/`OSError`); deterministic errors propagate.
 16. **Steering** (Pi-style, `2026-08-20`): `AgentLoop.steer(message)` queues a mid-turn nudge delivered after the current tool completes; remaining tool calls in the batch get `{"cancelled": true, "reason": "steer"}` results. Drained at tool boundaries in both `run()` and `run_stream()` (streaming loop advances its `iteration` counter explicitly). Steers arriving during text generation stay queued and are delivered as the next turn (follow-up). WS protocol: client `steer` message, server `steer_ack`; the WS layer persists steers at injection time via `loop.set_steer_sink()` (correct transcript position, no double-persist). `RunService` unregisters loops per session.
@@ -442,7 +442,7 @@ assistant/
 │   │   ├── handoffs.py          # Handoff, HandoffInput
 │   │   ├── tracing.py           # TraceProvider, Span, ConsoleTraceProcessor
 │   │   ├── subagent_models.py   # AgentDef, SubagentResult, TaskCancelledError, TaskStatus
-│   │   ├── work_queue.py        # WorkQueueDB (aiosqlite, per-user SQLite)
+│   │   ├── work_queue.py        # SubagentWorkQueueDB (aiosqlite, per-user SQLite)
 │   │   ├── coordinator.py       # SubagentCoordinator (PROFILE.md, capabilities filtering)
 │   │   ├── tools_core/          # ★ SDK-native tool implementations (60 registered tools)
 │   │   │   ├── time.py, shell.py, filesystem.py, file_search.py
@@ -558,7 +558,7 @@ SQLite work_queue-backed coordination with supervisor pattern. Full design in `d
 
 **New files:**
 - `src/sdk/subagent_models.py` — `AgentDef`, `SubagentResult`, `TaskStatus`, `TaskCancelledError`
-- `src/sdk/work_queue.py` — `WorkQueueDB` (aiosqlite, per-user at `data/private/subagents/work_queue.db`)
+- `src/sdk/subagent_work_queue.py` — `SubagentWorkQueueDB` (aiosqlite, per-user at `data/private/subagents/work_queue.db`)
 - `src/sdk/subagent_context.py` — `SubagentContext` (replaces middleware-based progress/instruction)
 - `src/sdk/coordinator.py` — `SubagentCoordinator` (create, update, invoke, cancel, instruct, delete)
 - `tests/sdk/test_subagent_v1.py` — 38 tests
