@@ -140,8 +140,6 @@ def run_desktop_server(
 
     Blocks until `stop_event` is set (tests) or the process is terminated.
     """
-    import fcntl
-
     from src.config import reload_settings
 
     # Desktop data roots are applied by the caller (the CLI command) BEFORE
@@ -234,10 +232,11 @@ def run_desktop_server(
             (system_dir / RENDZVOUS_FILE).unlink()
         except FileNotFoundError:
             pass
-        try:
-            fcntl.flock(lock, fcntl.LOCK_UN)
-        except (OSError, ValueError):
-            pass
+        # No explicit unlock here: release_sidecar_lock() in the finally block
+        # owns unlocking for internally acquired locks, and desktop_main()
+        # owns unlocking for borrowed locks. Unlocking a borrowed lock early
+        # (before the owning caller releases) would break the ownership
+        # contract documented in desktop_main().
     finally:
         if acquired_here:
             release_sidecar_lock(lock)
