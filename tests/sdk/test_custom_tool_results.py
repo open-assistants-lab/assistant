@@ -39,7 +39,7 @@ def make_tool(tmp_path, mode, **scope):
 
 
 @pytest.mark.parametrize("mode", ["parsed", "reconstructed"])
-@pytest.mark.parametrize("size", [0, 4999, 5000, 6000])
+@pytest.mark.parametrize("size", [0, 4999, 5000, 5001, 6000])
 def test_command_output_boundary_and_recovery(tmp_path, result_scope, mode, size):
     td = make_tool(tmp_path, mode)
     output = "A" * size
@@ -269,3 +269,69 @@ def test_retention_evicts_oldest_results(result_scope):
         last = json.loads(format_output("y" * 6000, "alice", "personal"))
     assert tool_result_read.function(first["result_id"], user_id="alice").is_error
     assert not tool_result_read.function(last["result_id"], user_id="alice").is_error
+
+
+@pytest.mark.parametrize("user_id", ["alice", None])
+async def test_missing_loop_context_uses_trusted_defaults(result_scope, user_id):
+    from src.sdk.loop import AgentLoop
+    from src.sdk.messages import ToolCall
+    from src.sdk.tool_results import format_output
+    from src.sdk.tools_core.tool_results import tool_result_read
+
+    saved = json.loads(format_output("x" * 6000, user_id or "default_user", "personal"))
+    loop = AgentLoop(provider=object(), tools=[tool_result_read], user_id=user_id)
+    result = await loop._execute_tool(ToolCall(
+        id="read", name="tool_result_read", arguments={
+            "result_id": saved["result_id"], "offset": 5000,
+            "user_id": "ignored", "workspace_id": "ignored",
+        },
+    ))
+    assert not result.is_error, result.content
+    assert result.structured_content["content"] == "x" * 1000
+
+
+async def test_manager_reader_uses_manager_identity(result_scope, monkeypatch):
+    from types import SimpleNamespace
+
+    from src.sdk.loop import AgentLoop
+    from src.sdk.messages import Message, ToolCall
+    from src.sdk.tool_results import format_output
+    from src.subagent.manager import SubagentManager
+
+    saved = json.loads(format_output("manager" * 1000, "alice", "personal"))
+    manager = SubagentManager("alice")
+    monkeypatch.setattr("src.sdk.providers.factory.create_model_from_config", lambda _: object())
+    monkeypatch.setattr("src.sdk.audit.ensure_audit_store_subscribed", lambda _: None)
+
+    async def run(loop, messages):
+        # Keep actual loop construction and tool execution; replace only LLM I/O.
+        result = await loop._execute_tool(ToolCall(
+            id="read", name="tool_result_read", arguments={"result_id": saved["result_id"]},
+        ))
+        assert not result.is_error, result.content
+        assert result.structured_content["content"].startswith("manager")
+        return SimpleNamespace(messages=[Message.assistant("recovered")])
+
+    monkeypatch.setattr(AgentLoop, "run", run)
+    result = await manager._invoke_async({"tools": ["tool_result_read"]}, "read saved output")
+    assert result["output"] == "recovered"
+
+
+def test_eviction_tolerates_vanished_entry(result_scope, monkeypatch):
+    from pathlib import Path
+
+    from src.sdk.tool_results import format_output
+    from src.sdk.tools_core.tool_results import tool_result_read
+
+    first = json.loads(format_output("x" * 6000, "alice", "personal"))
+    original = Path.lstat
+
+    def vanished(path, *args, **kwargs):
+        if path.name == first["result_id"] + ".result":
+            raise FileNotFoundError("concurrent eviction")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", vanished)
+    saved = json.loads(format_output("y" * 6000, "alice", "personal"))
+    assert "result_id" in saved, saved.get("error")
+    assert not tool_result_read.function(saved["result_id"], user_id="alice").is_error

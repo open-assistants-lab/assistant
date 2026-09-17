@@ -45,9 +45,15 @@ def format_output(output: str, user_id: str, workspace_id: str) -> str:
         directory = _directory(user_id, workspace_id)
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         now = time.time()
-        files = sorted(directory.glob("*.result"), key=lambda p: p.lstat().st_mtime)
-        for i, old in enumerate(files):
-            if old.lstat().st_mtime < now - RETENTION_SECONDS or i <= len(files) - MAX_RESULTS:
+        files: list[tuple[float, Path]] = []
+        for candidate in directory.glob("*.result"):
+            try:
+                files.append((candidate.lstat().st_mtime, candidate))
+            except FileNotFoundError:
+                continue  # Another save may have evicted this entry already.
+        files.sort()
+        for i, (modified, old) in enumerate(files):
+            if modified < now - RETENTION_SECONDS or i <= len(files) - MAX_RESULTS:
                 old.unlink(missing_ok=True)
         result_id = uuid.uuid4().hex
         path = directory / f"{result_id}.result"

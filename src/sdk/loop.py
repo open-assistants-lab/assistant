@@ -847,14 +847,14 @@ class AgentLoop:
 
     def _with_runtime_context(self, tc: ToolCall) -> ToolCall:
         tool_def = self._registry.get(tc.name)
-        if tool_def is None or not self.user_id:
+        if tool_def is None:
             return tc
         props = tool_def.parameters.get("properties", {})
         args = dict(tc.arguments)
         if "user_id" in props:
-            args["user_id"] = self.user_id
+            args["user_id"] = self.user_id or DEFAULT_USER_ID
         if "workspace_id" in props:
-            args["workspace_id"] = getattr(self, "workspace_id", "personal")
+            args["workspace_id"] = self.workspace_id or "personal"
         if "session_id" in props:
             args["session_id"] = getattr(self, "_flow_session_id", None)
         if args == tc.arguments:
