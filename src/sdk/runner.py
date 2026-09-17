@@ -135,7 +135,10 @@ def get_active_tool_definition(
     native.extend(filter_denied_native_tools([tool_search, tool_reload], settings))
     catalog = {tool.name: tool for tool in native}
     # Custom tools intentionally override matching shipped names.
-    catalog.update({tool.name: tool for tool in get_custom_tools(user_id, workspace_id)})
+    # The approval-time resolver uses the established one-argument custom-tool
+    # lookup contract. Custom tools are user-scoped; active loop workspace
+    # selection is not available at this independent governance boundary.
+    catalog.update({tool.name: tool for tool in get_custom_tools(user_id)})
     tool = catalog.get(tool_name)
     if tool is None or not _resource_enabled(_load_user_capabilities(user_id), "tools", tool_name):
         return None

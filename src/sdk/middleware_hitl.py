@@ -75,15 +75,21 @@ class HITLMiddleware(Middleware):
         # session_log payoff (M4-1 replay-resume): capture the run's session
         # id from the bound loop so approve-after-restart can find the run.
         session_id: str | None = None
+        executor: Any | None = None
         try:
             from src.sdk.loop import _current_agent_loop
 
             loop = _current_agent_loop.get()
             session_id = getattr(loop, "_flow_session_id", None) if loop else None
+            definition = loop._registry.get(tool_name) if loop else None  # noqa: SLF001
+            annotations = getattr(definition, "annotations", None)
+            if getattr(annotations, "execution_mode", "sync") == "async":
+                executor = getattr(annotations, "executor", None)
         except Exception:
             session_id = None
+            executor = None
         proposal_id = svc.create_pending(
-            self.user_id, tool_name, tool_input, tier=tier, session_id=session_id
+            self.user_id, tool_name, tool_input, tier=tier, session_id=session_id, executor=executor
         )
         if tier == "show_then_auto_send":
             # Lazy expiry: the window must ACTUALLY elapse before auto-

@@ -168,6 +168,7 @@ class GovernanceService:
         arguments: dict[str, Any],
         tier: str = "explicit",
         session_id: str | None = None,
+        executor: Any | None = None,
     ) -> str:
         proposal_id = uuid.uuid4().hex
         # _now_minus(-N) = now + N — single clock helper so tests shift time
@@ -177,7 +178,9 @@ class GovernanceService:
             if tier == "show_then_auto_send"
             else None
         )
-        executor = self.external_executor_for_tool(user_id, tool)
+        # The HITL boundary snapshots an async executor from the active loop
+        # registry. Do not resolve tool paths here: ordinary synchronous
+        # governance proposals must not trigger custom-tool discovery.
         executor_json = json.dumps(executor.model_dump(mode="json"), sort_keys=True) if executor else None
         with self._conn(user_id) as conn:
             conn.execute(
