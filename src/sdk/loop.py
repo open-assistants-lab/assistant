@@ -816,7 +816,9 @@ class AgentLoop:
                 )
         elif tool_type == "custom":
             from src.sdk.tool_index import _rebuild_custom_function
-            td = _rebuild_custom_function(td, reconstruct)
+            td = _rebuild_custom_function(
+                td, reconstruct, self.user_id or DEFAULT_USER_ID, self.workspace_id or "personal",
+            )
         elif tool_type == "mcp":
             mcp_bridge = getattr(self, "_mcp_bridge", None)
             if mcp_bridge is None:

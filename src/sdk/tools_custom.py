@@ -24,10 +24,13 @@ CORE_TOOL_NAMES: set[str] = {
     "mcp_reload",
     "tool_search",
     "tool_reload",
+    "tool_result_read",
 }
 
 
-def _parse_tool_file(tool_path: Path) -> ToolDefinition | None:
+def _parse_tool_file(
+    tool_path: Path, user_id: str = DEFAULT_USER_ID, workspace_id: str = "personal",
+) -> ToolDefinition | None:
     """Parse a TOOL.md file and return a ToolDefinition with a shell-execute wrapper."""
     if not tool_path.exists():
         return None
@@ -121,7 +124,9 @@ def _parse_tool_file(tool_path: Path) -> ToolDefinition | None:
                 output = result.stdout + result.stderr
                 if result.returncode != 0:
                     return f"Command failed (exit {result.returncode}):\n{output[:2000]}"
-                return output[:5000] or "(no output)"
+                from src.sdk.tool_results import format_output
+
+                return format_output(output, user_id, workspace_id)
             except _subprocess.TimeoutExpired:
                 return "Command timed out after 120 seconds."
             except Exception as e:
@@ -185,7 +190,9 @@ def _normalize_parameters_schema(parameters: dict[str, Any]) -> dict[str, Any]:
     return schema
 
 
-def scan_tools_dir(tools_dir: Path) -> list[ToolDefinition]:
+def scan_tools_dir(
+    tools_dir: Path, user_id: str = DEFAULT_USER_ID, workspace_id: str = "personal",
+) -> list[ToolDefinition]:
     """Scan a Tools/ directory for TOOL.md files and return ToolDefinitions."""
     results: list[ToolDefinition] = []
     if not tools_dir.exists():
@@ -197,7 +204,7 @@ def scan_tools_dir(tools_dir: Path) -> list[ToolDefinition]:
         tool_file = entry / "TOOL.md"
         if not tool_file.exists():
             continue
-        td = _parse_tool_file(tool_file)
+        td = _parse_tool_file(tool_file, user_id, workspace_id)
         if td:
             results.append(td)
 
@@ -215,8 +222,8 @@ def get_custom_tools(user_id: str =  DEFAULT_USER_ID, workspace_id: str = "perso
 
     paths = get_paths(user_id=user_id, workspace_id=workspace_id)
 
-    shared_tools = scan_tools_dir(paths.workspace_tools_dir())
-    user_tools = scan_tools_dir(paths.user_tools_dir())
+    shared_tools = scan_tools_dir(paths.workspace_tools_dir(), user_id, workspace_id)
+    user_tools = scan_tools_dir(paths.user_tools_dir(), user_id, workspace_id)
 
     merged = {t.name: t for t in shared_tools}
     for t in user_tools:
