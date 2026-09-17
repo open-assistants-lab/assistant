@@ -41,16 +41,30 @@ def client(gov_env):
 def test_async_approval_returns_accepted_without_invoking_executor(client, monkeypatch) -> None:
     import src.http.routers.governance as governance_router
     from src.sdk.governance import get_governance_service
+    from src.sdk.governance_operations import GovernanceOperationStore
     from src.sdk.tools import ExternalHTTPExecutor
 
     service = get_governance_service("alice")
+    monkeypatch.setattr(governance_router, "_svc", lambda _user_id: service)
+    monkeypatch.setattr(
+        GovernanceOperationStore,
+        "_external_executor_allowed_hosts",
+        staticmethod(lambda: ["executor.internal"]),
+    )
+    monkeypatch.setattr(
+        GovernanceOperationStore,
+        "_callback_secret",
+        staticmethod(lambda: "test-operation-secret"),
+    )
     executor = ExternalHTTPExecutor(kind="external_http", dispatch_url="https://executor.internal/run")
     monkeypatch.setattr(service, "_active_tool_definition", lambda *_args: object())
     monkeypatch.setattr(service, "execution_mode_for_tool", lambda _user_id, _tool_name: "async")
     monkeypatch.setattr(service, "resolve_tier", lambda *_args: "explicit")
     monkeypatch.setattr(service, "external_executor_for_tool", lambda *_args: executor)
     # Snapshot the immutable external executor at proposal creation.
-    proposal_id = service.create_pending("alice", "menu_change_execute", {"store": "HQ"}, tier="explicit")
+    proposal_id = service.create_pending(
+        "alice", "menu_change_execute", {"store": "HQ"}, tier="explicit", executor=executor
+    )
 
     async def executor_must_not_run(*_args, **_kwargs):
         raise AssertionError("async approval invoked the synchronous executor")
@@ -76,16 +90,20 @@ def test_async_approval_returns_accepted_without_invoking_executor(client, monke
 
 
 def test_async_approval_without_external_executor_is_rejected(client, monkeypatch) -> None:
+    import src.http.routers.governance as governance_router
     from src.sdk.governance import get_governance_service
     from src.sdk.tools import ExternalHTTPExecutor
 
     service = get_governance_service("alice")
+    monkeypatch.setattr(governance_router, "_svc", lambda _user_id: service)
     executor = ExternalHTTPExecutor(kind="external_http", dispatch_url="https://executor.internal/run")
     monkeypatch.setattr(service, "_active_tool_definition", lambda *_args: object())
     monkeypatch.setattr(service, "execution_mode_for_tool", lambda *_args: "async")
     monkeypatch.setattr(service, "resolve_tier", lambda *_args: "explicit")
     monkeypatch.setattr(service, "external_executor_for_tool", lambda *_args: executor)
-    proposal_id = service.create_pending("alice", "menu_change_execute", {}, tier="explicit")
+    proposal_id = service.create_pending(
+        "alice", "menu_change_execute", {}, tier="explicit", executor=executor
+    )
     monkeypatch.setattr(service, "external_executor_for_tool", lambda *_args: None)
 
     response = client.post(
