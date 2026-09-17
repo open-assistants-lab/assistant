@@ -11,13 +11,10 @@ failed-compression replay).
 
 from __future__ import annotations
 
-import asyncio
 import json
-
 from pathlib import Path
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Provider contracts under /v1
@@ -73,7 +70,6 @@ def test_check_likely_providers_with_consent_checks_candidates_only(client, monk
 
 
 def test_local_models_loopback_allowlist_only(client, monkeypatch):
-    import src.http.routers.desktop_providers as dp
 
     class FakeResponse:
         status_code = 200
@@ -172,6 +168,7 @@ def desktop_env(tmp_path, monkeypatch):
     monkeypatch.setenv("DEPLOYMENT_DATA_ROOT", str(home / "Assistant"))
     monkeypatch.setenv("DEPLOYMENT_DATA_PATH", str(home / "Assistant" / ".system"))
     monkeypatch.setenv("SOLO_BYPASS", "false")
+    monkeypatch.setenv("DESKTOP_LAUNCH_TOKEN", "desktop-contract-test-token")
     monkeypatch.delenv("API_KEY", raising=False)
     from src.config import settings as settings_module
 
@@ -189,6 +186,7 @@ def test_desktop_mode_refuses_server_side_key_persistence(client, desktop_env):
     )
     r = client.post(
         "/v1/settings/api-keys",
+        headers={"Authorization": "Bearer desktop-contract-test-token"},
         json={"provider": "openai", "api_key": "sk-secret-persist-me"},
         params={"user_id": "default_user"},
     )
@@ -218,7 +216,9 @@ def test_non_desktop_key_persistence_still_works(client):
 
 def test_desktop_resource_listings_exclude_email_contacts_todos(client, desktop_env):
     for path in ("/v1/tools", "/v1/skills", "/v1/subagents"):
-        r = client.get(path)
+        r = client.get(
+            path, headers={"Authorization": "Bearer desktop-contract-test-token"}
+        )
         assert r.status_code == 200, f"{path}: {r.status_code}"
         body = r.json()
         text = json.dumps(body).lower()
@@ -279,8 +279,6 @@ def _compressed_data(est_before, est_after, status="succeeded", error=None):
 
 def test_known_token_compression_projects_timeline_event(tmp_path, monkeypatch):
     from src.sdk import session_events as se
-    from src.sdk.messages import Message
-    from src.sdk.run_events import UserPromptEvent
 
     monkeypatch.setattr(se, "_session_stores", {})
     store = se.get_session_event_store("tok_user")
