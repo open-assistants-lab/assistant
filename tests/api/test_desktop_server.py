@@ -700,29 +700,18 @@ class TestReviewFixes4da4110f:
         token = "settings-launch-token"
         monkeypatch.setenv("DESKTOP_LAUNCH_TOKEN", token)
         monkeypatch.setenv("API_KEY", "inherited-deployment-key")
-        import importlib
+        from src.config import get_settings
+        from src.http import desktop as desktop_mod
+        from src.storage.paths import DataPaths
 
-        from src.config import reload_settings
-        import src.http.desktop as desktop_mod
-        import src.http.main as main_mod
-
-        importlib.reload(main_mod)
-        # Simulate the desktop launch path's settings application.
+        # This tests effective settings, not app assembly. Reloading main in
+        # desktop mode leaves filtered routes mounted for later API tests.
+        # desktop_env restores the environment and settings singleton.
         desktop_mod.apply_desktop_settings()
-        try:
-            from src.config import get_settings
+        cfg = get_settings()
+        assert cfg.deployment.mode == "desktop-server"
+        assert cfg.deployment.data_root == str(Path.home() / "Assistant")
+        assert cfg.deployment.data_path == str(Path.home() / "Assistant" / ".system")
 
-            cfg = get_settings()
-            assert cfg.deployment.mode == "desktop-server"
-            assert cfg.deployment.data_root == str(Path.home() / "Assistant")
-            assert cfg.deployment.data_path == str(Path.home() / "Assistant" / ".system")
-
-            from src.storage.paths import DataPaths
-
-            dp = DataPaths(user_id="default_user")
-            assert dp.root == Path.home() / "Assistant"
-        finally:
-            importlib.reload(main_mod)
-            from src.config import reload_settings
-
-            reload_settings()
+        dp = DataPaths(user_id="default_user")
+        assert dp.root == Path.home() / "Assistant"

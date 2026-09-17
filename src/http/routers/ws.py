@@ -525,6 +525,8 @@ async def ws_conversation(websocket: WebSocket) -> None:
             identity_failed = True
     if handshake_scoped_user:
         resolved_user_id = handshake_scoped_user
+    if desktop_mode:
+        resolved_user_id = getattr(desktop_identity, "user_id", None) or DEFAULT_USER_ID
 
     # Bug-hunt P0 (fail closed): when the resolver rejected the connection
     # (None) or errored, and no shared-secret gate passed, close — mirroring
@@ -549,7 +551,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
             return
 
     session_id = str(uuid.uuid4())[:8]
-    user_id = DEFAULT_USER_ID
+    user_id = resolved_user_id or DEFAULT_USER_ID
     workspace_id = "personal"
     verbose = False
     current_model: str | None = None
@@ -766,7 +768,12 @@ async def ws_conversation(websocket: WebSocket) -> None:
                 await websocket.send_json(DoneMessage(response="Cancelled").model_dump())
                 break
 
-            user_id = getattr(msg, "user_id", user_id) or user_id
+            # Desktop identity is server-owned, matching the HTTP contract:
+            # ignore client selectors rather than rejecting legacy payloads.
+            if desktop_mode:
+                user_id = resolved_user_id or DEFAULT_USER_ID
+            else:
+                user_id = getattr(msg, "user_id", user_id) or user_id
             if resolved_user_id is not None and user_id != resolved_user_id:
                 # P0-T2: authenticated connections cannot spoof another user.
                 await websocket.send_json(
@@ -777,7 +784,8 @@ async def ws_conversation(websocket: WebSocket) -> None:
                 )
                 await websocket.close()
                 return
-            workspace_id = getattr(msg, "workspace_id", workspace_id) or workspace_id
+            if not desktop_mode:
+                workspace_id = getattr(msg, "workspace_id", workspace_id) or workspace_id
             session_id = _resolve_ws_session_id(msg, session_id)
             # Bug-hunt P1 (billing): tenant budget gate on the WS path — the
             # native app's primary transport must not bypass the 402 gate.
