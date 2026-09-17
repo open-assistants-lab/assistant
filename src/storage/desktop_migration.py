@@ -83,11 +83,16 @@ def _root_entries_conflict_with_legacy(data_root: Path) -> list[Path]:
 def _legacy_target_conflicts(legacy: Path, data_root: Path) -> list[tuple[Path, Path]]:
     """Find collisions that would make a legacy promotion non-atomic."""
     conflicts: list[tuple[Path, Path]] = []
+    destinations: dict[Path, Path] = {}
     for child in legacy.iterdir():
         name = "Messages" if child.name == "Conversation" else child.name
         target = data_root / name
-        if target.exists():
+        previous = destinations.get(target)
+        if previous is not None:
+            conflicts.append((previous, target))
+        if target.exists() or previous is not None:
             conflicts.append((child, target))
+        destinations[target] = child
     return conflicts
 
 

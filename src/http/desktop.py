@@ -49,12 +49,16 @@ def acquire_sidecar_lock() -> IO[str] | None:
     system_dir = Path(os.environ["DEPLOYMENT_DATA_PATH"])
     system_dir.mkdir(parents=True, exist_ok=True)
     lock_path = system_dir / LOCK_FILE
-    fh = open(lock_path, "w")
+    # Append mode: a losing launch must not truncate the owner's lock record
+    # while discovering it cannot acquire the flock.
+    fh = open(lock_path, "a")
     try:
         fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except (BlockingIOError, OSError):
         fh.close()
         return None
+    fh.seek(0)
+    fh.truncate()
     fh.write(json.dumps({"pid": os.getpid(), "ts": time.time()}))
     fh.flush()
     os.fsync(fh.fileno())
@@ -70,9 +74,13 @@ def release_sidecar_lock(lock: IO[str]) -> None:
         fcntl.flock(lock, fcntl.LOCK_UN)
     except (OSError, ValueError):
         pass
-    lock.close()
+    # A release only clears the module handle when it belongs to the
+    # releasing call; a second release for a re-acquired owner must not
+    # make the later owner's handle invisible to future bookkeeping.
     global _lock_holder
-    _lock_holder = None
+    if _lock_holder is lock:
+        _lock_holder = None
+    lock.close()
 
 
 def _prebind_loopback_sock() -> tuple[socket.socket, int]:
@@ -124,7 +132,10 @@ def _write_rendezvous(system_dir: Path, rendezvous: dict[str, object]) -> None:
             pass
 
 
-def run_desktop_server(stop_event: threading.Event | None = None) -> None:
+def run_desktop_server(
+    stop_event: threading.Event | None = None,
+    lock: IO[str] | None = None,
+) -> None:
     """Run the desktop sidecar: lock, migrate, serve, write rendezvous.
 
     Blocks until `stop_event` is set (tests) or the process is terminated.
@@ -137,15 +148,23 @@ def run_desktop_server(stop_event: threading.Event | None = None) -> None:
     # any store initializes; reload so settings see them.
     reload_settings()
 
-    lock = acquire_sidecar_lock()
     if lock is None:
-        logger.error("desktop.sidecar_already_running", {})
-        print(
-            "A sidecar instance is already running for this data root "
-            f"({Path(os.environ['DEPLOYMENT_DATA_PATH'])}).",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        # Direct-call path (tests, embedders): acquire here so every serving
+        # path is still protected by the single-instance guarantee. Ownership
+        # stays with this call — only an internally acquired lock is released
+        # by this function.
+        lock = acquire_sidecar_lock()
+        if lock is None:
+            logger.error("desktop.sidecar_already_running", {})
+            print(
+                "A sidecar instance is already running for this data root "
+                f"({Path(os.environ['DEPLOYMENT_DATA_PATH'])}).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        acquired_here = True
+    else:
+        acquired_here = False
 
     try:
         # The native launcher generates and retains this token, then passes it
@@ -220,7 +239,8 @@ def run_desktop_server(stop_event: threading.Event | None = None) -> None:
         except (OSError, ValueError):
             pass
     finally:
-        release_sidecar_lock(lock)
+        if acquired_here:
+            release_sidecar_lock(lock)
 
 def apply_desktop_settings() -> None:
     """Apply desktop-mode configuration to the EFFECTIVE settings object.
@@ -253,8 +273,12 @@ def apply_desktop_settings() -> None:
 def desktop_main() -> None:
     """CLI entry: assistant desktop-server.
 
-    Applies the desktop data roots and the one-source storage migration
-    BEFORE stores initialize, then serves the sidecar until exit.
+    Applies the desktop data roots, then acquires the single-instance lock
+    BEFORE any state change: migration and rendezvous cleanup must never run
+    under a losing second launch, because they could discard an owner's
+    recovery evidence or discovery record. This function owns the lock for
+    the process lifetime and releases it exactly once (finally); serving
+    receives the lock without ownership transfer.
     """
     apply_desktop_settings()
 
@@ -263,17 +287,31 @@ def desktop_main() -> None:
         print("Desktop sidecar requires DESKTOP_LAUNCH_TOKEN.", file=sys.stderr)
         sys.exit(1)
 
-    # One-source storage migration BEFORE any store initializes (D1 task 4).
-    from src.storage.desktop_migration import run_desktop_migration
+    lock = acquire_sidecar_lock()
+    if lock is None:
+        logger.error("desktop.sidecar_already_running", {})
+        print(
+            "A sidecar instance is already running for this data root "
+            f"({Path(os.environ['DEPLOYMENT_DATA_PATH'])}).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
-    run_desktop_migration(Path(os.environ["DEPLOYMENT_DATA_ROOT"]))
-
-    # Never serve with a stale rendezvous from a previous run.
-    system_dir = Path(os.environ["DEPLOYMENT_DATA_PATH"])
-    system_dir.mkdir(parents=True, exist_ok=True)
     try:
-        (system_dir / RENDZVOUS_FILE).unlink()
-    except FileNotFoundError:
-        pass
+        # One-source storage migration BEFORE any store initializes (D1 task 4).
+        from src.storage.desktop_migration import run_desktop_migration
 
-    run_desktop_server()
+        run_desktop_migration(Path(os.environ["DEPLOYMENT_DATA_ROOT"]))
+
+        # Never serve with a stale rendezvous from a previous run. We now own
+        # the single-instance lock, so no live sidecar depends on this record.
+        system_dir = Path(os.environ["DEPLOYMENT_DATA_PATH"])
+        system_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            (system_dir / RENDZVOUS_FILE).unlink()
+        except FileNotFoundError:
+            pass
+
+        run_desktop_server(lock=lock)
+    finally:
+        release_sidecar_lock(lock)
