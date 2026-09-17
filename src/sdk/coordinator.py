@@ -28,7 +28,7 @@ from src.sdk.subagent_models import (
     TaskCancelledError,
     TaskStatus,
 )
-from src.sdk.work_queue import USER_LEVEL_WORKSPACE_ID, WorkQueueDB, get_work_queue
+from src.sdk.subagent_work_queue import USER_LEVEL_WORKSPACE_ID, SubagentWorkQueueDB, get_work_queue
 from src.storage import paths as _paths
 
 # Alias: used by callers (e.g. tests) that patch src.sdk.coordinator.get_paths
@@ -186,7 +186,7 @@ class SubagentCoordinator:
         self.settings = get_settings()
         self.base_path = get_paths(user_id=self.user_id).user_subagents_dir()
         self.base_path.mkdir(parents=True, exist_ok=True)
-        self._db: WorkQueueDB | None = None
+        self._db: SubagentWorkQueueDB | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._recovery_task: asyncio.Task[Any] | None = None
 
@@ -205,7 +205,7 @@ class SubagentCoordinator:
             )
         return count
 
-    async def _get_db(self) -> WorkQueueDB:
+    async def _get_db(self) -> SubagentWorkQueueDB:
         if self._db is None:
             self._db = await get_work_queue(self.user_id, USER_LEVEL_WORKSPACE_ID)
             if self._recovery_task is None:
@@ -341,7 +341,7 @@ class SubagentCoordinator:
     async def _register_active_context(
         self,
         task_id: str,
-        db: WorkQueueDB,
+        db: SubagentWorkQueueDB,
         ctx: SubagentContext,
     ) -> None:
         task_row = await db.get_task(task_id)
@@ -466,7 +466,7 @@ class SubagentCoordinator:
                     user_id="system",
                 )
 
-    async def _heartbeat_loop(self, task_id: str, worker_id: str, db: WorkQueueDB) -> None:
+    async def _heartbeat_loop(self, task_id: str, worker_id: str, db: SubagentWorkQueueDB) -> None:
         while True:
             await asyncio.sleep(5)
             await db.heartbeat(task_id, worker_id)
@@ -580,7 +580,7 @@ class SubagentCoordinator:
                 user_id=self.user_id,
             )
 
-    async def _set_cancelled_if_requested(self, task_id: str, db: WorkQueueDB) -> bool:
+    async def _set_cancelled_if_requested(self, task_id: str, db: SubagentWorkQueueDB) -> bool:
         latest = await db.get_task(task_id)
         if latest and (
             latest["cancel_requested"]
@@ -594,7 +594,7 @@ class SubagentCoordinator:
         task_id: str,
         profile: AgentProfile,
         task: str,
-        db: WorkQueueDB,
+        db: SubagentWorkQueueDB,
         ctx: SubagentContext | None = None,
     ) -> SubagentResult:
         from src.sdk.loop import AgentLoop, CostTracker, RunConfig

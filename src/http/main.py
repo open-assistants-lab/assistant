@@ -72,6 +72,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     desktop_mode = desktop_mode_active()
     warn_unknown_model_providers(get_settings())
     _token_refresh_task: asyncio.Task[Any] | None = None
+    _operation_dispatcher: Any | None = None
+    # Durable external operation dispatch is independent of the approving
+    # request. It safely idles when no governance outbox rows exist.
+    try:
+        from src.sdk.governance_dispatcher import GovernedOperationDispatcher
+
+        _operation_dispatcher = GovernedOperationDispatcher()
+        await _operation_dispatcher.start()
+    except Exception as exc:
+        from src.app_logging import get_logger as _go_logger
+
+        _go_logger().warning("governance.dispatcher_start_failed", {"error": str(exc)})
     if not desktop_mode:
         try:
             from src.subagent.scheduler import get_scheduler
@@ -131,6 +143,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if _token_refresh_task is not None:
             _token_refresh_task.cancel()
             get_logger().info("scheduler.stopped", {}, user_id="system")
+        if _operation_dispatcher is not None:
+            await _operation_dispatcher.stop()
     except Exception:
         pass
 
@@ -232,6 +246,16 @@ _PUBLIC_PATHS = {
 }
 
 
+def _is_operation_callback_path(path: str) -> bool:
+    """True for executor capability callback routes, never user-auth routes."""
+    parts = [part for part in path.split("/") if part]
+    return (
+        len(parts) == 4
+        and parts[:2] == ["governance", "operations"]
+        and parts[3] in {"events", "complete", "fail"}
+    )
+
+
 def _is_webhook_fire_path(path: str) -> bool:
     """True for POST /webhooks/{trigger_id} — the fire endpoint only.
 
@@ -262,7 +286,11 @@ async def api_key_auth_middleware(request: Request, call_next: Any) -> Any:
     if desktop_mode_active():
         if request.url.path in {"/health", "/health/ready"}:
             return await call_next(request)
-    elif request.url.path in _PUBLIC_PATHS or _is_webhook_fire_path(request.url.path):
+    elif (
+        request.url.path in _PUBLIC_PATHS
+        or _is_webhook_fire_path(request.url.path)
+        or _is_operation_callback_path(request.url.path)
+    ):
         return await call_next(request)
 
     import inspect

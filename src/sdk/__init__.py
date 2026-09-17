@@ -24,7 +24,7 @@ Public API:
     HybridDB, SearchMode, EmbeddingModelError - hybrid search database
     AgentProfile - portable agent definition (from agentprofile OSS package)
     SubagentResult, TaskStatus, TaskCancelledError - subagent models
-    WorkQueueDB, get_work_queue - work queue database
+    SubagentWorkQueueDB, get_work_queue - work queue database
     SubagentCoordinator, get_coordinator - subagent coordination
 """
 
@@ -66,6 +66,7 @@ from src.sdk.subagent_models import (
     TaskCancelledError,
     TaskStatus,
 )
+from src.sdk.subagent_work_queue import SubagentWorkQueueDB, get_work_queue
 from src.sdk.tools import ToolAnnotations, ToolDefinition, ToolRegistry, ToolResult, tool
 from src.sdk.tracing import (
     ConsoleTraceProcessor,
@@ -76,7 +77,6 @@ from src.sdk.tracing import (
     TraceProvider,
 )
 from src.sdk.validation import normalize_tool_schema, repair_tool_call
-from src.sdk.work_queue import WorkQueueDB, get_work_queue
 
 __all__ = [
     "Message",
@@ -144,7 +144,7 @@ __all__ = [
     "TaskCancelledError",
     "MaxCallsExceededError",
     "CostLimitExceededError",
-    "WorkQueueDB",
+    "SubagentWorkQueueDB",
     "get_work_queue",
     "SubagentCoordinator",
     "get_coordinator",

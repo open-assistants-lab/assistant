@@ -14,9 +14,34 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Callable
-from typing import Any, get_type_hints
+from typing import Any, Literal, get_type_hints
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+class ExternalHTTPExecutor(BaseModel):
+    """Trusted deployment-owned HTTP endpoint for an async tool.
+
+    ``dispatch_url`` comes from trusted tool metadata, never model arguments.
+    Deployments must restrict it to an internal/allowlisted executor; this
+    validation prevents malformed URLs but is not a general SSRF policy.
+    """
+
+    kind: Literal["external_http"]
+    dispatch_url: str
+    manifest_hash: str | None = None
+
+    @field_validator("dispatch_url")
+    @classmethod
+    def validate_dispatch_url(cls, value: str) -> str:
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(value)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise ValueError("dispatch_url must be an absolute http(s) URL")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("dispatch_url must not contain userinfo")
+        return value
 
 
 class ToolAnnotations(BaseModel):
@@ -30,6 +55,10 @@ class ToolAnnotations(BaseModel):
     # M4 (issue #6): declared by the tool author; the governance tier
     # resolution maps this to "explicit" unless a settings tier overrides it.
     requires_approval: bool = False
+    # Issue #21: async execution is opt-in; existing tools retain synchronous
+    # approval/execution behavior.
+    execution_mode: Literal["sync", "async"] = "sync"
+    executor: ExternalHTTPExecutor | None = None
 
 
 class ToolResult(BaseModel):

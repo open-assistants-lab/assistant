@@ -9,13 +9,37 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Request
+from pydantic import BaseModel
 
 from src.http.auth import enforce_user_id, resolve_user_id
 from src.sdk.governance import get_governance_service
+from src.sdk.governance_operations import OperationStatus
 from src.storage.paths import DEFAULT_USER_ID
 
 router = APIRouter(prefix="/governance", tags=["governance"])
+
+
+class OperationCallback(BaseModel):
+    """Executor-supplied immutable operation binding and payload."""
+
+    user_id: str
+    proposal_id: str
+    tool_name: str
+    arguments_hash: str
+    manifest_hash: str | None = None
+    sequence: int | None = None
+    message_safe: str = ""
+    result: dict[str, Any] | None = None
+
+
+def _callback_service(callback: OperationCallback, operation_id: str, capability: str):
+    if not capability:
+        raise HTTPException(status_code=401, detail="Missing operation callback capability")
+    service = _svc(callback.user_id)
+    # Store methods validate the capability plus all immutable bindings. The
+    # user id is only a database locator, never authentication.
+    return service, capability
 
 
 async def execute_approved_tool(
@@ -30,8 +54,17 @@ async def execute_approved_tool(
 
 
 def _svc(user_id: str):
-
     return get_governance_service(user_id)
+
+
+def _authorized_governance_user(request: Request, user_id: str) -> str:
+    """Resolve an owner or existing second-party governance actor's target."""
+    requester = getattr(getattr(request, "state", None), "identity", None)
+    if requester_is_second_party_authorized(requester, user_id):
+        return user_id
+    resolved_user = resolve_user_id(request, user_id)
+    enforce_user_id(resolved_user, requester)
+    return resolved_user
 
 
 @router.get("/pendings")
@@ -94,11 +127,6 @@ async def approve_pending(
     # Second-party approve: an org admin may approve ANOTHER user's pending,
     # targeting that user's store (user_id param = pending owner). Enforce
     # self-match only for the self path.
-    requester_is_other = (
-        requester is not None
-        and requester.user_id is not None
-        and requester.user_id != user_id
-    )
     if not requester_is_second_party_authorized(requester, user_id) and (
         requester is None or requester.user_id in (None, user_id)
     ):
@@ -126,6 +154,22 @@ async def approve_pending(
                     "deployment admin), not the user who created it."
                 ),
             )
+    # Async approval is an acceptance transaction, not execution: consume the
+    # proposal and create/read one durable operation without invoking a tool.
+    if row.get("executor") is not None and row["status"] in ("pending", "approved", "consumed"):
+        try:
+            executor = svc.validate_async_approval(user_id, row)
+            created, _approved_now = svc.approve_external_operation(user_id, proposal_id, executor)
+            operation = created.operation
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "proposal_id": proposal_id,
+            "status": "accepted",
+            "operation_id": operation.operation_id,
+            "operation_status": operation.status.value,
+        }
+
     # Execution runs ONLY on the pending->approved transition made by THIS
     # call — replays (already approved/executed) are no-ops (M4-1 review).
     if row["status"] in ("pending", "approved"):
@@ -152,6 +196,106 @@ async def approve_pending(
         "status": (final or {}).get("status", row["status"]),
         "execution": exec_row,
     }
+
+
+@router.get("/operations/{operation_id}")
+async def get_operation(
+    operation_id: str, request: Request, user_id: str = DEFAULT_USER_ID
+) -> dict[str, Any]:
+    user_id = _authorized_governance_user(request, user_id)
+    operation = _svc(user_id).operations.get_operation(user_id, operation_id)
+    if operation is None:
+        raise HTTPException(status_code=404, detail="No such operation")
+    return {**operation.model_dump(mode="json"), "events": [
+        event.model_dump(mode="json")
+        for event in _svc(user_id).operations.get_events(user_id, operation_id)
+    ]}
+
+
+@router.get("/operations")
+async def list_operations(
+    request: Request, user_id: str = DEFAULT_USER_ID, status: str | None = None
+) -> list[dict[str, Any]]:
+    user_id = _authorized_governance_user(request, user_id)
+    try:
+        return [operation.model_dump(mode="json") for operation in _svc(user_id).list_operations(user_id, status)]
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid operation status") from exc
+
+
+@router.post("/operations/{operation_id}/cancel")
+async def request_operation_cancel(
+    operation_id: str, request: Request, user_id: str = DEFAULT_USER_ID
+) -> dict[str, Any]:
+    user_id = _authorized_governance_user(request, user_id)
+    operation = _svc(user_id).request_operation_cancel(user_id, operation_id)
+    if operation is None:
+        raise HTTPException(status_code=404, detail="No such operation")
+    return operation.model_dump(mode="json")
+
+
+@router.post("/operations/{operation_id}/events")
+async def append_operation_event(
+    operation_id: str,
+    callback: OperationCallback,
+    x_operation_capability: str = Header(default=""),
+) -> dict[str, Any]:
+    """Append an executor checkpoint; bearer user auth is deliberately irrelevant."""
+    service, capability = _callback_service(callback, operation_id, x_operation_capability)
+    if callback.sequence is None:
+        raise HTTPException(status_code=422, detail="Callback sequence is required")
+    try:
+        event = service.operations.append_callback_event(
+            callback.user_id, operation_id, capability, callback.sequence, "progress", callback.message_safe,
+            proposal_id=callback.proposal_id, tool_name=callback.tool_name,
+            arguments_hash=callback.arguments_hash, manifest_hash=callback.manifest_hash,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail="Invalid operation callback capability") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return event.model_dump(mode="json")
+
+
+async def _finish_operation_callback(
+    operation_id: str,
+    callback: OperationCallback,
+    capability: str,
+    status: OperationStatus,
+) -> dict[str, Any]:
+    service, capability = _callback_service(callback, operation_id, capability)
+    try:
+        operation = service.operations.finish_callback(
+            callback.user_id, operation_id, capability, status,
+            proposal_id=callback.proposal_id, tool_name=callback.tool_name,
+            arguments_hash=callback.arguments_hash, manifest_hash=callback.manifest_hash,
+            result=callback.result,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail="Invalid operation callback capability") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return operation.model_dump(mode="json")
+
+
+@router.post("/operations/{operation_id}/complete")
+async def complete_operation(
+    operation_id: str, callback: OperationCallback,
+    x_operation_capability: str = Header(default=""),
+) -> dict[str, Any]:
+    return await _finish_operation_callback(
+        operation_id, callback, x_operation_capability, OperationStatus.SUCCEEDED
+    )
+
+
+@router.post("/operations/{operation_id}/fail")
+async def fail_operation(
+    operation_id: str, callback: OperationCallback,
+    x_operation_capability: str = Header(default=""),
+) -> dict[str, Any]:
+    return await _finish_operation_callback(
+        operation_id, callback, x_operation_capability, OperationStatus.FAILED
+    )
 
 
 @router.post("/pendings/{proposal_id}/cancel")

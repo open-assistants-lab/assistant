@@ -33,6 +33,12 @@ def reset_settings():
     _paths_cache.clear()
     yield
     _paths_cache.clear()
+    # Setup deliberately loads settings with SDK-test environment isolation.
+    # Teardown must clear, rather than reload, that singleton so subsequent
+    # non-SDK tests retain control over when configuration is initialized.
+    from src.config import settings as settings_module
+
+    settings_module._config = None
     for var, val in saved.items():
         if val is not None:
             os.environ[var] = val
@@ -96,7 +102,7 @@ def mock_tool_result():
 async def cleanup_work_queue_cache():
     """Prevent cross-test work_queue DB cache contamination."""
     yield
-    from src.sdk.work_queue import _db_cache
+    from src.sdk.subagent_work_queue import _db_cache
 
     for cached_db in list(_db_cache.values()):
         await cached_db.close()

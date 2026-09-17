@@ -209,7 +209,7 @@ async def list_subagent_jobs(
 ) -> dict[str, Any]:
     if request is not None:
         user_id = resolve_user_id(request, user_id)
-    from src.sdk.work_queue import get_work_queue
+    from src.sdk.subagent_work_queue import get_work_queue
 
     _validate_context_ids(user_id, workspace_id)
     db = await get_work_queue(user_id, workspace_id)
@@ -226,7 +226,7 @@ async def get_subagent_job(
 ) -> dict[str, Any]:
     if request is not None:
         user_id = resolve_user_id(request, user_id)
-    from src.sdk.work_queue import get_work_queue
+    from src.sdk.subagent_work_queue import get_work_queue
 
     _validate_context_ids(user_id, workspace_id)
     db = await get_work_queue(user_id, workspace_id)
@@ -247,7 +247,7 @@ async def instruct_subagent_job(
     if request is not None:
         user_id = resolve_user_id(request, user_id)
     from src.sdk.coordinator import get_coordinator
-    from src.sdk.work_queue import get_work_queue
+    from src.sdk.subagent_work_queue import get_work_queue
 
     _validate_context_ids(user_id, workspace_id)
     db = await get_work_queue(user_id, workspace_id)
@@ -270,7 +270,7 @@ async def cancel_subagent_job(
     if request is not None:
         user_id = resolve_user_id(request, user_id)
     from src.sdk.coordinator import get_coordinator
-    from src.sdk.work_queue import get_work_queue
+    from src.sdk.subagent_work_queue import get_work_queue
 
     _validate_context_ids(user_id, workspace_id)
     db = await get_work_queue(user_id, workspace_id)

@@ -1,7 +1,7 @@
-"""Tests for subagent V1: WorkQueueDB, middlewares, coordinator, models.
+"""Tests for subagent V1: SubagentWorkQueueDB, middlewares, coordinator, models.
 
 Covers:
-- WorkQueueDB CRUD (insert, status transitions, progress, instructions, cancel, queries)
+- SubagentWorkQueueDB CRUD (insert, status transitions, progress, instructions, cancel, queries)
 - ProgressMiddleware (progress updates, doom loop detection)
 - InstructionMiddleware (cancel signal, instruction injection)
 - SubagentCoordinator (create, update, invoke, cancel, instruct, delete)
@@ -49,16 +49,16 @@ def mock_paths(tmp_dir):
         mock.user_subagents_dir = mock.workspace_subagents_dir
         mock.memory_dir = mock.workspace_memory_dir
     with patch("src.storage.paths.get_paths", return_value=mock):
-        with patch("src.sdk.work_queue.get_paths", return_value=mock):
+        with patch("src.sdk.subagent_work_queue.get_paths", return_value=mock):
             with patch("src.sdk.coordinator.get_paths", return_value=mock):
                 yield mock
 
 
 @pytest.fixture
 async def db(mock_paths):
-    from src.sdk.work_queue import WorkQueueDB
+    from src.sdk.subagent_work_queue import SubagentWorkQueueDB
 
-    db = WorkQueueDB("test_user")
+    db = SubagentWorkQueueDB("test_user")
     yield db
     await db.close()
 
@@ -157,10 +157,10 @@ class TestTaskStatus:
         assert TaskStatus.CANCELLING == "cancelling"
 
 
-# -- WorkQueueDB Tests --
+# -- SubagentWorkQueueDB Tests --
 
 
-class TestWorkQueueDB:
+class TestSubagentWorkQueueDB:
     @pytest.mark.asyncio
     async def test_insert_and_get(self, db, profile):
         task_id = await db.insert_task("test_agent", "do something", profile)
@@ -398,11 +398,11 @@ class TestWorkQueueDB:
 
     @pytest.mark.asyncio
     async def test_get_task_is_user_level_across_workspace_ids(self, mock_paths, profile):
-        from src.sdk.work_queue import WorkQueueDB
+        from src.sdk.subagent_work_queue import SubagentWorkQueueDB
 
-        db = WorkQueueDB("test_user", workspace_id="personal")
-        other_workspace = WorkQueueDB("test_user", workspace_id="other")
-        other_user = WorkQueueDB("other_user", workspace_id="personal")
+        db = SubagentWorkQueueDB("test_user", workspace_id="personal")
+        other_workspace = SubagentWorkQueueDB("test_user", workspace_id="other")
+        other_user = SubagentWorkQueueDB("other_user", workspace_id="personal")
         try:
             task_id = await db.insert_task("test_agent", "task", profile)
 
@@ -417,11 +417,11 @@ class TestWorkQueueDB:
     @pytest.mark.asyncio
     async def test_check_progress_is_user_level_across_workspace_ids(self, mock_paths, profile):
         from src.sdk.subagent_models import TaskStatus
-        from src.sdk.work_queue import WorkQueueDB
+        from src.sdk.subagent_work_queue import SubagentWorkQueueDB
 
-        db = WorkQueueDB("test_user", workspace_id="personal")
-        other_workspace = WorkQueueDB("test_user", workspace_id="other")
-        other_user = WorkQueueDB("other_user", workspace_id="personal")
+        db = SubagentWorkQueueDB("test_user", workspace_id="personal")
+        other_workspace = SubagentWorkQueueDB("test_user", workspace_id="other")
+        other_user = SubagentWorkQueueDB("other_user", workspace_id="personal")
         try:
             own_id = await db.insert_task("test_agent", "own", profile, parent_id="shared")
             other_workspace_id = await other_workspace.insert_task(
@@ -453,10 +453,10 @@ class TestWorkQueueDB:
     @pytest.mark.asyncio
     async def test_legacy_workspace_rows_are_visible_to_user_level_reads(self, mock_paths, profile):
         from src.sdk.subagent_models import TaskStatus
-        from src.sdk.work_queue import WorkQueueDB
+        from src.sdk.subagent_work_queue import SubagentWorkQueueDB
 
-        db = WorkQueueDB("test_user", workspace_id="user")
-        other_user = WorkQueueDB("other_user", workspace_id="user")
+        db = SubagentWorkQueueDB("test_user", workspace_id="user")
+        other_user = SubagentWorkQueueDB("other_user", workspace_id="user")
         try:
             conn = await db._get_db()
             await conn.execute(
@@ -519,9 +519,9 @@ class TestWorkQueueDB:
         self, mock_paths, profile
     ):
         from src.sdk.subagent_models import TaskStatus
-        from src.sdk.work_queue import WorkQueueDB
+        from src.sdk.subagent_work_queue import SubagentWorkQueueDB
 
-        db = WorkQueueDB("test_user", workspace_id="user")
+        db = SubagentWorkQueueDB("test_user", workspace_id="user")
         try:
             conn = await db._get_db()
             for task_id, workspace_id, status in [
@@ -1681,7 +1681,7 @@ class TestSubagentCoordinator:
         from agentprofile.models import AgentProfile
 
         from src.sdk.coordinator import SubagentCoordinator
-        from src.sdk.work_queue import _db_cache
+        from src.sdk.subagent_work_queue import _db_cache
 
         _db_cache.clear()
         sales = SubagentCoordinator("test_user", workspace_id="sales")
@@ -1697,7 +1697,7 @@ class TestSubagentCoordinator:
 
     @pytest.mark.asyncio
     async def test_get_work_queue_is_cached_by_user_id_only(self, mock_paths):
-        from src.sdk.work_queue import _db_cache, get_work_queue
+        from src.sdk.subagent_work_queue import _db_cache, get_work_queue
 
         _db_cache.clear()
 
@@ -1935,7 +1935,7 @@ class TestStaleJobRecovery:
         mock_paths.work_queue_db = mock.MagicMock(return_value=db_dir / "work_queue.db")
 
         with mock.patch('src.sdk.coordinator.get_paths', return_value=mock_paths), \
-             mock.patch('src.sdk.work_queue.get_paths', return_value=mock_paths):
+             mock.patch('src.sdk.subagent_work_queue.get_paths', return_value=mock_paths):
             coordinator = SubagentCoordinator("test_user", "test_ws")
             db = await coordinator._get_db()
             await coordinator._recovery_task

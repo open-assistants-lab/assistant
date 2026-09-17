@@ -27,6 +27,7 @@ from typing import Any
 
 from src.app_logging import get_logger
 from src.sdk.audit import AuditEvent
+from src.sdk.governance_operations import GovernanceOperationStore, GovernedOperation
 from src.sdk.run_events import ToolResultData, ToolResultEvent
 from src.sdk.session_events import (
     get_session_event_store,
@@ -60,6 +61,7 @@ class GovernanceService:
     def __init__(self, data_root: str | None = None) -> None:
         self._paths = DataPaths() if data_root is None else DataPaths(data_root=data_root)
         self._lock = threading.Lock()
+        self.operations = GovernanceOperationStore(self._conn, self._lock)
         self._recent: list[AuditEvent] = []  # receipt ring buffer (process-local)
 
     def _db_path(self, user_id: str) -> Path:
@@ -82,16 +84,21 @@ class GovernanceService:
                 tier TEXT NOT NULL,
                 status TEXT NOT NULL,
                 expires_at TEXT,
-                session_id TEXT
+                session_id TEXT,
+                user_id TEXT,
+                executor_json TEXT
             )
             """
         )
-        # Migration-safe: pre-session-log DBs lack the column.
-        try:
-            conn.execute("ALTER TABLE proposals ADD COLUMN session_id TEXT")
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass
+        # Migration-safe: pre-session-log DBs lack the columns.
+        for column in ("session_id", "user_id", "executor_json"):
+            try:
+                conn.execute(f"ALTER TABLE proposals ADD COLUMN {column} TEXT")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
+        conn.execute("UPDATE proposals SET user_id = ? WHERE user_id IS NULL", (user_id,))
+        conn.commit()
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS tool_stats (
@@ -161,6 +168,7 @@ class GovernanceService:
         arguments: dict[str, Any],
         tier: str = "explicit",
         session_id: str | None = None,
+        executor: Any | None = None,
     ) -> str:
         proposal_id = uuid.uuid4().hex
         # _now_minus(-N) = now + N — single clock helper so tests shift time
@@ -170,9 +178,13 @@ class GovernanceService:
             if tier == "show_then_auto_send"
             else None
         )
+        # The HITL boundary snapshots an async executor from the active loop
+        # registry. Do not resolve tool paths here: ordinary synchronous
+        # governance proposals must not trigger custom-tool discovery.
+        executor_json = json.dumps(executor.model_dump(mode="json"), sort_keys=True) if executor else None
         with self._conn(user_id) as conn:
             conn.execute(
-                "INSERT INTO proposals VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO proposals (proposal_id, ts, tool, arguments, tier, status, expires_at, session_id, user_id, executor_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     proposal_id,
                     datetime.now(UTC).isoformat(),
@@ -182,6 +194,8 @@ class GovernanceService:
                     "pending",
                     expiry,
                     session_id,
+                    user_id,
+                    executor_json,
                 ),
             )
             # M4-2 anti-fatigue: proposals_created per tool.
@@ -237,7 +251,7 @@ class GovernanceService:
         with self._conn(user_id) as conn:
             row = conn.execute(
                 "SELECT proposal_id, tool, arguments, tier, status, expires_at,"
-                " session_id FROM proposals WHERE proposal_id = ?",
+                " session_id, executor_json FROM proposals WHERE proposal_id = ?",
                 (proposal_id,),
             ).fetchone()
         if row is None:
@@ -250,6 +264,7 @@ class GovernanceService:
             "status": row[4],
             "expires_at": row[5],
             "session_id": row[6],
+            "executor": json.loads(row[7]) if row[7] else None,
         }
 
     def approve(
@@ -290,6 +305,79 @@ class GovernanceService:
                 )
                 conn.commit()
         return newly
+
+    def _active_tool_definition(self, user_id: str, tool_name: str) -> Any | None:
+        """Resolve through the runner's deployment and user capability ceiling."""
+        from src.sdk.runner import get_active_tool_definition
+
+        return get_active_tool_definition(user_id, tool_name)
+
+    def execution_mode_for_tool(self, user_id: str, tool_name: str) -> str:
+        definition = self._active_tool_definition(user_id, tool_name)
+        return str(getattr(getattr(definition, "annotations", None), "execution_mode", "sync"))
+
+    def external_executor_for_tool(self, user_id: str, tool_name: str) -> Any | None:
+        """Return the active, deployment/capability-authorized executor only."""
+        definition = self._active_tool_definition(user_id, tool_name)
+        return getattr(getattr(definition, "annotations", None), "executor", None)
+
+    def validate_async_approval(self, user_id: str, row: dict[str, Any]) -> Any:
+        """Fail closed if current policy/tool metadata no longer matches proposal."""
+        definition = self._active_tool_definition(user_id, row["tool"])
+        if definition is None or self.execution_mode_for_tool(user_id, row["tool"]) != "async":
+            raise ValueError("async tool is no longer enabled")
+        if self.resolve_tier(user_id, row["tool"]) != row["tier"] or row["tier"] == "hard_block":
+            raise ValueError("governance tier changed")
+        executor = self.external_executor_for_tool(user_id, row["tool"])
+        snapshot = row.get("executor")
+        if executor is None or snapshot != executor.model_dump(mode="json"):
+            raise ValueError("external executor metadata changed")
+        return executor
+
+    def _record_async_approval(self, user_id: str, proposal_id: str, tool: str) -> None:
+        """Record the approval receipt/stat only after the atomic transition."""
+        self._emit_receipt(user_id, f"approved:{proposal_id}", tool="", correlation=proposal_id)
+        with self._conn(user_id) as conn:
+            conn.execute(
+                "INSERT INTO tool_stats (tool, approvals) VALUES (?, 1)"
+                " ON CONFLICT(tool) DO UPDATE SET approvals = approvals + 1",
+                (tool,),
+            )
+            conn.commit()
+
+    def approve_async_operation(
+        self, user_id: str, proposal_id: str
+    ) -> tuple[GovernedOperation, bool]:
+        """Atomically accept an async proposal without invoking its tool body."""
+        operation, approved_now = self.operations.approve_pending_and_create_operation(user_id, proposal_id)
+        if approved_now:
+            self._record_async_approval(user_id, proposal_id, operation.tool_name)
+        return operation, approved_now
+
+    def approve_external_operation(
+        self, user_id: str, proposal_id: str, executor: Any
+    ) -> tuple[Any, bool]:
+        """Accept one external operation and create its durable dispatch outbox."""
+        created, approved_now = self.operations.approve_pending_and_create_external_operation(
+            user_id, proposal_id, executor
+        )
+        if approved_now:
+            self._record_async_approval(user_id, proposal_id, created.operation.tool_name)
+        return created, approved_now
+
+    def list_operations(
+        self, user_id: str, status: str | None = None
+    ) -> list[GovernedOperation]:
+        return self.operations.list_operations(user_id, status)
+
+    def request_operation_cancel(
+        self, user_id: str, operation_id: str
+    ) -> GovernedOperation | None:
+        operation = self.operations.get_operation(user_id, operation_id)
+        if operation is None:
+            return None
+        self.operations.request_cancel(user_id, operation_id)
+        return self.operations.get_operation(user_id, operation_id)
 
     def resolve_pending(self, user_id: str, proposal_id: str) -> dict[str, Any]:
         """Lazy expiry evaluation for show_then_auto_send (read-time, no
@@ -576,6 +664,20 @@ class GovernanceService:
             default_capture_bus.emit(ev)
         except Exception:
             pass
+
+
+def iter_governance_user_ids() -> list[str]:
+    """Return users with an in-memory or durable governance store.
+
+    Lifespan recovery must find queued work after a process restart, not only
+    users that happened to issue a request in this process.
+    """
+    with _lock:
+        users = set(_services)
+    root = DataPaths().root / "private" / "governance"
+    if root.is_dir():
+        users.update(path.name for path in root.iterdir() if path.is_dir())
+    return sorted(users)
 
 
 def get_governance_service(user_id: str = "default_user") -> GovernanceService:

@@ -366,6 +366,21 @@ consent tiers, vendor endpoints, or vendor egress.
 - Export runs on a bounded background batch (5 s timeout); a slow or
   unreachable collector causes **drops, never request backpressure**.
 
+### Governed external operations
+
+Async tools with `annotations.executor.kind: external_http` require a deployment-held
+`GOVERNANCE_OPERATION_CALLBACK_SECRET`. It derives operation-scoped callback capabilities
+and must never be stored in `TOOL.md`, callbacks, or the governance database. The deployment
+refuses external async approval when this secret is unset.
+
+External dispatch also fails closed unless its URL host (or exact `host:port`) is listed in
+`GOVERNANCE_EXTERNAL_EXECUTOR_ALLOWED_HOSTS` (JSON list) or
+`governance.external_executor_allowed_hosts` in configuration. Its `dispatch_url` must be an
+absolute HTTP(S) URL without userinfo; model arguments never choose it. Treat every allowed
+host as a privileged outbound integration, restrict egress at the network layer, and never
+accept an arbitrary user-supplied dispatch host. The operation callback capability is delivered
+only in the immutable dispatch envelope; do not log it.
+
 ## Production hardening checklist
 
 - [ ] `API_KEY` set on any server reachable beyond localhost
