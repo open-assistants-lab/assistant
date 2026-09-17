@@ -44,15 +44,13 @@ def test_async_approval_returns_accepted_without_invoking_executor(client, monke
     from src.sdk.tools import ExternalHTTPExecutor
 
     service = get_governance_service("alice")
-    proposal_id = service.create_pending("alice", "menu_change_execute", {"store": "HQ"}, tier="explicit")
+    executor = ExternalHTTPExecutor(kind="external_http", dispatch_url="https://executor.internal/run")
+    monkeypatch.setattr(service, "_active_tool_definition", lambda *_args: object())
     monkeypatch.setattr(service, "execution_mode_for_tool", lambda _user_id, _tool_name: "async")
-    monkeypatch.setattr(
-        service,
-        "external_executor_for_tool",
-        lambda _user_id, _tool_name: ExternalHTTPExecutor(
-            kind="external_http", dispatch_url="https://executor.internal/run"
-        ),
-    )
+    monkeypatch.setattr(service, "resolve_tier", lambda *_args: "explicit")
+    monkeypatch.setattr(service, "external_executor_for_tool", lambda *_args: executor)
+    # Snapshot the immutable external executor at proposal creation.
+    proposal_id = service.create_pending("alice", "menu_change_execute", {"store": "HQ"}, tier="explicit")
 
     async def executor_must_not_run(*_args, **_kwargs):
         raise AssertionError("async approval invoked the synchronous executor")
@@ -79,17 +77,22 @@ def test_async_approval_returns_accepted_without_invoking_executor(client, monke
 
 def test_async_approval_without_external_executor_is_rejected(client, monkeypatch) -> None:
     from src.sdk.governance import get_governance_service
+    from src.sdk.tools import ExternalHTTPExecutor
 
     service = get_governance_service("alice")
-    proposal_id = service.create_pending("alice", "menu_change_execute", {}, tier="explicit")
+    executor = ExternalHTTPExecutor(kind="external_http", dispatch_url="https://executor.internal/run")
+    monkeypatch.setattr(service, "_active_tool_definition", lambda *_args: object())
     monkeypatch.setattr(service, "execution_mode_for_tool", lambda *_args: "async")
+    monkeypatch.setattr(service, "resolve_tier", lambda *_args: "explicit")
+    monkeypatch.setattr(service, "external_executor_for_tool", lambda *_args: executor)
+    proposal_id = service.create_pending("alice", "menu_change_execute", {}, tier="explicit")
     monkeypatch.setattr(service, "external_executor_for_tool", lambda *_args: None)
 
     response = client.post(
         f"/v1/governance/pendings/{proposal_id}/approve", params={"user_id": "alice"}
     )
     assert response.status_code == 409
-    assert "external_http executor" in response.json()["detail"]
+    assert "executor metadata changed" in response.json()["detail"]
     assert service.get_pending("alice", proposal_id)["status"] == "pending"
 
 

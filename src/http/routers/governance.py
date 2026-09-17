@@ -156,15 +156,9 @@ async def approve_pending(
             )
     # Async approval is an acceptance transaction, not execution: consume the
     # proposal and create/read one durable operation without invoking a tool.
-    if svc.execution_mode_for_tool(user_id, row["tool"]) == "async" and row["status"] in (
-        "pending", "approved", "consumed"
-    ):
+    if row.get("executor") is not None and row["status"] in ("pending", "approved", "consumed"):
         try:
-            executor = svc.external_executor_for_tool(user_id, row["tool"])
-            if executor is None:
-                raise ValueError(
-                    "Async governance approval requires a trusted external_http executor"
-                )
+            executor = svc.validate_async_approval(user_id, row)
             created, _approved_now = svc.approve_external_operation(user_id, proposal_id, executor)
             operation = created.operation
         except ValueError as exc:

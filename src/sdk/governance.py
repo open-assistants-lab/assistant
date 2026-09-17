@@ -85,12 +85,13 @@ class GovernanceService:
                 status TEXT NOT NULL,
                 expires_at TEXT,
                 session_id TEXT,
-                user_id TEXT
+                user_id TEXT,
+                executor_json TEXT
             )
             """
         )
         # Migration-safe: pre-session-log DBs lack the columns.
-        for column in ("session_id", "user_id"):
+        for column in ("session_id", "user_id", "executor_json"):
             try:
                 conn.execute(f"ALTER TABLE proposals ADD COLUMN {column} TEXT")
                 conn.commit()
@@ -176,9 +177,11 @@ class GovernanceService:
             if tier == "show_then_auto_send"
             else None
         )
+        executor = self.external_executor_for_tool(user_id, tool)
+        executor_json = json.dumps(executor.model_dump(mode="json"), sort_keys=True) if executor else None
         with self._conn(user_id) as conn:
             conn.execute(
-                "INSERT INTO proposals (proposal_id, ts, tool, arguments, tier, status, expires_at, session_id, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO proposals (proposal_id, ts, tool, arguments, tier, status, expires_at, session_id, user_id, executor_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     proposal_id,
                     datetime.now(UTC).isoformat(),
@@ -189,6 +192,7 @@ class GovernanceService:
                     expiry,
                     session_id,
                     user_id,
+                    executor_json,
                 ),
             )
             # M4-2 anti-fatigue: proposals_created per tool.
@@ -244,7 +248,7 @@ class GovernanceService:
         with self._conn(user_id) as conn:
             row = conn.execute(
                 "SELECT proposal_id, tool, arguments, tier, status, expires_at,"
-                " session_id FROM proposals WHERE proposal_id = ?",
+                " session_id, executor_json FROM proposals WHERE proposal_id = ?",
                 (proposal_id,),
             ).fetchone()
         if row is None:
@@ -257,6 +261,7 @@ class GovernanceService:
             "status": row[4],
             "expires_at": row[5],
             "session_id": row[6],
+            "executor": json.loads(row[7]) if row[7] else None,
         }
 
     def approve(
@@ -298,42 +303,33 @@ class GovernanceService:
                 conn.commit()
         return newly
 
+    def _active_tool_definition(self, user_id: str, tool_name: str) -> Any | None:
+        """Resolve through the runner's deployment and user capability ceiling."""
+        from src.sdk.runner import get_active_tool_definition
+
+        return get_active_tool_definition(user_id, tool_name)
+
     def execution_mode_for_tool(self, user_id: str, tool_name: str) -> str:
-        """Return the declared mode for a native/custom governed tool.
-
-        Missing definitions remain synchronous so an existing proposal can
-        never silently become async because of a discovery failure.
-        """
-        from src.sdk.native_tools import get_native_tools
-
-        definitions = list(get_native_tools())
-        try:
-            from src.sdk.tools_custom import get_custom_tools
-
-            native_names = {definition.name for definition in definitions}
-            definitions.extend(
-                definition for definition in get_custom_tools(user_id)
-                if definition.name not in native_names
-            )
-        except Exception:
-            pass
-        definition = next((item for item in definitions if item.name == tool_name), None)
+        definition = self._active_tool_definition(user_id, tool_name)
         return str(getattr(getattr(definition, "annotations", None), "execution_mode", "sync"))
 
     def external_executor_for_tool(self, user_id: str, tool_name: str) -> Any | None:
-        """Return only a trusted static external executor declaration."""
-        from src.sdk.native_tools import get_native_tools
-
-        definitions = list(get_native_tools())
-        try:
-            from src.sdk.tools_custom import get_custom_tools
-
-            native_names = {definition.name for definition in definitions}
-            definitions.extend(item for item in get_custom_tools(user_id) if item.name not in native_names)
-        except Exception:
-            pass
-        definition = next((item for item in definitions if item.name == tool_name), None)
+        """Return the active, deployment/capability-authorized executor only."""
+        definition = self._active_tool_definition(user_id, tool_name)
         return getattr(getattr(definition, "annotations", None), "executor", None)
+
+    def validate_async_approval(self, user_id: str, row: dict[str, Any]) -> Any:
+        """Fail closed if current policy/tool metadata no longer matches proposal."""
+        definition = self._active_tool_definition(user_id, row["tool"])
+        if definition is None or self.execution_mode_for_tool(user_id, row["tool"]) != "async":
+            raise ValueError("async tool is no longer enabled")
+        if self.resolve_tier(user_id, row["tool"]) != row["tier"] or row["tier"] == "hard_block":
+            raise ValueError("governance tier changed")
+        executor = self.external_executor_for_tool(user_id, row["tool"])
+        snapshot = row.get("executor")
+        if executor is None or snapshot != executor.model_dump(mode="json"):
+            raise ValueError("external executor metadata changed")
+        return executor
 
     def _record_async_approval(self, user_id: str, proposal_id: str, tool: str) -> None:
         """Record the approval receipt/stat only after the atomic transition."""

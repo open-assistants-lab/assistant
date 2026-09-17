@@ -122,6 +122,26 @@ def _current_tool_catalog(loop: AgentLoop) -> list[ToolDefinition]:
     return list({tool.name: tool for tool in catalog}.values())
 
 
+def get_active_tool_definition(
+    user_id: str, tool_name: str, workspace_id: str = "personal"
+) -> ToolDefinition | None:
+    """Resolve an approval-time tool through the same deployment/user ceiling as loops."""
+    from src.sdk.tools_core.tool_reload import tool_reload
+    from src.sdk.tools_core.tool_search import tool_search
+    from src.sdk.tools_custom import get_custom_tools
+
+    settings = get_settings()
+    native = filter_denied_native_tools(list(get_native_tools()), settings)
+    native.extend(filter_denied_native_tools([tool_search, tool_reload], settings))
+    catalog = {tool.name: tool for tool in native}
+    # Custom tools intentionally override matching shipped names.
+    catalog.update({tool.name: tool for tool in get_custom_tools(user_id, workspace_id)})
+    tool = catalog.get(tool_name)
+    if tool is None or not _resource_enabled(_load_user_capabilities(user_id), "tools", tool_name):
+        return None
+    return tool
+
+
 def refresh_user_tool_registries(user_id: str, names: set[str] | None = None) -> int:
     """Diff current tool definitions into every live loop without replacing loop state."""
     caps = _load_user_capabilities(user_id)
