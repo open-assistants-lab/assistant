@@ -9,8 +9,11 @@ from typing import Any
 
 import yaml
 
+from src.app_logging import get_logger
 from src.sdk.tools import DEFAULT_COMMAND_TIMEOUT_SECONDS, ToolAnnotations, ToolDefinition
 from src.storage.paths import DEFAULT_USER_ID
+
+logger = get_logger()
 
 CORE_TOOL_NAMES: set[str] = {
     "shell_execute",
@@ -215,7 +218,18 @@ def scan_tools_dir(
         tool_file = entry / "TOOL.md"
         if not tool_file.exists():
             continue
-        td = _parse_tool_file(tool_file, user_id, workspace_id)
+        # Issue #23 review F3: a malformed declaration must skip only its own
+        # tool. Parsing happens during loop construction, so an unguarded
+        # raise here would take down the whole session over one typo.
+        try:
+            td = _parse_tool_file(tool_file, user_id, workspace_id)
+        except Exception as e:
+            logger.warning(
+                "custom_tool.skipped",
+                {"tool_file": str(tool_file), "error": str(e), "error_type": type(e).__name__},
+                user_id=user_id,
+            )
+            continue
         if td:
             results.append(td)
 
