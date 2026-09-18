@@ -816,7 +816,9 @@ class AgentLoop:
                 )
         elif tool_type == "custom":
             from src.sdk.tool_index import _rebuild_custom_function
-            td = _rebuild_custom_function(td, reconstruct)
+            td = _rebuild_custom_function(
+                td, reconstruct, self.user_id or DEFAULT_USER_ID, self.workspace_id or "personal",
+            )
         elif tool_type == "mcp":
             mcp_bridge = getattr(self, "_mcp_bridge", None)
             if mcp_bridge is None:
@@ -845,14 +847,14 @@ class AgentLoop:
 
     def _with_runtime_context(self, tc: ToolCall) -> ToolCall:
         tool_def = self._registry.get(tc.name)
-        if tool_def is None or not self.user_id:
+        if tool_def is None:
             return tc
         props = tool_def.parameters.get("properties", {})
         args = dict(tc.arguments)
         if "user_id" in props:
-            args["user_id"] = self.user_id
+            args["user_id"] = self.user_id or DEFAULT_USER_ID
         if "workspace_id" in props:
-            args["workspace_id"] = getattr(self, "workspace_id", "personal")
+            args["workspace_id"] = self.workspace_id or "personal"
         if "session_id" in props:
             args["session_id"] = getattr(self, "_flow_session_id", None)
         if args == tc.arguments:

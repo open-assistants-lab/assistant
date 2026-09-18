@@ -205,6 +205,8 @@ You have access to tools and skills as configured.
             provider=provider,
             tools=sdk_tools,
             system_prompt=config.get("system_prompt", ""),
+            user_id=self.user_id,
+            workspace_id="personal",
         )
 
         messages = [Message.user(task)]

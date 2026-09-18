@@ -16,7 +16,10 @@ from src.storage.paths import DEFAULT_USER_ID
 _RECONSTRUCT_EMPTY = "{}"
 
 
-def _rebuild_custom_function(td: ToolDefinition, reconstruct: dict[str, Any]) -> ToolDefinition:
+def _rebuild_custom_function(
+    td: ToolDefinition, reconstruct: dict[str, Any],
+    user_id: str = DEFAULT_USER_ID, workspace_id: str = "personal",
+) -> ToolDefinition:
     """Rebuild the function for a custom (TOOL.md) tool from reconstruct metadata."""
     command_template = reconstruct.get("command", "")
     install_cmds = reconstruct.get("install", [])
@@ -56,7 +59,9 @@ def _rebuild_custom_function(td: ToolDefinition, reconstruct: dict[str, Any]) ->
             output = result.stdout + result.stderr
             if result.returncode != 0:
                 return f"Command failed (exit {result.returncode}):\n{output[:2000]}"
-            return output[:5000] or "(no output)"
+            from src.sdk.tool_results import format_output
+
+            return format_output(output, user_id, workspace_id)
         except subprocess.TimeoutExpired:
             return "Command timed out after 120 seconds."
         except Exception as e:

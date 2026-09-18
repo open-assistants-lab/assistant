@@ -90,6 +90,7 @@ from src.sdk.tools_core.subagent import (
 )
 from src.sdk.tools_core.summarize import summarize_session
 from src.sdk.tools_core.time import time_get
+from src.sdk.tools_core.tool_results import tool_result_read
 from src.sdk.tools_core.user_prompt import (
     interview_ask,
     interview_finish,
@@ -129,6 +130,8 @@ def reset_native_tools() -> None:
 def _register_all() -> None:
     registry = _registry
 
+    if not _desktop_excluded("tool_result_read"):
+        registry.register(tool_result_read)
     if not _desktop_excluded("time_get"):
         registry.register(time_get)
     if not _desktop_excluded("shell_execute"):
