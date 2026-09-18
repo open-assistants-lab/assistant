@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import threading
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -505,11 +506,28 @@ class GovernanceService:
                     "is_error": False,
                 }
         except Exception as exc:  # receipt the failure, never raise
-            result = {
-                "content": f"Governed execution failed: {exc}",
-                "structured_content": {"executed": False, "error": str(exc)},
-                "is_error": True,
-            }
+            if isinstance(exc, subprocess.TimeoutExpired):
+                # Issue #23: a cap-killed command must never be recorded as
+                # executed — the elapsed detail travels in the exception.
+                from src.sdk.tool_results import TIMEOUT_MARKER
+
+                detail = exc.output if isinstance(exc.output, str) else ""
+                elapsed = detail.removeprefix(f"{TIMEOUT_MARKER}: ").strip() or str(exc)
+                result = {
+                    "content": f"Governed execution timed out: {elapsed}",
+                    "structured_content": {
+                        "executed": False,
+                        "error": TIMEOUT_MARKER,
+                        "elapsed": elapsed,
+                    },
+                    "is_error": True,
+                }
+            else:
+                result = {
+                    "content": f"Governed execution failed: {exc}",
+                    "structured_content": {"executed": False, "error": str(exc)},
+                    "is_error": True,
+                }
 
         with self._lock, self._conn(user_id) as conn:
             conn.execute(

@@ -76,6 +76,29 @@ parameters:
 
 The `{{param}}` placeholders in `command` become the tool parameters. The description should include keywords that match queries like "extract text from pdf" or "ocr pdf files".
 
+Optional `annotations:` block for long-running commands and approval metadata:
+
+```yaml
+annotations:
+  timeout_seconds: 1800      # default 300; any positive value; "none" removes the cap entirely
+  requires_approval: true    # route through the governance approval flow
+  destructive: true
+```
+
+A command killed at the cap **fails** — governance records `executed: false` with
+`error: "timed_out"` and an `elapsed` detail string (for example
+`killed after 148.3s (limit 300s)`), so a killed run is never reported as successful
+for this tool. The declared `timeout_seconds` *is* the wrapper's cap; there is no
+second limit layered on top. Values of `0`, negative numbers, booleans, and
+non-numeric text are rejected at load time rather than silently disabling the cap;
+that tool is skipped with a warning and the rest of the session still starts.
+
+If a command must outlive a client connection (or the caller cannot wait for it),
+use the async governance path instead — that requires **both**
+`execution_mode: async` and a configured `executor:` block (see the governed-operations
+design docs); with `execution_mode: async` and no executor, the call still runs
+synchronously under the cap.
+
 4. Call `tool_reload()` to make it immediately available in the search index:
 
 5. Call `tool_search("extract text from pdf")` to verify it appears

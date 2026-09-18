@@ -4,6 +4,7 @@ import hashlib
 import json
 import shlex
 import subprocess
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ def _rebuild_custom_function(
     command_template = reconstruct.get("command", "")
     install_cmds = reconstruct.get("install", [])
     tool_dir_str = reconstruct.get("tool_dir", "")
+    command_timeout = td.annotations.timeout_seconds
 
     def fn(**kwargs: Any) -> str:
         from src.sdk.sandbox import custom_command_tools_allowed
@@ -49,11 +51,12 @@ def _rebuild_custom_function(
                 return f"Tool '{tool_name}' not found on PATH."
 
         try:
+            started = time.monotonic()
             result = subprocess.run(
                 rendered,
                 shell=True,
                 capture_output=True,
-                timeout=120,
+                timeout=command_timeout,
                 text=True,
             )
             output = result.stdout + result.stderr
@@ -63,7 +66,9 @@ def _rebuild_custom_function(
 
             return format_output(output, user_id, workspace_id)
         except subprocess.TimeoutExpired:
-            return "Command timed out after 120 seconds."
+            from src.sdk.tool_results import raise_command_timeout
+
+            raise_command_timeout(rendered, command_timeout, started)
         except Exception as e:
             return f"Command error: {e}"
 
