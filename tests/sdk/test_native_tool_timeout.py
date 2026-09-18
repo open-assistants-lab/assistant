@@ -66,8 +66,12 @@ def test_cli_adapter_timeout_raises(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ca, "get_sandbox_backend", lambda: type("B", (), {"run": lambda *a, **k: _timed_out()})(), raising=False)
     with pytest.raises(subprocess.TimeoutExpired) as exc:
-        adapter.run(["scrape", "https://example.com"])
+        adapter.run(["scrape", "https://example.com/?token=SUPERSECRET"])
     assert "timed_out" in exc.value.output
+    # Review P2-1: only a minimized label may travel into content/logs/audit.
+    assert "SUPERSECRET" not in exc.value.output
+    assert "SUPERSECRET" not in str(exc.value)
+    assert "firecrawl scrape" in str(exc.value.cmd)
 
 
 def test_non_timeout_failures_keep_their_shapes(tmp_path, monkeypatch):
@@ -119,3 +123,31 @@ def test_governed_native_timeout_records_not_executed(tool_name, tmp_path, monke
     assert result["structured_content"]["executed"] is False, result
     assert result["structured_content"]["error"] == "timed_out", result
     assert result["is_error"] is True
+
+
+@pytest.mark.parametrize("tool_name", ["shell_execute", "code_execute"])
+def test_timeout_elapsed_is_measured_not_constant(tool_name, tmp_path, monkeypatch):
+    """P2-4: the reported elapsed must come from the real measurement."""
+    import src.sdk.tools_core.code_execute as ce
+    import src.sdk.tools_core.shell as shell
+
+    td, args = _prepare(tool_name, tmp_path, monkeypatch, _timed_out())
+    clock = iter([1000.0, 1064.25])
+    monkeypatch.setattr(shell.time, "monotonic", lambda: next(clock), raising=False)
+    monkeypatch.setattr(ce.time, "monotonic", lambda: next(clock), raising=False)
+    with pytest.raises(subprocess.TimeoutExpired) as exc:
+        td.function(**args)
+    assert "64.2s" in exc.value.output
+
+
+@pytest.mark.parametrize("tool_name", ["shell_execute", "code_execute"])
+async def test_loop_surfaces_timeout_as_tool_error(tool_name, tmp_path, monkeypatch):
+    """P2-4: the raise must reach the model as is_error, not crash the run."""
+    from src.sdk.loop import AgentLoop
+    from src.sdk.messages import ToolCall
+
+    td, args = _prepare(tool_name, tmp_path, monkeypatch, _timed_out())
+    loop = AgentLoop(provider=object(), tools=[td], user_id="u")
+    result = await loop._execute_tool(ToolCall(id="1", name=td.name, arguments=args))
+    assert result.is_error is True
+    assert "timed out" in result.content

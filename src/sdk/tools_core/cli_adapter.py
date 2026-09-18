@@ -89,10 +89,13 @@ class CLIToolAdapter:
         )
         if result.timed_out:
             # Issue #24: raise instead of returning -2 — a tuple return would
-            # be receipted as a successful execution by governance.
+            # be receipted as a successful execution by governance. Only a
+            # minimized label travels into content/logs/audit (review P2-1):
+            # argv can carry user-supplied secrets.
             from src.sdk.tool_results import raise_timeout
 
-            raise_timeout(" ".join(cmd), float(timeout), time.monotonic() - _started)
+            label = f"{self.cli_name} {args[0]}".strip() if args else self.cli_name
+            raise_timeout(label, float(timeout), time.monotonic() - _started)
         output = result.stdout
         if result.stderr:
             output += f"\n{result.stderr}" if output else result.stderr
