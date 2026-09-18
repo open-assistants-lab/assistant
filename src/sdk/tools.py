@@ -44,9 +44,11 @@ class ExternalHTTPExecutor(BaseModel):
         return value
 
 
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 300.0
+
+
 class ToolAnnotations(BaseModel):
     """Metadata about a tool's behavior for auto-approval and UI display."""
-
     title: str | None = None
     read_only: bool = False
     destructive: bool = False
@@ -59,6 +61,38 @@ class ToolAnnotations(BaseModel):
     # approval/execution behavior.
     execution_mode: Literal["sync", "async"] = "sync"
     executor: ExternalHTTPExecutor | None = None
+    # Issue #23: per-tool command budget. Custom TOOL.md tools may declare
+    # `timeout_seconds` in their annotations block; any positive value is
+    # accepted with no ceiling, and the literal string "none" explicitly
+    # opts out of the cap. Zero, negative, and non-numeric declarations are
+    # rejected rather than silently treated as unbounded.
+    timeout_seconds: float | str | None = DEFAULT_COMMAND_TIMEOUT_SECONDS
+
+    # Assignment validation is required: TOOL.md annotations and lazy-load
+    # reconstruction set this after construction, and an unvalidated
+    # non-positive value would silently disable the cap.
+    model_config = {"validate_assignment": True}
+
+    @field_validator("timeout_seconds")
+    @classmethod
+    def _validate_timeout(cls, value: Any) -> float | str | None:
+        """Reject values that would silently disable the cap."""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            if value.strip().lower() == "none":
+                return None
+            try:
+                value = float(value)
+            except ValueError:
+                raise ValueError(
+                    f"timeout_seconds must be a positive number or 'none', got {value!r}"
+                ) from None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"timeout_seconds must be a positive number or 'none', got {value!r}")
+        if value <= 0:
+            raise ValueError(f"timeout_seconds must be positive or 'none', got {value!r}")
+        return float(value)
 
 
 class ToolResult(BaseModel):

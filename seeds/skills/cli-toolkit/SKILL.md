@@ -76,6 +76,22 @@ parameters:
 
 The `{{param}}` placeholders in `command` become the tool parameters. The description should include keywords that match queries like "extract text from pdf" or "ocr pdf files".
 
+Optional `annotations:` block for long-running commands and approval metadata:
+
+```yaml
+annotations:
+  timeout_seconds: 1800      # default 300; any positive value; "none" removes the cap entirely
+  requires_approval: true    # route through the governance approval flow
+  destructive: true
+```
+
+A command killed at the cap **fails** — governance records `executed: false` with
+`error: "timed_out"` and the elapsed seconds, so a killed run is never reported as
+successful. A TOOL.md's own `timeout_seconds` overrides the wrapper cap; if the
+command also needs to outlive a client connection, prefer `execution_mode: async`
+(see below). Values of `0`, negative numbers, or non-numeric text are rejected at
+load time rather than silently disabling the cap.
+
 4. Call `tool_reload()` to make it immediately available in the search index:
 
 5. Call `tool_search("extract text from pdf")` to verify it appears

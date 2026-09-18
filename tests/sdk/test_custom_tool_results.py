@@ -80,12 +80,15 @@ def test_result_scope_is_bound_not_taken_from_command_arguments(tmp_path, result
 
 
 @pytest.mark.parametrize("mode", ["parsed", "reconstructed"])
-def test_command_errors_and_timeouts_unchanged(tmp_path, result_scope, mode):
+def test_command_errors_unchanged_and_timeout_now_fails(tmp_path, result_scope, mode):
     td = make_tool(tmp_path, mode)
     with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 7, "oops", "!")):
         assert td.function() == "Command failed (exit 7):\noops!"
-    with patch("subprocess.run", side_effect=[None, subprocess.TimeoutExpired("echo", 120)]):
-        assert td.function() == "Command timed out after 120 seconds."
+    # Issue #23: a cap-killed command must fail, never return a success string.
+    with patch("subprocess.run", side_effect=[None, subprocess.TimeoutExpired("echo", 300)]):
+        with pytest.raises(subprocess.TimeoutExpired) as exc:
+            td.function()
+    assert "timed_out" in exc.value.output
 
 
 def test_real_command_large_output_round_trip(tmp_path, result_scope):

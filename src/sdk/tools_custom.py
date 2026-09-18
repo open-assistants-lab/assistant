@@ -3,12 +3,13 @@ from __future__ import annotations
 import inspect
 import re
 import shlex
+import time
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from src.sdk.tools import ToolAnnotations, ToolDefinition
+from src.sdk.tools import DEFAULT_COMMAND_TIMEOUT_SECONDS, ToolAnnotations, ToolDefinition
 from src.storage.paths import DEFAULT_USER_ID
 
 CORE_TOOL_NAMES: set[str] = {
@@ -69,6 +70,11 @@ def _parse_tool_file(
 
     annotations = ToolAnnotations(
         title=annotations_raw.get("title") if annotations_raw else None,
+        timeout_seconds=(
+            annotations_raw.get("timeout_seconds", DEFAULT_COMMAND_TIMEOUT_SECONDS)
+            if annotations_raw
+            else DEFAULT_COMMAND_TIMEOUT_SECONDS
+        ),
         read_only=annotations_raw.get("read_only", True) if annotations_raw else True,
         destructive=annotations_raw.get("destructive", False) if annotations_raw else False,
         idempotent=annotations_raw.get("idempotent", False) if annotations_raw else False,
@@ -80,6 +86,8 @@ def _parse_tool_file(
 
     def make_function(tmpl: str, install_cmds: list[str] | None, tool_dir: Path | None = None) -> Any:
         import subprocess as _subprocess
+
+        command_timeout = annotations.timeout_seconds
 
         def fn(**kwargs: Any) -> str:
             from src.sdk.sandbox import custom_command_tools_allowed
@@ -114,11 +122,12 @@ def _parse_tool_file(
                 return f"Tool '{tool_name}' not found on PATH."
 
             try:
+                started = time.monotonic()
                 result = _subprocess.run(
                     rendered,
                     shell=True,
                     capture_output=True,
-                    timeout=120,
+                    timeout=command_timeout,
                     text=True,
                 )
                 output = result.stdout + result.stderr
@@ -128,7 +137,9 @@ def _parse_tool_file(
 
                 return format_output(output, user_id, workspace_id)
             except _subprocess.TimeoutExpired:
-                return "Command timed out after 120 seconds."
+                from src.sdk.tool_results import raise_command_timeout
+
+                raise_command_timeout(rendered, command_timeout, started)
             except Exception as e:
                 return f"Command error: {e}"
 

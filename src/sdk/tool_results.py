@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -103,3 +104,18 @@ def read_result(
         }
     except (OSError, ValueError):
         return {"error": "Result not found or expired."}
+
+
+TIMEOUT_MARKER = "timed_out"
+
+def raise_command_timeout(command: str, timeout: float | None, started: float) -> None:
+    """Surface a cap-killed command as failure, never as a successful return.
+
+    The message carries the elapsed seconds so a caller (or the governance
+    executor) can report a timeout receipt instead of claiming execution.
+    """
+    elapsed = time.monotonic() - started
+    limit = "unbounded" if timeout is None else f"{timeout:g}s"
+    raise subprocess.TimeoutExpired(
+        command, timeout or 0, output=f"{TIMEOUT_MARKER}: killed after {elapsed:.1f}s (limit {limit})"
+    )
