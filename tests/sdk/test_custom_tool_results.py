@@ -39,12 +39,10 @@ def make_tool(tmp_path, mode, **scope):
 
 
 @pytest.mark.parametrize("mode", ["parsed", "reconstructed"])
-@pytest.mark.parametrize("size", [0, 4999, 5000, 5001, 6000])
+@pytest.mark.parametrize("size", [0, 4999, 5000, 5001, 5002, 6000])
 def test_command_output_boundary_and_recovery(tmp_path, result_scope, mode, size):
     td = make_tool(tmp_path, mode)
-    output = "A" * size
-    if size > 5000:
-        output += "END_OF_RESULT_MARKER"
+    output = "A" * (size - len("END_OF_RESULT_MARKER")) + "END_OF_RESULT_MARKER" if size > 5000 else "A" * size
     with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, output, "")) as run:
         value = td.function()
         if size <= 5000:
@@ -52,7 +50,8 @@ def test_command_output_boundary_and_recovery(tmp_path, result_scope, mode, size
             return
         envelope = json.loads(value)
         assert envelope["truncated"] is True
-        assert envelope["total_chars"] == len(output)
+        assert envelope["total_chars"] == size
+        assert len(output) == size
         assert envelope["content"] == output[:5000]
         assert envelope["end"] == 5000
         from src.sdk.tools_core.tool_results import tool_result_read
