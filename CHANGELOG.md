@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.6.10 — 2026-09-18
+
+### Fixed
+- The native command tools (`shell_execute`, `code_execute`, and the CLI adapter behind browser tools) returned a timeout as a normal string, so the governance layer recorded `executed: true` for a command that was killed mid-flight (#24) — the same defect class #23 fixed for custom `TOOL.md` tools. All three now raise the shared timeout failure, and governance records `executed: false` with `error: "timed_out"`.
+- `shell_execute`'s catch-all exception handler silently converted the new timeout failure back into a successful string return; it now re-raises explicitly (#24).
+- Timeout details for CLI-backed tools no longer carry the full argv, which could include user-supplied secrets, into model-visible content, logs, and audit records.
+
+### Verification
+- Full suite: 3,020 passed, 11 skipped.
+
 ## v0.6.9 — 2026-09-18
 
 ### Fixed
