@@ -7,6 +7,7 @@ spawn on soft backends (SB1-2).
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from src.app_logging import get_logger
@@ -58,6 +59,7 @@ def code_execute(code: str, user_id: str = DEFAULT_USER_ID, workspace_id: str = 
         return str(rejection)
 
     limits = _get_limits()
+    _started = time.monotonic()
     result = backend.run(
         ["python3", "-c", code],
         root,
@@ -70,7 +72,10 @@ def code_execute(code: str, user_id: str = DEFAULT_USER_ID, workspace_id: str = 
         user_id=user_id,
     )
     if result.timed_out:
-        return f"Error: code execution timed out after {limits.timeout_seconds}s"
+        # Issue #24: fail loudly so governance cannot record executed: true.
+        from src.sdk.tool_results import raise_timeout
+
+        raise_timeout("code_execute", limits.timeout_seconds, time.monotonic() - _started)
     output = result.stdout
     if result.stderr:
         output += f"\nSTDERR: {result.stderr}"

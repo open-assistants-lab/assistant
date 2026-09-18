@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +75,8 @@ class CLIToolAdapter:
         if json_output and "--json" not in args and "-j" not in args:
             cmd.append("--json")
 
+        _started = time.monotonic()
+
         # SB1-4: transport through the SandboxBackend seam (env scrubbed on
         # soft backends; cwd here is the process cwd — CLI agents are
         # workspace-agnostic).
@@ -85,7 +88,11 @@ class CLIToolAdapter:
             SandboxLimits(timeout_seconds=float(timeout)),
         )
         if result.timed_out:
-            return -2, f"Error: {self.cli_name} command timed out after {timeout}s"
+            # Issue #24: raise instead of returning -2 — a tuple return would
+            # be receipted as a successful execution by governance.
+            from src.sdk.tool_results import raise_timeout
+
+            raise_timeout(" ".join(cmd), float(timeout), time.monotonic() - _started)
         output = result.stdout
         if result.stderr:
             output += f"\n{result.stderr}" if output else result.stderr

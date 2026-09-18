@@ -1,6 +1,7 @@
 """Shell tool — SDK-native implementation."""
 
 import re
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -146,6 +147,7 @@ def shell_execute(command: str, user_id: str =  DEFAULT_USER_ID, workspace_id: s
         from src.sdk.sandbox import SandboxLimits, get_sandbox_backend
 
         backend = get_sandbox_backend()
+        _started = time.monotonic()
         result = backend.run(
             cmd_parts,
             root_path,
@@ -156,7 +158,15 @@ def shell_execute(command: str, user_id: str =  DEFAULT_USER_ID, workspace_id: s
             user_id=user_id,
         )
         if result.timed_out:
-            return f"Error: Command timed out after {config['timeout_seconds']} seconds"
+            # Issue #24: a cap-killed command must fail, not return a string —
+            # governance would otherwise receipt it as executed: true.
+            from src.sdk.tool_results import raise_timeout
+
+            raise_timeout(
+                " ".join(cmd_parts),
+                float(config["timeout_seconds"]),
+                time.monotonic() - _started,
+            )
 
         output = result.stdout
         if result.stderr:
@@ -193,6 +203,10 @@ def shell_execute(command: str, user_id: str =  DEFAULT_USER_ID, workspace_id: s
 
     except FileNotFoundError:
         return f"Error: Command not found: {cmd_parts[0]}"
+    except subprocess.TimeoutExpired:
+        # Issue #24: a cap-killed command must propagate — the catch-all below
+        # would otherwise turn it back into a successful string return.
+        raise
     except Exception as e:
         logger.error("shell_execute.error", {"command": command, "error": str(e)}, user_id=user_id)
         return f"Error: {e}"

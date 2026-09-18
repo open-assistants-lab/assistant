@@ -114,8 +114,19 @@ def raise_command_timeout(command: str, timeout: float | None, started: float) -
     The message carries the elapsed seconds so a caller (or the governance
     executor) can report a timeout receipt instead of claiming execution.
     """
-    elapsed = time.monotonic() - started
+    raise_timeout(command, timeout, time.monotonic() - started)
+
+
+def raise_timeout(command: str, timeout: float | None, elapsed: float) -> None:
+    """Raise the distinct timeout failure from an already-measured elapsed.
+
+    Sandbox-backed tools receive `timed_out=True` from the transport seam
+    rather than a `TimeoutExpired` of their own (#24), so they report the
+    elapsed duration directly instead of taking a monotonic start stamp.
+    """
     limit = "unbounded" if timeout is None else f"{timeout:g}s"
     raise subprocess.TimeoutExpired(
-        command, timeout or 0, output=f"{TIMEOUT_MARKER}: killed after {elapsed:.1f}s (limit {limit})"
+        command,
+        timeout or 0,
+        output=f"{TIMEOUT_MARKER}: killed after {elapsed:.1f}s (limit {limit})",
     )
