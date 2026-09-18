@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.6.9 — 2026-09-18
+
+### Fixed
+- Custom `TOOL.md` tools silently truncated command output to 5,000 characters with no way to recover the rest (#22). Large results are now preserved and readable in bounded pages via the new read-only `tool_result_read` tool, which returns a preview envelope with the total size, the original result ID, and the next offset. Recovery never reruns the command and does not require `files_read`.
+- A cap-killed custom command was returned as a normal string, so the governance layer recorded `executed: true` for work nobody observed completing (#23). A timeout now raises a distinct failure carrying `timed_out` plus an elapsed detail, and governance records `executed: false` with `error: "timed_out"` instead of claiming success.
+
+### Added
+- `ToolAnnotations.timeout_seconds` for custom tools: default 300s, any positive value accepted with no ceiling, and the literal `none` as an explicit opt-out. `0`, negative, boolean, non-finite, and non-numeric declarations are rejected at load time rather than silently changing the cap; a rejected definition skips only its own tool instead of aborting session construction.
+
+### Changed
+- The custom-command cap is now configurable and no longer overrides a tool author's declared budget.
+
+### Security and deployment
+- Saved custom-tool results are scoped to the invoking user and workspace, stored outside the workspace file tree with restrictive permissions, and expire after seven days or eviction.
+
+### Verification
+- Full suite: 3,010 passed, 11 skipped.
+
 ## v0.6.8 — 2026-09-17
 
 ### Added
