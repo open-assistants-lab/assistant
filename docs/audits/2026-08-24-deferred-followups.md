@@ -110,7 +110,16 @@ clears on an identical re-run.
 
 ## 7. Receipt-fidelity residuals (2026-09-19) — closed in v0.6.14
 
-Both items below were fixed in v0.6.14 (branch fix/receipt-fidelity-2526):
+Both items below were fixed in v0.6.14 (branch fix/receipt-fidelity-2526).
+
+Still deferred in this class (tracked by #30): the sync success
+path still hard-codes `is_error: False` for non-`ToolResult` returns, so an
+`"Error: …"` string from a tool's own catch-all is receipted `executed: true` —
+including three catch-alls that have each swallowed a deliberate failure at
+least once (#23 `shell_execute`, #24 the custom wrappers); `proposals.status`
+is still written as `'executed'` for killed runs; and a signal death inside a
+`shell=True` pipeline surfaces as the shell's positive `128+n`, so the custom
+seam's negative-code check does not fire for grandchildren.
 
 - **#25** (fixed) — signal-killed children (`RLIMIT_AS`/`CPU`/`NPROC`/`FSIZE`)
   returned `timed_out=False` with a negative `exit_code` and were receipted

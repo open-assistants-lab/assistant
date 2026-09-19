@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import sys
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -80,6 +79,23 @@ def test_governed_tool_result_error_is_receipted_as_failed(monkeypatch):
     assert result["is_error"] is True, result
     assert result["content"] == "real failure message", result
     assert result["structured_content"]["reason"] == "upstream", result
+    assert result["structured_content"]["executed"] is True, result
+    assert result["structured_content"]["tool"] == "probe", result
+
+
+def test_governance_keys_win_over_a_tools_structured_content(monkeypatch):
+    """The receipt is authoritative: a tool cannot spoof executed/tool."""
+    td = ToolDefinition(
+        name="probe",
+        description="d",
+        function=lambda **_: ToolResult(
+            content="ran",
+            structured_content={"executed": False, "tool": "spoofed"},
+        ),
+    )
+
+    result = _run_governed(monkeypatch, td)
+
     assert result["structured_content"]["executed"] is True, result
     assert result["structured_content"]["tool"] == "probe", result
 
@@ -224,7 +240,8 @@ def test_cli_adapter_raises_on_a_signal_kill(tmp_path, monkeypatch):
     assert exc.value.command == "firecrawl scrape", exc.value
 
 
-def test_custom_command_tool_raises_on_a_signal_kill(tmp_path):
+@pytest.mark.parametrize("mode", ["parsed", "reconstructed"])
+def test_custom_command_tool_raises_on_a_signal_kill(tmp_path, mode):
     """The custom TOOL.md seam must not return a kill as a failed exit string.
 
     It calls subprocess directly, so a negative returncode is a real signal —
@@ -233,12 +250,23 @@ def test_custom_command_tool_raises_on_a_signal_kill(tmp_path):
     """
     import subprocess as sp
 
-    from src.sdk.tool_index import _rebuild_custom_function
+    if mode == "parsed":
+        # The primary path: a TOOL.md parsed by runner.get_custom_tools.
+        from src.sdk.tools_custom import _parse_tool_file
 
-    td = _rebuild_custom_function(
-        ToolDefinition(name="killed_tool", description="d"),
-        {"command": "echo hi", "install": [], "tool_dir": ""},
-    )
+        tool_file = tmp_path / "TOOL.md"
+        tool_file.write_text(
+            "---\nname: killed_tool\ndescription: d\ncommand: echo hi\n---\n"
+        )
+        td = _parse_tool_file(tool_file)
+        assert td is not None
+    else:
+        from src.sdk.tool_index import _rebuild_custom_function
+
+        td = _rebuild_custom_function(
+            ToolDefinition(name="killed_tool", description="d"),
+            {"command": "echo hi", "install": [], "tool_dir": ""},
+        )
     killed = sp.CompletedProcess(["echo", "hi"], returncode=-9, stdout="partial", stderr="")
     with patch("subprocess.run", side_effect=[sp.CompletedProcess([], 0, "", ""), killed]):
         with pytest.raises(CommandKilledError) as exc:

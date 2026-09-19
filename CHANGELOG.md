@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.6.14 — 2026-09-19
+
+### Fixed
+- A governed tool returning a `ToolResult` lost its outcome: `is_error` was hard-coded `False` on the success-return path and its content became a pydantic repr through `json.dumps(..., default=str)`, so a tool that ran and failed was receipted as completed and logged as `status="completed"` (#26). The receipt now carries the tool's `content`, `is_error` and `structured_content`, with the governance keys winning so a tool cannot spoof `executed`/`tool`; a failed tool is now logged as `status="failed"`.
+- A command killed by a signal was receipted `executed: true` (#25). A child killed by a resource limit (`RLIMIT_AS`/`CPU`/`NPROC`/`FSIZE`) or any other signal exits with a negative code and `timed_out=False`, which was indistinguishable from an ordinary non-zero exit — so the tools returned partial output as success. The sandbox now marks kills explicitly, the three native command tools and both custom `TOOL.md` wrappers raise `CommandKilledError` with the signal number and elapsed time, and governance records `executed: false` with `error: "killed"`. Signals are read from the explicit flag rather than the sign of `exit_code`, because the sandbox's own timeout also reports `-1`; timeout details now say "cap reached" rather than "killed" so the two outcomes do not share a word.
+
+### Security and deployment
+- Ordinary non-zero exits keep returning their output, so a `grep`-style command is unaffected; only a signal death is treated as a failure.
+
+### Verification
+- Chunked suite: sdk 1,953 passed / 4 skipped; api 606 passed / 6 skipped; unit+storage+config+integration 500 passed, with the opt-in phase-0 gate included.
+
 ## v0.6.13 — 2026-09-19
 
 ### Fixed
