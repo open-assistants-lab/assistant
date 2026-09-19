@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.6.12 — 2026-09-19
+
+### Fixed
+- `tool_reload` cleared the persisted tool index and re-indexed only custom and MCP rows, then committed the source hashes — so the native rows it removed were never rebuilt (#28). Non-core native tools are reachable only through their index row, so a reload left them permanently `Unknown tool`: a restart did not help (the committed hashes still matched) and a further reload did not help either. `tool_reload` now indexes non-core native tools with the same catalogue and filters as the session runner, and its summary reports the native count.
+
+### Verification
+- Chunked suite: sdk 1,937 passed / 4 skipped; api 606 passed / 6 skipped; unit+storage+config+integration 500 passed.
+
 ## v0.6.11 — 2026-09-19
 
 ### Fixed
