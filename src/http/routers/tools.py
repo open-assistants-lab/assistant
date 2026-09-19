@@ -65,7 +65,10 @@ def _purge_tool_index_entry(user_id: str, workspace_id: str, name: str) -> None:
         paths = get_paths(user_id=user_id, workspace_id=workspace_id)
         idx, _commit = get_or_create_index(
             paths.user_tools_dir(),
-            None,
+            # Must match src/sdk/runner.py: computing a different source-hash set
+            # here makes check_needs_reindex report a change and idx.clear()
+            # wipes every row, not just the purged one (review P1 on #27).
+            paths.workspace_tools_dir(),
             paths.user_mcp_config(),
             user_id=user_id,
             workspace_id=workspace_id,
