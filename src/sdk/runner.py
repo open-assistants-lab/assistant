@@ -649,8 +649,14 @@ async def create_sdk_loop(
             {"missing_count": len(missing_rows), "sample": sorted(missing_rows)[:5]},
             user_id=user_id,
         )
-        index_rows(idx, index_row_set)
-        # Crash-safe: only now that indexing finished, persist source hashes.
+        # Write only the gaps. Re-writing the whole catalogue on every build
+        # would turn one unwritable row into a full re-embedding per session.
+        index_rows(idx, [row for row in index_row_set if row.name in missing_rows])
+    if missing_rows or not index_row_set:
+        # Crash-safe: only once the index reflects the sources, persist hashes.
+        # An empty desired set is consistent with an empty index, so commit
+        # then too — otherwise check_needs_reindex stays true and every session
+        # clears the index again.
         commit_index_hashes()
 
     summary_config = settings.memory.summarization

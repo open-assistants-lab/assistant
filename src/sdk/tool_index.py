@@ -18,7 +18,7 @@ from src.storage.paths import DEFAULT_USER_ID
 _RECONSTRUCT_EMPTY = "{}"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class IndexRow:
     """One row the persisted tool index should contain."""
 
@@ -31,9 +31,9 @@ class IndexRow:
 
 def desired_index_rows(
     *,
-    native_tools: Sequence[Any],
-    custom_tools: Sequence[Any],
-    mcp_tools: Sequence[Any],
+    native_tools: Sequence[ToolDefinition],
+    custom_tools: Sequence[ToolDefinition],
+    mcp_tools: Sequence[ToolDefinition],
     caps: dict[str, Any],
     user_id: str = DEFAULT_USER_ID,
     workspace_id: str = "personal",

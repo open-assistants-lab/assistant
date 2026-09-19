@@ -153,7 +153,9 @@ async def test_healthy_index_is_not_rebuilt(session_env, monkeypatch):
     await _build("s-29c")
 
     indexed: list[str] = []
+    consulted = 0
     original = ToolIndex.index_tool
+    original_names = ToolIndex.list_all_names
 
     def counting(self, td, tool_type, namespace="", reconstruct=None):
         indexed.append(td.name)
@@ -161,9 +163,16 @@ async def test_healthy_index_is_not_rebuilt(session_env, monkeypatch):
             self, td, tool_type, namespace=namespace, reconstruct=reconstruct
         )
 
+    def counting_names(self):
+        nonlocal consulted
+        consulted += 1
+        return original_names(self)
+
     monkeypatch.setattr(ToolIndex, "index_tool", counting)
+    monkeypatch.setattr(ToolIndex, "list_all_names", counting_names)
     await _build("s-29d")
 
+    assert consulted > 0, "the presence check never consulted the index"
     assert indexed == [], f"healthy index was re-indexed: {sorted(indexed)}"
 
 
@@ -205,8 +214,11 @@ async def test_reload_and_session_build_produce_the_same_rows(session_env):
     """The two writers of the index must agree on the row set."""
     loop = await _build("s-29g")
     from_build = _names()
+    assert from_build == {"files_list", "user_only"}, (
+        f"fixture no longer produces the expected rows: {sorted(from_build)}"
+    )
 
-    assert "Error" not in _reload(loop), "reload failed"
+    assert not _reload(loop).startswith("Error"), "reload failed"
     from_reload = _names()
 
     assert from_build == from_reload, (
