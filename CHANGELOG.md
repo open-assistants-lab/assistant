@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.6.15 — 2026-09-19
+
+### Fixed
+- A tool whose body raised was receipted as a successful run: 38 broad `except Exception` handlers in tool bodies converted the exception into a plain string, and governance receipts a string as `executed: true, is_error: false` (#30). All now return `ToolResult(is_error=True)` or re-raise a marker failure. The same shape had already swallowed a deliberate timeout or kill three times during #23–#25, in each case making the fix inert until a re-raise was added.
+- A subagent run that was cancelled, timed out or failed was receipted as executed: the coordinator caught those one layer below the tool, which passed the plain string through (#30).
+- `mcp_reload` reported a clean reload after a failure that had already unregistered the session's MCP tools (#30).
+
+### Changed
+- Tool bodies that can report failure are declared `-> ToolResult | str`; `ToolAnnotations.timeout_seconds` is now `float | None`, which removed two pre-existing mypy errors.
+- A convention test walks the AST of every tool body and fails when a catch-all returns a plain string, with an allowlist that fails once an entry is no longer needed.
+
+### Verification
+- Chunked suite: sdk 1,965 passed / 4 skipped; api 606 passed / 6 skipped; unit+storage+config+integration 500 passed. mypy: 64 errors / 19 files against 68 / 19 at the v0.6.13 baseline.
+
 ## v0.6.14 — 2026-09-19
 
 ### Fixed
