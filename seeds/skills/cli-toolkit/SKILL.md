@@ -87,8 +87,10 @@ annotations:
 
 A command killed at the cap **fails** — governance records `executed: false` with
 `error: "timed_out"` and an `elapsed` detail string (for example
-`killed after 148.3s (limit 300s)`), so a killed run is never reported as successful
-for this tool. The declared `timeout_seconds` *is* the wrapper's cap; there is no
+`cap reached after 148.3s (limit 300s)`), so a killed run is never reported as successful
+for this tool. A command killed by a *signal* (a resource limit, for example) fails
+the same way, with `error: "killed"` and the signal number. The declared
+`timeout_seconds` *is* the wrapper's cap; there is no
 second limit layered on top. Values of `0`, negative numbers, booleans, and
 non-numeric text are rejected at load time rather than silently disabling the cap;
 that tool is skipped with a warning and the rest of the session still starts.

@@ -108,6 +108,12 @@ class SandboxResult:
     stdout: str = ""
     stderr: str = ""
     timed_out: bool = False
+    # Issue #25: a child killed by a signal (RLIMIT_AS/CPU/NPROC/FSIZE or any
+    # other signal) exits with a negative code and timed_out=False, which is
+    # otherwise indistinguishable from an ordinary non-zero exit. The sandbox
+    # own timeout ALSO reports exit_code=-1, so callers must read this flag
+    # rather than infer a kill from the sign of exit_code.
+    signalled: bool = False
     # Issue #15 follow-up: the sandbox clamps captured output to
     # max_output_bytes; the tool must know when that happened so the
     # user-facing spill predicate stays reachable (a tool limit smaller
@@ -188,7 +194,12 @@ class NullSandboxBackend:
                 )
                 if span is not None:
                     span.set_attribute("sandbox.exit_code", proc.returncode)
-                return SandboxResult(proc.returncode, proc.stdout, proc.stderr)
+                return SandboxResult(
+                    proc.returncode,
+                    proc.stdout,
+                    proc.stderr,
+                    signalled=proc.returncode < 0,
+                )
             except subprocess.TimeoutExpired:
                 if span is not None:
                     span.set_attribute("sandbox.exit_code", -1)
@@ -321,6 +332,7 @@ class SoftSandboxBackend:
                     proc.returncode,
                     proc.stdout[:capture_cap],
                     proc.stderr[: lim.max_output_bytes],
+                    signalled=proc.returncode < 0,
                     stdout_truncated=len(proc.stdout) > lim.max_output_bytes,
                 )
             except subprocess.TimeoutExpired as e:
@@ -504,6 +516,7 @@ class BwrapSandboxBackend:
                     proc.returncode,
                     proc.stdout[:capture_cap],
                     proc.stderr[: lim.max_output_bytes],
+                    signalled=proc.returncode < 0,
                     stdout_truncated=len(proc.stdout) > lim.max_output_bytes,
                 )
             except subprocess.TimeoutExpired:

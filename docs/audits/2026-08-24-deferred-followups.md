@@ -108,20 +108,29 @@ is consistent with the ordering interference above rather than a defect in the
 test. Trigger to re-open: any single-run failure of a settings/prompt test that
 clears on an identical re-run.
 
-## 7. Receipt-fidelity residuals (2026-09-19) — filed, not fixed
+## 7. Receipt-fidelity residuals (2026-09-19) — closed in v0.6.14
 
-Two known ways a failed execution can still read as successful, both filed as
-issues rather than fixed opportunistically:
+Both items below were fixed in v0.6.14 (branch fix/receipt-fidelity-2526).
 
-- **#25** — signal-killed children (`RLIMIT_AS`/`CPU`/`NPROC`/`FSIZE`) return
-  `timed_out=False` with a negative `exit_code`, so they are indistinguishable
-  from an ordinary non-zero exit and are receipted `executed: true`. Narrow fix
-  is a signal-kill marker at the sandbox seam, not "every non-zero exit fails"
-  (`shell_execute` legitimately returns output from a non-zero exit).
-- **#26** — `GovernanceService.execute_approved` forces `{"executed": True,
-  "is_error": False}` on the success-return path, so a tool returning
-  `ToolResult(is_error=True)` is logged as `status="completed"` and its content
-  becomes a pydantic repr (`src/sdk/governance.py:502-507`, `:640`).
+Still deferred in this class (tracked by #30): the sync success
+path still hard-codes `is_error: False` for non-`ToolResult` returns, so an
+`"Error: …"` string from a tool's own catch-all is receipted `executed: true` —
+including three catch-alls that have each swallowed a deliberate failure at
+least once (#23 `shell_execute`, #24 the custom wrappers); `proposals.status`
+is still written as `'executed'` for killed runs; and a signal death inside a
+`shell=True` pipeline surfaces as the shell's positive `128+n`, so the custom
+seam's negative-code check does not fire for grandchildren.
+
+- **#25** (fixed) — signal-killed children (`RLIMIT_AS`/`CPU`/`NPROC`/`FSIZE`)
+  returned `timed_out=False` with a negative `exit_code` and were receipted
+  `executed: true`. `SandboxResult.signalled` now marks them explicitly (the
+  sandbox's own timeout also reports `-1`, so the sign alone cannot), the
+  command tools raise `CommandKilledError`, and governance records
+  `executed: false` with `error: "killed"` and the signal number.
+- **#26** (fixed) — `execute_approved` forced `is_error: False` and stringified
+  a `ToolResult` into a pydantic repr. The receipt now carries the tool's
+  `content`, `is_error` and `structured_content`, so a failed tool is logged as
+  `status="failed"`.
 
 ## 8. M4/M2 review residuals (2026-09-01) ⏳ tracked
 
