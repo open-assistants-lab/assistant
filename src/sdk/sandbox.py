@@ -20,9 +20,9 @@ Trust-tier table (plan §6.2):
 | enterprise | runc    | container-per-task (stub; T3.4 follow-up)    |
 | tests/dev  | null    | passthrough (loud warning)                   |
 
-Consumers: `code_execute` (SB1-3), `shell_execute` + `cli_adapter` +
-`browser_agent` (SB1-4). Policy (allowlist, metacharacter ban) stays IN
-FRONT of the seam — the seam is transport, not policy.
+Consumers: `code_execute` (SB1-3), `shell_execute` + `cli_adapter` (SB1-4).
+Policy (allowlist, metacharacter ban) stays IN FRONT of the seam — the seam
+is transport, not policy.
 """
 
 from __future__ import annotations

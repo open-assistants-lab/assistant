@@ -40,6 +40,10 @@
 - **Validation:** After the change, run `uv run pytest tests/` to confirm env-based settings still load correctly.
 
 ### 2.3 `src/http/ws_protocol.py` and `src/sdk/tools_core/browser_agent.py` — returning `Any` / wrong declared type
+
+> Superseded: `src/sdk/tools_core/browser_agent.py` was deleted in `85bf4a8e`
+> (unreachable dead code superseded by `src/sdk/tools_core/browser.py`). The
+> `browser_agent` items below are kept only as a historical record.
 - **Functions/lines:**
   - `src/http/ws_protocol.py:336` — `parse_client_message()`
   - `src/http/ws_protocol.py:376` — `parse_server_message()`

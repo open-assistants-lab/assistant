@@ -6,6 +6,8 @@ ToolRegistry provides OpenAI/Anthropic format output for LLM API calls.
 Key compatibility:
     - @tool produces objects with .name, .description, .args, .invoke, .ainvoke
     - .invoke() and .ainvoke() accept a dict, returning the function result
+    - .invoke() is the sync seam and rejects async tools (use .ainvoke()); it
+      never returns an un-awaited coroutine
     - .to_openai_format() / .to_anthropic_format() for LLM tool definitions
 """
 
@@ -145,15 +147,8 @@ class ToolDefinition(BaseModel):
     annotations: ToolAnnotations = Field(default_factory=ToolAnnotations)
     output_schema: dict[str, Any] | None = None
     function: Callable[..., Any] | None = Field(default=None, exclude=True)
-    _coroutine: Any | None = None
 
     model_config = {"arbitrary_types_allowed": True}
-
-    def __init__(self, **data: Any) -> None:
-        super().__init__(**data)
-        func = data.get("function")
-        if func and inspect.iscoroutinefunction(func):
-            self._coroutine = func
 
     @property
     def args(self) -> dict[str, Any]:
@@ -165,7 +160,24 @@ class ToolDefinition(BaseModel):
         merged = {**args, **kwargs}
         if self.function is None:
             raise ValueError(f"Tool {self.name} has no function bound")
-        return self.function(**merged)
+        if inspect.iscoroutinefunction(self.function):
+            # Never hand a coroutine to a caller that cannot await it: an
+            # un-run tool would otherwise be mistaken for a result.
+            raise TypeError(
+                f"Tool '{self.name}' is async; use ainvoke() instead of invoke()"
+            )
+        result = self.function(**merged)
+        if inspect.isawaitable(result):
+            # iscoroutinefunction cannot see through every wrapper (functools
+            # .wraps over an async def, a callable object with an async
+            # __call__), so guard the result too — and close the orphan rather
+            # than leaving an un-awaited coroutine behind.
+            if inspect.iscoroutine(result):
+                result.close()
+            raise TypeError(
+                f"Tool '{self.name}' returned an awaitable; use ainvoke() instead of invoke()"
+            )
+        return result
 
     async def ainvoke(self, args: dict[str, Any] | None = None, **kwargs: Any) -> Any:
         if args is None:
@@ -173,13 +185,25 @@ class ToolDefinition(BaseModel):
         merged = {**args, **kwargs}
         if self.function is None:
             raise ValueError(f"Tool {self.name} has no function bound")
-        if self._coroutine:
-            return await self._coroutine(**merged)
-        # Sync tool bodies run in a worker thread so they never block the
-        # event loop (audit S1: SQLite/subprocess/IMAP tools stalled every
-        # concurrent session). to_thread copies contextvars, so
-        # get_current_agent_loop() consumers keep working.
-        return await asyncio.to_thread(self.function, **merged)
+        # Decide from the CURRENT callable, never a construction-time flag: a
+        # coroutine attached after __init__ (lazy rebuild, plugin registration)
+        # used to take the thread path, which called the function without
+        # awaiting it and returned an un-awaited coroutine object that
+        # from_raw then stringified into a non-error result (#24 review).
+        if inspect.iscoroutinefunction(self.function):
+            result = self.function(**merged)
+        else:
+            # Sync tool bodies run in a worker thread so they never block the
+            # event loop (audit S1: SQLite/subprocess/IMAP tools stalled every
+            # concurrent session). to_thread copies contextvars, so
+            # get_current_agent_loop() consumers keep working.
+            result = await asyncio.to_thread(self.function, **merged)
+        # Belt-and-braces for callables `iscoroutinefunction` cannot see
+        # through (functools.partial, some decorators): awaiting the result is
+        # always safe, and returning an awaitable never is.
+        if inspect.isawaitable(result):
+            result = await result
+        return result
 
     def to_openai_format(self) -> dict[str, Any]:
         result: dict[str, Any] = {

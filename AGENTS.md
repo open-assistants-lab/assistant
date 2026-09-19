@@ -447,7 +447,7 @@ assistant/
 │   │   ├── tools_core/          # ★ SDK-native tool implementations (60 registered tools)
 │   │   │   ├── time.py, shell.py, filesystem.py, file_search.py
 │   │   │   ├── file_versioning.py, todos.py, contacts.py, message.py
-│   │   │   ├── memory.py, browser.py, browser_agent.py
+│   │   │   ├── memory.py, browser.py
 │   │   │   ├── subagent.py, apps.py, research.py, summarize.py
 │   │   │   ├── web.py, user_prompt.py, skills.py
 │   │   │   ├── mcp.py, mcp_bridge.py, mcp_manager.py, mcp_config.py
