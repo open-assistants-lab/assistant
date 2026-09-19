@@ -624,41 +624,39 @@ async def create_sdk_loop(
     # NOTE: do NOT call idx.clear() here. get_or_create_index already clears
     # when source hashes change (needs_reindex). A blanket clear here wipes the
     # persisted index on every new session, forcing a ~23s chromadb re-embedding
-    # of all 82 tools. The idx.count() == 0 check below correctly skips
-    # re-indexing when the persisted index already has data.
+    # of all 82 tools. The presence check below correctly skips re-indexing when
+    # the persisted index already holds every row.
 
-    if idx.count() == 0:
-        for td in tools:
-            if not is_core_tool(td.name):
-                idx.index_tool(td, tool_type="native", namespace="native")
+    from src.sdk.tool_index import desired_index_rows, index_rows, missing_index_rows
 
-        # Index custom (TOOL.md) tools
-        from src.sdk.tools_custom import find_tool_file, load_tool_meta
-        for td in custom_tools:
-            if not is_core_tool(td.name) and _resource_enabled(caps, "tools", td.name):
-                tool_file = find_tool_file(td.name, user_tools_dir, workspace_tools_dir)
-                reconstruct_data = {"command": "", "install": [], "tool_dir": ""}
-                if tool_file:
-                    meta = load_tool_meta(tool_file)
-                    if meta:
-                        reconstruct_data = {
-                            "command": meta.get("command", ""),
-                            "install": meta.get("install", []),
-                            "tool_dir": str(tool_file.parent),
-                        }
-                idx.index_tool(td, tool_type="custom", namespace="custom",
-                               reconstruct=reconstruct_data)
-
-        # Index MCP tools
-        for td in mcp_tools:
-            if not is_core_tool(td.name):
-                parts = td.name.split("__", 2)
-                server_name = parts[1] if len(parts) == 3 else ""
-                reconstruct = {"server_name": server_name, "mcp_tool_name": td.name}
-                idx.index_tool(td, tool_type="mcp", namespace=f"mcp__{server_name}",
-                               reconstruct=reconstruct)
-
-        # Crash-safe: only now that indexing finished, persist source hashes.
+    index_row_set = desired_index_rows(
+        native_tools=tools,
+        custom_tools=custom_tools,
+        mcp_tools=mcp_tools,
+        caps=caps,
+        user_id=user_id,
+        workspace_id=runtime_workspace_id,
+    )
+    missing_rows = missing_index_rows(idx, index_row_set)
+    if missing_rows:
+        # A count cannot tell that rows are missing: an index can be non-empty
+        # and still incomplete while the source hashes match (a dropped row, a
+        # crashed reload, or a tool re-enabled after a reload skipped it).
+        # Re-index on presence instead, and log what was missing so this cannot
+        # spin silently (#29).
+        logger.info(
+            "sdk_runner.index_rows_missing",
+            {"missing_count": len(missing_rows), "sample": sorted(missing_rows)[:5]},
+            user_id=user_id,
+        )
+        # Write only the gaps. Re-writing the whole catalogue on every build
+        # would turn one unwritable row into a full re-embedding per session.
+        index_rows(idx, [row for row in index_row_set if row.name in missing_rows])
+    if missing_rows or not index_row_set:
+        # Crash-safe: only once the index reflects the sources, persist hashes.
+        # An empty desired set is consistent with an empty index, so commit
+        # then too — otherwise check_needs_reindex stays true and every session
+        # clears the index again.
         commit_index_hashes()
 
     summary_config = settings.memory.summarization

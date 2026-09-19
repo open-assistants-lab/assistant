@@ -235,14 +235,20 @@ async def test_create_sdk_loop_uses_user_level_runtime_context(monkeypatch, tmp_
             return tmp_path / ".mcp.json"
 
     class FakeIndex:
+        def __init__(self):
+            self._names: set[str] = set()
+
         def count(self):
-            return 0
+            return len(self._names)
 
         def clear(self):
-            pass
+            self._names.clear()
 
-        def index_tool(self, *args, **kwargs):
-            pass
+        def index_tool(self, td, *args, **kwargs):
+            self._names.add(td.name)
+
+        def list_all_names(self):
+            return sorted(self._names)
 
     seen_prompt_args = []
 

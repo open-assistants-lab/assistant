@@ -19,14 +19,23 @@ import pytest
 
 
 class _FakeIndex:
+    """Mirrors the ToolIndex methods the runner touches (the runner re-indexes
+    on row presence, not a row count)."""
+
+    def __init__(self):
+        self._names: set[str] = set()
+
     def count(self):
-        return 0
+        return len(self._names)
 
     def clear(self):
-        pass
+        self._names.clear()
 
-    def index_tool(self, *args, **kwargs):
-        pass
+    def index_tool(self, td, *args, **kwargs):
+        self._names.add(td.name)
+
+    def list_all_names(self):
+        return sorted(self._names)
 
 
 def _settings(summarization_enabled: bool, governance_enabled: bool) -> MagicMock:
