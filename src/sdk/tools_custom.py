@@ -262,7 +262,11 @@ def is_core_tool(name: str) -> bool:
 
 
 def find_tool_file(name: str, user_dir: Path, workspace_dir: Path | None) -> Path | None:
-    for d in [workspace_dir, user_dir]:
+    # Precedence must match get_custom_tools(): the per-user Tools/ OVERRIDES a
+    # same-name shared tool, so the user copy resolves first. Shared-first made
+    # the runner record the shared file's command for a tool the model saw as
+    # the user's (review P2 on #27).
+    for d in [user_dir, workspace_dir]:
         if d and d.exists():
             candidate = d / name / "TOOL.md"
             if candidate.exists():

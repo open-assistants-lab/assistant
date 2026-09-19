@@ -30,6 +30,18 @@ def _rebuild_custom_function(
     def fn(**kwargs: Any) -> str:
         from src.sdk.sandbox import custom_command_tools_allowed
 
+        if not command_template.strip():
+            # Issue #27: an index row rebuilt without its command used to run an
+            # empty shell command and return "(no output)" — a non-error result
+            # for a tool that never ran. Fail loudly instead; the loop converts
+            # this into an is_error tool result.
+            raise RuntimeError(
+                f"Tool '{td.name}' has no command recorded in its index entry. "
+                "Run tool_reload() to re-index custom tools. If the tool's "
+                "directory name does not match its frontmatter 'name', the index "
+                "cannot resolve its TOOL.md and a reload will not help."
+            )
+
         if not custom_command_tools_allowed():
             return "Custom command tools are disabled by the hard sandbox backend."
         rendered = command_template
@@ -209,6 +221,41 @@ class ToolIndex:
         pass
 
 
+def _hash_tool_file(tool_file: Path) -> str | None:
+    """Hash a TOOL.md, tolerating unreadable files.
+
+    The scan tolerates a bad file (logs custom_tool.skipped), so hashing must
+    too: an unreadable TOOL.md in the admin-provisioned shared dir must not
+    abort session construction (review P2 on #27).
+    """
+    try:
+        return hashlib.sha256(tool_file.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _iter_tool_dirs(scan_dir: Path) -> list[Path]:
+    """Candidate tool directories under a Tools/ dir.
+
+    Everything except the index's own bookkeeping directory counts as a
+    source. Counting `Tools/.index` made the hash set depend on whether the
+    index already existed: the first commit (written before `.index` was
+    created) could therefore never match a later call, so
+    `check_needs_reindex` reported a change and `idx.clear()` wiped every row.
+
+    Only `.index` is skipped — not hidden directories in general — so hashing
+    stays consistent with scan_tools_dir(), which loads any directory holding
+    a TOOL.md, including dot-named ones.
+    """
+    if not scan_dir.exists():
+        return []
+    return [
+        entry
+        for entry in sorted(scan_dir.iterdir())
+        if entry.is_dir() and entry.name != ".index"
+    ]
+
+
 def compute_source_hashes(
     tools_dir: Path,
     workspace_tools_dir: Path | None,
@@ -218,20 +265,24 @@ def compute_source_hashes(
     hashes: dict[str, str] = {}
 
     if tools_dir.exists():
-        for tool_dir in sorted(tools_dir.iterdir()):
+        for tool_dir in _iter_tool_dirs(tools_dir):
             tool_file = tool_dir / "TOOL.md"
             key = f"user:{tool_dir.name}"
             if tool_file.exists():
-                hashes[key] = hashlib.sha256(tool_file.read_bytes()).hexdigest()
+                digest = _hash_tool_file(tool_file)
+                if digest is not None:
+                    hashes[key] = digest
             else:
                 hashes[key] = ""
 
     if workspace_tools_dir and workspace_tools_dir.exists():
-        for tool_dir in sorted(workspace_tools_dir.iterdir()):
+        for tool_dir in _iter_tool_dirs(workspace_tools_dir):
             tool_file = tool_dir / "TOOL.md"
             key = f"workspace:{tool_dir.name}"
             if tool_file.exists():
-                hashes[key] = hashlib.sha256(tool_file.read_bytes()).hexdigest()
+                digest = _hash_tool_file(tool_file)
+                if digest is not None:
+                    hashes[key] = digest
 
     if mcp_config.exists():
         hashes["mcp:config"] = hashlib.sha256(mcp_config.read_bytes()).hexdigest()
