@@ -30,6 +30,16 @@ def _rebuild_custom_function(
     def fn(**kwargs: Any) -> str:
         from src.sdk.sandbox import custom_command_tools_allowed
 
+        if not command_template.strip():
+            # Issue #27: an index row rebuilt without its command used to run an
+            # empty shell command and return "(no output)" — a non-error result
+            # for a tool that never ran. Fail loudly instead; the loop converts
+            # this into an is_error tool result.
+            raise RuntimeError(
+                f"Tool '{td.name}' has no command recorded in its index entry. "
+                "Run tool_reload() to re-index custom tools."
+            )
+
         if not custom_command_tools_allowed():
             return "Custom command tools are disabled by the hard sandbox backend."
         rendered = command_template

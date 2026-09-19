@@ -603,7 +603,11 @@ async def create_sdk_loop(
 
     paths = _get_paths(user_id, workspace_id=runtime_workspace_id)
     user_tools_dir = paths.user_tools_dir()
-    workspace_tools_dir = None
+    # Issue #27: the deployment-shared tools dir must be wired through, matching
+    # src/sdk/tools_core/tool_reload.py. Passing None here meant shared sources
+    # were never hashed (no reindex on change) and shared-only tools were
+    # indexed with an empty reconstruct blob.
+    workspace_tools_dir = paths.workspace_tools_dir()
     mcp_config = paths.user_mcp_config()
     custom_tools = [
         td
