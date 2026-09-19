@@ -15,7 +15,7 @@
 | `src/http/ws_protocol.py` | Fixed `Any` returns and generic `dict` params |
 | `src/sdk/validation.py` | Cast returns; added `dict[Any, Any]` |
 | `src/sdk/handoffs.py` | Parameterized `Callable`; fixed `filter_input()` |
-| `src/sdk/tools_core/browser_agent.py` | Return type `str | ToolResult` — *superseded: file deleted in `85bf4a8e`; kept as a historical record* |
+| `src/sdk/tools_core/browser_agent.py` | Return type `str \| ToolResult` — *superseded: file deleted in `85bf4a8e`; kept as a historical record* |
 | `src/app_logging.py` | Added return types and generic dict annotations |
 
 **Current state:** `uv run mypy src/` reports **444 errors in 67 files**.

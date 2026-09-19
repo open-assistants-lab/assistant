@@ -178,6 +178,12 @@ else:
 
 No changes needed to the agent loop.
 
+> Superseded (2026-09-19): `_coroutine` no longer exists, and the loop routes
+> every tool through `ainvoke` — `ToolDefinition.ainvoke` decides dispatch from
+> the current callable instead of a construction-time flag (see `85bf4a8e`).
+> The snippet above is kept only as a historical record of the design at the
+> time.
+
 ### 5. Timeout Handling
 
 The tool has a `timeout_seconds` parameter defaulting to 120s. The effective timeout is `min(timeout_seconds, agent_def.timeout_seconds)` — the tool can request a shorter timeout than the agent's definition allows, but cannot exceed it. This prevents the LLM from overriding the agent owner's configured limit.

@@ -359,7 +359,7 @@ def test_per_user_kernel_isolation_two_users(tmp_path):
             user_id="alice",
         )
         assert not (ws_b / "Files" / "leak.txt").exists()
-        assert r.returncode != 0 or "Permission denied" in (r.stderr or "")
+        assert r.exit_code != 0 or "Permission denied" in (r.stderr or "")
     finally:
         settings_module._config = None
         os.chown(str(ws_a / "Files"), os.getuid(), os.getgid())

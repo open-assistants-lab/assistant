@@ -100,11 +100,30 @@ fix): `tests/config/test_user_settings_store.py::test_omitted_fallback_ignores_u
 failed once in a full-suite invocation (`assert settings_module._config is None`
 — the settings singleton was repopulated) and passed on an immediate re-run with
 the same commit and command. It passes in isolation and with `tests/config/`
-alone. Neither the module under test nor the config suite calls `get_settings()`,
-so the repopulation comes from elsewhere in the process — consistent with the
-ordering interference above rather than a defect in the test.
+alone. The assertion is on a process-global singleton (`src/config/settings.py`)
+that many unrelated modules reset or reload, and merely importing the module
+under test reaches `get_settings()` indirectly (`src/app_logging.py` builds its
+`Logger()` on first use), so a mid-body repopulation by another actor in the run
+is consistent with the ordering interference above rather than a defect in the
+test. Trigger to re-open: any single-run failure of a settings/prompt test that
+clears on an identical re-run.
 
-## 4. M4/M2 review residuals (2026-09-01) ⏳ tracked
+## 7. Receipt-fidelity residuals (2026-09-19) — filed, not fixed
+
+Two known ways a failed execution can still read as successful, both filed as
+issues rather than fixed opportunistically:
+
+- **#25** — signal-killed children (`RLIMIT_AS`/`CPU`/`NPROC`/`FSIZE`) return
+  `timed_out=False` with a negative `exit_code`, so they are indistinguishable
+  from an ordinary non-zero exit and are receipted `executed: true`. Narrow fix
+  is a signal-kill marker at the sandbox seam, not "every non-zero exit fails"
+  (`shell_execute` legitimately returns output from a non-zero exit).
+- **#26** — `GovernanceService.execute_approved` forces `{"executed": True,
+  "is_error": False}` on the success-return path, so a tool returning
+  `ToolResult(is_error=True)` is logged as `status="completed"` and its content
+  becomes a pydantic repr (`src/sdk/governance.py:502-507`, `:640`).
+
+## 8. M4/M2 review residuals (2026-09-01) ⏳ tracked
 
 From the governance re-review (db771be/0816d3b) — merge approved with these:
 
