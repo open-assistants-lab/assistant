@@ -101,12 +101,10 @@ async def _mcp_reload(user_id: str = "", session_id: str = "") -> ToolResult | s
         # point, so falling through to `return result` reported a clean reload
         # while the session had silently lost its MCP tools (issue #30).
         return ToolResult(
-            content=f"MCP reload failed: {type(e).__name__}: {e}. Existing MCP tools were "
-            "unregistered and may be missing until the next successful reload.",
+            content=f"MCP reload failed: {type(e).__name__}: {e}. The session's MCP "
+            "tool list may be stale or incomplete until the next successful reload.",
             is_error=True,
         )
-
-    return result
 
 
 mcp_reload = ToolDefinition(

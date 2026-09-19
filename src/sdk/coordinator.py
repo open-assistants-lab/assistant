@@ -357,7 +357,11 @@ class SubagentCoordinator:
         parent_id: str | None = None,
         timeout_seconds: int | None = None,
     ) -> ToolResult | str:
-        """Run a subagent synchronously and return the result string.
+        """Run a subagent synchronously.
+
+        Returns the subagent's output text on success, or a
+        `ToolResult(is_error=True)` when the run was cancelled, timed out or
+        failed — the caller must not treat every return as success.
 
         Like invoke() but with agent-def validation and full middleware stack.
         Unlike start(), this blocks until the subagent completes.
@@ -397,7 +401,14 @@ class SubagentCoordinator:
             )
             completed = await db.set_completed(task_id, result)
             if not completed:
+                # The row was cancelled (or is no longer running) while the run
+                # finished, so the work_queue says CANCELLED: returning the
+                # output would claim a success the queue disagrees with.
                 await self._set_cancelled_if_requested(task_id, db)
+                return ToolResult(
+                    content="Cancelled: subagent was cancelled during execution.",
+                    is_error=True,
+                )
             return result.output
         except TaskCancelledError:
             await db.set_cancelled(task_id)

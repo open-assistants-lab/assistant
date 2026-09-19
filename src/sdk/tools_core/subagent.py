@@ -340,7 +340,8 @@ async def subagent_delegate(
         timeout_seconds: Maximum seconds to wait (default 120)
 
     Returns:
-        The subagent's output text
+        The subagent's output text on success; an error ToolResult when the run
+        was cancelled, timed out or failed
     """
     coordinator = get_coordinator(user_id, workspace_id)
 

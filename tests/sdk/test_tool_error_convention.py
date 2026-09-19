@@ -10,10 +10,16 @@ convention directly.
 text from a broad handler because the tool completed its job. Keep it short:
 each entry is a documented exception, not a parking space.
 
-Reach: only `@tool`-decorated functions in this package are walked. A
-`@tool(name=...)` call form, a hand-built `ToolDefinition`, and MCP or
-user-authored tool bodies are outside this test and need the same review by
-hand.
+Reach: only `@tool`-decorated functions in this package are walked. Out of
+scope, and reviewed by hand instead:
+
+- a `@tool(name=...)` call form or a hand-built `ToolDefinition`
+  (`mcp.py`, `research.py`, `mcp_bridge.py`);
+- MCP and user-authored tool bodies;
+- narrow handlers such as `except httpx.HTTPError`, which may legitimately
+  return guidance text;
+- a broad handler with no `return` of its own, which falls through to a later
+  return (`files_write`'s version-capture failure is deliberate).
 """
 
 from __future__ import annotations
@@ -95,7 +101,11 @@ def _violations():
 
 
 def test_every_tool_catch_all_reports_failure():
-    """No tool may turn an exception into a successful string return.
+    """No tool *catch-all* may turn an exception into a successful string.
+
+    Narrow handlers are out of scope here (see the module docstring), as are
+    handlers with no `return` at all — those fall through to a later return
+    and are reviewed by hand.
 
     A plain string is receipted `executed: true, is_error: false`, so a tool
     that crashed is recorded as a success — the false-success class this repo
@@ -111,24 +121,22 @@ def test_every_tool_catch_all_reports_failure():
 
 def test_allowlist_entries_are_still_needed():
     """A stale exception in the allowlist would hide a real violation later."""
-    still_violating = {
-        v.split(":")[0] for v in _violations_ignoring_allowlist()
-    }
-    for (file_name, fn_name) in ALLOWED_SUCCESS_RETURNS:
-        assert file_name in still_violating, (
-            f"allowlist entry ({file_name}, {fn_name}) is no longer needed — "
-            "the handler now reports failure, so remove it"
+    still_violating = _violations_ignoring_allowlist()
+    for entry in ALLOWED_SUCCESS_RETURNS:
+        assert entry in still_violating, (
+            f"allowlist entry {entry} is no longer needed — the handler now "
+            "reports failure, so remove it from ALLOWED_SUCCESS_RETURNS"
         )
 
 
-def _violations_ignoring_allowlist():
-    found = []
+def _violations_ignoring_allowlist() -> set[tuple[str, str]]:
+    found: set[tuple[str, str]] = set()
     for path in sorted(TOOLS_CORE.rglob("*.py")):
         for fn in _tool_functions(path):
             for handler in _broad_handlers(fn):
                 for value in _returned_values(handler):
                     if not _is_failure_result(value):
-                        found.append(f"{path.name}:{value.lineno} in {fn.name}()")
+                        found.add((path.name, fn.name))
     return found
 
 
