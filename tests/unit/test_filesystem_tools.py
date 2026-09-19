@@ -4,6 +4,8 @@ import shutil
 
 import pytest
 
+from src.sdk.tools import ToolResult
+
 TEST_USER_ID = "test_filesystem_user"
 
 
@@ -187,30 +189,40 @@ class TestPathTraversalProtection:
         """Test that absolute paths are rejected."""
         from src.sdk.tools_core.filesystem import files_write
 
-        result = files_write.invoke(
-            {"path": "/etc/passwd", "content": "hacked", "user_id": TEST_USER_ID}
+        result = ToolResult.from_raw(
+            files_write.invoke(
+                {"path": "/etc/passwd", "content": "hacked", "user_id": TEST_USER_ID}
+            )
         )
-        assert "relative paths only" in result.lower() or "error" in result.lower()
+        # A refused write is a failure, not a successful run (issue #30).
+        assert result.is_error is True
+        assert "relative paths only" in result.content.lower() or "error" in result.content.lower()
 
     def test_path_traversal_parent_directory_rejected(self, user_workspace):
         """Test that paths attempting to escape user directory are rejected."""
         from src.sdk.tools_core.filesystem import files_write
 
-        result = files_write.invoke(
-            {"path": "../etc/passwd", "content": "hacked", "user_id": TEST_USER_ID}
+        result = ToolResult.from_raw(
+            files_write.invoke(
+                {"path": "../etc/passwd", "content": "hacked", "user_id": TEST_USER_ID}
+            )
         )
+        assert result.is_error is True
         assert (
-            "outside user directory" in result.lower()
-            or "error" in result.lower()
-            or "relative paths only" in result.lower()
+            "outside user directory" in result.content.lower()
+            or "error" in result.content.lower()
+            or "relative paths only" in result.content.lower()
         )
 
     def test_path_traversal_absolute_with_slash_rejected(self, user_workspace):
         """Test that paths starting with / are rejected."""
         from src.sdk.tools_core.filesystem import files_read
 
-        result = files_read.invoke({"path": "/tmp/secret.txt", "user_id": TEST_USER_ID})
-        assert "relative paths only" in result.lower() or "error" in result.lower()
+        result = ToolResult.from_raw(
+            files_read.invoke({"path": "/tmp/secret.txt", "user_id": TEST_USER_ID})
+        )
+        assert result.is_error is True
+        assert "relative paths only" in result.content.lower() or "error" in result.content.lower()
 
     def test_path_traversal_sibling_directory_blocked(self, user_workspace):
         """Test that paths to sibling directories are blocked."""
@@ -220,8 +232,11 @@ class TestPathTraversalProtection:
         other_dir.mkdir(parents=True, exist_ok=True)
         (other_dir / "secret.txt").write_text("secret")
 
-        result = files_read.invoke({"path": "../other_user/secret.txt", "user_id": TEST_USER_ID})
-        assert "outside user directory" in result.lower() or "error" in result.lower()
+        result = ToolResult.from_raw(
+            files_read.invoke({"path": "../other_user/secret.txt", "user_id": TEST_USER_ID})
+        )
+        assert result.is_error is True
+        assert "outside user directory" in result.content.lower() or "error" in result.content.lower()
 
         shutil.rmtree(other_dir.parent)
 

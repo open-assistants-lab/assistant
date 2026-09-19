@@ -6,7 +6,7 @@ from collections import Counter
 from pathlib import Path
 
 from src.app_logging import get_logger
-from src.sdk.tools import ToolAnnotations, tool
+from src.sdk.tools import ToolAnnotations, ToolResult, tool
 from src.storage.paths import DEFAULT_USER_ID, get_paths
 
 logger = get_logger()
@@ -106,7 +106,7 @@ def files_glob_search(pattern: str = "**/*", path: str = ".", user_id: str =  DE
         logger.error(
             "files_glob_search.error", {"pattern": pattern, "error": str(e)}, user_id=user_id
         )
-        return f"Error: {e}"
+        return ToolResult(content=f'Error: {e}', is_error=True)
 
 
 files_glob_search.annotations = ToolAnnotations(
@@ -215,7 +215,7 @@ def files_grep_search(
         logger.error(
             "files_grep_search.error", {"pattern": pattern, "error": str(e)}, user_id=user_id
         )
-        return f"Error: {e}"
+        return ToolResult(content=f'Error: {e}', is_error=True)
 
 
 files_grep_search.annotations = ToolAnnotations(

@@ -25,7 +25,7 @@ from src.app_logging import get_logger
 from src.sdk.agent_validation import validate_agent_def
 from src.sdk.coordinator import get_coordinator
 from src.sdk.subagent_models import TaskStatus
-from src.sdk.tools import ToolAnnotations, tool
+from src.sdk.tools import ToolAnnotations, ToolResult, tool
 from src.storage.paths import DEFAULT_USER_ID
 
 logger = get_logger()
@@ -357,7 +357,7 @@ async def subagent_delegate(
         )
         return result
     except Exception as e:
-        return f"Error running '{agent_name}': {type(e).__name__}: {e}"
+        return ToolResult(content=f"Error running '{agent_name}': {type(e).__name__}: {e}", is_error=True)
 
 
 subagent_delegate.annotations = ToolAnnotations(

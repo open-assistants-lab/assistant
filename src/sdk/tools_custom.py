@@ -11,7 +11,12 @@ import yaml
 
 from src.app_logging import get_logger
 from src.sdk.tool_results import CommandKilledError
-from src.sdk.tools import DEFAULT_COMMAND_TIMEOUT_SECONDS, ToolAnnotations, ToolDefinition
+from src.sdk.tools import (
+    DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    ToolAnnotations,
+    ToolDefinition,
+    ToolResult,
+)
 from src.storage.paths import DEFAULT_USER_ID
 
 logger = get_logger()
@@ -165,7 +170,7 @@ def _parse_tool_file(
                 # a command that never finished (issue #25).
                 raise
             except Exception as e:
-                return f"Command error: {e}"
+                return ToolResult(content=f"Command error: {e}", is_error=True)
 
         fn.__name__ = name
         properties = parameters.get("properties", {})

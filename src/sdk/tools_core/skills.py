@@ -18,7 +18,7 @@ from typing import Any
 
 from src.app_logging import get_logger
 from src.sdk.capabilities import load_user_capabilities, resource_enabled
-from src.sdk.tools import ToolAnnotations, tool
+from src.sdk.tools import ToolAnnotations, ToolResult, tool
 from src.skills.registry import get_skill_registry
 from src.storage.paths import DEFAULT_USER_ID
 
@@ -62,7 +62,7 @@ def skills_load(
     try:
         registry = _get_registry(user_id, workspace_id)
     except Exception as exc:
-        return str(exc)
+        return ToolResult(content=str(exc), is_error=True)
 
     caps = _load_user_caps(user_id)
     skill = registry.get_skill(name)
@@ -122,7 +122,7 @@ def skills_reload(
         registry = _get_registry(user_id, workspace_id)
         registry.reload()
     except Exception as exc:
-        return str(exc)
+        return ToolResult(content=str(exc), is_error=True)
 
     caps = _load_user_caps(user_id)
     skills = [s for s in registry.get_all_skills() if _skill_enabled(caps, s.get("name", ""))]

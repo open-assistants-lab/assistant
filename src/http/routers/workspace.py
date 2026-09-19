@@ -9,6 +9,7 @@ from fastapi import APIRouter, Body, Request
 from fastapi.responses import StreamingResponse
 
 from src.http.auth import resolve_user_id
+from src.http.tool_text import tool_text
 from src.storage.paths import DEFAULT_USER_ID, get_paths
 
 router = APIRouter(tags=["workspace"])
@@ -41,7 +42,7 @@ async def read_workspace_file(path: str, user_id: str =  DEFAULT_USER_ID, worksp
     from src.http.workspace_cache import get_file_cache
     from src.sdk.tools_core.filesystem import files_read
 
-    result = files_read.invoke({"path": path, "user_id": user_id, "workspace_id": workspace_id})
+    result = tool_text(files_read.invoke({"path": path, "user_id": user_id, "workspace_id": workspace_id}))
 
     file_cache = get_file_cache(user_id, workspace_id)
     workspace_root = get_paths(user_id, workspace_id=workspace_id).workspace_files_dir()
@@ -59,7 +60,7 @@ async def list_workspace_files(path: str = "", user_id: str =  DEFAULT_USER_ID, 
     user_id = resolve_user_id(request, user_id)
     from src.sdk.tools_core.filesystem import files_list
 
-    result = files_list.invoke({"path": path, "user_id": user_id, "workspace_id": workspace_id})
+    result = tool_text(files_list.invoke({"path": path, "user_id": user_id, "workspace_id": workspace_id}))
     return {"response": str(result)}
 
 
@@ -80,9 +81,9 @@ async def write_workspace_file(
 
     from src.sdk.tools_core.filesystem import files_write
 
-    result = files_write.invoke(
+    result = tool_text(files_write.invoke(
         {"path": path, "content": content, "user_id": user_id, "workspace_id": workspace_id}
-    )
+    ))
     return {"response": str(result)}
 
 
@@ -92,7 +93,7 @@ async def delete_workspace_file(path: str, user_id: str =  DEFAULT_USER_ID, work
     user_id = resolve_user_id(request, user_id)
     from src.sdk.tools_core.filesystem import files_delete
 
-    result = files_delete.invoke({"path": path, "user_id": user_id, "workspace_id": workspace_id})
+    result = tool_text(files_delete.invoke({"path": path, "user_id": user_id, "workspace_id": workspace_id}))
     return {"response": str(result)}
 
 

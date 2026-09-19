@@ -14,7 +14,7 @@ import html2text
 import httpx
 
 from src.app_logging import get_logger
-from src.sdk.tools import ToolAnnotations, tool
+from src.sdk.tools import ToolAnnotations, ToolResult, tool
 
 logger = get_logger()
 
@@ -77,7 +77,7 @@ def web_fetch(url: str) -> str:
         return f"Error fetching {url}: {e}"
     except Exception as e:
         logger.warning("web.fetch_error", {"url": url, "error": str(e)})
-        return f"Error fetching {url}: {e}"
+        return ToolResult(content=f'Error fetching {url}: {e}', is_error=True)
 
 
 web_fetch.annotations = ToolAnnotations(
@@ -190,7 +190,7 @@ def web_search(query: str, limit: int = 10) -> str:
         return f"Error searching: {e}"
     except Exception as e:
         logger.warning("web.search_error", {"query": query, "error": str(e)})
-        return f"Error searching for '{query}': {e}"
+        return ToolResult(content=f"Error searching for '{query}': {e}", is_error=True)
 
 
 web_search.annotations = ToolAnnotations(

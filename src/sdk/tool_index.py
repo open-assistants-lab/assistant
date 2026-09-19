@@ -13,7 +13,7 @@ from typing import Any
 from hybriddb import HybridDB
 
 from src.sdk.tool_results import CommandKilledError
-from src.sdk.tools import ToolDefinition
+from src.sdk.tools import ToolDefinition, ToolResult
 from src.storage.paths import DEFAULT_USER_ID
 
 _RECONSTRUCT_EMPTY = "{}"
@@ -202,7 +202,7 @@ def _rebuild_custom_function(
             # a command that never finished (issue #25).
             raise
         except Exception as e:
-            return f"Command error: {e}"
+            return ToolResult(content=f"Command error: {e}", is_error=True)
 
     td.function = fn
     return td

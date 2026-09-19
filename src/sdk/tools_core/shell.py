@@ -10,7 +10,7 @@ from typing import Any
 from src.app_logging import get_logger
 from src.config import get_settings
 from src.sdk.tool_results import CommandKilledError
-from src.sdk.tools import ToolAnnotations, tool
+from src.sdk.tools import ToolAnnotations, ToolResult, tool
 from src.storage.paths import DEFAULT_USER_ID, get_paths
 
 logger = get_logger()
@@ -222,7 +222,7 @@ def shell_execute(command: str, user_id: str =  DEFAULT_USER_ID, workspace_id: s
         raise
     except Exception as e:
         logger.error("shell_execute.error", {"command": command, "error": str(e)}, user_id=user_id)
-        return f"Error: {e}"
+        return ToolResult(content=f'Error: {e}', is_error=True)
 
 
 shell_execute.annotations = ToolAnnotations(

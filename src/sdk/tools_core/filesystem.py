@@ -5,7 +5,7 @@ from contextvars import ContextVar
 from pathlib import Path
 
 from src.app_logging import get_logger
-from src.sdk.tools import ToolAnnotations, tool
+from src.sdk.tools import ToolAnnotations, ToolResult, tool
 from src.storage.paths import DEFAULT_USER_ID, get_paths
 
 logger = get_logger()
@@ -117,7 +117,7 @@ def files_list(path: str = ".", user_id: str =  DEFAULT_USER_ID, workspace_id: s
         return "\n".join(["", *items, ""])
     except Exception as e:
         logger.error("files_list.error", {"path": path, "error": str(e)}, user_id=user_id)
-        return f"Error: {e}"
+        return ToolResult(content=f'Error: {e}', is_error=True)
 
 
 files_list.annotations = ToolAnnotations(title="List Files", read_only=True, idempotent=True)
@@ -166,7 +166,7 @@ def files_read(path: str, offset: int = 0, limit: int = 100, user_id: str =  DEF
         return f"--- {path} ({offset}-{total}/{target.stat().st_size} bytes) ---\n{content}"
     except Exception as e:
         logger.error("files_read.error", {"path": path, "error": str(e)}, user_id=user_id)
-        return f"Error: {e}"
+        return ToolResult(content=f'Error: {e}', is_error=True)
 
 
 files_read.annotations = ToolAnnotations(title="Read File", read_only=True, idempotent=True)
@@ -214,7 +214,7 @@ def files_write(path: str, content: str, user_id: str =  DEFAULT_USER_ID, worksp
         return f"Successfully wrote to {path}"
     except Exception as e:
         logger.error("files_write.error", {"path": path, "error": str(e)}, user_id=user_id)
-        return f"Error: {e}"
+        return ToolResult(content=f'Error: {e}', is_error=True)
 
 
 files_write.annotations = ToolAnnotations(title="Write File", destructive=True)
@@ -260,7 +260,7 @@ def files_edit(path: str, old: str, new: str, user_id: str =  DEFAULT_USER_ID, w
         return f"Edited {path}"
     except Exception as e:
         logger.error("files_edit.error", {"path": path, "error": str(e)}, user_id=user_id)
-        return f"Error: {e}"
+        return ToolResult(content=f'Error: {e}', is_error=True)
 
 
 files_edit.annotations = ToolAnnotations(title="Edit File", destructive=True)
@@ -297,7 +297,7 @@ def files_delete(path: str, user_id: str =  DEFAULT_USER_ID, workspace_id: str =
         return f"Deleted {path}"
     except Exception as e:
         logger.error("files_delete.error", {"path": path, "error": str(e)}, user_id=user_id)
-        return f"Error: {e}"
+        return ToolResult(content=f'Error: {e}', is_error=True)
 
 
 files_delete.annotations = ToolAnnotations(title="Delete File", destructive=True)
@@ -327,7 +327,7 @@ def files_mkdir(path: str, user_id: str =  DEFAULT_USER_ID, workspace_id: str = 
         return f"Created directory: {path}"
     except Exception as e:
         logger.error("files_mkdir.error", {"path": path, "error": str(e)}, user_id=user_id)
-        return f"Error: {e}"
+        return ToolResult(content=f'Error: {e}', is_error=True)
 
 
 files_mkdir.annotations = ToolAnnotations(title="Create Directory")
@@ -374,7 +374,7 @@ def files_rename(path: str, new_name: str, user_id: str =  DEFAULT_USER_ID, work
             {"path": path, "new_name": new_name, "error": str(e)},
             user_id=user_id,
         )
-        return f"Error: {e}"
+        return ToolResult(content=f'Error: {e}', is_error=True)
 
 
 files_rename.annotations = ToolAnnotations(title="Rename File", destructive=True)

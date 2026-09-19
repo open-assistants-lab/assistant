@@ -21,7 +21,7 @@ from hybriddb.embedding import hash_embedding as _hash_embedding
 from src.app_logging import get_logger
 from src.config import get_settings
 from src.sdk.messages import Message
-from src.sdk.tools import ToolAnnotations, tool
+from src.sdk.tools import ToolAnnotations, ToolResult, tool
 from src.storage.paths import DEFAULT_USER_ID, get_paths
 
 logger = get_logger()
@@ -189,7 +189,7 @@ def app_create(name: str, tables: dict[str, dict[str, str]], user_id: str =  DEF
         return f"App '{name}' created successfully.\n\nTables:\n" + "\n".join(tables_info)
     except Exception as e:
         logger.error("app_create.error", {"name": name, "error": str(e)}, user_id=user_id)
-        return f"Error creating app: {e}"
+        return ToolResult(content=f'Error creating app: {e}', is_error=True)
 
 
 app_create.annotations = ToolAnnotations(title="Create App", destructive=True)
@@ -214,7 +214,7 @@ def app_list(user_id: str =  DEFAULT_USER_ID) -> str:
         return "Apps:\n" + "\n".join(f"  - {app}" for app in sorted(apps))
     except Exception as e:
         logger.error("app_list.error", {"error": str(e)}, user_id=user_id)
-        return f"Error listing apps: {e}"
+        return ToolResult(content=f'Error listing apps: {e}', is_error=True)
 
 
 app_list.annotations = ToolAnnotations(title="List Apps", read_only=True, idempotent=True)
@@ -248,7 +248,7 @@ def app_schema(name: str, user_id: str =  DEFAULT_USER_ID) -> str:
         return "\n".join(lines)
     except Exception as e:
         logger.error("app_schema.error", {"name": name, "error": str(e)}, user_id=user_id)
-        return f"Error getting schema: {e}"
+        return ToolResult(content=f'Error getting schema: {e}', is_error=True)
 
 
 app_schema.annotations = ToolAnnotations(title="App Schema", read_only=True, idempotent=True)
@@ -271,7 +271,7 @@ def app_delete(name: str, user_id: str =  DEFAULT_USER_ID) -> str:
         return f"App '{name}' not found."
     except Exception as e:
         logger.error("app_delete.error", {"name": name, "error": str(e)}, user_id=user_id)
-        return f"Error deleting app: {e}"
+        return ToolResult(content=f'Error deleting app: {e}', is_error=True)
 
 
 app_delete.annotations = ToolAnnotations(title="Delete App", destructive=True)
@@ -298,7 +298,7 @@ def app_insert(app: str, table: str, data: dict[str, Any], user_id: str =  DEFAU
         logger.error(
             "app_insert.error", {"app": app, "table": table, "error": str(e)}, user_id=user_id
         )
-        return f"Error inserting data: {e}"
+        return ToolResult(content=f'Error inserting data: {e}', is_error=True)
 
 
 app_insert.annotations = ToolAnnotations(title="Insert App Row")
@@ -331,7 +331,7 @@ def app_update(
             {"app": app, "table": table, "id": id, "error": str(e)},
             user_id=user_id,
         )
-        return f"Error updating data: {e}"
+        return ToolResult(content=f'Error updating data: {e}', is_error=True)
 
 
 app_update.annotations = ToolAnnotations(title="Update App Row")
@@ -361,7 +361,7 @@ def app_delete_row(app: str, table: str, id: int, user_id: str =  DEFAULT_USER_I
             {"app": app, "table": table, "id": id, "error": str(e)},
             user_id=user_id,
         )
-        return f"Error deleting data: {e}"
+        return ToolResult(content=f'Error deleting data: {e}', is_error=True)
 
 
 app_delete_row.annotations = ToolAnnotations(title="Delete App Row", destructive=True)
@@ -400,7 +400,7 @@ def app_column_add(
             {"app": app, "table": table, "column": column, "error": str(e)},
             user_id=user_id,
         )
-        return f"Error adding column: {e}"
+        return ToolResult(content=f'Error adding column: {e}', is_error=True)
 
 
 app_column_add.annotations = ToolAnnotations(title="Add App Column")
@@ -429,7 +429,7 @@ def app_column_delete(app: str, table: str, column: str, user_id: str =  DEFAULT
             {"app": app, "table": table, "column": column, "error": str(e)},
             user_id=user_id,
         )
-        return f"Error deleting column: {e}"
+        return ToolResult(content=f'Error deleting column: {e}', is_error=True)
 
 
 app_column_delete.annotations = ToolAnnotations(title="Delete App Column", destructive=True)
@@ -467,7 +467,7 @@ def app_column_rename(
             },
             user_id=user_id,
         )
-        return f"Error renaming column: {e}"
+        return ToolResult(content=f'Error renaming column: {e}', is_error=True)
 
 
 app_column_rename.annotations = ToolAnnotations(title="Rename App Column")
@@ -575,7 +575,7 @@ def app_query(app: str, query: str, user_id: str =  DEFAULT_USER_ID) -> str:
         logger.error(
             "app_query.error", {"app": app, "query": query, "error": str(e)}, user_id=user_id
         )
-        return f"Error querying app: {e}"
+        return ToolResult(content=f'Error querying app: {e}', is_error=True)
 
 
 app_query.annotations = ToolAnnotations(title="Query App Data", open_world=True)
@@ -637,7 +637,7 @@ def app_search_fts(
             {"app": app, "table": table, "column": column, "query": query, "error": str(e)},
             user_id=user_id,
         )
-        return f"Error searching: {e}"
+        return ToolResult(content=f'Error searching: {e}', is_error=True)
 
 
 app_search_fts.annotations = ToolAnnotations(
@@ -727,7 +727,7 @@ def app_import_csv(
         logger.error(
             "app_import_csv.error", {"path": path, "error": str(e)}, user_id=user_id
         )
-        return f"Error importing file: {e}"
+        return ToolResult(content=f'Error importing file: {e}', is_error=True)
 
 
 app_import_csv.annotations = ToolAnnotations(title="Import CSV/XLSX", destructive=True)
@@ -766,7 +766,7 @@ async def app_summarize(app: str, user_id: str = DEFAULT_USER_ID) -> str:
         return text[:200] or context[:200]
     except Exception as e:
         logger.error("app_summarize.error", {"app": app, "error": str(e)}, user_id=user_id)
-        return f"Error summarizing app: {e}"
+        return ToolResult(content=f'Error summarizing app: {e}', is_error=True)
 
 
 app_summarize.annotations = ToolAnnotations(title="Summarize Workbook", read_only=True)

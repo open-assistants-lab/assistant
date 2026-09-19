@@ -3,6 +3,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 
 from src.http.auth import resolve_user_id
+from src.http.tool_text import tool_text
 from src.storage.paths import DEFAULT_USER_ID
 
 router = APIRouter(prefix="/todos", tags=["todos"])
@@ -15,7 +16,7 @@ async def list_todos(request: Request, user_id: str = DEFAULT_USER_ID) -> dict[s
     """List all todos."""
     from src.sdk.tools_core.todos import todos_list
 
-    result = todos_list.invoke({"user_id": user_id})
+    result = tool_text(todos_list.invoke({"user_id": user_id}))
     return {"todos": result}
 
 
@@ -33,7 +34,7 @@ async def add_todo(
     args: dict[str, Any] = {"user_id": user_id, "content": content}
     if priority is not None:
         args["priority"] = priority
-    result = todos_add.invoke(args)
+    result = tool_text(todos_add.invoke(args))
     return {"result": str(result)}
 
 
@@ -57,7 +58,7 @@ async def update_todo(
         args["status"] = status
     if priority is not None:
         args["priority"] = priority
-    result = todos_update.invoke(args)
+    result = tool_text(todos_update.invoke(args))
     return {"result": str(result)}
 
 
@@ -66,5 +67,5 @@ async def delete_todo(todo_id: str, user_id: str =  DEFAULT_USER_ID) -> dict[str
     """Delete a todo."""
     from src.sdk.tools_core.todos import todos_delete
 
-    result = todos_delete.invoke({"user_id": user_id, "todo_id": todo_id})
+    result = tool_text(todos_delete.invoke({"user_id": user_id, "todo_id": todo_id}))
     return {"result": str(result)}

@@ -3,6 +3,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 
 from src.http.auth import resolve_user_id
+from src.http.tool_text import tool_text
 from src.storage.paths import DEFAULT_USER_ID
 
 router = APIRouter(prefix="/contacts", tags=["contacts"])
@@ -15,7 +16,7 @@ async def list_contacts(request: Request, user_id: str = DEFAULT_USER_ID) -> dic
     """List all contacts."""
     from src.sdk.tools_core.contacts import contacts_list
 
-    result = contacts_list.invoke({"user_id": user_id})
+    result = tool_text(contacts_list.invoke({"user_id": user_id}))
     return {"contacts": result}
 
 
@@ -24,7 +25,7 @@ async def search_contacts(query: str, user_id: str =  DEFAULT_USER_ID) -> dict[s
     """Search contacts."""
     from src.sdk.tools_core.contacts import contacts_search
 
-    result = contacts_search.invoke({"user_id": user_id, "query": query})
+    result = tool_text(contacts_search.invoke({"user_id": user_id, "query": query}))
     return {"results": result}
 
 
@@ -41,9 +42,9 @@ async def add_contact(
     """Add a new contact."""
     from src.sdk.tools_core.contacts import contacts_add
 
-    result = contacts_add.invoke(
+    result = tool_text(contacts_add.invoke(
         {"user_id": user_id, "email": email, "name": name, "phone": phone, "company": company}
-    )
+    ))
     return {"result": str(result)}
 
 
@@ -61,7 +62,7 @@ async def update_contact(
     """Update a contact."""
     from src.sdk.tools_core.contacts import contacts_update
 
-    result = contacts_update.invoke(
+    result = tool_text(contacts_update.invoke(
         {
             "user_id": user_id,
             "contact_id": contact_id,
@@ -70,7 +71,7 @@ async def update_contact(
             "phone": phone,
             "company": company,
         }
-    )
+    ))
     return {"result": str(result)}
 
 
@@ -79,5 +80,5 @@ async def delete_contact(contact_id: str, user_id: str =  DEFAULT_USER_ID) -> di
     """Delete a contact."""
     from src.sdk.tools_core.contacts import contacts_delete
 
-    result = contacts_delete.invoke({"user_id": user_id, "contact_id": contact_id})
+    result = tool_text(contacts_delete.invoke({"user_id": user_id, "contact_id": contact_id}))
     return {"result": str(result)}
