@@ -95,6 +95,15 @@ interference. Regression: 2026-08-29 session. Track: split CI jobs per suite
 or fix ordering at conftest level. Also: 20 pre-existing ruff E-warnings in
 unrelated HTTP router files (E402 import placement) — cleanup batch.
 
+Second observed instance (2026-09-19, while verifying the false-success-class
+fix): `tests/config/test_user_settings_store.py::test_omitted_fallback_ignores_uninitialized_settings_and_hostile_cwd`
+failed once in a full-suite invocation (`assert settings_module._config is None`
+— the settings singleton was repopulated) and passed on an immediate re-run with
+the same commit and command. It passes in isolation and with `tests/config/`
+alone. Neither the module under test nor the config suite calls `get_settings()`,
+so the repopulation comes from elsewhere in the process — consistent with the
+ordering interference above rather than a defect in the test.
+
 ## 4. M4/M2 review residuals (2026-09-01) ⏳ tracked
 
 From the governance re-review (db771be/0816d3b) — merge approved with these:
