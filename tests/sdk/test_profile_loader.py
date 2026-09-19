@@ -171,14 +171,20 @@ def loop_factory_patched(monkeypatch, tmp_path):
     )
 
     class FakeIndex:
+        def __init__(self):
+            self._names: set[str] = set()
+
         def count(self):
-            return 0
+            return len(self._names)
 
         def clear(self):
-            pass
+            self._names.clear()
 
-        def index_tool(self, *a, **kw):
-            pass
+        def index_tool(self, td, *a, **kw):
+            self._names.add(td.name)
+
+        def list_all_names(self):
+            return sorted(self._names)
 
     monkeypatch.setattr(
         "src.sdk.tool_index.get_or_create_index",

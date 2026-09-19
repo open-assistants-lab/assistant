@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.sdk.capabilities import load_user_capabilities, resource_enabled
+from src.sdk.capabilities import load_user_capabilities
 from src.sdk.deployment_tools import filter_denied_native_tools
 from src.sdk.loop import get_current_agent_loop
 from src.sdk.tool_index import (
@@ -11,7 +11,6 @@ from src.sdk.tool_index import (
     save_source_hashes,
 )
 from src.sdk.tools import tool
-from src.sdk.tools_custom import is_core_tool
 from src.storage.paths import DEFAULT_USER_ID
 
 
@@ -66,59 +65,46 @@ def tool_reload() -> str:
         }
         loop._tool_index.clear()
 
-        from src.sdk.tools_custom import find_tool_file, get_custom_tools, load_tool_meta
+        from src.config import get_settings
+        from src.sdk.native_tools import get_native_tools
+        from src.sdk.tool_index import desired_index_rows, index_rows
+        from src.sdk.tools_custom import get_custom_tools
 
-        custom_count = 0
-        current_managed_names: set[str] = set()
         user_id = loop.user_id or DEFAULT_USER_ID
         caps = load_user_capabilities(user_id)
-        from src.config import get_settings
-
         settings = get_settings()
-
-        # Index non-core native tools. The reload clears the index, and a native
-        # row is the only route to a non-core native tool (the session runner
-        # registers only CORE_TOOL_NAMES eagerly and re-indexes only when the
-        # index is empty), so dropping them here made them permanently
-        # unresolvable — "Unknown tool" — with no repair path (#28). The
-        # catalogue is filtered the same way the runner filters it.
-        from src.sdk.native_tools import get_native_tools
-
-        native_count = 0
-        for td in filter_denied_native_tools(list(get_native_tools()), settings):
-            if not is_core_tool(td.name) and resource_enabled(caps, "tools", td.name):
-                loop._tool_index.index_tool(td, tool_type="native", namespace="native")
-                native_count += 1
-
-        # Index custom (TOOL.md) tools
-        for td in get_custom_tools(user_id=user_id, workspace_id=loop.workspace_id or "personal"):
-            if not is_core_tool(td.name) and resource_enabled(caps, "tools", td.name):
-                tool_file = find_tool_file(td.name, user_tools_dir, workspace_tools_dir)
-                reconstruct_data = {"command": "", "install": [], "tool_dir": ""}
-                if tool_file:
-                    meta = load_tool_meta(tool_file)
-                    if meta:
-                        reconstruct_data = {
-                            "command": meta.get("command", ""),
-                            "install": meta.get("install", []),
-                            "tool_dir": str(tool_file.parent),
-                        }
-                loop._tool_index.index_tool(td, tool_type="custom", namespace="custom", reconstruct=reconstruct_data)
-                current_managed_names.add(td.name)
-                custom_count += 1
-
-        # Index MCP tools from the bridge
         mcp_bridge = getattr(loop, "_mcp_bridge", None)
-        mcp_count = 0
-        if mcp_bridge:
-            for td in mcp_bridge.get_tool_definitions():
-                if not is_core_tool(td.name) and resource_enabled(caps, "tools", td.name):
-                    parts = td.name.split("__", 2)
-                    server_name = parts[1] if len(parts) == 3 else ""
-                    reconstruct = {"server_name": server_name, "mcp_tool_name": td.name}
-                    loop._tool_index.index_tool(td, tool_type="mcp", namespace=f"mcp__{server_name}", reconstruct=reconstruct)
-                    current_managed_names.add(td.name)
-                    mcp_count += 1
+
+        # Build from the same definition the session runner uses, so the two
+        # writers cannot disagree about which rows belong in the index (#28,
+        # #29). Clearing first means every desired row must be written here —
+        # including native ones, whose row is the only route to a non-core
+        # native tool.
+        rows = desired_index_rows(
+            native_tools=filter_denied_native_tools(list(get_native_tools()), settings),
+            custom_tools=get_custom_tools(
+                user_id=user_id, workspace_id=loop.workspace_id or "personal"
+            ),
+            mcp_tools=(
+                list(mcp_bridge.get_tool_definitions()) if mcp_bridge else []
+            ),
+            caps=caps,
+            user_id=user_id,
+            workspace_id=loop.workspace_id or "personal",
+        )
+        index_rows(loop._tool_index, rows)
+
+        current_managed_names: set[str] = set()
+        native_count = custom_count = mcp_count = 0
+        for row in rows:
+            if row.tool_type == "native":
+                native_count += 1
+            elif row.tool_type == "custom":
+                custom_count += 1
+                current_managed_names.add(row.name)
+            elif row.tool_type == "mcp":
+                mcp_count += 1
+                current_managed_names.add(row.name)
 
         current_hashes = compute_source_hashes(
             user_tools_dir, workspace_tools_dir, mcp_config,

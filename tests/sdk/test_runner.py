@@ -14,14 +14,26 @@ from src.storage.messages import Message as StoredMessage
 
 
 class _FakeIndex:
+    """Mirrors the ToolIndex methods the runner touches.
+
+    The runner re-indexes on row *presence*, not on a row count, so a double
+    that only implements `count()` cannot stand in for the real index.
+    """
+
+    def __init__(self):
+        self._names: set[str] = set()
+
     def count(self):
-        return 0
+        return len(self._names)
 
     def clear(self):
-        pass
+        self._names.clear()
 
-    def index_tool(self, *args, **kwargs):
-        pass
+    def index_tool(self, td, *args, **kwargs):
+        self._names.add(td.name)
+
+    def list_all_names(self):
+        return sorted(self._names)
 
 
 @pytest.fixture
@@ -585,6 +597,9 @@ async def test_create_sdk_loop_does_not_import_item_scopes(monkeypatch):
         def index_tool(self, *args, **kwargs):
             pass
 
+        def list_all_names(self):
+            return []
+
     monkeypatch.setattr(builtins, "__import__", blocked_import)
 
     with (
@@ -861,10 +876,13 @@ async def test_create_sdk_loop_excludes_disabled_tools_from_core_and_index(monke
             self.indexed = []
 
         def count(self):
-            return 0
+            return len(self.indexed)
 
         def index_tool(self, td, *args, **kwargs):
             self.indexed.append(td.name)
+
+        def list_all_names(self):
+            return list(self.indexed)
 
     fake_index = FakeIndex()
     (tmp_path / "capabilities.yaml").write_text(
@@ -933,10 +951,10 @@ async def test_create_sdk_loop_rebuilds_tool_index_when_capabilities_change(monk
             self.cleared = False
 
         def count(self):
-            # Simulates a persisted index that already has data — the runner
-            # should NOT clear it (get_or_create_index handles clearing when
-            # source hashes change). With count() > 0 the re-indexing loop
-            # is skipped, which is the fast path after the fix.
+            # Simulates a persisted index that already holds every expected
+            # row — the runner should NOT clear it (get_or_create_index
+            # handles clearing when source hashes change) and should not
+            # re-index, which is the fast path.
             return 1
 
         def clear(self):
@@ -944,6 +962,10 @@ async def test_create_sdk_loop_rebuilds_tool_index_when_capabilities_change(monk
 
         def index_tool(self, td, *args, **kwargs):
             self.indexed.append(td.name)
+
+        def list_all_names(self):
+            # Holds the one native tool this test seeds, so nothing is missing.
+            return ["demo_lookup"]
 
     fake_index = FakeIndex()
     monkeypatch.setattr("src.sdk.capabilities.user_capabilities_root", lambda user_id: tmp_path)
@@ -976,7 +998,7 @@ async def test_create_sdk_loop_rebuilds_tool_index_when_capabilities_change(monk
     # chromadb re-embedding of all tools on every new session. Clearing is
     # the responsibility of get_or_create_index when source hashes change.
     assert fake_index.cleared is False
-    # Since the index already had data (count() > 0), no re-indexing occurs.
+    # The index already holds every expected row, so nothing is re-indexed.
     assert fake_index.indexed == []
 
 

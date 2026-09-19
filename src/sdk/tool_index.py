@@ -5,7 +5,8 @@ import json
 import shlex
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,104 @@ from src.sdk.tools import ToolDefinition
 from src.storage.paths import DEFAULT_USER_ID
 
 _RECONSTRUCT_EMPTY = "{}"
+
+
+@dataclass(frozen=True)
+class IndexRow:
+    """One row the persisted tool index should contain."""
+
+    name: str
+    td: ToolDefinition
+    tool_type: str
+    namespace: str
+    reconstruct: dict[str, Any] | None = None
+
+
+def desired_index_rows(
+    *,
+    native_tools: Sequence[Any],
+    custom_tools: Sequence[Any],
+    mcp_tools: Sequence[Any],
+    caps: dict[str, Any],
+    user_id: str = DEFAULT_USER_ID,
+    workspace_id: str = "personal",
+) -> list[IndexRow]:
+    """Return the rows the index should hold for one user/workspace.
+
+    Single definition of the per-type indexing rules — which families are
+    indexed, what is skipped, and the provenance/reconstruct payloads — so the
+    completeness check and the indexing step cannot disagree. The runner and
+    tool_reload both build the index from this, because two hand-written copies
+    of these rules is what let tool_reload stop indexing native rows (#28) and
+    left rows unrecoverable (#29).
+
+    Callers pass catalogues they have already filtered for deployment policy;
+    capability filtering is applied here so a scope=none tool is not treated as
+    a missing row (which would re-index on every session while it is disabled).
+    """
+    from src.sdk.capabilities import resource_enabled
+    from src.sdk.tools_custom import find_tool_file, is_core_tool, load_tool_meta
+    from src.storage.paths import get_paths
+
+    paths = get_paths(user_id=user_id, workspace_id=workspace_id)
+    user_tools_dir = paths.user_tools_dir()
+    workspace_tools_dir = paths.workspace_tools_dir()
+
+    rows: list[IndexRow] = []
+
+    for td in native_tools:
+        if not is_core_tool(td.name) and resource_enabled(caps, "tools", td.name):
+            rows.append(IndexRow(td.name, td, "native", "native"))
+
+    for td in custom_tools:
+        if not is_core_tool(td.name) and resource_enabled(caps, "tools", td.name):
+            reconstruct_data = {"command": "", "install": [], "tool_dir": ""}
+            tool_file = find_tool_file(td.name, user_tools_dir, workspace_tools_dir)
+            if tool_file:
+                meta = load_tool_meta(tool_file)
+                if meta:
+                    reconstruct_data = {
+                        "command": meta.get("command", ""),
+                        "install": meta.get("install", []),
+                        "tool_dir": str(tool_file.parent),
+                    }
+            rows.append(IndexRow(td.name, td, "custom", "custom", reconstruct_data))
+
+    for td in mcp_tools:
+        if not is_core_tool(td.name) and resource_enabled(caps, "tools", td.name):
+            parts = td.name.split("__", 2)
+            server_name = parts[1] if len(parts) == 3 else ""
+            rows.append(
+                IndexRow(
+                    td.name,
+                    td,
+                    "mcp",
+                    f"mcp__{server_name}",
+                    {"server_name": server_name, "mcp_tool_name": td.name},
+                )
+            )
+
+    return rows
+
+
+def index_rows(idx: ToolIndex, rows: Sequence[IndexRow]) -> None:
+    """Upsert the desired rows (by unique name)."""
+    for row in rows:
+        idx.index_tool(
+            row.td,
+            tool_type=row.tool_type,
+            namespace=row.namespace,
+            reconstruct=row.reconstruct,
+        )
+
+
+def missing_index_rows(idx: ToolIndex, rows: Sequence[IndexRow]) -> set[str]:
+    """Names in `rows` that the persisted index does not hold.
+
+    Presence, not a row count: an index can be non-empty and still be missing
+    rows whose sources never changed (#29).
+    """
+    return {row.name for row in rows} - set(idx.list_all_names())
 
 
 def _rebuild_custom_function(
