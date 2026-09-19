@@ -1984,3 +1984,105 @@ class TestDoomLoopDetection:
         ctx.record_tool_call("shell_execute", '{"command": "date"}')
 
         assert ctx.doom_detected is False
+
+
+class TestDelegateFailureContract:
+    """A failed delegate() must say so, not return a success-looking string.
+
+    Issue #30: subagent_delegate's own catch-all was converted to return an
+    error result, but the coordinator catches these failures one layer down, so
+    the tool returned a plain string and governance receipted the run as
+    executed with is_error false.
+    """
+
+    @pytest.mark.asyncio
+    async def test_timeout_returns_an_error_result(self, monkeypatch, db, profile):
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.tools import ToolResult
+
+        coord = SubagentCoordinator("test_user", "personal")
+        monkeypatch.setattr(coord, "load_def", lambda name: profile)
+        monkeypatch.setattr("src.sdk.coordinator._subagent_enabled", lambda *a, **k: True)
+
+        async def fake_db():
+            return db
+
+        async def noop(*a, **k):
+            return None
+
+        async def slow(*a, **k):
+            raise TimeoutError("took too long")
+
+        monkeypatch.setattr(coord, "_get_db", fake_db)
+        monkeypatch.setattr(coord, "_register_active_context", noop)
+        monkeypatch.setattr(coord, "_run_loop", slow)
+
+        result = await coord.delegate("test_agent", "task", timeout_seconds=1)
+
+        assert isinstance(result, ToolResult), result
+        assert result.is_error is True, result
+        assert "Timeout" in result.content, result
+
+    @pytest.mark.asyncio
+    async def test_unexpected_error_returns_an_error_result(self, monkeypatch, db, profile):
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.tools import ToolResult
+
+        coord = SubagentCoordinator("test_user", "personal")
+        monkeypatch.setattr(coord, "load_def", lambda name: profile)
+        monkeypatch.setattr("src.sdk.coordinator._subagent_enabled", lambda *a, **k: True)
+
+        async def fake_db():
+            return db
+
+        async def noop(*a, **k):
+            return None
+
+        async def boom(*a, **k):
+            raise RuntimeError("provider exploded")
+
+        monkeypatch.setattr(coord, "_get_db", fake_db)
+        monkeypatch.setattr(coord, "_register_active_context", noop)
+        monkeypatch.setattr(coord, "_run_loop", boom)
+
+        result = await coord.delegate("test_agent", "task", timeout_seconds=1)
+
+        assert isinstance(result, ToolResult), result
+        assert result.is_error is True, result
+        assert "provider exploded" in result.content, result
+
+
+    @pytest.mark.asyncio
+    async def test_cancelled_completion_is_not_a_success(self, monkeypatch, db, profile):
+        """A run the queue records as CANCELLED must not read as a success."""
+        from types import SimpleNamespace
+
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.tools import ToolResult
+
+        coord = SubagentCoordinator("test_user", "personal")
+        monkeypatch.setattr(coord, "load_def", lambda name: profile)
+        monkeypatch.setattr("src.sdk.coordinator._subagent_enabled", lambda *a, **k: True)
+
+        async def fake_db():
+            return db
+
+        async def noop(*a, **k):
+            return None
+
+        async def finished(*a, **k):
+            return SimpleNamespace(output="work done")
+
+        async def not_completed(*a, **k):
+            return False
+
+        monkeypatch.setattr(coord, "_get_db", fake_db)
+        monkeypatch.setattr(coord, "_register_active_context", noop)
+        monkeypatch.setattr(coord, "_run_loop", finished)
+        monkeypatch.setattr(db, "set_completed", not_completed)
+
+        result = await coord.delegate("test_agent", "task", timeout_seconds=1)
+
+        assert isinstance(result, ToolResult), result
+        assert result.is_error is True, result
+        assert "Cancelled" in result.content, result

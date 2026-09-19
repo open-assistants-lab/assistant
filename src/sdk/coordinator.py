@@ -29,6 +29,7 @@ from src.sdk.subagent_models import (
     TaskStatus,
 )
 from src.sdk.subagent_work_queue import USER_LEVEL_WORKSPACE_ID, SubagentWorkQueueDB, get_work_queue
+from src.sdk.tools import ToolResult
 from src.storage import paths as _paths
 
 # Alias: used by callers (e.g. tests) that patch src.sdk.coordinator.get_paths
@@ -355,8 +356,12 @@ class SubagentCoordinator:
         task: str,
         parent_id: str | None = None,
         timeout_seconds: int | None = None,
-    ) -> str:
-        """Run a subagent synchronously and return the result string.
+    ) -> ToolResult | str:
+        """Run a subagent synchronously.
+
+        Returns the subagent's output text on success, or a
+        `ToolResult(is_error=True)` when the run was cancelled, timed out or
+        failed — the caller must not treat every return as success.
 
         Like invoke() but with agent-def validation and full middleware stack.
         Unlike start(), this blocks until the subagent completes.
@@ -396,26 +401,42 @@ class SubagentCoordinator:
             )
             completed = await db.set_completed(task_id, result)
             if not completed:
+                # The row was cancelled (or is no longer running) while the run
+                # finished, so the work_queue says CANCELLED: returning the
+                # output would claim a success the queue disagrees with.
                 await self._set_cancelled_if_requested(task_id, db)
+                return ToolResult(
+                    content="Cancelled: subagent was cancelled during execution.",
+                    is_error=True,
+                )
             return result.output
         except TaskCancelledError:
             await db.set_cancelled(task_id)
-            return "Cancelled: subagent was cancelled during execution."
+            return ToolResult(
+                content="Cancelled: subagent was cancelled during execution.",
+                is_error=True,
+            )
         except SubagentCancelledError:
             await db.set_cancelled(task_id)
-            return "Cancelled: subagent was cancelled during execution."
+            return ToolResult(
+                content="Cancelled: subagent was cancelled during execution.",
+                is_error=True,
+            )
         except TimeoutError:
             error = f"timeout after {effective_timeout}s"
             failed = await db.set_failed(task_id, error)
             if not failed:
                 await self._set_cancelled_if_requested(task_id, db)
-            return f"Timeout: subagent did not complete within {effective_timeout}s."
+            return ToolResult(
+                content=f"Timeout: subagent did not complete within {effective_timeout}s.",
+                is_error=True,
+            )
         except Exception as e:
             error = f"{type(e).__name__}: {e}"
             failed = await db.set_failed(task_id, error)
             if not failed:
                 await self._set_cancelled_if_requested(task_id, db)
-            return f"Error: {type(e).__name__}: {e}"
+            return ToolResult(content=f"Error: {type(e).__name__}: {e}", is_error=True)
         finally:
             _active.pop(task_id, None)
 

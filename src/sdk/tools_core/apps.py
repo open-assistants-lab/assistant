@@ -21,7 +21,7 @@ from hybriddb.embedding import hash_embedding as _hash_embedding
 from src.app_logging import get_logger
 from src.config import get_settings
 from src.sdk.messages import Message
-from src.sdk.tools import ToolAnnotations, tool
+from src.sdk.tools import ToolAnnotations, ToolResult, tool
 from src.storage.paths import DEFAULT_USER_ID, get_paths
 
 logger = get_logger()
@@ -154,7 +154,7 @@ def _delete_app(app_name: str, user_id: str) -> bool:
 
 
 @tool
-def app_create(name: str, tables: dict[str, dict[str, str]], user_id: str =  DEFAULT_USER_ID) -> str:
+def app_create(name: str, tables: dict[str, dict[str, str]], user_id: str =  DEFAULT_USER_ID) -> ToolResult | str:
     """Create a new app with one or more tables.
 
     Args:
@@ -189,14 +189,14 @@ def app_create(name: str, tables: dict[str, dict[str, str]], user_id: str =  DEF
         return f"App '{name}' created successfully.\n\nTables:\n" + "\n".join(tables_info)
     except Exception as e:
         logger.error("app_create.error", {"name": name, "error": str(e)}, user_id=user_id)
-        return f"Error creating app: {e}"
+        return ToolResult(content=f'Error creating app: {e}', is_error=True)
 
 
 app_create.annotations = ToolAnnotations(title="Create App", destructive=True)
 
 
 @tool
-def app_list(user_id: str =  DEFAULT_USER_ID) -> str:
+def app_list(user_id: str =  DEFAULT_USER_ID) -> ToolResult | str:
     """List all apps the user has created.
 
     Args:
@@ -214,14 +214,14 @@ def app_list(user_id: str =  DEFAULT_USER_ID) -> str:
         return "Apps:\n" + "\n".join(f"  - {app}" for app in sorted(apps))
     except Exception as e:
         logger.error("app_list.error", {"error": str(e)}, user_id=user_id)
-        return f"Error listing apps: {e}"
+        return ToolResult(content=f'Error listing apps: {e}', is_error=True)
 
 
 app_list.annotations = ToolAnnotations(title="List Apps", read_only=True, idempotent=True)
 
 
 @tool
-def app_schema(name: str, user_id: str =  DEFAULT_USER_ID) -> str:
+def app_schema(name: str, user_id: str =  DEFAULT_USER_ID) -> ToolResult | str:
     """Get schema for an app.
 
     Args:
@@ -248,14 +248,14 @@ def app_schema(name: str, user_id: str =  DEFAULT_USER_ID) -> str:
         return "\n".join(lines)
     except Exception as e:
         logger.error("app_schema.error", {"name": name, "error": str(e)}, user_id=user_id)
-        return f"Error getting schema: {e}"
+        return ToolResult(content=f'Error getting schema: {e}', is_error=True)
 
 
 app_schema.annotations = ToolAnnotations(title="App Schema", read_only=True, idempotent=True)
 
 
 @tool
-def app_delete(name: str, user_id: str =  DEFAULT_USER_ID) -> str:
+def app_delete(name: str, user_id: str =  DEFAULT_USER_ID) -> ToolResult | str:
     """Delete an app and all its data.
 
     Args:
@@ -271,14 +271,14 @@ def app_delete(name: str, user_id: str =  DEFAULT_USER_ID) -> str:
         return f"App '{name}' not found."
     except Exception as e:
         logger.error("app_delete.error", {"name": name, "error": str(e)}, user_id=user_id)
-        return f"Error deleting app: {e}"
+        return ToolResult(content=f'Error deleting app: {e}', is_error=True)
 
 
 app_delete.annotations = ToolAnnotations(title="Delete App", destructive=True)
 
 
 @tool
-def app_insert(app: str, table: str, data: dict[str, Any], user_id: str =  DEFAULT_USER_ID) -> str:
+def app_insert(app: str, table: str, data: dict[str, Any], user_id: str =  DEFAULT_USER_ID) -> ToolResult | str:
     """Insert a row into a table.
 
     Args:
@@ -298,7 +298,7 @@ def app_insert(app: str, table: str, data: dict[str, Any], user_id: str =  DEFAU
         logger.error(
             "app_insert.error", {"app": app, "table": table, "error": str(e)}, user_id=user_id
         )
-        return f"Error inserting data: {e}"
+        return ToolResult(content=f'Error inserting data: {e}', is_error=True)
 
 
 app_insert.annotations = ToolAnnotations(title="Insert App Row")
@@ -307,7 +307,7 @@ app_insert.annotations = ToolAnnotations(title="Insert App Row")
 @tool
 def app_update(
     app: str, table: str, id: int, data: dict[str, Any], user_id: str =  DEFAULT_USER_ID
-) -> str:
+) -> ToolResult | str:
     """Update a row by ID.
 
     Args:
@@ -331,14 +331,14 @@ def app_update(
             {"app": app, "table": table, "id": id, "error": str(e)},
             user_id=user_id,
         )
-        return f"Error updating data: {e}"
+        return ToolResult(content=f'Error updating data: {e}', is_error=True)
 
 
 app_update.annotations = ToolAnnotations(title="Update App Row")
 
 
 @tool
-def app_delete_row(app: str, table: str, id: int, user_id: str =  DEFAULT_USER_ID) -> str:
+def app_delete_row(app: str, table: str, id: int, user_id: str =  DEFAULT_USER_ID) -> ToolResult | str:
     """Delete a row by ID.
 
     Args:
@@ -361,7 +361,7 @@ def app_delete_row(app: str, table: str, id: int, user_id: str =  DEFAULT_USER_I
             {"app": app, "table": table, "id": id, "error": str(e)},
             user_id=user_id,
         )
-        return f"Error deleting data: {e}"
+        return ToolResult(content=f'Error deleting data: {e}', is_error=True)
 
 
 app_delete_row.annotations = ToolAnnotations(title="Delete App Row", destructive=True)
@@ -375,7 +375,7 @@ def app_column_add(
     col_type: str,
     enable_search: bool = True,
     user_id: str =  DEFAULT_USER_ID,
-) -> str:
+) -> ToolResult | str:
     """Add a column to a table.
 
     Args:
@@ -400,14 +400,14 @@ def app_column_add(
             {"app": app, "table": table, "column": column, "error": str(e)},
             user_id=user_id,
         )
-        return f"Error adding column: {e}"
+        return ToolResult(content=f'Error adding column: {e}', is_error=True)
 
 
 app_column_add.annotations = ToolAnnotations(title="Add App Column")
 
 
 @tool
-def app_column_delete(app: str, table: str, column: str, user_id: str =  DEFAULT_USER_ID) -> str:
+def app_column_delete(app: str, table: str, column: str, user_id: str =  DEFAULT_USER_ID) -> ToolResult | str:
     """Delete a column from a table.
 
     Args:
@@ -429,7 +429,7 @@ def app_column_delete(app: str, table: str, column: str, user_id: str =  DEFAULT
             {"app": app, "table": table, "column": column, "error": str(e)},
             user_id=user_id,
         )
-        return f"Error deleting column: {e}"
+        return ToolResult(content=f'Error deleting column: {e}', is_error=True)
 
 
 app_column_delete.annotations = ToolAnnotations(title="Delete App Column", destructive=True)
@@ -438,7 +438,7 @@ app_column_delete.annotations = ToolAnnotations(title="Delete App Column", destr
 @tool
 def app_column_rename(
     app: str, table: str, old_name: str, new_name: str, user_id: str =  DEFAULT_USER_ID
-) -> str:
+) -> ToolResult | str:
     """Rename a column in a table.
 
     Args:
@@ -467,7 +467,7 @@ def app_column_rename(
             },
             user_id=user_id,
         )
-        return f"Error renaming column: {e}"
+        return ToolResult(content=f'Error renaming column: {e}', is_error=True)
 
 
 app_column_rename.annotations = ToolAnnotations(title="Rename App Column")
@@ -535,7 +535,7 @@ def _convert_date_in_query(query: str) -> str:
 
 
 @tool
-def app_query(app: str, query: str, user_id: str =  DEFAULT_USER_ID) -> str:
+def app_query(app: str, query: str, user_id: str =  DEFAULT_USER_ID) -> ToolResult | str:
     """Query app data with SQL.
 
     Args:
@@ -575,7 +575,7 @@ def app_query(app: str, query: str, user_id: str =  DEFAULT_USER_ID) -> str:
         logger.error(
             "app_query.error", {"app": app, "query": query, "error": str(e)}, user_id=user_id
         )
-        return f"Error querying app: {e}"
+        return ToolResult(content=f'Error querying app: {e}', is_error=True)
 
 
 app_query.annotations = ToolAnnotations(title="Query App Data", open_world=True)
@@ -584,7 +584,7 @@ app_query.annotations = ToolAnnotations(title="Query App Data", open_world=True)
 @tool
 def app_search_fts(
     app: str, table: str, column: str, query: str, limit: int = 10, user_id: str =  DEFAULT_USER_ID
-) -> str:
+) -> ToolResult | str:
     """Search app data using keyword search (FTS5).
 
     Only works on TEXT columns that have been indexed for search.
@@ -637,7 +637,7 @@ def app_search_fts(
             {"app": app, "table": table, "column": column, "query": query, "error": str(e)},
             user_id=user_id,
         )
-        return f"Error searching: {e}"
+        return ToolResult(content=f'Error searching: {e}', is_error=True)
 
 
 app_search_fts.annotations = ToolAnnotations(
@@ -653,7 +653,7 @@ def app_import_csv(
     app_name: str,
     table: str | None = None,
     user_id: str = DEFAULT_USER_ID,
-) -> str:
+) -> ToolResult | str:
     """Import a CSV or XLSX file into app tables.
 
     Excel formula cells are stored raw (never evaluated). Re-importing the
@@ -727,14 +727,14 @@ def app_import_csv(
         logger.error(
             "app_import_csv.error", {"path": path, "error": str(e)}, user_id=user_id
         )
-        return f"Error importing file: {e}"
+        return ToolResult(content=f'Error importing file: {e}', is_error=True)
 
 
 app_import_csv.annotations = ToolAnnotations(title="Import CSV/XLSX", destructive=True)
 
 
 @tool
-async def app_summarize(app: str, user_id: str = DEFAULT_USER_ID) -> str:
+async def app_summarize(app: str, user_id: str = DEFAULT_USER_ID) -> ToolResult | str:
     """One-line (<=200 char) LLM description of what a workbook contains.
 
     Args:
@@ -766,7 +766,7 @@ async def app_summarize(app: str, user_id: str = DEFAULT_USER_ID) -> str:
         return text[:200] or context[:200]
     except Exception as e:
         logger.error("app_summarize.error", {"app": app, "error": str(e)}, user_id=user_id)
-        return f"Error summarizing app: {e}"
+        return ToolResult(content=f'Error summarizing app: {e}', is_error=True)
 
 
 app_summarize.annotations = ToolAnnotations(title="Summarize Workbook", read_only=True)

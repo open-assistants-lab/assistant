@@ -3,6 +3,8 @@ import inspect
 
 import pytest
 
+from src.sdk.tools import ToolResult
+
 
 def test_new_runtime_tools_registered():
     from src.sdk.native_tools import get_native_tools
@@ -395,15 +397,18 @@ async def test_subagent_delegate_timeout(monkeypatch):
     monkeypatch.setattr(
         mod, "get_coordinator", lambda user_id, workspace_id: FakeCoordinator(), raising=False
     )
-    result = await mod.subagent_delegate.ainvoke(
-        {
-            "agent_name": "slow",
-            "task": "do work",
-            "user_id": "u",
-            "timeout_seconds": 1,
-        }
+    result = ToolResult.from_raw(
+        await mod.subagent_delegate.ainvoke(
+            {
+                "agent_name": "slow",
+                "task": "do work",
+                "user_id": "u",
+                "timeout_seconds": 1,
+            }
+        )
     )
-    assert "Timeout" in result
+    assert result.is_error is True
+    assert "Timeout" in result.content
 
 
 def test_subagent_delegate_requires_hitl_not_parallel_safe():

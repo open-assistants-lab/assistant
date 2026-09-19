@@ -70,7 +70,10 @@ class ToolAnnotations(BaseModel):
     # opts out of the cap. Zero, negative, boolean, non-finite, and
     # non-numeric declarations are rejected rather than silently changing
     # the cap's meaning.
-    timeout_seconds: float | str | None = DEFAULT_COMMAND_TIMEOUT_SECONDS
+    # Declared strictly: the before-validator below normalises the string
+    # forms ('none', '42') before the field is populated, so no str ever
+    # reaches this value.
+    timeout_seconds: float | None = DEFAULT_COMMAND_TIMEOUT_SECONDS
 
     # Assignment validation is required: TOOL.md annotations and lazy-load
     # reconstruction set this after construction, and an unvalidated

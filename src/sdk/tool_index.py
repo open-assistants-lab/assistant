@@ -13,7 +13,7 @@ from typing import Any
 from hybriddb import HybridDB
 
 from src.sdk.tool_results import CommandKilledError
-from src.sdk.tools import ToolDefinition
+from src.sdk.tools import ToolDefinition, ToolResult
 from src.storage.paths import DEFAULT_USER_ID
 
 _RECONSTRUCT_EMPTY = "{}"
@@ -127,7 +127,7 @@ def _rebuild_custom_function(
     tool_dir_str = reconstruct.get("tool_dir", "")
     command_timeout = td.annotations.timeout_seconds
 
-    def fn(**kwargs: Any) -> str:
+    def fn(**kwargs: Any) -> ToolResult | str:
         from src.sdk.sandbox import custom_command_tools_allowed
 
         if not command_template.strip():
@@ -202,7 +202,7 @@ def _rebuild_custom_function(
             # a command that never finished (issue #25).
             raise
         except Exception as e:
-            return f"Command error: {e}"
+            return ToolResult(content=f"Command error: {e}", is_error=True)
 
     td.function = fn
     return td

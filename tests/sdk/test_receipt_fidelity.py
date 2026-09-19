@@ -272,3 +272,45 @@ def test_custom_command_tool_raises_on_a_signal_kill(tmp_path, mode):
         with pytest.raises(CommandKilledError) as exc:
             td.function()
     assert exc.value.signal_number == 9, exc.value
+
+
+def test_governed_catch_all_failure_is_receipted_as_a_failure(monkeypatch):
+    """End-to-end for issue #30: a crash inside a tool must not look clean.
+
+    The tool's own catch-all returns ToolResult(is_error=True); governance's
+    #26 branch propagates that, so the receipt says `is_error: true` rather
+    than claiming a completed run. `executed: true` together with
+    `is_error: true` means: the approved call was invoked, and it reported
+    failure.
+    """
+    import src.sdk.tools_core.filesystem as fs
+
+    monkeypatch.setattr(
+        fs, "_resolve_path", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+
+    def call_files_read(**_kwargs):
+        return fs.files_read.function(path="x", user_id=USER)
+
+    result = _run_governed(
+        monkeypatch,
+        ToolDefinition(name="files_read", description="d", function=call_files_read),
+    )
+
+    assert result["is_error"] is True, result
+    assert result["structured_content"]["executed"] is True, result
+    assert "Error" in result["content"], result
+
+
+def test_a_tool_catch_all_flags_the_failure(monkeypatch):
+    """A tool-body catch-all returns an error result, not a bare string."""
+    import src.sdk.tools_core.filesystem as fs
+
+    # Force the tool body's broad handler: an unexpected error inside the tool.
+    monkeypatch.setattr(fs, "_resolve_path", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    out = fs.files_read.function(path="x", user_id=USER)
+
+    assert isinstance(out, ToolResult), out
+    assert out.is_error is True, out
+    assert "Error" in out.content, out

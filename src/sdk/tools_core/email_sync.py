@@ -10,7 +10,7 @@ from sqlalchemy import text
 
 from src.app_logging import get_logger
 from src.config import get_settings
-from src.sdk.tools import tool
+from src.sdk.tools import ToolResult, tool
 from src.sdk.tools_core.email_db import get_engine as _get_engine
 from src.sdk.tools_core.email_db import parse_email_flags
 from src.storage.paths import DEFAULT_USER_ID
@@ -573,7 +573,7 @@ def email_sync(
     mode: str = "new",
     folder: str = "INBOX",
     user_id: str = "",
-) -> str:
+) -> ToolResult | str:
     """Manually sync emails for an account.
 
     Args:
@@ -617,4 +617,4 @@ def email_sync(
             count = asyncio.run(_sync())
         return f"Synced {count} emails ({mode} mode) for {account_name}."
     except Exception as e:
-        return f"Error syncing: {e}"
+        return ToolResult(content=f'Error syncing: {e}', is_error=True)

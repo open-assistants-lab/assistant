@@ -18,7 +18,7 @@ from typing import Any
 
 from src.app_logging import get_logger
 from src.sdk.capabilities import load_user_capabilities, resource_enabled
-from src.sdk.tools import ToolAnnotations, tool
+from src.sdk.tools import ToolAnnotations, ToolResult, tool
 from src.skills.registry import get_skill_registry
 from src.storage.paths import DEFAULT_USER_ID
 
@@ -45,7 +45,7 @@ def skills_load(
     name: str,
     user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
-) -> str:
+) -> ToolResult | str:
     """Load a skill's full SKILL.md content into context.
 
     Call this when the current task matches a skill's description from the
@@ -62,7 +62,7 @@ def skills_load(
     try:
         registry = _get_registry(user_id, workspace_id)
     except Exception as exc:
-        return str(exc)
+        return ToolResult(content=str(exc), is_error=True)
 
     caps = _load_user_caps(user_id)
     skill = registry.get_skill(name)
@@ -104,7 +104,7 @@ skills_load.annotations = ToolAnnotations(
 def skills_reload(
     user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
-) -> str:
+) -> ToolResult | str:
     """Reload the skill registry after creating, editing, or deleting SKILL.md files.
 
     Call this after using files_write, files_edit, or files_delete to create,
@@ -122,7 +122,7 @@ def skills_reload(
         registry = _get_registry(user_id, workspace_id)
         registry.reload()
     except Exception as exc:
-        return str(exc)
+        return ToolResult(content=str(exc), is_error=True)
 
     caps = _load_user_caps(user_id)
     skills = [s for s in registry.get_all_skills() if _skill_enabled(caps, s.get("name", ""))]

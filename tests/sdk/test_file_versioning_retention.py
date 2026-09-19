@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from src.sdk.tools import ToolResult
 from src.sdk.tools_core import file_versioning as fv
 from src.storage.paths import DataPaths
 
@@ -143,19 +144,26 @@ class TestTraversalGuards:
         victim = _user_root(isolated) / "junk-dir"
         victim.mkdir(parents=True)
         (victim / "keep.txt").write_text("x", encoding="utf-8")
-        result = fv.files_versions_delete.function(  # type: ignore[union-attr]
-            path="../junk-dir", version=None, user_id="u1"
+        result = ToolResult.from_raw(
+            fv.files_versions_delete.function(  # type: ignore[union-attr]
+                path="../junk-dir", version=None, user_id="u1"
+            )
         )
-        assert "Error:" in result
+        # A refused deletion is a failure (issue #30), not a successful run.
+        assert result.is_error is True
+        assert "Error:" in result.content
         assert victim.exists()
 
     def test_list_traversal_path_returns_error_not_listing(self, isolated):
         outside = isolated / "outside"
         (outside / ".versions").mkdir(parents=True)
         (outside / ".versions" / "secret.txt").write_text("s", encoding="utf-8")
-        result = fv.files_versions_list.function(path="../outside/x", user_id="default_user")  # type: ignore[union-attr]
-        assert "Error:" in result
-        assert "secret" not in result
+        result = ToolResult.from_raw(
+            fv.files_versions_list.function(path="../outside/x", user_id="default_user")  # type: ignore[union-attr]
+        )
+        assert result.is_error is True
+        assert "Error:" in result.content
+        assert "secret" not in result.content
 
     def test_restore_valid_version_still_works(self, isolated):
         root = _user_root(isolated) / ".versions"

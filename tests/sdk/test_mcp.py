@@ -140,3 +140,42 @@ async def test_mcp_reload_registers_unconfigured_destructive_mcp_tool(monkeypatc
 
     assert "1 MCP tools registered" in result
     assert loop.registered == ["mcp__fs__delete"]
+
+
+class FailingBridge(FakeBridge):
+    """Discovery fails after the session's mcp__* tools were unregistered."""
+
+    async def discover(self):
+        raise RuntimeError("server handshake failed")
+
+
+async def test_mcp_reload_failure_is_reported_not_swallowed(monkeypatch):
+    """Issue #30: a failed reload must not report a clean success.
+
+    By the time discover() runs, the session's mcp__* tools have already been
+    unregistered, so falling through to a success string claimed a reload that
+    silently cost the session its MCP tools.
+    """
+    from src.sdk import runner
+    from src.sdk.loop import _current_agent_loop
+    from src.sdk.tools import ToolResult
+    from src.sdk.tools_core.mcp import mcp_reload
+
+    loop = FakeLoop()
+    runner._user_loops.clear()
+    runner.register_user_loop("u", loop, session_id="chat-1")
+    token = _current_agent_loop.set(loop)
+
+    try:
+        with (
+            patch("src.sdk.tools_core.mcp_manager.get_mcp_manager", return_value=FakeManager()),
+            patch("src.sdk.tools_core.mcp_bridge.MCPToolBridge", FailingBridge),
+        ):
+            result = await mcp_reload.ainvoke({"user_id": "u"})
+    finally:
+        _current_agent_loop.reset(token)
+
+    assert isinstance(result, ToolResult), result
+    assert result.is_error is True, result
+    assert "MCP reload failed" in result.content, result
+    assert "handshake" in result.content, result

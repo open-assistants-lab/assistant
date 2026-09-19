@@ -104,7 +104,10 @@ def append_draft(
         except Exception:  # pragma: no cover - best effort teardown
             pass
 
-from src.sdk.tools import tool  # noqa: E402  (tool import after helpers keeps module import-light)
+from src.sdk.tools import (  # noqa: E402  (tool import after helpers keeps module import-light)
+    ToolResult,
+    tool,
+)
 
 
 @tool
@@ -114,7 +117,7 @@ def email_draft(
     subject: str,
     body: str,
     user_id: str = "",
-) -> str:
+) -> ToolResult | str:
     """Draft an email into the user's drafts folder (NEVER sends).
 
     Args:
@@ -153,6 +156,6 @@ def email_draft(
             {"error_type": type(e).__name__},
             user_id=user_id,
         )
-        return f"Error: could not reach the drafts folder — {type(e).__name__}"
+        return ToolResult(content=f'Error: could not reach the drafts folder — {type(e).__name__}', is_error=True)
 
     return json.dumps(handle)

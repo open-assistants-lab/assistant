@@ -88,7 +88,10 @@ annotations:
 A command killed at the cap **fails** — governance records `executed: false` with
 `error: "timed_out"` and an `elapsed` detail string (for example
 `cap reached after 148.3s (limit 300s)`), so a killed run is never reported as successful
-for this tool. A command killed by a *signal* (a resource limit, for example) fails
+for this tool. A tool that ran and reported a failure of its own — a refused
+path, a crash — is receipted `executed: true` with `is_error: true`: the call was
+invoked, and it reported failure. `executed: false` means it never completed (a
+timeout or a kill). A command killed by a *signal* (a resource limit, for example) fails
 the same way, with `error: "killed"` and the signal number. The declared
 `timeout_seconds` *is* the wrapper's cap; there is no
 second limit layered on top. Values of `0`, negative numbers, booleans, and

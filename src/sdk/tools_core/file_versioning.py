@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from src.app_logging import get_logger
-from src.sdk.tools import ToolAnnotations, tool
+from src.sdk.tools import ToolAnnotations, ToolResult, tool
 from src.storage.paths import DEFAULT_USER_ID, get_paths
 
 logger = get_logger()
@@ -89,7 +89,7 @@ def capture_version(user_id: str, file_path: str, new_content: str, workspace_id
 
 
 @tool
-def files_versions_list(path: str, user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> str:
+def files_versions_list(path: str, user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> ToolResult | str:
     """List all versions of a file.
 
     Args:
@@ -119,7 +119,7 @@ def files_versions_list(path: str, user_id: str =  DEFAULT_USER_ID, workspace_id
         return "\n".join(result)
     except Exception as e:
         logger.error("versions_list.error", {"path": path, "error": str(e)}, user_id=user_id)
-        return f"Error: {e}"
+        return ToolResult(content=f'Error: {e}', is_error=True)
 
 
 files_versions_list.annotations = ToolAnnotations(
@@ -128,7 +128,7 @@ files_versions_list.annotations = ToolAnnotations(
 
 
 @tool
-def files_versions_restore(path: str, version: str, user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> str:
+def files_versions_restore(path: str, version: str, user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> ToolResult | str:
     """Restore a file to a specific version.
 
     Args:
@@ -163,14 +163,14 @@ def files_versions_restore(path: str, version: str, user_id: str =  DEFAULT_USER
             {"path": path, "version": version, "error": str(e)},
             user_id=user_id,
         )
-        return f"Error: {e}"
+        return ToolResult(content=f'Error: {e}', is_error=True)
 
 
 files_versions_restore.annotations = ToolAnnotations(title="Restore File Version", destructive=True)
 
 
 @tool
-def files_versions_delete(path: str, version: str | None = None, user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> str:
+def files_versions_delete(path: str, version: str | None = None, user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> ToolResult | str:
     """Delete a specific version or all versions of a file.
 
     Args:
@@ -206,14 +206,14 @@ def files_versions_delete(path: str, version: str | None = None, user_id: str = 
         return f"Deleted all versions of {path}"
     except Exception as e:
         logger.error("versions_delete.error", {"path": path, "error": str(e)}, user_id=user_id)
-        return f"Error: {e}"
+        return ToolResult(content=f'Error: {e}', is_error=True)
 
 
 files_versions_delete.annotations = ToolAnnotations(title="Delete File Version", destructive=True)
 
 
 @tool
-def files_versions_clean(user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> str:
+def files_versions_clean(user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> ToolResult | str:
     """Clean up old versions based on retention policy.
 
     Daily: keep all for 7 days
@@ -288,7 +288,7 @@ def files_versions_clean(user_id: str =  DEFAULT_USER_ID, workspace_id: str = "p
         return f"Cleaned up {deleted_count} old versions"
     except Exception as e:
         logger.error("versions_clean.error", {"error": str(e)}, user_id=user_id)
-        return f"Error: {e}"
+        return ToolResult(content=f'Error: {e}', is_error=True)
 
 
 files_versions_clean.annotations = ToolAnnotations(title="Clean Old Versions", destructive=True)

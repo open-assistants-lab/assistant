@@ -10,7 +10,7 @@ from src.sdk.tool_index import (
     compute_source_hashes,
     save_source_hashes,
 )
-from src.sdk.tools import tool
+from src.sdk.tools import ToolResult, tool
 from src.storage.paths import DEFAULT_USER_ID
 
 
@@ -25,7 +25,7 @@ def _scan_custom_tool_names(tools_dir: Path) -> set[str]:
 
 
 @tool
-def tool_reload() -> str:
+def tool_reload() -> ToolResult | str:
     """Reload and re-index all tools from current sources. Use after creating, editing, or deleting a TOOL.md file.
 
     MCP servers must be reconnected via `mcp_reload()` first — this only re-indexes
@@ -129,4 +129,4 @@ def tool_reload() -> str:
             lines.append("  No changes detected.")
         return "\n".join(lines)
     except Exception as e:
-        return f"Error rebuilding tool index: {e}"
+        return ToolResult(content=f'Error rebuilding tool index: {e}', is_error=True)
