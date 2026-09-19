@@ -80,7 +80,8 @@ def test_governed_tool_result_error_is_receipted_as_failed(monkeypatch):
     assert result["is_error"] is True, result
     assert result["content"] == "real failure message", result
     assert result["structured_content"]["reason"] == "upstream", result
-    assert "is_error" not in result["structured_content"] or True  # provenance merged below
+    assert result["structured_content"]["executed"] is True, result
+    assert result["structured_content"]["tool"] == "probe", result
 
 
 def test_governed_tool_result_content_is_not_stringified(monkeypatch):
@@ -169,7 +170,6 @@ def test_native_tool_raises_on_a_signal_kill(tool_name, tmp_path, monkeypatch):
 
     if tool_name == "shell_execute":
         monkeypatch.setattr(shell, "_get_root_path", lambda *a, **k: tmp_path)
-        monkeypatch.setattr(shell, "get_sandbox_backend", lambda: backend, raising=False)
         monkeypatch.setattr("src.sdk.sandbox.get_sandbox_backend", lambda: backend)
         td, args = shell.shell_execute, {"command": "echo hi", "user_id": USER}
     else:
@@ -199,3 +199,48 @@ def test_governed_signal_kill_is_not_receipted_as_executed(monkeypatch):
     assert result["structured_content"]["error"] == "killed", result
     assert result["is_error"] is True, result
     assert "killed" in result["content"].lower(), result
+
+
+def test_cli_adapter_raises_on_a_signal_kill(tmp_path, monkeypatch):
+    """The adapter is one of the three paths #25 names."""
+    from src.sdk.tools_core.cli_adapter import CLIToolAdapter
+
+    class _CLI(CLIToolAdapter):
+        cli_name = "firecrawl"
+        install_hint = "npm i -g firecrawl"
+
+    adapter = _CLI()
+    monkeypatch.setattr(_CLI, "is_available", lambda self: True)
+    killed = SandboxResult(exit_code=-9, stdout="", stderr="", signalled=True)
+    monkeypatch.setattr(
+        "src.sdk.sandbox.get_sandbox_backend",
+        lambda: type("B", (), {"run": lambda *a, **k: killed})(),
+    )
+
+    with pytest.raises(CommandKilledError) as exc:
+        adapter.run(["scrape", "https://example.com"])
+    assert exc.value.signal_number == 9, exc.value
+    # The label stays minimized: argv can carry secrets (review P2-1 on #24).
+    assert exc.value.command == "firecrawl scrape", exc.value
+
+
+def test_custom_command_tool_raises_on_a_signal_kill(tmp_path):
+    """The custom TOOL.md seam must not return a kill as a failed exit string.
+
+    It calls subprocess directly, so a negative returncode is a real signal —
+    the sandbox's synthetic -1 for its own timeout is why the seam there needs
+    an explicit flag and this one does not.
+    """
+    import subprocess as sp
+
+    from src.sdk.tool_index import _rebuild_custom_function
+
+    td = _rebuild_custom_function(
+        ToolDefinition(name="killed_tool", description="d"),
+        {"command": "echo hi", "install": [], "tool_dir": ""},
+    )
+    killed = sp.CompletedProcess(["echo", "hi"], returncode=-9, stdout="partial", stderr="")
+    with patch("subprocess.run", side_effect=[sp.CompletedProcess([], 0, "", ""), killed]):
+        with pytest.raises(CommandKilledError) as exc:
+            td.function()
+    assert exc.value.signal_number == 9, exc.value

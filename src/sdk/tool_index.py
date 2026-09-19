@@ -12,6 +12,7 @@ from typing import Any
 
 from hybriddb import HybridDB
 
+from src.sdk.tool_results import CommandKilledError
 from src.sdk.tools import ToolDefinition
 from src.storage.paths import DEFAULT_USER_ID
 
@@ -171,6 +172,21 @@ def _rebuild_custom_function(
                 text=True,
             )
             output = result.stdout + result.stderr
+            if result.returncode < 0:
+                # Issue #25: killed by a signal (RLIMIT_AS/CPU/NPROC/FSIZE
+                # or another). Here returncode is the OS status directly,
+                # so a negative value is a real signal — unlike the sandbox
+                # seam, which also reports a synthetic -1 for its own
+                # timeout and therefore needs an explicit flag. Returning
+                # the partial output made governance record executed: true
+                # for a command that never finished.
+                from src.sdk.tool_results import raise_command_killed
+
+                raise_command_killed(
+                    " ".join(rendered.split()),
+                    -result.returncode,
+                    time.monotonic() - started,
+                )
             if result.returncode != 0:
                 return f"Command failed (exit {result.returncode}):\n{output[:2000]}"
             from src.sdk.tool_results import format_output
@@ -180,6 +196,11 @@ def _rebuild_custom_function(
             from src.sdk.tool_results import raise_command_timeout
 
             raise_command_timeout(rendered, command_timeout, started)
+        except CommandKilledError:
+            # A signal kill must propagate: the catch-all below would turn it
+            # back into a string and governance would record executed: true for
+            # a command that never finished (issue #25).
+            raise
         except Exception as e:
             return f"Command error: {e}"
 

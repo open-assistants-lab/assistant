@@ -470,6 +470,41 @@ class TestSessionLogParity:
         assert real.data.tool_call_id == "call_9"  # same call pairing
         assert real.data.status == "completed"
 
+    def test_execute_logs_failed_status_for_tool_result_error(
+        self, svc, tmp_path, monkeypatch
+    ):
+        """#26: a tool that ran and failed must be logged as failed, not completed."""
+        import asyncio
+
+        import src.sdk.governance as gov
+        from src.sdk.session_events import SessionEventStore
+        from src.sdk.tools import ToolResult
+
+        monkeypatch.setattr(gov, "governance_enabled", lambda: True)
+        monkeypatch.setattr(gov, "session_log_enabled", lambda: True)
+        store = SessionEventStore(str(tmp_path / "root" / "events.db"))
+        monkeypatch.setattr(gov, "get_session_event_store", lambda user_id: store)
+
+        pid = svc.create_pending(
+            "u1", "gated_tool", {"x": "1"}, tier="explicit", session_id="sess-err",
+        )
+        assert svc.approve("u1", pid) is True
+
+        class FakeTD:
+            name = "gated_tool"
+
+            async def ainvoke(self, arguments):
+                return ToolResult(content="upstream refused", is_error=True)
+
+        out = asyncio.run(svc.execute_approved("u1", pid, [FakeTD()]))
+        assert out["is_error"] is True, out
+        assert out["content"] == "upstream refused", out
+
+        results = [e for e in store.events("sess-err") if e.type == "tool_result"]
+        assert results, "no session-log event written"
+        assert results[-1].data.status == "failed", results[-1].data
+        assert "upstream refused" in str(results[-1].data.content)
+
     def test_no_session_id_no_log_write(self, svc, monkeypatch, tmp_path):
         import src.sdk.governance as gov
         from src.sdk.session_events import SessionEventStore
