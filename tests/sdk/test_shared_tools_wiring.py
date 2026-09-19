@@ -52,6 +52,11 @@ def isolate_root(tmp_path, monkeypatch) -> Path:
     root = tmp_path / "data"
     root.mkdir(exist_ok=True)
     monkeypatch.setattr(paths_mod.DataPaths, "root", property(lambda self: root))
+    # Capability writes resolve through the settings singleton, not DataPaths,
+    # so toggle_tool would otherwise persist into the checkout's data/ dir.
+    import src.sdk.capabilities as caps_mod
+
+    monkeypatch.setattr(caps_mod, "user_capabilities_root", lambda user_id: root / user_id)
     return root
 
 
@@ -309,7 +314,7 @@ async def test_disabling_then_re_enabling_a_native_tool_restores_it(session_env,
     from src.sdk.tools import ToolDefinition
 
     # A non-core native tool: CORE_TOOL_NAMES would be registered eagerly.
-    native = ToolDefinition(name="files_list", description="List files")
+    native = ToolDefinition(name="files_list", description="List files", function=lambda **_: "ok")
     monkeypatch.setattr(runner, "get_native_tools", lambda: [native])
     # The router resolves its registry through a function-local import.
     monkeypatch.setattr("src.sdk.native_tools.get_native_tools", lambda: [native])
@@ -332,6 +337,7 @@ async def test_disabling_then_re_enabling_a_native_tool_restores_it(session_env,
         ToolCall(id="1", name="files_list", arguments={})
     )
     assert resolved is not None, "disabled-then-enabled tool stayed unresolvable"
+    assert not resolved.is_error, resolved.content
 
 
 # --- defensive guard -------------------------------------------------------

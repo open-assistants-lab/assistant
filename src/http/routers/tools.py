@@ -1,6 +1,5 @@
 # mypy: disable-error-code="assignment"
 """Tools API — list tools with metadata, toggle user-level enabled state."""
-import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -13,8 +12,6 @@ from src.sdk.capabilities import (
 )
 from src.sdk.native_tools import get_tool_category
 from src.storage.paths import DEFAULT_USER_ID, _validate_path_id
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/tools", tags=["tools"])
 
