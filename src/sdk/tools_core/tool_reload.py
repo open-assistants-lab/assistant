@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.sdk.capabilities import load_user_capabilities, resource_enabled
+from src.sdk.deployment_tools import filter_denied_native_tools
 from src.sdk.loop import get_current_agent_loop
 from src.sdk.tool_index import (
     ToolIndex,
@@ -65,13 +66,31 @@ def tool_reload() -> str:
         }
         loop._tool_index.clear()
 
-        # Index custom (TOOL.md) tools
         from src.sdk.tools_custom import find_tool_file, get_custom_tools, load_tool_meta
 
         custom_count = 0
         current_managed_names: set[str] = set()
         user_id = loop.user_id or DEFAULT_USER_ID
         caps = load_user_capabilities(user_id)
+        from src.config import get_settings
+
+        settings = get_settings()
+
+        # Index non-core native tools. The reload clears the index, and a native
+        # row is the only route to a non-core native tool (the session runner
+        # registers only CORE_TOOL_NAMES eagerly and re-indexes only when the
+        # index is empty), so dropping them here made them permanently
+        # unresolvable — "Unknown tool" — with no repair path (#28). The
+        # catalogue is filtered the same way the runner filters it.
+        from src.sdk.native_tools import get_native_tools
+
+        native_count = 0
+        for td in filter_denied_native_tools(list(get_native_tools()), settings):
+            if not is_core_tool(td.name) and resource_enabled(caps, "tools", td.name):
+                loop._tool_index.index_tool(td, tool_type="native", namespace="native")
+                native_count += 1
+
+        # Index custom (TOOL.md) tools
         for td in get_custom_tools(user_id=user_id, workspace_id=loop.workspace_id or "personal"):
             if not is_core_tool(td.name) and resource_enabled(caps, "tools", td.name):
                 tool_file = find_tool_file(td.name, user_tools_dir, workspace_tools_dir)
@@ -115,7 +134,7 @@ def tool_reload() -> str:
 
         refresh_user_tool_registries(user_id, managed_names | current_managed_names)
 
-        lines = [f"Index rebuilt ({custom_count} custom, {mcp_count} MCP)."]
+        lines = [f"Index rebuilt ({native_count} native, {custom_count} custom, {mcp_count} MCP)."]
         if added:
             lines.append(f"  Added: {', '.join(sorted(added))}")
         if removed:

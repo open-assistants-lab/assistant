@@ -64,6 +64,7 @@ data/evaluations/
 
 # Benchmark results
 results/
+results.tsv
 *.superpowers/
 .gstack/
 
