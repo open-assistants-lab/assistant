@@ -6,6 +6,8 @@ ToolRegistry provides OpenAI/Anthropic format output for LLM API calls.
 Key compatibility:
     - @tool produces objects with .name, .description, .args, .invoke, .ainvoke
     - .invoke() and .ainvoke() accept a dict, returning the function result
+    - .invoke() is the sync seam and rejects async tools (use .ainvoke()); it
+      never returns an un-awaited coroutine
     - .to_openai_format() / .to_anthropic_format() for LLM tool definitions
 """
 
@@ -165,6 +167,12 @@ class ToolDefinition(BaseModel):
         merged = {**args, **kwargs}
         if self.function is None:
             raise ValueError(f"Tool {self.name} has no function bound")
+        if inspect.iscoroutinefunction(self.function):
+            # Never hand a coroutine to a caller that cannot await it: an
+            # un-run tool would otherwise be mistaken for a result.
+            raise TypeError(
+                f"Tool '{self.name}' is async; use ainvoke() instead of invoke()"
+            )
         return self.function(**merged)
 
     async def ainvoke(self, args: dict[str, Any] | None = None, **kwargs: Any) -> Any:
@@ -173,13 +181,25 @@ class ToolDefinition(BaseModel):
         merged = {**args, **kwargs}
         if self.function is None:
             raise ValueError(f"Tool {self.name} has no function bound")
-        if self._coroutine:
-            return await self._coroutine(**merged)
-        # Sync tool bodies run in a worker thread so they never block the
-        # event loop (audit S1: SQLite/subprocess/IMAP tools stalled every
-        # concurrent session). to_thread copies contextvars, so
-        # get_current_agent_loop() consumers keep working.
-        return await asyncio.to_thread(self.function, **merged)
+        # Decide from the CURRENT callable rather than the construction-time
+        # `_coroutine` flag: a coroutine attached after __init__ (lazy rebuild,
+        # plugin registration) took the thread path, which called the function
+        # without awaiting and returned an un-awaited coroutine object that
+        # from_raw then stringified into a non-error result (#24 review).
+        if inspect.iscoroutinefunction(self.function):
+            result = self.function(**merged)
+        else:
+            # Sync tool bodies run in a worker thread so they never block the
+            # event loop (audit S1: SQLite/subprocess/IMAP tools stalled every
+            # concurrent session). to_thread copies contextvars, so
+            # get_current_agent_loop() consumers keep working.
+            result = await asyncio.to_thread(self.function, **merged)
+        # Belt-and-braces for callables `iscoroutinefunction` cannot see
+        # through (functools.partial, some decorators): awaiting the result is
+        # always safe, and returning an awaitable never is.
+        if inspect.isawaitable(result):
+            result = await result
+        return result
 
     def to_openai_format(self) -> dict[str, Any]:
         result: dict[str, Any] = {
