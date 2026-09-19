@@ -237,20 +237,22 @@ def _hash_tool_file(tool_file: Path) -> str | None:
 def _iter_tool_dirs(scan_dir: Path) -> list[Path]:
     """Candidate tool directories under a Tools/ dir.
 
-    Hidden entries are skipped: `Tools/.index` is the search index's own
-    bookkeeping, and counting it as a tool source made the hash set depend on
-    whether the index already existed. The first commit (made before
-    `.index` was created) could therefore never match a later call, so
-    `check_needs_reindex` reported a change and `idx.clear()` wiped every row
-    — the whole index was rebuilt on the next thing that touched it.
-    Mirrors scan_tools_dir(), which already ignores it.
+    Everything except the index's own bookkeeping directory counts as a
+    source. Counting `Tools/.index` made the hash set depend on whether the
+    index already existed: the first commit (written before `.index` was
+    created) could therefore never match a later call, so
+    `check_needs_reindex` reported a change and `idx.clear()` wiped every row.
+
+    Only `.index` is skipped — not hidden directories in general — so hashing
+    stays consistent with scan_tools_dir(), which loads any directory holding
+    a TOOL.md, including dot-named ones.
     """
     if not scan_dir.exists():
         return []
     return [
         entry
         for entry in sorted(scan_dir.iterdir())
-        if entry.is_dir() and not entry.name.startswith(".")
+        if entry.is_dir() and entry.name != ".index"
     ]
 
 

@@ -293,31 +293,45 @@ async def test_session_index_hashes_shared_sources(session_env):
 
 
 @pytest.mark.asyncio
-async def test_purging_one_tool_keeps_the_rest_of_the_index(session_env):
-    """Disabling a tool must remove its row only, not clear the whole index.
+async def test_disabling_then_re_enabling_a_native_tool_restores_it(session_env, monkeypatch):
+    """Disable must not destroy a row the enable path never restores.
 
-    The tools API purges one row via get_or_create_index(...). That call must
-    compute the SAME source-hash set as the runner, or check_needs_reindex
-    reports a change and idx.clear() wipes every row (tool_search then returns
-    nothing until the next session rebuild).
+    Non-core native tools are only reachable through their index row, so a
+    one-way purge leaves them permanently "Unknown tool" — a restart does not
+    help (hashes still match) and tool_reload does not re-index native rows.
+    Capability-disabled rows are already filtered out of tool_search by
+    resource_enabled(), and execution is blocked by the caps check, so the row
+    does not need to be destroyed.
     """
-    from src.http.routers.tools import _purge_tool_index_entry
+    from src.http.routers import tools as tools_router
     from src.sdk import runner
+    from src.sdk.messages import ToolCall
+    from src.sdk.tools import ToolDefinition
 
-    _write_shared_tool()
-    _write_user_tool()
-    await runner.create_sdk_loop(user_id=USER, session_id="s-27c")
+    # A non-core native tool: CORE_TOOL_NAMES would be registered eagerly.
+    native = ToolDefinition(name="files_list", description="List files")
+    monkeypatch.setattr(runner, "get_native_tools", lambda: [native])
+    # The router resolves its registry through a function-local import.
+    monkeypatch.setattr("src.sdk.native_tools.get_native_tools", lambda: [native])
 
-    names_before = _index_names()
-    assert {"shared_echo", "user_only"} <= names_before, sorted(names_before)
+    loop = await runner.create_sdk_loop(user_id=USER, session_id="s-27d")
+    assert "files_list" in _index_names(), "precondition: native tool indexed"
 
-    _purge_tool_index_entry(USER, "personal", "shared_echo")
-
-    names_after = _index_names()
-    assert "shared_echo" not in names_after, "purged row survived"
-    assert "user_only" in names_after, (
-        f"purging one tool wiped the whole index: {sorted(names_after)}"
+    # Drive the real endpoint: scope=none, then back to scope=all.
+    await tools_router.toggle_tool(
+        name="files_list", body={"scope": "none"}, user_id=USER, workspace_id="personal"
     )
+    await tools_router.toggle_tool(
+        name="files_list", body={"scope": "all"}, user_id=USER, workspace_id="personal"
+    )
+
+    assert "files_list" in _index_names(), (
+        "re-enabling left the row missing: disable removed it and enable never restores it"
+    )
+    resolved = await loop._try_lazy_load(
+        ToolCall(id="1", name="files_list", arguments={})
+    )
+    assert resolved is not None, "disabled-then-enabled tool stayed unresolvable"
 
 
 # --- defensive guard -------------------------------------------------------

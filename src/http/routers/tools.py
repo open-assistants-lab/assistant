@@ -51,34 +51,6 @@ def _reset_user_loops(user_id: str) -> None:
     reset_user_sdk_loops(user_id)
 
 
-def _purge_tool_index_entry(user_id: str, workspace_id: str, name: str) -> None:
-    """Remove a disabled tool's row from the persisted search index (audit E24).
-
-    Without this the stale row keeps advertising the tool via tool_search even
-    after scope=none. Best-effort: a failure here must not fail the PATCH —
-    the execution-boundary caps check still blocks the tool.
-    """
-    try:
-        from src.sdk.tool_index import get_or_create_index
-        from src.storage.paths import get_paths
-
-        paths = get_paths(user_id=user_id, workspace_id=workspace_id)
-        idx, _commit = get_or_create_index(
-            paths.user_tools_dir(),
-            # Must match src/sdk/runner.py: computing a different source-hash set
-            # here makes check_needs_reindex report a change and idx.clear()
-            # wipes every row, not just the purged one (review P1 on #27).
-            paths.workspace_tools_dir(),
-            paths.user_mcp_config(),
-            user_id=user_id,
-            workspace_id=workspace_id,
-        )
-        idx.remove_tool(name)
-        logger.info("tools.index_entry_purged", {"tool": name})
-    except Exception as e:
-        logger.warning("tools.index_entry_purge_failed", {"tool": name, "error": str(e)})
-
-
 @router.get("")
 async def list_tools(
     user_id: str = Query(DEFAULT_USER_ID),
@@ -263,9 +235,17 @@ async def toggle_tool(
         enabled = new_scope != "none"
         _save_user_enabled(user_id, "tools", name, enabled)
         if not enabled:
-            # Audit E24-tools: purge the stale persisted-index row so the
-            # disabled tool stops being advertised via tool_search.
-            _purge_tool_index_entry(user_id, workspace_id, name)
+            # Audit E24-tools: a disabled tool must stop being advertised, and
+            # that is already enforced at query time — tool_search filters rows
+            # through resource_enabled() (see _eligible_results in
+            # src/sdk/tools_core/tool_search.py) and the execution boundary
+            # re-checks capabilities. Destroying the row was worse than
+            # redundant: non-core native tools are reachable only through their
+            # index row, and neither a restart (hashes still match) nor
+            # tool_reload (custom + MCP rows only) restores it, so
+            # disable-then-enable left the tool permanently "Unknown tool"
+            # (review P1 on #27).
+            pass
         scope, wids = _scope_response(enabled)
         _reset_user_loops(user_id)
         return {
