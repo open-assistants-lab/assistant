@@ -84,7 +84,7 @@ async def list_pendings(request: Request, user_id: str = DEFAULT_USER_ID) -> lis
             exec_row = await execute_approved_tool(
                 user_id, pid, row["tool"], row["arguments"]
             )
-            row = {**row, "status": "executed", "execution": exec_row}
+            row = {**row, "status": "executed", "outcome": exec_row.get("outcome"), "execution": exec_row}
         out.append(row)
     return out
 
