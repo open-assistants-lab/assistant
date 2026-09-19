@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.6.13 — 2026-09-19
+
+### Fixed
+- Tool-index integrity was inferred from a row count and a source hash, neither of which can tell whether the rows that should exist are actually present (#29). Three repair gaps closed: a damaged install whose rows were dropped (matching hashes, non-empty index) was never rebuilt; a partial index left by a crash mid-`tool_reload` was never rebuilt; and `disable → tool_reload → re-enable` left no row, leaving the tool `Unknown tool` until another manual reload. The runner now re-indexes when an expected row is missing, comparing row names rather than a count, so the repair does not depend on the hashes. It writes only the gaps, commits the source hashes once the index reflects the sources, and logs which rows were missing.
+
+### Changed
+- The per-family indexing rules (which families are indexed, what is skipped, provenance and `reconstruct` payloads) now live in one place, used by both the session runner and `tool_reload`. Two hand-written copies of those rules is what let `tool_reload` stop indexing native rows (#28) and left rows unrecoverable.
+
+### Verification
+- Chunked suite: sdk 1,941 passed / 4 skipped; api 606 passed / 6 skipped; unit+storage+config+integration 500 passed; the opt-in phase-0 gate passes with `addopts` cleared.
+
 ## v0.6.12 — 2026-09-19
 
 ### Fixed
