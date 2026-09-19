@@ -127,7 +127,7 @@ def _rebuild_custom_function(
     tool_dir_str = reconstruct.get("tool_dir", "")
     command_timeout = td.annotations.timeout_seconds
 
-    def fn(**kwargs: Any) -> str:
+    def fn(**kwargs: Any) -> ToolResult | str:
         from src.sdk.sandbox import custom_command_tools_allowed
 
         if not command_template.strip():

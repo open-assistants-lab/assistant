@@ -318,7 +318,7 @@ async def subagent_delegate(
     workspace_id: str = "personal",
     parent_id: str | None = None,
     timeout_seconds: int = 120,
-) -> str:
+) -> ToolResult | str:
     """Run a subagent and wait for the result. Returns the subagent's output.
 
     Unlike subagent_start which fires and forgets, this tool blocks until

@@ -573,7 +573,7 @@ def email_sync(
     mode: str = "new",
     folder: str = "INBOX",
     user_id: str = "",
-) -> str:
+) -> ToolResult | str:
     """Manually sync emails for an account.
 
     Args:

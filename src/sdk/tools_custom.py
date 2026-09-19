@@ -98,7 +98,7 @@ def _parse_tool_file(
 
         command_timeout = annotations.timeout_seconds
 
-        def fn(**kwargs: Any) -> str:
+        def fn(**kwargs: Any) -> ToolResult | str:
             from src.sdk.sandbox import custom_command_tools_allowed
 
             if not custom_command_tools_allowed():

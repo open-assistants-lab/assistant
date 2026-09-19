@@ -85,7 +85,7 @@ def _resolve_path(path: str | None, user_id: str, workspace_id: str = "personal"
 
 
 @tool
-def files_list(path: str = ".", user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> str:
+def files_list(path: str = ".", user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> ToolResult | str:
     """List files in a directory.
 
     Args:
@@ -124,7 +124,7 @@ files_list.annotations = ToolAnnotations(title="List Files", read_only=True, ide
 
 
 @tool
-def files_read(path: str, offset: int = 0, limit: int = 100, user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> str:
+def files_read(path: str, offset: int = 0, limit: int = 100, user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> ToolResult | str:
     """Read file content.
 
     Args:
@@ -173,7 +173,7 @@ files_read.annotations = ToolAnnotations(title="Read File", read_only=True, idem
 
 
 @tool
-def files_write(path: str, content: str, user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> str:
+def files_write(path: str, content: str, user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> ToolResult | str:
     """Write content to a file (creates or overwrites).
 
     The path is relative to the workspace files directory. For skills,
@@ -221,7 +221,7 @@ files_write.annotations = ToolAnnotations(title="Write File", destructive=True)
 
 
 @tool
-def files_edit(path: str, old: str, new: str, user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> str:
+def files_edit(path: str, old: str, new: str, user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> ToolResult | str:
     """Edit a file by replacing text.
 
     Args:
@@ -267,7 +267,7 @@ files_edit.annotations = ToolAnnotations(title="Edit File", destructive=True)
 
 
 @tool
-def files_delete(path: str, user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> str:
+def files_delete(path: str, user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> ToolResult | str:
     """Delete a file.
 
     NOTE: This tool requires human approval before execution.
@@ -304,7 +304,7 @@ files_delete.annotations = ToolAnnotations(title="Delete File", destructive=True
 
 
 @tool
-def files_mkdir(path: str, user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> str:
+def files_mkdir(path: str, user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> ToolResult | str:
     """Create a directory.
 
     Args:
@@ -334,7 +334,7 @@ files_mkdir.annotations = ToolAnnotations(title="Create Directory")
 
 
 @tool
-def files_rename(path: str, new_name: str, user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> str:
+def files_rename(path: str, new_name: str, user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> ToolResult | str:
     """Rename a file or directory.
 
     Args:

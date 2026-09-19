@@ -45,7 +45,7 @@ def skills_load(
     name: str,
     user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
-) -> str:
+) -> ToolResult | str:
     """Load a skill's full SKILL.md content into context.
 
     Call this when the current task matches a skill's description from the
@@ -104,7 +104,7 @@ skills_load.annotations = ToolAnnotations(
 def skills_reload(
     user_id: str =  DEFAULT_USER_ID,
     workspace_id: str = "personal",
-) -> str:
+) -> ToolResult | str:
     """Reload the skill registry after creating, editing, or deleting SKILL.md files.
 
     Call this after using files_write, files_edit, or files_delete to create,

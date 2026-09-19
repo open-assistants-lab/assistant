@@ -9,6 +9,11 @@ convention directly.
 ``ALLOWED_SUCCESS_RETURNS`` lists handlers that legitimately return guidance
 text from a broad handler because the tool completed its job. Keep it short:
 each entry is a documented exception, not a parking space.
+
+Reach: only `@tool`-decorated functions in this package are walked. A
+`@tool(name=...)` call form, a hand-built `ToolDefinition`, and MCP or
+user-authored tool bodies are outside this test and need the same review by
+hand.
 """
 
 from __future__ import annotations
@@ -47,11 +52,30 @@ def _broad_handlers(fn):
                 yield handler
 
 
-def _returned_value(handler):
+def _is_failure_result(value) -> bool:
+    """A ToolResult is only a failure if it says so.
+
+    `ToolResult.is_error` defaults to False, so `return ToolResult(content=...)`
+    would still be receipted `executed: true, is_error: false` — the exact slip
+    this test exists to prevent.
+    """
+    if not (isinstance(value, ast.Call) and getattr(value.func, "id", None) == "ToolResult"):
+        return False
+    for kw in value.keywords:
+        if kw.arg == "is_error" and not (isinstance(kw.value, ast.Constant) and kw.value.value is False):
+            return True
+        if kw.arg == "is_error":
+            return False
+    return False  # is_error omitted -> defaults to False
+
+
+def _returned_values(handler):
+    """Every value returned from the handler (nested branches included)."""
+    values = []
     for node in ast.walk(handler):
         if isinstance(node, ast.Return) and node.value is not None:
-            return node.value
-    return None
+            values.append(node.value)
+    return values
 
 
 def _violations():
@@ -59,14 +83,14 @@ def _violations():
     for path in sorted(TOOLS_CORE.rglob("*.py")):
         for fn in _tool_functions(path):
             for handler in _broad_handlers(fn):
-                value = _returned_value(handler)
-                if value is None:
-                    continue
-                if isinstance(value, ast.Call) and getattr(value.func, "id", None) == "ToolResult":
-                    continue
-                if (path.name, fn.name) in ALLOWED_SUCCESS_RETURNS:
-                    continue
-                found.append(f"{path.name}:{handler.lineno} in {fn.name}() -> {ast.unparse(value)}")
+                for value in _returned_values(handler):
+                    if _is_failure_result(value):
+                        continue
+                    if (path.name, fn.name) in ALLOWED_SUCCESS_RETURNS:
+                        continue
+                    found.append(
+                        f"{path.name}:{value.lineno} in {fn.name}() -> {ast.unparse(value)}"
+                    )
     return found
 
 
@@ -85,16 +109,27 @@ def test_every_tool_catch_all_reports_failure():
     )
 
 
-def test_allowlist_entries_still_exist():
+def test_allowlist_entries_are_still_needed():
     """A stale exception in the allowlist would hide a real violation later."""
-    seen = set()
+    still_violating = {
+        v.split(":")[0] for v in _violations_ignoring_allowlist()
+    }
+    for (file_name, fn_name) in ALLOWED_SUCCESS_RETURNS:
+        assert file_name in still_violating, (
+            f"allowlist entry ({file_name}, {fn_name}) is no longer needed — "
+            "the handler now reports failure, so remove it"
+        )
+
+
+def _violations_ignoring_allowlist():
+    found = []
     for path in sorted(TOOLS_CORE.rglob("*.py")):
         for fn in _tool_functions(path):
             for handler in _broad_handlers(fn):
-                if _returned_value(handler) is not None:
-                    seen.add((path.name, fn.name))
-    for entry in ALLOWED_SUCCESS_RETURNS:
-        assert entry in seen, f"allowlist entry {entry} no longer matches a handler"
+                for value in _returned_values(handler):
+                    if not _is_failure_result(value):
+                        found.append(f"{path.name}:{value.lineno} in {fn.name}()")
+    return found
 
 
 @pytest.mark.parametrize("tool_path", ["tools_custom.py", "tool_index.py"])
@@ -110,10 +145,8 @@ def test_custom_command_wrappers_report_failure_on_exception(tool_path):
             name = getattr(handler.type, "id", None) or getattr(handler.type, "attr", None)
             if name not in {"Exception", "BaseException"}:
                 continue
-            value = _returned_value(handler)
-            if value is None:
-                continue
-            if isinstance(value, ast.Call) and getattr(value.func, "id", None) == "ToolResult":
-                continue
-            hits.append(f"{tool_path}:{handler.lineno} -> {ast.unparse(value)}")
+            for value in _returned_values(handler):
+                if _is_failure_result(value):
+                    continue
+                hits.append(f"{tool_path}:{value.lineno} -> {ast.unparse(value)}")
     assert not hits, f"custom wrapper catch-alls returning strings: {hits}"

@@ -25,7 +25,7 @@ def _scan_custom_tool_names(tools_dir: Path) -> set[str]:
 
 
 @tool
-def tool_reload() -> str:
+def tool_reload() -> ToolResult | str:
     """Reload and re-index all tools from current sources. Use after creating, editing, or deleting a TOOL.md file.
 
     MCP servers must be reconnected via `mcp_reload()` first — this only re-indexes

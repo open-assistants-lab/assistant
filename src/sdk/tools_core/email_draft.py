@@ -117,7 +117,7 @@ def email_draft(
     subject: str,
     body: str,
     user_id: str = "",
-) -> str:
+) -> ToolResult | str:
     """Draft an email into the user's drafts folder (NEVER sends).
 
     Args:

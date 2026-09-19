@@ -116,7 +116,7 @@ def _sweep_old_spill_files(out_dir: Path, max_age_days: int = 7) -> int:
 
 
 @tool
-def shell_execute(command: str, user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> str:
+def shell_execute(command: str, user_id: str =  DEFAULT_USER_ID, workspace_id: str = "personal") -> ToolResult | str:
     """Run a shell command.
 
     Args:

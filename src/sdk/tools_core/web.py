@@ -30,7 +30,7 @@ _h2t.body_width = 0
 
 
 @tool
-def web_fetch(url: str) -> str:
+def web_fetch(url: str) -> ToolResult | str:
     """Fetch a URL and return its content as markdown.
 
     Fetches any HTTP/HTTPS URL and converts HTML to clean markdown.
@@ -140,7 +140,7 @@ def _parse_ddg_results(html: str, limit: int = 10) -> list[dict[str, Any]]:
 
 
 @tool
-def web_search(query: str, limit: int = 10) -> str:
+def web_search(query: str, limit: int = 10) -> ToolResult | str:
     """Search the web and return results.
 
     Uses DuckDuckGo search. No API key required.

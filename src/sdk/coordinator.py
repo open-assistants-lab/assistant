@@ -29,6 +29,7 @@ from src.sdk.subagent_models import (
     TaskStatus,
 )
 from src.sdk.subagent_work_queue import USER_LEVEL_WORKSPACE_ID, SubagentWorkQueueDB, get_work_queue
+from src.sdk.tools import ToolResult
 from src.storage import paths as _paths
 
 # Alias: used by callers (e.g. tests) that patch src.sdk.coordinator.get_paths
@@ -355,7 +356,7 @@ class SubagentCoordinator:
         task: str,
         parent_id: str | None = None,
         timeout_seconds: int | None = None,
-    ) -> str:
+    ) -> ToolResult | str:
         """Run a subagent synchronously and return the result string.
 
         Like invoke() but with agent-def validation and full middleware stack.
@@ -400,22 +401,31 @@ class SubagentCoordinator:
             return result.output
         except TaskCancelledError:
             await db.set_cancelled(task_id)
-            return "Cancelled: subagent was cancelled during execution."
+            return ToolResult(
+                content="Cancelled: subagent was cancelled during execution.",
+                is_error=True,
+            )
         except SubagentCancelledError:
             await db.set_cancelled(task_id)
-            return "Cancelled: subagent was cancelled during execution."
+            return ToolResult(
+                content="Cancelled: subagent was cancelled during execution.",
+                is_error=True,
+            )
         except TimeoutError:
             error = f"timeout after {effective_timeout}s"
             failed = await db.set_failed(task_id, error)
             if not failed:
                 await self._set_cancelled_if_requested(task_id, db)
-            return f"Timeout: subagent did not complete within {effective_timeout}s."
+            return ToolResult(
+                content=f"Timeout: subagent did not complete within {effective_timeout}s.",
+                is_error=True,
+            )
         except Exception as e:
             error = f"{type(e).__name__}: {e}"
             failed = await db.set_failed(task_id, error)
             if not failed:
                 await self._set_cancelled_if_requested(task_id, db)
-            return f"Error: {type(e).__name__}: {e}"
+            return ToolResult(content=f"Error: {type(e).__name__}: {e}", is_error=True)
         finally:
             _active.pop(task_id, None)
 

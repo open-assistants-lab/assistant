@@ -7,7 +7,7 @@ All tools are now native async — no thread hack needed.
 from __future__ import annotations
 
 from src.app_logging import get_logger
-from src.sdk.tools import ToolAnnotations, ToolDefinition
+from src.sdk.tools import ToolAnnotations, ToolDefinition, ToolResult
 
 logger = get_logger()
 
@@ -47,7 +47,7 @@ mcp_list = ToolDefinition(
 )
 
 
-async def _mcp_reload(user_id: str = "", session_id: str = "") -> str:
+async def _mcp_reload(user_id: str = "", session_id: str = "") -> ToolResult | str:
     if not user_id:
         return "Error: user_id is required."
 
@@ -97,6 +97,14 @@ async def _mcp_reload(user_id: str = "", session_id: str = "") -> str:
         return " — ".join(parts)
     except Exception as e:
         logger.warning("mcp_reload.bridge_error", {"error": str(e)}, user_id=user_id)
+        # The session's mcp__* tools have already been unregistered by this
+        # point, so falling through to `return result` reported a clean reload
+        # while the session had silently lost its MCP tools (issue #30).
+        return ToolResult(
+            content=f"MCP reload failed: {type(e).__name__}: {e}. Existing MCP tools were "
+            "unregistered and may be missing until the next successful reload.",
+            is_error=True,
+        )
 
     return result
 
