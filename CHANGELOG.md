@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.6.11 — 2026-09-19
+
+### Fixed
+- `ToolDefinition.ainvoke` could hand back an un-awaited coroutine instead of a result: dispatch was decided from a flag captured at construction, so a coroutine attached afterwards took the thread path, and `ToolResult.from_raw` stringified the coroutine into a **non-error** result — so governance recorded `executed: true` for a tool that never ran. Dispatch now inspects the current callable, with an `isawaitable` fallback for callables `inspect` cannot see through.
+- `ToolDefinition.invoke` (the sync seam, used by 13 router endpoints) returned a coroutine that no sync caller can await; it now fails loudly and points at `ainvoke()`.
+- The deployment-shared tools directory (`data_root/Tools`) was only half-wired: the session runner passed `workspace_tools_dir=None` to the tool index, so shared tool changes never triggered a reindex and shared-only tools were indexed with an empty `reconstruct` blob — rebuilding into a tool that ran an empty command and returned `(no output)` as a non-error result (#27).
+- The tool index counted its own `Tools/.index` directory as a tool source, so the first hash set could never match a later call and the next thing to touch the index cleared every row (#27).
+- Disabling a tool destroyed its index row while the enable path never restored it. Non-core native tools are reachable only through their row, so disable-then-enable left the tool permanently `Unknown tool`, invisible to `tool_search` and unrecoverable by restart or `tool_reload` (#27). The purge was redundant: `tool_search` already filters capability-disabled rows at query time.
+- `find_tool_file` resolved the shared copy before the per-user one, recording the shared tool's command for a tool the model was shown as the user's override (#27).
+
+### Changed
+- `ToolDefinition.invoke()` now raises `TypeError` for async or awaitable-returning callables instead of returning an un-awaited coroutine. Pass synchronous tools through `invoke()`, and use `await ainvoke()` for everything else — the SDK's sync seam no longer returns something a caller cannot await.
+- Hashing a `TOOL.md` tolerates an unreadable file instead of aborting session construction.
+
+### Removed
+- `src/sdk/tools_core/browser_agent.py` — unreachable code superseded by `browser.py`, which registers the same tool names. It also read a `SandboxResult` field that does not exist, so registering it would have failed every call.
+
+### Verification
+- Full suite: 3,032 passed, 11 skipped (chunked: sdk 1,920; api 606; unit+storage+config+integration 500).
+- mypy: 68 errors across 19 files, none in a file these changes touch (69/20 at the v0.6.10 baseline; deleting the dead module removed one).
+
 ## v0.6.10 — 2026-09-18
 
 ### Fixed
