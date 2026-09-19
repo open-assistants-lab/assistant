@@ -9,6 +9,7 @@ from typing import Any
 
 from src.app_logging import get_logger
 from src.config import get_settings
+from src.sdk.tool_results import CommandKilledError
 from src.sdk.tools import ToolAnnotations, tool
 from src.storage.paths import DEFAULT_USER_ID, get_paths
 
@@ -167,6 +168,17 @@ def shell_execute(command: str, user_id: str =  DEFAULT_USER_ID, workspace_id: s
                 float(config["timeout_seconds"]),
                 time.monotonic() - _started,
             )
+        if result.signalled:
+            # Issue #25: killed by a signal (RLIMIT_AS/CPU/NPROC/FSIZE or
+            # another signal). It exited non-zero, but so does `grep`, so only
+            # the explicit flag separates them.
+            from src.sdk.tool_results import raise_command_killed
+
+            raise_command_killed(
+                " ".join(cmd_parts),
+                -result.exit_code if result.exit_code < 0 else None,
+                time.monotonic() - _started,
+            )
 
         output = result.stdout
         if result.stderr:
@@ -203,9 +215,10 @@ def shell_execute(command: str, user_id: str =  DEFAULT_USER_ID, workspace_id: s
 
     except FileNotFoundError:
         return f"Error: Command not found: {cmd_parts[0]}"
-    except subprocess.TimeoutExpired:
-        # Issue #24: a cap-killed command must propagate — the catch-all below
-        # would otherwise turn it back into a successful string return.
+    except (subprocess.TimeoutExpired, CommandKilledError):
+        # Issue #24/#25: a cap-killed or signal-killed command must propagate —
+        # the catch-all below would otherwise turn it back into a successful
+        # string return.
         raise
     except Exception as e:
         logger.error("shell_execute.error", {"command": command, "error": str(e)}, user_id=user_id)

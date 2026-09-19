@@ -34,6 +34,8 @@ from src.sdk.session_events import (
     get_session_event_store,
     session_log_enabled,
 )
+from src.sdk.tool_results import CommandKilledError
+from src.sdk.tools import ToolResult
 from src.storage.paths import DataPaths
 
 Tier = str  # "autonomous" | "show_then_auto_send" | "explicit" | "hard_block"
@@ -500,11 +502,27 @@ class GovernanceService:
                 }
             else:
                 out = await td.ainvoke(arguments)
-                result = {
-                    "content": out if isinstance(out, str) else json.dumps(out, default=str),
-                    "structured_content": {"executed": True, "tool": tool},
-                    "is_error": False,
-                }
+                if isinstance(out, ToolResult):
+                    # Issue #26: a ToolResult carries its own outcome. Hard-coding
+                    # is_error False here receipted a tool that ran and failed as
+                    # completed, and json.dumps(default=str) replaced its content
+                    # with a pydantic repr. Governance keys win over the tool's
+                    # own structured_content so the receipt stays authoritative.
+                    result = {
+                        "content": out.content,
+                        "structured_content": {
+                            **(out.structured_content or {}),
+                            "executed": True,
+                            "tool": tool,
+                        },
+                        "is_error": out.is_error,
+                    }
+                else:
+                    result = {
+                        "content": out if isinstance(out, str) else json.dumps(out, default=str),
+                        "structured_content": {"executed": True, "tool": tool},
+                        "is_error": False,
+                    }
         except Exception as exc:  # receipt the failure, never raise
             if isinstance(exc, subprocess.TimeoutExpired):
                 # Issue #23: a cap-killed command must never be recorded as
@@ -519,6 +537,22 @@ class GovernanceService:
                         "executed": False,
                         "error": TIMEOUT_MARKER,
                         "elapsed": elapsed,
+                    },
+                    "is_error": True,
+                }
+            elif isinstance(exc, CommandKilledError):
+                # Issue #25: killed by a signal (RLIMIT_AS/CPU/NPROC/FSIZE or
+                # another signal). The run did not complete, so it must not be
+                # receipted as executed.
+                from src.sdk.tool_results import KILLED_MARKER
+
+                result = {
+                    "content": f"Governed execution was killed: {exc.detail}",
+                    "structured_content": {
+                        "executed": False,
+                        "error": KILLED_MARKER,
+                        "signal": exc.signal_number,
+                        "elapsed": exc.detail,
                     },
                     "is_error": True,
                 }

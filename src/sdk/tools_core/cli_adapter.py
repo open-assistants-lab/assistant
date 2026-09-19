@@ -96,6 +96,17 @@ class CLIToolAdapter:
 
             label = f"{self.cli_name} {args[0]}".strip() if args else self.cli_name
             raise_timeout(label, float(timeout), time.monotonic() - _started)
+        if result.signalled:
+            # Issue #25: same reasoning as the timeout above — only the explicit
+            # flag separates a kill from an ordinary non-zero exit.
+            from src.sdk.tool_results import raise_command_killed
+
+            label = f"{self.cli_name} {args[0]}".strip() if args else self.cli_name
+            raise_command_killed(
+                label,
+                -result.exit_code if result.exit_code < 0 else None,
+                time.monotonic() - _started,
+            )
         output = result.stdout
         if result.stderr:
             output += f"\n{result.stderr}" if output else result.stderr

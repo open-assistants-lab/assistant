@@ -76,6 +76,16 @@ def code_execute(code: str, user_id: str = DEFAULT_USER_ID, workspace_id: str = 
         from src.sdk.tool_results import raise_timeout
 
         raise_timeout("code_execute", limits.timeout_seconds, time.monotonic() - _started)
+    if result.signalled:
+        # Issue #25: killed by a resource limit or another signal; a partial
+        # run must not be reported as a completed one.
+        from src.sdk.tool_results import raise_command_killed
+
+        raise_command_killed(
+            "code_execute",
+            -result.exit_code if result.exit_code < 0 else None,
+            time.monotonic() - _started,
+        )
     output = result.stdout
     if result.stderr:
         output += f"\nSTDERR: {result.stderr}"

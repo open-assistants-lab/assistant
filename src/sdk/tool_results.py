@@ -107,6 +107,46 @@ def read_result(
 
 
 TIMEOUT_MARKER = "timed_out"
+KILLED_MARKER = "killed"
+
+
+class CommandKilledError(RuntimeError):
+    """A command was killed by a signal before it finished.
+
+    Distinct from `subprocess.TimeoutExpired`: the sandbox's own cap did not
+    fire, the child died from a resource limit (RLIMIT_AS/CPU/NPROC/FSIZE) or
+    another signal.
+    """
+
+    def __init__(self, command: str, signal_number: int | None, detail: str) -> None:
+        super().__init__(detail)
+        self.command = command
+        self.signal_number = signal_number
+        self.detail = detail
+
+
+def raise_command_killed(
+    command: str, signal_number: int | None, elapsed: float
+) -> None:
+    """Raise the distinct failure for a signal-killed command (issue #25).
+
+    A child killed by a resource limit exits with a *negative* code and
+    `timed_out=False`, which is otherwise indistinguishable from an ordinary
+    non-zero exit — so a killed run was receipted `executed: true`. Timeouts
+    also report `exit_code=-1`, so tools must read the sandbox's explicit
+    `signalled` flag rather than the sign of the code.
+    """
+    name = f"signal {signal_number}" if signal_number else "a signal"
+    if signal_number:
+        try:
+            import signal as _signal
+
+            name = f"{_signal.Signals(signal_number).name} ({signal_number})"
+        except (ValueError, AttributeError):
+            pass
+    raise CommandKilledError(
+        command, signal_number, f"{KILLED_MARKER} by {name} after {elapsed:.1f}s"
+    )
 
 def raise_command_timeout(command: str, timeout: float | None, started: float) -> None:
     """Surface a cap-killed command as failure, never as a successful return.
@@ -128,5 +168,5 @@ def raise_timeout(command: str, timeout: float | None, elapsed: float) -> None:
     raise subprocess.TimeoutExpired(
         command,
         timeout or 0,
-        output=f"{TIMEOUT_MARKER}: killed after {elapsed:.1f}s (limit {limit})",
+        output=f"{TIMEOUT_MARKER}: cap reached after {elapsed:.1f}s (limit {limit})",
     )
