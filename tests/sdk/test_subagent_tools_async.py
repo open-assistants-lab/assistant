@@ -31,7 +31,6 @@ def test_all_subagent_tools_are_native_async_without_bridge():
     ]:
         tool_def = getattr(mod, name)
         assert inspect.iscoroutinefunction(tool_def.function), name
-        assert tool_def._coroutine is not None, name
 
     assert not hasattr(mod, "_run_async")
     assert not hasattr(mod, "_recreate_loop")

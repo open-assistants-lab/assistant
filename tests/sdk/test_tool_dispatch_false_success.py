@@ -8,8 +8,11 @@ object. `ToolResult.from_raw` then stringified it into a non-error result, so
 the governance executor recorded `executed: true` for a tool that never ran.
 """
 
+import functools
+import gc
 import inspect
 import threading
+import warnings
 
 import pytest
 
@@ -99,11 +102,45 @@ class TestFailurePropagation:
             await _tool(function=boom).ainvoke({})
 
 
+def _wrapped_async_probe(value: str = "ok"):
+    """A functools.wraps-style wrapper: iscoroutinefunction cannot see through it."""
+
+    @functools.wraps(_async_probe)
+    def wrapper(*args, **kwargs):
+        return _async_probe(*args, **kwargs)
+
+    return wrapper
+
+
+class _AsyncCallable:
+    """A callable object whose __call__ is async — also invisible to inspect."""
+
+    async def __call__(self, value: str = "ok") -> str:
+        return f"callable:{value}"
+
+
 class TestSyncInvokeSeam:
-    def test_invoke_refuses_async_tool_instead_of_leaking_a_coroutine(self):
-        """The sync seam must fail loudly: a caller cannot await a coroutine."""
+    @pytest.mark.parametrize(
+        "target",
+        [
+            pytest.param(_async_probe, id="async-def"),
+            pytest.param(_wrapped_async_probe(), id="wrapped-async-def"),
+            pytest.param(_AsyncCallable(), id="async-callable-object"),
+        ],
+    )
+    def test_invoke_refuses_async_targets_instead_of_leaking_a_coroutine(self, target):
+        """The sync seam must fail loudly for every async shape it can receive."""
         with pytest.raises(TypeError, match="use ainvoke"):
-            _tool(function=_async_probe).invoke({"value": "g"})
+            _tool(function=target).invoke({"value": "g"})
+
+    def test_invoke_leaves_no_orphan_coroutine(self):
+        """Refusing must not leave an un-awaited coroutine behind."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(TypeError, match="use ainvoke"):
+                _tool(function=_wrapped_async_probe()).invoke({"value": "g"})
+            gc.collect()
+        assert not [w for w in caught if "never awaited" in str(w.message)]
 
     def test_invoke_still_runs_sync_tools(self):
         assert _tool(function=_sync_probe).invoke({"value": "h"}).startswith("sync:h")
