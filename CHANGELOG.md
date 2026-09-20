@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.6.17 — 2026-09-19
+
+### Fixed
+- `GET /pendings` auto-executed an approved `show_then_auto_send` proposal without checking whether it was designated async, so a tool configured for the durable async path (#21) ran **inside the pendings request**: the request blocked for the run's duration, no operation was created (no cancel, no dispatch receipt, no `uncertain` handling), and the proposal settled through the synchronous leg (#33). The scan now mirrors the approve endpoint — executor-bearing rows are dispatched through the operation ledger and report the operation id and status, and only executor-less rows run synchronously. A refused dispatch fails closed, leaving the proposal for a human and logging the reason.
+
+### Verification
+- Chunked suite: sdk 1,975 passed / 4 skipped; api 609 passed / 6 skipped; unit+storage+config+integration 500 passed. mypy: 64 errors / 19 files.
+
 ## v0.6.16 — 2026-09-19
 
 ### Added
