@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+- A custom `TOOL.md` command killed by a signal inside a pipeline was reported as a failure *string*, which governance receipts as a successful execution (#32 part 2). The seam only recognised a kill when the shell *itself* died (`returncode < 0`); bash reports a signalled child as `128 + n`, so that status is now read as a signal death and raises `CommandKilledError` with the signal number. This also covers a plain (non-pipeline) command killed by a signal, since the shell encodes it the same way. A command that deliberately exits `128 + n` is indistinguishable by exit status and is reported as killed — both are failures, so only the marker differs.
+
+  Not fixed, filed as #35: when an **early** pipeline member fails, the shell reports the *last* command's status, so `false | cat` still reads as success. Surfacing it means changing pipeline semantics (`pipefail`), which would also reclassify legitimate `grep`-style pipelines.
+
 ### Changed
 - The sandbox's workspace write budget is its own number (#32 part 3). `RLIMIT_FSIZE` was derived from `max_output_bytes × 8` — about 800 KB with the shipped `shell_tool` defaults — so a command that legitimately wrote a larger file (a download, a generated report, an export) was killed, and raising the stdout budget silently raised the write cap with it. Writes are now bounded by `SandboxLimits.max_write_bytes`, defaulting to **64 MB** and configurable as `shell_tool.max_write_mb` (env `SHELL_TOOL_MAX_WRITE_MB`), independent of output capture. The cap is clamped to the host's hard `RLIMIT_FSIZE` so a host policy below the default cannot fail the command.
 

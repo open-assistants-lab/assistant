@@ -167,6 +167,21 @@ def _parse_tool_file(
                         -result.returncode,
                         time.monotonic() - started,
                     )
+                if 128 < result.returncode <= 192:
+                    # Issue #32 part 2: when a pipeline member is killed, bash
+                    # reports the LAST command's death as 128+n (positive), so
+                    # the negative-code check above misses it and the run was
+                    # returned as a failure *string* — which governance receipts
+                    # as a successful execution. A command that deliberately
+                    # exits 128+n is indistinguishable; both are failures, so
+                    # only the marker differs.
+                    from src.sdk.tool_results import raise_command_killed
+
+                    raise_command_killed(
+                        " ".join(rendered.split()),
+                        result.returncode - 128,
+                        time.monotonic() - started,
+                    )
                 if result.returncode != 0:
                     return f"Command failed (exit {result.returncode}):\n{output[:2000]}"
                 from src.sdk.tool_results import format_output
