@@ -211,7 +211,7 @@ def _rebuild_custom_function(
                 from src.sdk.tool_results import raise_command_killed
 
                 raise_command_killed(
-                    rendered,
+                    " ".join(rendered.split()),
                     result.returncode - 128,
                     time.monotonic() - started,
                 )
