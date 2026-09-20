@@ -92,12 +92,38 @@ _WRITE_CALLS = re.compile(
 )
 
 
+def _apply_write_limit(resource_mod: Any, max_write_bytes: int) -> None:
+    """Set RLIMIT_FSIZE, clamped to the host's hard limit.
+
+    An unprivileged process cannot raise a hard limit, so asking for more than
+    the host allows (a container `LimitFSIZE`, `ulimit -f` in a wrapper) would
+    raise inside preexec_fn and fail the whole command — which is how a host
+    whose hard limit sits between the old derived cap and the new 64 MB
+    default would break. Clamping keeps the host's policy in force instead of
+    silently dropping the cap.
+    """
+    limit = getattr(resource_mod, "RLIMIT_FSIZE", None)
+    if limit is None:  # pragma: no cover - not the case on POSIX
+        return
+    try:
+        _soft, hard = resource_mod.getrlimit(limit)
+        if hard != resource_mod.RLIM_INFINITY:
+            max_write_bytes = min(max_write_bytes, hard)
+        resource_mod.setrlimit(limit, (max_write_bytes, hard))
+    except (OSError, ValueError, AttributeError):  # pragma: no cover - host policy
+        pass
+
+
 @dataclass
 class SandboxLimits:
     """Resource caps applied to sandboxed execution."""
 
     timeout_seconds: float = 30.0
     max_output_bytes: int = 200_000
+    # Issue #32 part 3: bytes a sandboxed command may write (RLIMIT_FSIZE),
+    # independent of how much output we capture. Deriving it from
+    # max_output_bytes killed legitimate file work at ~800 KB.
+    max_write_bytes: int = 64 * 1024 * 1024
     env_mode: str = "scrubbed"  # "scrubbed" | "inherit"
     memory_mb: int = 512  # SB1 review P1: RLIMIT_AS cap
 
@@ -268,7 +294,7 @@ class SoftSandboxBackend:
         def _preexec() -> None:  # pragma: no cover - runs in child
             import resource
 
-            resource.setrlimit(resource.RLIMIT_FSIZE, (lim.max_output_bytes * 8, lim.max_output_bytes * 8))
+            _apply_write_limit(resource, lim.max_write_bytes)
             resource.setrlimit(resource.RLIMIT_CPU, (int(lim.timeout_seconds) + 2, int(lim.timeout_seconds) + 2))
             # M4/SB1 review P1: memory cap — a runaway code_execute must not
             # OOM the host. RLIMIT_NPROC kept per docstring claim.
@@ -322,8 +348,8 @@ class SoftSandboxBackend:
                     preexec_fn=_preexec,
                 )
                 # Issue #15: capture a bounded headroom (8× the tool-facing
-                # limit, matching the child's RLIMIT_FSIZE multiple) so the
-                # tool's spill-to-file predicate can recover the FULL output.
+                # limit) so the tool's spill-to-file predicate can recover the
+                # FULL output. Independent of the write budget below.
                 # Clamping at the tool limit made spill unreachable.
                 capture_cap = lim.max_output_bytes * 8
                 if span is not None:
@@ -478,9 +504,7 @@ class BwrapSandboxBackend:
         def _preexec() -> None:  # pragma: no cover - runs in child
             import resource
 
-            resource.setrlimit(
-                resource.RLIMIT_FSIZE, (lim.max_output_bytes * 8,) * 2
-            )
+            _apply_write_limit(resource, lim.max_write_bytes)
             resource.setrlimit(
                 resource.RLIMIT_CPU, (int(lim.timeout_seconds) + 2,) * 2
             )
@@ -506,9 +530,9 @@ class BwrapSandboxBackend:
                     env=env,
                     preexec_fn=_preexec,
                 )
-                # Issue #15: capture headroom (8×, matching RLIMIT_FSIZE) so
-                # the tool's spill predicate stays reachable and the spill file
-                # holds the full output.
+                # Issue #15: capture headroom (8× the tool-facing limit) so the
+                # tool's spill predicate stays reachable and the spill file
+                # holds the full output. Independent of the write budget.
                 capture_cap = lim.max_output_bytes * 8
                 if span is not None:
                     span.set_attribute("sandbox.exit_code", proc.returncode)

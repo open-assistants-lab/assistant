@@ -72,6 +72,10 @@ shell_tool:
   enabled: true
   max_output_kb: 100
   timeout_seconds: 30
+  # Per-file write budget for sandboxed commands (RLIMIT_FSIZE, MB).
+  # Left commented on purpose: a value here would override
+  # SHELL_TOOL_MAX_WRITE_MB. Default 64. See issue #32 part 3.
+  # max_write_mb: 64
 skills:
   enabled: true
 subagent: null

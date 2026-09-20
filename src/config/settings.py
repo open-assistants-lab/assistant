@@ -473,6 +473,11 @@ class ShellToolConfig(_BaseSettings):
     )
     timeout_seconds: int = 30
     max_output_kb: int = 100
+    # Issue #32 part 3: the workspace write budget (RLIMIT_FSIZE) is its own
+    # number. It was derived from max_output_kb * 8 (~800 KB at the default),
+    # which killed legitimate file work (downloads, generated reports) and
+    # silently coupled two unrelated knobs.
+    max_write_mb: int = 64
 
     model_config = SettingsConfigDict(env_prefix="SHELL_TOOL_")
 

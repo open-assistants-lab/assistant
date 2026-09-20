@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- The sandbox's workspace write budget is its own number (#32 part 3). `RLIMIT_FSIZE` was derived from `max_output_bytes × 8` — about 800 KB with the shipped `shell_tool` defaults — so a command that legitimately wrote a larger file (a download, a generated report, an export) was killed, and raising the stdout budget silently raised the write cap with it. Writes are now bounded by `SandboxLimits.max_write_bytes`, defaulting to **64 MB** and configurable as `shell_tool.max_write_mb` (env `SHELL_TOOL_MAX_WRITE_MB`), independent of output capture. The cap is clamped to the host's hard `RLIMIT_FSIZE` so a host policy below the default cannot fail the command.
+
+  Note the distinction: this is a **per-file** limit, not an aggregate quota — file count and total workspace size remain unbounded, bounded only by the command timeout and the host filesystem.
+
 ## v0.6.17 — 2026-09-19
 
 ### Fixed
