@@ -17,6 +17,7 @@ def _small_config() -> dict:
         "allowed_commands": {"python3", "echo"},
         "timeout_seconds": 30,
         "max_output_kb": 1,  # tiny budget to force truncation
+        "max_write_mb": 64,
     }
 
 

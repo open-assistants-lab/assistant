@@ -98,6 +98,10 @@ class SandboxLimits:
 
     timeout_seconds: float = 30.0
     max_output_bytes: int = 200_000
+    # Issue #32 part 3: bytes a sandboxed command may write (RLIMIT_FSIZE),
+    # independent of how much output we capture. Deriving it from
+    # max_output_bytes killed legitimate file work at ~800 KB.
+    max_write_bytes: int = 64 * 1024 * 1024
     env_mode: str = "scrubbed"  # "scrubbed" | "inherit"
     memory_mb: int = 512  # SB1 review P1: RLIMIT_AS cap
 
@@ -268,7 +272,7 @@ class SoftSandboxBackend:
         def _preexec() -> None:  # pragma: no cover - runs in child
             import resource
 
-            resource.setrlimit(resource.RLIMIT_FSIZE, (lim.max_output_bytes * 8, lim.max_output_bytes * 8))
+            resource.setrlimit(resource.RLIMIT_FSIZE, (lim.max_write_bytes,) * 2)
             resource.setrlimit(resource.RLIMIT_CPU, (int(lim.timeout_seconds) + 2, int(lim.timeout_seconds) + 2))
             # M4/SB1 review P1: memory cap — a runaway code_execute must not
             # OOM the host. RLIMIT_NPROC kept per docstring claim.
@@ -322,8 +326,8 @@ class SoftSandboxBackend:
                     preexec_fn=_preexec,
                 )
                 # Issue #15: capture a bounded headroom (8× the tool-facing
-                # limit, matching the child's RLIMIT_FSIZE multiple) so the
-                # tool's spill-to-file predicate can recover the FULL output.
+                # limit) so the tool's spill-to-file predicate can recover the
+                # FULL output. Independent of the write budget below.
                 # Clamping at the tool limit made spill unreachable.
                 capture_cap = lim.max_output_bytes * 8
                 if span is not None:
@@ -479,7 +483,7 @@ class BwrapSandboxBackend:
             import resource
 
             resource.setrlimit(
-                resource.RLIMIT_FSIZE, (lim.max_output_bytes * 8,) * 2
+                resource.RLIMIT_FSIZE, (lim.max_write_bytes,) * 2
             )
             resource.setrlimit(
                 resource.RLIMIT_CPU, (int(lim.timeout_seconds) + 2,) * 2
@@ -506,9 +510,9 @@ class BwrapSandboxBackend:
                     env=env,
                     preexec_fn=_preexec,
                 )
-                # Issue #15: capture headroom (8×, matching RLIMIT_FSIZE) so
-                # the tool's spill predicate stays reachable and the spill file
-                # holds the full output.
+                # Issue #15: capture headroom (8× the tool-facing limit) so the
+                # tool's spill predicate stays reachable and the spill file
+                # holds the full output. Independent of the write budget.
                 capture_cap = lim.max_output_bytes * 8
                 if span is not None:
                     span.set_attribute("sandbox.exit_code", proc.returncode)

@@ -30,9 +30,11 @@ def _get_limits() -> SandboxLimits:
     shell_cfg = getattr(settings, "shell_tool", None)
     timeout = getattr(shell_cfg, "timeout_seconds", 30) if shell_cfg else 30
     max_kb = getattr(shell_cfg, "max_output_kb", 100) if shell_cfg else 100
+    max_write_mb = getattr(shell_cfg, "max_write_mb", 64) if shell_cfg else 64
     return SandboxLimits(
         timeout_seconds=float(timeout),
         max_output_bytes=max_kb * 1024,
+        max_write_bytes=max_write_mb * 1024 * 1024,
     )
 
 
