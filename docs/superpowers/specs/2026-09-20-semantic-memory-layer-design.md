@@ -1,7 +1,8 @@
 # Semantic Memory Layer — Design Spec
 
-**Status:** design recorded; **implementation gated on the eval in §4** (see §4 precondition)
+**Status:** **PARKED 2026-09-20** — design recorded; implementation gated on the eval in §4 (see §4 precondition). No work starts until the eval returns a result.
 **Date:** 2026-09-20
+**Decisions taken 2026-09-20:** component rename `dream()` → **`replay()`**; working name **SemanticMem** (provisional — to be confirmed or changed when the project is unparked)
 **Related:** `2026-05-06-memory-redesign.md`, `2026-05-27-memory-consolidation-design.md` (observer/reflector — **retired in CoreMem 0.10**), `2026-06-09-unified-data-architecture.md`, `2026-08-24-vertical-expansion-enterprise-roadmap.md` §6.6
 **External references studied:** LangChain OpenWiki (claims + versioned evidence), Claude Code auto memory (index + topic files, hard-capped), AutoSchemaKG (autonomous schema induction), *LLM-empowered KG construction* survey (2025)
 
@@ -138,7 +139,12 @@ Kept here because the naming decision depends on which register a name comes fro
 | **AI / agents** | context window, long-term memory, episodic/semantic/procedural (the standard agent triad), memory bank, vector memory, parametric vs non-parametric, KV cache, reflection, memory stream, skill library |
 | **Business** | **institutional memory**, organizational memory (Walsh & Ungson), **tribal knowledge**, knowledge base, playbook / runbook / SOP / handbook, key-person risk |
 
-**Terminology note for the `dream()` step:** the science-accurate names are **Replay** (the mechanism) and **Consolidation** (the process). "Dreaming" is the pop-culture term, and REM is associated with emotional/creative integration rather than declarative consolidation — so a rename to `replay()` or `consolidate()` would be more accurate if the component is touched.
+**Terminology note for the `dream()` step — DECIDED 2026-09-20: rename to `replay()`.** The
+science-accurate names are **Replay** (the mechanism: hippocampal replay during slow-wave
+sleep) and **Consolidation** (the process). "Dreaming" is the pop-culture term, and REM is
+associated with emotional/creative integration rather than declarative consolidation. So
+the component should be `replay()`, not `dream()`. Apply when the component is next
+touched (extraction, or any edit to the journal path) — not as a standalone change.
 
 ---
 
@@ -189,13 +195,18 @@ The layer needs an LLM provider abstraction. CoreMem has `providers.py`; **dupli
 | `GistDB` / `The Gist` | ❌ "DB" misdescribes a markdown-first store; "The Gist" breaks the pack pattern |
 | `TotalRecall` | ❌ **The film is about implanted false memories** (Rekall) — the precise opposite of an evidence-and-verification pitch. Also overclaims, names CoreMem's function (recall), breaks the pack, and `totalrecall` is taken on PyPI |
 
-### 7.3 Recommendation
+### 7.3 Recommendation — **PROVISIONAL: `SemanticMem`**
 
 | | |
 |---|---|
-| Product / package / repo | **`semanticmem`** (PyPI free) |
+| Product / package / repo | **`semanticmem`** (PyPI free) — **working name, confirm or change on unpark** |
 | Tagline | *SemanticMem — distilled, evidence-backed knowledge for AI agents. The semantic half of CoreMem.* |
 | Pairing | **CoreMem** remembers what happened. **SemanticMem** keeps what's worth knowing. |
+
+Owner decision (2026-09-20): proceed with **SemanticMem** as the working name; revisit at
+unpark. If it is changed, §7.2's candidate table and the pack pattern in §7.1 are the
+starting point — and any replacement must satisfy all six constraints at once (short,
+technical, PascalCase `[role][category]`, PyPI-free, no overclaim, says "knowledge").
 
 **Buyer-register note:** the *market* name for this capability should be institutional-memory language ("your firm's institutional memory", "tribal knowledge"), not the library's technical name. They can differ without conflict.
 
@@ -208,5 +219,22 @@ The layer needs an LLM provider abstraction. CoreMem has `providers.py`; **dupli
 1. Does the double-counting check (§4.2.1) invalidate the 20-question result?
 2. Is the journal's lift attributable to **structure** or to **LLM spend** (`memorycore_llm_expansion` control)?
 3. If the layer ships: does knowledge live in the **same HybridDB instance** as CoreMem (needed to resolve evidence versions, atomic promotion, one backup) with separate tables — or its own store?
-4. Does `dream()`/`replay()` get renamed when the component is extracted?
+4. ~~Does `dream()` get renamed?~~ — **decided: `replay()`** (see §5).
 5. Do the four modes run within budget? Journal compilation is per-question-haystack LLM work; the June run used `deepseek-v4-flash`.
+6. Is the name actually SemanticMem? Provisional until unpark (§7.3).
+
+---
+
+## 9. Park notice
+
+**Parked 2026-09-20.** Nothing in this spec is scheduled. It is parked for two reasons:
+
+1. **The precondition hasn't been met.** The eval in §4 must run first — the pipeline has never executed, so there is no basis for building anything here.
+2. **Better-ordered work exists.** G5/G6 email tools, LC-5, H8, OB-1 and the D1 decision are all closer to the money path (or unblock others).
+
+**To unpark:** run §4.1, apply the §4.2 checks, and read the §4.3 decision matrix. The
+matrix is the whole point of this document: it converts "should we build a semantic memory
+layer?" from an architecture argument into an observation-driven decision.
+
+**What would justify deleting this spec entirely:** a null result at scale. That is a
+legitimate and cheap outcome — and the reason the eval runs before anything is written.
