@@ -122,7 +122,19 @@ def _parse_tool_file(
                     timeout=10,
                     check=True,
                 )
-            except (_subprocess.CalledProcessError, FileNotFoundError, OSError):
+            except _subprocess.TimeoutExpired:
+                # An unanswered probe says nothing about the tool (see the
+                # reconstructed-wrapper twin in tool_index.py).
+                return ToolResult(
+                    content=                    f"Tool '{tool_name}' availability could not be verified: "
+                    "the PATH probe timed out.",
+                    is_error=True,
+                )
+            except (
+                _subprocess.CalledProcessError,
+                FileNotFoundError,
+                OSError,
+            ):
                 if install_cmds:
                     return (
                         f"Tool '{tool_name}' not found. Install it with one of:\n"

@@ -154,7 +154,20 @@ def _rebuild_custom_function(
         if tool_name:
             try:
                 subprocess.run(["which", tool_name], capture_output=True, timeout=10, check=True)
-            except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+            except subprocess.TimeoutExpired:
+                # An unanswered probe says nothing about the tool: report it as
+                # a failure rather than as "not found", which would tell the
+                # user to install something that is probably already there.
+                return ToolResult(
+                    content=                f"Tool '{tool_name}' availability could not be verified: "
+                "the PATH probe timed out.",
+                    is_error=True,
+                )
+            except (
+                subprocess.CalledProcessError,
+                FileNotFoundError,
+                OSError,
+            ):
                 if install_cmds:
                     return (
                         f"Tool '{tool_name}' not found. Install it with one of:\n"

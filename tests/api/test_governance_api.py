@@ -68,7 +68,6 @@ class TestGovernanceEndpoints:
 
         executed: list[dict] = []
 
-        import src.http.routers.governance as grouter
 
         async def fake_execute(user_id, proposal_id, tool, arguments):
             executed.append({"tool": tool, "arguments": arguments})
@@ -116,7 +115,7 @@ class TestLoopGuardHook:
         from src.sdk.loop import AgentLoop, RunConfig
         from src.sdk.messages import Message
         from src.sdk.middleware_hitl import HITLMiddleware
-        from src.sdk.tools import ToolDefinition, ToolResult
+        from src.sdk.tools import ToolDefinition
 
         calls: list[str] = []
 
@@ -211,3 +210,51 @@ def test_tool_stats_endpoint(client, test_user_id):
     rows = r.json()
     assert rows and rows[0]["tool"] == "mailer"
     assert rows[0]["override_rate"] == 0.5
+
+
+def test_pendings_scan_reports_the_persisted_row_not_a_literal_status(
+    client, monkeypatch
+):
+    """A race during the auto-send scan must not be labelled "executed".
+
+    The scan used to merge a literal {"status": "executed", "outcome": ...}
+    into the row it returned, so a proposal settled differently meanwhile (for
+    example consumed by the async leg) still read as executed.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from src.sdk.governance import get_governance_service
+
+    svc = get_governance_service("govu")
+    pid = svc.create_pending(
+        "govu", "files_read", {"path": "x"}, tier="show_then_auto_send"
+    )
+    # Force the auto-send window to have elapsed and the row to be approved.
+    with svc._conn("govu") as conn:
+        conn.execute(
+            "UPDATE proposals SET expires_at=?, status='approved' WHERE proposal_id=?",
+            ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(), pid),
+        )
+        conn.commit()
+
+    import src.http.routers.governance as grouter
+
+    async def fake_execute(user_id, proposal_id, tool, arguments):
+        # Simulate the async leg consuming the proposal while the scan runs.
+        with svc._conn(user_id) as conn:
+            conn.execute(
+                "UPDATE proposals SET status='consumed' WHERE proposal_id=?",
+                (proposal_id,),
+            )
+            conn.commit()
+        return {"status": "consumed"}
+
+    monkeypatch.setattr(grouter, "execute_approved_tool", fake_execute)
+
+    r = client.get("/v1/governance/pendings", params={"user_id": "govu"})
+    assert r.status_code == 200
+    row = next(item for item in r.json() if item["proposal_id"] == pid)
+
+    assert row["status"] == "consumed", row
+    assert row["outcome"] is None, row
+    assert row["execution"] == {"status": "consumed"}, row

@@ -34,11 +34,46 @@ from src.sdk.session_events import (
     get_session_event_store,
     session_log_enabled,
 )
-from src.sdk.tool_results import CommandKilledError
+from src.sdk.tool_results import KILLED_MARKER, TIMEOUT_MARKER, CommandKilledError
 from src.sdk.tools import ToolResult
 from src.storage.paths import DataPaths
 
 Tier = str  # "autonomous" | "show_then_auto_send" | "explicit" | "hard_block"
+
+#: Outcomes a consumed proposal can carry. `status` stays 'executed' — it means
+#: "approved and consumed, terminal" and replay_resume depends on it — while
+#: this records what the call actually did (issue #32).
+#:
+#: `outcome is None` means "not applicable": rows written before this column
+#: existed, rows that were never executed (pending/approved/cancelled), and
+#: proposals consumed by the async leg, whose terminal state lives in the
+#: operation ledger. These five values are the frozen persisted vocabulary —
+#: renaming one strands historical rows on the old literal.
+OUTCOME_SUCCEEDED = "succeeded"
+OUTCOME_REFUSED = "refused"
+OUTCOME_FAILED = "failed"
+# The marker outcomes reuse the codes the receipt already carries, so the
+# column and the receipt cannot drift.
+OUTCOME_TIMED_OUT = TIMEOUT_MARKER
+OUTCOME_KILLED = KILLED_MARKER
+# Mirrors the three refusal codes set by the branches below.
+_REFUSAL_ERRORS = frozenset({"tool disabled", "tier changed", "unknown tool"})
+
+
+def outcome_for(result: dict[str, Any]) -> str:
+    """One word for what an executed proposal actually did.
+
+    Kept deliberately small so a consumer can switch on it: a clean run, a
+    refusal (the tool never ran), a timeout, a signal kill, or a failure.
+    """
+    if not result.get("is_error"):
+        return OUTCOME_SUCCEEDED
+    error = str((result.get("structured_content") or {}).get("error") or "")
+    if error in _REFUSAL_ERRORS:
+        return OUTCOME_REFUSED
+    if error in (OUTCOME_TIMED_OUT, OUTCOME_KILLED):
+        return error
+    return OUTCOME_FAILED
 
 _services: dict[str, GovernanceService] = {}
 _lock = threading.Lock()
@@ -89,12 +124,13 @@ class GovernanceService:
                 expires_at TEXT,
                 session_id TEXT,
                 user_id TEXT,
-                executor_json TEXT
+                executor_json TEXT,
+                outcome TEXT
             )
             """
         )
         # Migration-safe: pre-session-log DBs lack the columns.
-        for column in ("session_id", "user_id", "executor_json"):
+        for column in ("session_id", "user_id", "executor_json", "outcome"):
             try:
                 conn.execute(f"ALTER TABLE proposals ADD COLUMN {column} TEXT")
                 conn.commit()
@@ -254,7 +290,7 @@ class GovernanceService:
         with self._conn(user_id) as conn:
             row = conn.execute(
                 "SELECT proposal_id, tool, arguments, tier, status, expires_at,"
-                " session_id, executor_json FROM proposals WHERE proposal_id = ?",
+                " session_id, executor_json, outcome FROM proposals WHERE proposal_id = ?",
                 (proposal_id,),
             ).fetchone()
         if row is None:
@@ -268,6 +304,7 @@ class GovernanceService:
             "expires_at": row[5],
             "session_id": row[6],
             "executor": json.loads(row[7]) if row[7] else None,
+            "outcome": row[8],
         }
 
     def approve(
@@ -414,7 +451,9 @@ class GovernanceService:
         if row is None:
             return {"status": "missing"}
         if row["status"] == "executed":
-            return {"status": "executed", "already": True}
+            # Carry the persisted outcome too: a client that only calls approve
+            # should see the same headline as GET /pendings.
+            return {"status": "executed", "already": True, "outcome": row.get("outcome")}
         if row["status"] != "approved":
             return {"status": row["status"]}
 
@@ -442,11 +481,12 @@ class GovernanceService:
                     },
                     "is_error": True,
                 }
+                result["outcome"] = outcome_for(result)
                 with self._lock, self._conn(user_id) as conn:
                     conn.execute(
-                        "UPDATE proposals SET status='executed'"
+                        "UPDATE proposals SET status='executed', outcome=?"
                         " WHERE proposal_id=? AND status='approved'",
-                        (proposal_id,),
+                        (result["outcome"], proposal_id),
                     )
                     conn.commit()
                 self._emit_receipt(
@@ -465,11 +505,12 @@ class GovernanceService:
                     },
                     "is_error": True,
                 }
+                result["outcome"] = outcome_for(result)
                 with self._lock, self._conn(user_id) as conn:
                     conn.execute(
-                        "UPDATE proposals SET status='executed'"
+                        "UPDATE proposals SET status='executed', outcome=?"
                         " WHERE proposal_id=? AND status='approved'",
-                        (proposal_id,),
+                        (result["outcome"], proposal_id),
                     )
                     conn.commit()
                 self._emit_receipt(
@@ -563,11 +604,12 @@ class GovernanceService:
                     "is_error": True,
                 }
 
+        result["outcome"] = outcome_for(result)
         with self._lock, self._conn(user_id) as conn:
             conn.execute(
-                "UPDATE proposals SET status='executed'"
+                "UPDATE proposals SET status='executed', outcome=?"
                 " WHERE proposal_id=? AND status='approved'",
-                (proposal_id,),
+                (result["outcome"], proposal_id),
             )
             conn.commit()
         self._emit_receipt(
