@@ -43,6 +43,12 @@ Tier = str  # "autonomous" | "show_then_auto_send" | "explicit" | "hard_block"
 #: Outcomes a consumed proposal can carry. `status` stays 'executed' — it means
 #: "approved and consumed, terminal" and replay_resume depends on it — while
 #: this records what the call actually did (issue #32).
+#:
+#: `outcome is None` means "not applicable": rows written before this column
+#: existed, rows that were never executed (pending/approved/cancelled), and
+#: proposals consumed by the async leg, whose terminal state lives in the
+#: operation ledger. These five values are the frozen persisted vocabulary —
+#: renaming one strands historical rows on the old literal.
 OUTCOME_SUCCEEDED = "succeeded"
 OUTCOME_REFUSED = "refused"
 OUTCOME_FAILED = "failed"
@@ -50,7 +56,7 @@ OUTCOME_FAILED = "failed"
 # column and the receipt cannot drift.
 OUTCOME_TIMED_OUT = TIMEOUT_MARKER
 OUTCOME_KILLED = KILLED_MARKER
-# Mirrors the three refusal codes set by the branches above.
+# Mirrors the three refusal codes set by the branches below.
 _REFUSAL_ERRORS = frozenset({"tool disabled", "tier changed", "unknown tool"})
 
 

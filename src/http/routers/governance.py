@@ -193,7 +193,10 @@ async def approve_pending(
         if exec_row.get("status") == "missing":
             raise HTTPException(status_code=404, detail="No such proposal")
     else:
-        exec_row = {"status": row["status"], "already": True}
+        # Carry the persisted outcome so a repeat approve shows the same
+        # headline as GET /pendings (the first approve nests it under
+        # `execution`).
+        exec_row = {"status": row["status"], "already": True, "outcome": row.get("outcome")}
     final = svc.get_pending(user_id, proposal_id)
     return {
         "proposal_id": proposal_id,

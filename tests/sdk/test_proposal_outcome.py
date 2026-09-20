@@ -199,6 +199,10 @@ def test_disabled_tool_is_a_refusal(svc, monkeypatch):
 
 def test_tier_change_is_a_refusal(svc, monkeypatch):
     """A tier re-check that now refuses is a refusal, not a failure."""
+    import src.sdk.capabilities as caps_mod
+
+    # Hermetic: don't read the ambient user capabilities file.
+    monkeypatch.setattr(caps_mod, "load_capabilities", lambda root: {"tools": {}})
     monkeypatch.setattr(svc, "resolve_tier", lambda *_: "hard_block")
 
     _, result = _run(svc, _tool(fn=lambda **_: "should not run"))
