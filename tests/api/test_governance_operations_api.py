@@ -217,6 +217,9 @@ def test_pendings_scan_dispatches_async_proposals_instead_of_running_them(
     assert ran_synchronously == [], "an async-designated proposal ran synchronously"
     assert row["status"] == "consumed", row
     assert row["execution"]["operation_id"], row
+    # The ledger row must be queued (not merely created): the dispatcher picks
+    # up queued operations, and the approve endpoint reports the same status.
+    assert row["execution"]["operation_status"] == "queued", row
 
 
 def test_pendings_scan_fails_closed_when_async_validation_refuses(client, monkeypatch) -> None:

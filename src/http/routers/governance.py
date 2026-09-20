@@ -12,10 +12,13 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
+from src.app_logging import get_logger
 from src.http.auth import enforce_user_id, resolve_user_id
 from src.sdk.governance import get_governance_service
 from src.sdk.governance_operations import OperationStatus
 from src.storage.paths import DEFAULT_USER_ID
+
+logger = get_logger()
 
 router = APIRouter(prefix="/governance", tags=["governance"])
 
@@ -95,10 +98,20 @@ async def list_pendings(request: Request, user_id: str = DEFAULT_USER_ID) -> lis
                     execution: dict[str, Any] = {
                         "status": "accepted",
                         "operation_id": created.operation.operation_id,
+                        # Parity with the approve endpoint's payload.
+                        "operation_status": created.operation.status.value,
                     }
                 except ValueError as exc:
                     # Fail closed without breaking the scan: leave the proposal
-                    # as it is and report why it was not dispatched.
+                    # as it is and report why it was not dispatched. Log it too
+                    # — a deployment misconfiguration (missing callback secret,
+                    # non-allowlisted host) raises ValueError from the same call
+                    # chain and would otherwise be silent on this path.
+                    logger.warning(
+                        "governance.pendings_async_refused",
+                        {"proposal_id": pid, "tool": row["tool"], "error": str(exc)},
+                        user_id=user_id,
+                    )
                     execution = {"status": "refused", "detail": str(exc)}
             else:
                 exec_row = await execute_approved_tool(
