@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.6.16 — 2026-09-19
+
+### Added
+- `proposals.outcome` records what a consumed approval actually did — `succeeded`, `refused` (the tool never ran: disabled, tier re-checked to `hard_block`, or unresolvable), `failed`, `timed_out`, or `killed` (#32 part 1). Previously every consumed proposal read `status='executed'`, so a killed or failed action was indistinguishable from a clean one without reading `structured_content`. `status` keeps its meaning ("approved and consumed, terminal"; `replay_resume` depends on it). The outcome is derived from the receipt governance already builds, so the two cannot disagree, and it reaches `get_pending`, the pendings endpoints, the approve response and the idempotent re-approve. Existing databases gain the column through the existing `ALTER TABLE` migration; rows written before this change read as `None` — unknown, not a claim of success.
+
+### Fixed
+- A timed-out `which` availability probe was reported as a *governed* timeout — claiming the command hit its cap when only the check had — and then as "not found on PATH". It now reports that the availability could not be verified.
+- The pendings scan hard-coded `status='executed'` beside a freshly executed row, so a proposal settled differently in the meantime could be labelled as executed; it re-reads the persisted row.
+
+### Known limits
+- `outcome` is derived from `is_error`, so failures a tool reports as a plain string still read `succeeded` (for example `web_fetch`'s network errors, the `browser_*` CLI failures, and `shell_execute`'s policy refusals). Those are narrow handlers, deferred with #30's scope. Governance-class failures (#23/#24/#25/#26/#30) and the three refusals are exact.
+
+### Verification
+- Chunked suite: sdk 1,975 passed / 4 skipped; api 607 passed / 6 skipped; unit+storage+config+integration 500 passed. mypy: 64 errors / 19 files (68 / 19 at the v0.6.13 baseline).
+
 ## v0.6.15 — 2026-09-19
 
 ### Fixed
