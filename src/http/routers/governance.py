@@ -81,14 +81,35 @@ async def list_pendings(request: Request, user_id: str = DEFAULT_USER_ID) -> lis
         if row is None or row["status"] == "missing":
             continue
         if row["tier"] == "show_then_auto_send" and row["status"] == "approved":
-            exec_row = await execute_approved_tool(
-                user_id, pid, row["tool"], row["arguments"]
-            )
+            if row.get("executor") is not None:
+                # Issue #33: an executor-bearing proposal is the durable async
+                # path (#21). Running it here would execute a long tool inside
+                # this request, create no operation (so no cancel, no dispatch
+                # receipt), and settle the proposal through the synchronous
+                # leg. Mirror the approve endpoint instead.
+                try:
+                    executor = svc.validate_async_approval(user_id, row)
+                    created, _approved_now = svc.approve_external_operation(
+                        user_id, pid, executor
+                    )
+                    execution: dict[str, Any] = {
+                        "status": "accepted",
+                        "operation_id": created.operation.operation_id,
+                    }
+                except ValueError as exc:
+                    # Fail closed without breaking the scan: leave the proposal
+                    # as it is and report why it was not dispatched.
+                    execution = {"status": "refused", "detail": str(exc)}
+            else:
+                exec_row = await execute_approved_tool(
+                    user_id, pid, row["tool"], row["arguments"]
+                )
+                execution = exec_row
             # Re-read: a race (async consume, cancel, double-approve) may have
             # settled the row differently, and the persisted status and outcome
             # are the truth. Hard-coding "executed" here could label a consumed
             # or cancelled proposal as executed with outcome None.
-            row = {**(svc.get_pending(user_id, pid) or row), "execution": exec_row}
+            row = {**(svc.get_pending(user_id, pid) or row), "execution": execution}
         out.append(row)
     return out
 
