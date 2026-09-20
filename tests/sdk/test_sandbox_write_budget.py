@@ -19,6 +19,21 @@ import pytest
 from src.sdk.sandbox import SandboxLimits, get_sandbox_backend
 
 
+@pytest.fixture(autouse=True)
+def _limiting_backend(monkeypatch):
+    """Pin the backend: with `null` these tests pass vacuously.
+
+    `null` is a documented passthrough that applies no rlimits, so an ambient
+    SANDBOX_BACKEND=null would silently stop the anchor tests proving anything.
+    """
+    from src.config import reload_settings
+
+    monkeypatch.setenv("SANDBOX_BACKEND", "soft")
+    reload_settings()
+    yield
+    reload_settings()
+
+
 def _run(argv: list[str], cwd, **limit_kwargs):
     return get_sandbox_backend().run(
         argv, cwd, SandboxLimits(timeout_seconds=30.0, **limit_kwargs)
@@ -162,19 +177,95 @@ def test_soft_backend_applies_the_configured_budget(monkeypatch, tmp_path):
     """
     if os.name != "posix":  # pragma: no cover - the seam is POSIX-only
         pytest.skip("RLIMIT_FSIZE is POSIX-only")
-    monkeypatch.setenv("SANDBOX_BACKEND", "soft")
-    from src.config import reload_settings
-
-    reload_settings()
     target = tmp_path / "small.bin"
-    try:
-        result = _run(
-            _write_file_script(str(target), 4 * 1024 * 1024),
-            tmp_path,
-            max_write_bytes=1024 * 1024,  # 1 MB budget
-        )
-    finally:
-        monkeypatch.delenv("SANDBOX_BACKEND")
-        reload_settings()
+    result = _run(
+        _write_file_script(str(target), 4 * 1024 * 1024),
+        tmp_path,
+        max_write_bytes=1024 * 1024,  # 1 MB budget
+    )
 
     assert result.signalled is True or result.exit_code != 0, result
+
+
+def test_host_hard_limit_below_the_default_does_not_fail_the_command(
+    tmp_path, monkeypatch
+):
+    """A host whose hard FSIZE is under 64 MB must still run commands.
+
+    An unprivileged process cannot raise a hard limit, so asking for the full
+    default on such a host would raise inside preexec_fn and fail every
+    sandboxed command. The limit is clamped to the host's hard limit instead —
+    the host's policy stays in force rather than the cap silently vanishing.
+    """
+    import resource
+
+    from src.sdk import sandbox as sandbox_mod
+
+    applied: list[tuple[int, int]] = []
+    real_setrlimit = resource.setrlimit
+    original_hard = resource.getrlimit(resource.RLIMIT_FSIZE)[1]
+
+    def fake_getrlimit(which):
+        if which == resource.RLIMIT_FSIZE:
+            # A host that allows only 2 MB per file — between the old derived
+            # cap and the new default.
+            return (2 * 1024 * 1024, 2 * 1024 * 1024)
+        return resource.getrlimit(which)
+
+    def recording_setrlimit(which, limits):
+        if which == resource.RLIMIT_FSIZE:
+            applied.append(limits)
+            return
+        return real_setrlimit(which, limits)
+
+    monkeypatch.setattr(resource, "getrlimit", fake_getrlimit)
+    monkeypatch.setattr(resource, "setrlimit", recording_setrlimit)
+    try:
+        sandbox_mod._apply_write_limit(resource, 64 * 1024 * 1024)
+    finally:
+        monkeypatch.undo()
+
+    assert applied == [(2 * 1024 * 1024, 2 * 1024 * 1024)], applied
+    assert resource.getrlimit(resource.RLIMIT_FSIZE)[1] == original_hard
+
+
+def test_clamp_is_skipped_when_the_host_is_unlimited(monkeypatch):
+    """An unlimited host gets the configured budget untouched."""
+    import resource
+
+    from src.sdk import sandbox as sandbox_mod
+
+    applied: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        resource,
+        "getrlimit",
+        lambda which: (resource.RLIM_INFINITY, resource.RLIM_INFINITY),
+    )
+    monkeypatch.setattr(
+        resource,
+        "setrlimit",
+        lambda which, limits: applied.append(limits),
+    )
+
+    sandbox_mod._apply_write_limit(resource, 7 * 1024 * 1024)
+
+    assert applied == [(7 * 1024 * 1024, resource.RLIM_INFINITY)], applied
+
+
+def test_code_execute_reads_the_configured_write_budget(monkeypatch):
+    """The code path is wired identically to shell_execute."""
+    from types import SimpleNamespace
+
+    from src.sdk.tools_core import code_execute as ce
+
+    monkeypatch.setattr(
+        ce,
+        "get_settings",
+        lambda: SimpleNamespace(
+            shell_tool=SimpleNamespace(
+                timeout_seconds=30, max_output_kb=100, max_write_mb=5
+            )
+        ),
+    )
+
+    assert ce._get_limits().max_write_bytes == 5 * 1024 * 1024

@@ -92,6 +92,28 @@ _WRITE_CALLS = re.compile(
 )
 
 
+def _apply_write_limit(resource_mod: Any, max_write_bytes: int) -> None:
+    """Set RLIMIT_FSIZE, clamped to the host's hard limit.
+
+    An unprivileged process cannot raise a hard limit, so asking for more than
+    the host allows (a container `LimitFSIZE`, `ulimit -f` in a wrapper) would
+    raise inside preexec_fn and fail the whole command — which is how a host
+    whose hard limit sits between the old derived cap and the new 64 MB
+    default would break. Clamping keeps the host's policy in force instead of
+    silently dropping the cap.
+    """
+    limit = getattr(resource_mod, "RLIMIT_FSIZE", None)
+    if limit is None:  # pragma: no cover - not the case on POSIX
+        return
+    try:
+        _soft, hard = resource_mod.getrlimit(limit)
+        if hard != resource_mod.RLIM_INFINITY:
+            max_write_bytes = min(max_write_bytes, hard)
+        resource_mod.setrlimit(limit, (max_write_bytes, hard))
+    except (OSError, ValueError, AttributeError):  # pragma: no cover - host policy
+        pass
+
+
 @dataclass
 class SandboxLimits:
     """Resource caps applied to sandboxed execution."""
@@ -272,7 +294,7 @@ class SoftSandboxBackend:
         def _preexec() -> None:  # pragma: no cover - runs in child
             import resource
 
-            resource.setrlimit(resource.RLIMIT_FSIZE, (lim.max_write_bytes,) * 2)
+            _apply_write_limit(resource, lim.max_write_bytes)
             resource.setrlimit(resource.RLIMIT_CPU, (int(lim.timeout_seconds) + 2, int(lim.timeout_seconds) + 2))
             # M4/SB1 review P1: memory cap — a runaway code_execute must not
             # OOM the host. RLIMIT_NPROC kept per docstring claim.
@@ -482,9 +504,7 @@ class BwrapSandboxBackend:
         def _preexec() -> None:  # pragma: no cover - runs in child
             import resource
 
-            resource.setrlimit(
-                resource.RLIMIT_FSIZE, (lim.max_write_bytes,) * 2
-            )
+            _apply_write_limit(resource, lim.max_write_bytes)
             resource.setrlimit(
                 resource.RLIMIT_CPU, (int(lim.timeout_seconds) + 2,) * 2
             )

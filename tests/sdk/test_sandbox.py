@@ -107,10 +107,11 @@ class TestSoftBackend:
             tmp_path,
             SandboxLimits(max_output_bytes=100),
         )
-        # Issue #15: capture ceiling is 8× the tool-facing limit (matching
-        # the child's RLIMIT_FSIZE multiple) so the tool's spill predicate
-        # can recover the full output; the tool-facing flag still reports
-        # that output exceeded the configured limit.
+        # Issue #15: the capture ceiling is 8× the tool-facing limit so the
+        # tool's spill predicate can recover the full output; the tool-facing
+        # flag still reports that output exceeded the configured limit. This is
+        # independent of the child's RLIMIT_FSIZE, which is its own budget
+        # (issue #32 part 3).
         assert len(r.stdout) <= 100 * 8
         assert r.stdout_truncated is True
 
