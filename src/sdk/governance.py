@@ -46,6 +46,11 @@ Tier = str  # "autonomous" | "show_then_auto_send" | "explicit" | "hard_block"
 OUTCOME_SUCCEEDED = "succeeded"
 OUTCOME_REFUSED = "refused"
 OUTCOME_FAILED = "failed"
+# The marker outcomes reuse the codes the receipt already carries, so the
+# column and the receipt cannot drift.
+OUTCOME_TIMED_OUT = TIMEOUT_MARKER
+OUTCOME_KILLED = KILLED_MARKER
+# Mirrors the three refusal codes set by the branches above.
 _REFUSAL_ERRORS = frozenset({"tool disabled", "tier changed", "unknown tool"})
 
 
@@ -60,7 +65,7 @@ def outcome_for(result: dict[str, Any]) -> str:
     error = str((result.get("structured_content") or {}).get("error") or "")
     if error in _REFUSAL_ERRORS:
         return OUTCOME_REFUSED
-    if error in (TIMEOUT_MARKER, KILLED_MARKER):
+    if error in (OUTCOME_TIMED_OUT, OUTCOME_KILLED):
         return error
     return OUTCOME_FAILED
 
@@ -440,7 +445,9 @@ class GovernanceService:
         if row is None:
             return {"status": "missing"}
         if row["status"] == "executed":
-            return {"status": "executed", "already": True}
+            # Carry the persisted outcome too: a client that only calls approve
+            # should see the same headline as GET /pendings.
+            return {"status": "executed", "already": True, "outcome": row.get("outcome")}
         if row["status"] != "approved":
             return {"status": row["status"]}
 

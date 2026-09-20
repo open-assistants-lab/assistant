@@ -84,7 +84,11 @@ async def list_pendings(request: Request, user_id: str = DEFAULT_USER_ID) -> lis
             exec_row = await execute_approved_tool(
                 user_id, pid, row["tool"], row["arguments"]
             )
-            row = {**row, "status": "executed", "outcome": exec_row.get("outcome"), "execution": exec_row}
+            # Re-read: a race (async consume, cancel, double-approve) may have
+            # settled the row differently, and the persisted status and outcome
+            # are the truth. Hard-coding "executed" here could label a consumed
+            # or cancelled proposal as executed with outcome None.
+            row = {**(svc.get_pending(user_id, pid) or row), "execution": exec_row}
         out.append(row)
     return out
 

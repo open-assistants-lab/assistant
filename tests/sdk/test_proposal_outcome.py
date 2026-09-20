@@ -106,7 +106,11 @@ def test_status_stays_terminal_for_replay(svc):
 
     assert svc.get_pending(USER, proposal_id)["status"] == "executed"
     again = asyncio.run(svc.execute_approved(USER, proposal_id, registry=[]))
-    assert again == {"status": "executed", "already": True}
+    assert again["status"] == "executed"
+    assert again["already"] is True
+    # The headline travels with the idempotent return too, so a client that
+    # only ever calls approve sees the same vocabulary as GET /pendings.
+    assert again["outcome"] == "succeeded"
 
 
 def test_bare_timeout_expired_also_persists_the_outcome(svc):
@@ -173,3 +177,31 @@ def test_existing_databases_gain_the_column(tmp_path, monkeypatch):
     assert "outcome" in columns, columns
     assert row["status"] == "executed"
     assert row["outcome"] is None, "a legacy row must not claim an outcome"
+
+
+def test_disabled_tool_is_a_refusal(svc, monkeypatch):
+    """The refusal codes are matched by value, so pin each one.
+
+    `_REFUSAL_ERRORS` mirrors literals set in three branches; editing one
+    without the other would silently degrade a refusal to `failed`.
+    """
+    import src.sdk.capabilities as caps_mod
+
+    monkeypatch.setattr(
+        caps_mod, "load_capabilities", lambda root: {"tools": {"probe": False}}
+    )
+
+    _, result = _run(svc, _tool(fn=lambda **_: "should not run"))
+
+    assert result["outcome"] == "refused", result
+    assert result["structured_content"]["error"] == "tool disabled"
+
+
+def test_tier_change_is_a_refusal(svc, monkeypatch):
+    """A tier re-check that now refuses is a refusal, not a failure."""
+    monkeypatch.setattr(svc, "resolve_tier", lambda *_: "hard_block")
+
+    _, result = _run(svc, _tool(fn=lambda **_: "should not run"))
+
+    assert result["outcome"] == "refused", result
+    assert result["structured_content"]["error"] == "tier changed"

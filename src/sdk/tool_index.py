@@ -154,7 +154,12 @@ def _rebuild_custom_function(
         if tool_name:
             try:
                 subprocess.run(["which", tool_name], capture_output=True, timeout=10, check=True)
-            except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+            except (
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+                FileNotFoundError,
+                OSError,
+            ):
                 if install_cmds:
                     return (
                         f"Tool '{tool_name}' not found. Install it with one of:\n"

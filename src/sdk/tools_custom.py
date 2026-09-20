@@ -122,7 +122,12 @@ def _parse_tool_file(
                     timeout=10,
                     check=True,
                 )
-            except (_subprocess.CalledProcessError, FileNotFoundError, OSError):
+            except (
+                _subprocess.CalledProcessError,
+                _subprocess.TimeoutExpired,
+                FileNotFoundError,
+                OSError,
+            ):
                 if install_cmds:
                     return (
                         f"Tool '{tool_name}' not found. Install it with one of:\n"
