@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from src.config import get_settings
 from src.sdk.capabilities import load_user_capabilities, resource_enabled
 from src.sdk.deployment_tools import native_tool_is_denied
@@ -20,7 +22,7 @@ def _eligible_results(
     idx: object,
     description: str,
     settings: object,
-    capabilities: dict[object, object],
+    capabilities: dict[str, Any],
 ) -> list[tuple[str, str, str]]:
     """Return allowed ranked results without truncating before index exhaustion."""
     max_candidates = idx.count()  # type: ignore[attr-defined]
@@ -79,8 +81,8 @@ def tool_search(description: str, user_id: str =  DEFAULT_USER_ID) -> str:
         caps = load_user_capabilities(user_id)
     except Exception:
         caps = {}
-    results = _eligible_results(idx, description, settings, caps)
-    results = [(name, desc) for name, desc, _ in results]
+    ranked = _eligible_results(idx, description, settings, caps)
+    results = [(name, desc) for name, desc, _ in ranked]
     if not results:
         return f"No tools found matching '{description}'. Try different keywords."
 

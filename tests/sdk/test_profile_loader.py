@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 from agentprofile import AgentProfile, dumps_profile
 
-from src.sdk import profile_loader, runner
+from src.sdk import profile_loader
 
 
 def _write_profile(path, profile: AgentProfile) -> None:

@@ -1,7 +1,9 @@
 """Contract tests for conversation endpoints."""
 
-import pytest
 from unittest.mock import AsyncMock
+
+import pytest
+
 
 def _astub(store):
     """Async stand-in for aget_message_store (S4: call sites await it)."""

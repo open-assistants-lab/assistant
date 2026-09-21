@@ -11,12 +11,6 @@ left ChromaDB vectors + ``_journal`` rows behind (ghost recall).
 from __future__ import annotations
 
 import pytest
-
-def _astub(store):
-    """Async stand-in for aget_message_store (S4: call sites await it)."""
-    async def _get(user_id="default_user", workspace_id="personal"):
-        return store
-    return _get
 from fastapi import HTTPException
 
 from src.http.routers import conversation as conversation_router
@@ -26,6 +20,13 @@ from src.sdk.session_worker import (
     get_session_registry,
     session_key,
 )
+
+
+def _astub(store):
+    """Async stand-in for aget_message_store (S4: call sites await it)."""
+    async def _get(user_id="default_user", workspace_id="personal"):
+        return store
+    return _get
 
 
 @pytest.mark.asyncio
@@ -40,7 +41,7 @@ async def test_lock_acquired_via_one_transport_blocks_the_other():
     """A lock held under the canonical key is visible to every caller."""
     reg = get_session_registry()
     key = session_key("u1", "chat-1")
-    lock = await reg.acquire(key)
+    await reg.acquire(key)
     try:
         with pytest.raises(SessionBusyError):
             await reg.acquire(key)  # WS-side acquire of an SSE-held session
@@ -96,7 +97,7 @@ async def test_approve_during_active_run_returns_409(monkeypatch):
 async def test_delete_session_refuses_while_run_active(monkeypatch):
     reg = get_session_registry()
     key = session_key("title_user", "sess-del")
-    lock = await reg.acquire(key)
+    await reg.acquire(key)
 
     calls: list[str] = []
 

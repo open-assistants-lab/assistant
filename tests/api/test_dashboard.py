@@ -5,7 +5,6 @@ drafts=2, derived hours_saved, cost_per_seat; opt-out user gets opt-out
 state, never data.
 """
 
-from collections import OrderedDict
 
 import pytest
 

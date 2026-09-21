@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from agentprofile import AgentProfile, load_profile
 
@@ -36,7 +37,7 @@ class LoopSpec:
 
     model: str | None  # None = fall back to request/settings model
     persona: str | None  # None = keep user_prompt text
-    run_config_kwargs: dict  # max_llm_calls/cost_limit_usd/timeout_seconds
+    run_config_kwargs: dict[str, Any]  # max_llm_calls/cost_limit_usd/timeout_seconds
     timeout_seconds: int
 
 
@@ -234,8 +235,8 @@ async def revalidate_and_reset(
     user_id: str,
     *,
     data_root: str | Path | None = None,
-    registry=None,
-) -> dict:
+    registry: Any | None = None,
+) -> dict[str, Any]:
     """Profile-change lifecycle: reload + reset loops + detach active sessions.
 
     - reset_user_sdk_loops bumps the runner generation (in-flight creations are

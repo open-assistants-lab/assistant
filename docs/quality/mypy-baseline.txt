@@ -1,0 +1,13 @@
+# mypy ratchet baseline — regenerate with:
+#   uv run python scripts/mypy_baseline.py --write
+# The gate fails when a file's count grows or an unlisted file gains an error.
+src/http/routers/auth_keys.py: 1
+src/http/routers/contacts.py: 2
+src/http/routers/conversation.py: 3
+src/http/routers/email.py: 4
+src/http/routers/governance.py: 7
+src/http/routers/memories.py: 2
+src/http/routers/subagents.py: 10
+src/http/routers/tenancy.py: 10
+src/http/routers/todos.py: 2
+src/sdk/run_service.py: 1

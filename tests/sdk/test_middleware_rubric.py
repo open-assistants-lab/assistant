@@ -440,7 +440,7 @@ async def test_verification_timings_absent_without_grades():
     agent_loop.timings = HarnessTimings()
 
     provider = FakeGraderProvider(json.dumps({"result": "satisfied", "explanation": "", "criteria": []}))
-    mw = RubricMiddleware(provider, "- Be nice", agent_loop=agent_loop)
+    RubricMiddleware(provider, "- Be nice", agent_loop=agent_loop)
 
     assert agent_loop.timings.count("verification") == 0
     assert agent_loop.timings.stage_ms("verification") is None

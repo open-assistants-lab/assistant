@@ -141,7 +141,6 @@ def main() -> int:
         m_cost = sum(users[u]["cost_usd"] for u in members)
         price = MOTIONS[motion]["_price"]
         pct = (m_cost / price * 100) if price else 0.0
-        per_seat = m_cost / max(1, len(members))
         print(
             f"{motion:<28} members={len(members):>3}  mtd_cost=${m_cost:>8.4f}"
             f"  plan=${price:>7.2f}  cost={pct:>6.1f}% of plan"

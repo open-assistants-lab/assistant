@@ -11,8 +11,8 @@ from src.storage.metering import MeteringStore, UsageEventRow, reset_metering_st
 @pytest.fixture()
 def usage_api(tmp_path, monkeypatch):
     """Per-user isolated metering stores + disabled env pin."""
-    import src.storage.paths as paths_mod
     import src.storage.metering as metering_mod
+    import src.storage.paths as paths_mod
 
     monkeypatch.delenv("METERING_ENABLED", raising=False)
     monkeypatch.setattr(
@@ -23,7 +23,6 @@ def usage_api(tmp_path, monkeypatch):
     monkeypatch.setattr(metering_mod, "_metering_stores", {})
     monkeypatch.setattr(metering_mod, "_metering_sink_subscribed", False)
 
-    from fastapi.testclient import TestClient
 
     from src.http.main import app
 
@@ -101,9 +100,6 @@ class TestUsageAPI:
         )
         body2 = r2.json()
         assert body2["count"] == 1  # seeded 3 total
-        ids = {e["event_id"] for e in body["events"]} | {
-            e["event_id"] for e in body["events"]
-        }
 
     def test_billing_cost_total(self, usage_api, tmp_path):
         _seed()

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 
-from pathlib import Path
-
 import pytest
 
 
@@ -50,8 +48,8 @@ def test_unfilled_optional_placeholders_render_empty(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_execute_approved_resolves_custom_tool(tmp_path, monkeypatch):
     """Issue #13: the execution leg resolves custom TOOL.md tools."""
-    import src.storage.paths as paths_mod
     import src.sdk.governance as gov
+    import src.storage.paths as paths_mod
     from src.sdk.governance import GovernanceService
     from src.sdk.tools import tool
 
@@ -87,8 +85,8 @@ async def test_execute_approved_resolves_custom_tool(tmp_path, monkeypatch):
 async def test_unknown_tool_still_marks_executed_with_error(tmp_path, monkeypatch):
     """Issue #13 evidence: unknown-tool result is is_error=True (surfaced),
     matching the shipped behavior the issue reported."""
-    import src.storage.paths as paths_mod
     import src.sdk.governance as gov
+    import src.storage.paths as paths_mod
     from src.sdk.governance import GovernanceService
 
     monkeypatch.setattr(

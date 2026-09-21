@@ -55,7 +55,6 @@ def test_export_isolates_users(client):
 
 
 def test_export_since_filter(client):
-    from datetime import datetime
 
     _write_events("audit_u3", n=2)
     r = client.get(

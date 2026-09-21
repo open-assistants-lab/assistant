@@ -21,8 +21,6 @@ def _write_tool(tools_dir, name, description):
 
 @pytest.fixture()
 def _isolated(tmp_path, monkeypatch):
-    import src.http.auth as http_auth
-    import src.http.routers.tools as tools_mod
     import src.storage.paths as paths_mod
     from src.config.settings import reload_settings
 

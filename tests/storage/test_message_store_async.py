@@ -6,8 +6,8 @@ import pytest
 
 from src.storage.messages import (
     _MESSAGE_STORE_CACHE_MAX,
-    _stores,
     MessageStore,
+    _stores,
     aget_message_store,
     get_message_store,
 )

@@ -250,13 +250,14 @@ class GovernanceOperationStore:
     def _select_operation(
         conn: sqlite3.Connection, user_id: str, operation_id: str
     ) -> tuple[Any, ...] | None:
-        return conn.execute(
+        row = conn.execute(
             """SELECT operation_id, proposal_id, user_id, tool_name, arguments_json,
                       arguments_hash, status, cancel_requested, created_at, started_at,
                       updated_at, completed_at, result_json, error_code, error_detail_safe, executor_url, manifest_hash, dispatch_idempotency_key
                FROM operations WHERE operation_id = ? AND user_id = ?""",
             (operation_id, user_id),
         ).fetchone()
+        return tuple(row) if row is not None else None
 
     def approve_and_create_operation(self, user_id: str, proposal_id: str) -> GovernedOperation:
         """Consume one approved proposal and create/read its one queued operation.

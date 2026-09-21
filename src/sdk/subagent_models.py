@@ -8,6 +8,7 @@ Agent definition is now handled by the OSS `agentprofile` package (AgentProfile)
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -61,7 +62,7 @@ class SubagentResult(BaseModel):
     cost_usd: float = 0.0
     llm_calls: int = 0
     error: str | None = None
-    structured_output: dict | list | str | int | float | bool | None = None
+    structured_output: dict[str, Any] | list[Any] | str | int | float | bool | None = None
 
 
 class TaskCancelledError(Exception):

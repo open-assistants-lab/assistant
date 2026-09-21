@@ -10,9 +10,8 @@ from __future__ import annotations
 import os
 import sqlite3
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import pytest
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
@@ -22,7 +21,6 @@ from src.sdk.tools_core import contacts_storage as cs
 from src.sdk.tools_core import message as message_mod
 from src.sdk.tools_core import shell as shell_mod
 from src.sdk.tools_core import todos_storage as todos_mod
-
 
 # ---------------------------------------------------------------- 1. message_count
 
