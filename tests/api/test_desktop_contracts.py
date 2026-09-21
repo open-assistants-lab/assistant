@@ -481,3 +481,36 @@ def test_failed_compression_never_appears_as_success(tmp_path, monkeypatch):
     )
     projected = se.deriveMessages("s3", "fail_user")
     assert not any("Context updated" in m.content for m in projected)
+
+
+def test_turns_replay_context_compression_with_typed_metadata(client, monkeypatch):
+    from src.sdk import session_events as se
+
+    monkeypatch.setattr(se, "_session_stores", {})
+    monkeypatch.setattr(se, "session_log_enabled", lambda: True)
+    user_id = "turns_context_user"
+    store = se.get_session_event_store(user_id)
+    _append_event(store, 1, "reload-session", "user_prompt", {"content": "hello"})
+    _append_event(
+        store,
+        2,
+        "reload-session",
+        "context_compressed",
+        _compressed_data(46_000, 9_000),
+    )
+
+    response = client.get(
+        "/v1/conversation/turns",
+        params={"user_id": user_id, "session_id": "reload-session"},
+    )
+    assert response.status_code == 200
+    turns = response.json()["turns"]
+    context_messages = [
+        message
+        for turn in turns
+        for message in turn["messages"]
+        if message["role"] == "context"
+    ]
+    assert len(context_messages) == 1
+    assert context_messages[0]["content"] == "Context updated · 46k → 9k tokens"
+    assert context_messages[0]["metadata"]["event_type"] == "context_compressed"
