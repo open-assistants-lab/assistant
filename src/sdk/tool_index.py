@@ -4,7 +4,6 @@ import hashlib
 import json
 import shlex
 import subprocess
-import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -176,58 +175,14 @@ def _rebuild_custom_function(
                 return f"Tool '{tool_name}' not found on PATH."
 
         try:
-            started = time.monotonic()
-            result = subprocess.run(
-                rendered,
-                shell=True,
-                capture_output=True,
-                timeout=command_timeout,
-                text=True,
-            )
-            output = result.stdout + result.stderr
-            if result.returncode < 0:
-                # Issue #25: killed by a signal (RLIMIT_AS/CPU/NPROC/FSIZE
-                # or another). Here returncode is the OS status directly,
-                # so a negative value is a real signal — unlike the sandbox
-                # seam, which also reports a synthetic -1 for its own
-                # timeout and therefore needs an explicit flag. Returning
-                # the partial output made governance record executed: true
-                # for a command that never finished.
-                from src.sdk.tool_results import raise_command_killed
+            from src.sdk.tools_custom import run_custom_command
 
-                raise_command_killed(
-                    " ".join(rendered.split()),
-                    -result.returncode,
-                    time.monotonic() - started,
-                )
-            if 128 < result.returncode <= 192:
-                # Issue #32 part 2: when a pipeline member is killed, bash
-                # reports the LAST command's death as 128+n (positive), so
-                # the negative-code check above misses it and the run was
-                # returned as a failure *string* — which governance receipts
-                # as a successful execution. A command that deliberately
-                # exits 128+n is indistinguishable; both are failures, so
-                # only the marker differs.
-                from src.sdk.tool_results import raise_command_killed
-
-                raise_command_killed(
-                    " ".join(rendered.split()),
-                    result.returncode - 128,
-                    time.monotonic() - started,
-                )
-            if result.returncode != 0:
-                return f"Command failed (exit {result.returncode}):\n{output[:2000]}"
-            from src.sdk.tool_results import format_output
-
-            return format_output(output, user_id, workspace_id)
-        except subprocess.TimeoutExpired:
-            from src.sdk.tool_results import raise_command_timeout
-
-            raise_command_timeout(rendered, command_timeout, started)
-        except CommandKilledError:
-            # A signal kill must propagate: the catch-all below would turn it
-            # back into a string and governance would record executed: true for
-            # a command that never finished (issue #25).
+            return run_custom_command(rendered, user_id, workspace_id, command_timeout)
+        except (subprocess.TimeoutExpired, CommandKilledError):
+            # A cap-killed or signal-killed command must propagate: the
+            # catch-all below would turn it back into a string and governance
+            # would record executed: true for a command that never finished
+            # (issues #24/#25).
             raise
         except Exception as e:
             return ToolResult(content=f"Command error: {e}", is_error=True)

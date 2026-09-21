@@ -497,3 +497,50 @@ def test_bwrap_blocks_outside_workspace_write(tmp_path):
     )
     # read-only root bind: the write fails (or the file never appears)
     assert not outside.exists() or r.exit_code != 0
+
+
+class _RecordingResource:
+    """A fake `resource` module recording every setrlimit call."""
+
+    RLIMIT_CPU = "cpu"
+    RLIMIT_AS = "as"
+    RLIMIT_FSIZE = "fsize"
+    RLIMIT_NPROC = "nproc"
+    RLIM_INFINITY = -1
+
+    def __init__(self):
+        self.calls: list[tuple[str, tuple[int, int]]] = []
+
+    def getrlimit(self, which):
+        return (1024, 1024)
+
+    def setrlimit(self, which, limits):
+        self.calls.append((which, limits))
+
+
+def test_soft_rlimits_do_not_cap_forks_host_wide():
+    """RLIMIT_NPROC without a PID namespace bounds the whole UID, not the command.
+
+    A fixed cap (256) makes every forked command — `a | b` pipelines included —
+    fail with EAGAIN once the operator's ambient process count is above it.
+    Issue #34 surfaced this through custom TOOL.md commands, which are
+    typically pipelines; the namespaced bwrap backend keeps its cap.
+    """
+    from src.sdk.sandbox import _apply_soft_rlimits
+
+    resource = _RecordingResource()
+    _apply_soft_rlimits(resource, SandboxLimits(timeout_seconds=30))
+
+    applied = [name for name, _ in resource.calls]
+    assert "nproc" not in applied
+    assert "cpu" in applied and "fsize" in applied
+
+
+def test_soft_rlimits_skip_the_cpu_cap_when_the_declaration_is_unbounded():
+    """`timeout_seconds: none` (#23) has no number to derive RLIMIT_CPU from."""
+    from src.sdk.sandbox import _apply_soft_rlimits
+
+    resource = _RecordingResource()
+    _apply_soft_rlimits(resource, SandboxLimits(timeout_seconds=None))
+
+    assert "cpu" not in [name for name, _ in resource.calls]
