@@ -52,6 +52,12 @@ def test_catalog_lists_fixture_with_connected_false(client, fixture_spec_dir, te
     assert "help_text" in fields[0]
 
 
+def test_catalog_defaults_identity_when_client_omits_user_id(client, fixture_spec_dir):
+    r = client.get("/connectors/catalog")
+    assert r.status_code == 200
+    assert any(c["name"] == "fixture-api" for c in r.json())
+
+
 def test_api_key_connect_and_disconnect(client, fixture_spec_dir, test_user_id):
     r = client.post(
         "/connectors/connect",

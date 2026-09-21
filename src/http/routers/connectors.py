@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from src.app_logging import get_logger
 from src.http.auth import resolve_user_id
+from src.storage.paths import DEFAULT_USER_ID
 
 logger = get_logger()
 router = APIRouter(prefix="/connectors", tags=["connectors"])
@@ -42,13 +43,13 @@ def _get_catalog(user_id: str) -> list[dict[str, Any]]:
 
 
 @router.get("/catalog")
-async def list_connectors(user_id: str = Query(...), request: Request = None) -> list[dict[str, Any]]:
+async def list_connectors(user_id: str = Query(DEFAULT_USER_ID), request: Request = None) -> list[dict[str, Any]]:
     user_id = resolve_user_id(request, user_id)
     return _get_catalog(user_id)
 
 
 @router.get("/catalog/{service}")
-async def get_connector(service: str, user_id: str = Query(...), request: Request = None) -> dict[str, Any]:
+async def get_connector(service: str, user_id: str = Query(DEFAULT_USER_ID), request: Request = None) -> dict[str, Any]:
     user_id = resolve_user_id(request, user_id)
     catalog = _get_catalog(user_id)
     match = next((c for c in catalog if c["name"] == service), None)
@@ -61,7 +62,7 @@ async def get_connector(service: str, user_id: str = Query(...), request: Reques
 async def connect_service(
     request: Request,
     service: str = Query(...),
-    user_id: str = Query(...),
+    user_id: str = Query(DEFAULT_USER_ID),
 ) -> dict[str, Any]:
     """Store user-provided credentials for a service.
 
@@ -116,7 +117,7 @@ async def connect_service(
 @router.delete("/disconnect")
 async def disconnect_service(
     service: str = Query(...),
-    user_id: str = Query(...),
+    user_id: str = Query(DEFAULT_USER_ID),
     request: Request = None,
 ) -> dict[str, Any]:
     """Remove stored credentials for a connected service."""

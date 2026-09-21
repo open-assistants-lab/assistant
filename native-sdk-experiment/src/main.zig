@@ -5779,7 +5779,7 @@ pub fn main(init: std.process.Init) !void {
     // D3 task 2: restore the credential the native app owns (Keychain); it is
     // injected per request and never persisted by the sidecar.
     keychainLoadActive(&app_state.model);
-    if (app_state.model.active_provider_key.len == 0) {
+    if (app_state.model.active_provider_key.len == 0 and init.environ_map.get("NATIVE_ASSISTANT_SKIP_FIRST_RUN") == null) {
         app_state.model.launch_state = .first_run;
     }
 

@@ -213,7 +213,7 @@ start_backend() {
 
 start_app() {
   rm -rf .zig-cache/native-sdk-automation
-  NATIVE_ASSISTANT_BASE_URL="$API_BASE_URL" NATIVE_ASSISTANT_LAUNCH_TOKEN="$API_AUTH_TOKEN" native dev -Dautomation=true > /tmp/native_frontend_suite.log 2>&1 &
+  NATIVE_ASSISTANT_BASE_URL="$API_BASE_URL" NATIVE_ASSISTANT_LAUNCH_TOKEN="$API_AUTH_TOKEN" NATIVE_ASSISTANT_SKIP_FIRST_RUN=1 native dev -Dautomation=true > /tmp/native_frontend_suite.log 2>&1 &
   APP=$!
   sleep 5
   if ! native automate wait --timeout-ms 15000 > /dev/null 2>&1; then
@@ -227,7 +227,7 @@ start_app() {
     done
     sleep 1
     rm -rf .zig-cache/native-sdk-automation
-    NATIVE_ASSISTANT_BASE_URL="$API_BASE_URL" NATIVE_ASSISTANT_LAUNCH_TOKEN="$API_AUTH_TOKEN" native dev -Dautomation=true > /tmp/native_frontend_suite.log 2>&1 &
+    NATIVE_ASSISTANT_BASE_URL="$API_BASE_URL" NATIVE_ASSISTANT_LAUNCH_TOKEN="$API_AUTH_TOKEN" NATIVE_ASSISTANT_SKIP_FIRST_RUN=1 native dev -Dautomation=true > /tmp/native_frontend_suite.log 2>&1 &
     APP=$!
     sleep 5
     native automate wait --timeout-ms 15000 > /dev/null 2>&1
