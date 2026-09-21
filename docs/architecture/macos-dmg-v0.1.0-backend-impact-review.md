@@ -179,6 +179,11 @@ Implications:
 
 The current settings/API-key persistence path needs review because it may store provider credentials in backend-managed settings. Desktop mode must provide an in-memory credential path rather than duplicate plaintext/persistent secret storage.
 
+**Decision B (2026-09-21):** the Connections panel is absent from the desktop
+v0.1.0 surface. The D2 task-list mention of Connections is deferred together
+with connector OAuth: the connector router is not mounted in desktop mode and
+the v0.1.0 app exposes no Connections destination. Revisit when OAuth lands.
+
 ### 4.2 Key recognition and validation
 
 Provider recognition must have three separate operations:

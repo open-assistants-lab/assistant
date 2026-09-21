@@ -218,6 +218,7 @@ StreamEventType = Literal[
     "reasoning",
     "tool_result",
     "usage",
+    "context_compressed",
     "rubric_evaluation_start",
     "rubric_evaluation_end",
 ]
@@ -255,6 +256,9 @@ class StreamChunk(BaseModel):
     is_error: bool = False
     tool_calls: list[dict[str, Any]] | None = None
     usage: Usage | None = None
+    # context_compressed carries the run-event payload: {"before": snapshot,
+    # "after": snapshot, "status": "succeeded"} (D2 task 5).
+    context: dict[str, Any] | None = None
 
     @classmethod
     def text_start(cls) -> StreamChunk:
@@ -327,6 +331,10 @@ class StreamChunk(BaseModel):
     @classmethod
     def usage_event(cls, usage: Usage) -> StreamChunk:
         return cls(type="usage", usage=usage)
+
+    @classmethod
+    def context_compressed(cls, context: dict[str, Any]) -> StreamChunk:
+        return cls(type="context_compressed", context=context)
 
     @property
     def canonical_type(self) -> str:

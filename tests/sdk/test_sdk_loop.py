@@ -2304,3 +2304,58 @@ class TestP3MeasurementReuse:
         )
         await loop.run([Message.user("history")])
         assert observed[0].after_context is loop.last_call_context
+
+
+@pytest.mark.asyncio
+async def test_compression_is_logged_and_streamed(tmp_path, monkeypatch):
+    """D2 task 5: a real run produces the durable record and the live chunk."""
+    import src.storage.paths as paths_mod
+    from src.sdk import session_events as se
+
+    monkeypatch.setenv("DEPLOYMENT_DATA_ROOT", str(tmp_path / "data"))
+    monkeypatch.setattr(
+        paths_mod.DataPaths,
+        "root",
+        property(lambda self: tmp_path / "data"),
+        raising=False,
+    )
+    monkeypatch.setattr(se, "session_log_enabled", lambda: True)
+    se.reset_session_stores()
+
+    loop = AgentLoop(
+        provider=MockProvider([Message.assistant("done")]),
+        middlewares=[ScriptedCompressionMiddleware(automatic=True)],
+        user_id="u1",
+        context_measurer=lambda **kwargs: _measured_snapshot(**kwargs),
+    )
+    loop._flow_session_id = "s1"
+
+    chunks = [chunk async for chunk in loop.run_stream([Message.user("hello")])]
+    compressed = [chunk for chunk in chunks if chunk.type == "context_compressed"]
+    assert len(compressed) == 1, [c.type for c in chunks]
+    assert compressed[0].context is not None
+    assert compressed[0].context["status"] == "succeeded"
+
+    logged = se.deriveMessages("s1", "u1")
+    assert any(
+        isinstance(m.content, str) and m.content.startswith("Context updated")
+        for m in logged
+    ), logged
+
+
+def test_stream_chunk_to_event_maps_context_compressed():
+    from src.sdk.run_events import ContextCompressedEvent
+    from src.sdk.run_service import _stream_chunk_to_event
+
+    calls: list[tuple[type, dict, int]] = []
+
+    def emit(event_cls, data, attempt):
+        calls.append((event_cls, data, attempt))
+        return event_cls.model_construct(data=data, attempt=attempt)
+
+    chunk = StreamChunk.context_compressed(
+        {"before": {"attempt": 1}, "after": {"attempt": 1}, "status": "succeeded"}
+    )
+    event = _stream_chunk_to_event(chunk, emit, attempt=1)
+    assert calls and calls[0][0] is ContextCompressedEvent
+    assert event is not None

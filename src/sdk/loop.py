@@ -1354,6 +1354,27 @@ class AgentLoop:
         except Exception:
             logger.warning("compression_sink_error", exc_info=True)
 
+    def _stream_compression_chunk(
+        self, already_streamed: CompressionTelemetry | None
+    ) -> StreamChunk | None:
+        """Live context_compressed chunk, emitted once per compression (D2 task 5)."""
+        telemetry = self.last_compression
+        if (
+            telemetry is None
+            or telemetry is already_streamed
+            or telemetry.status is not CompressionStatus.SUCCEEDED
+            or telemetry.before_context is None
+            or telemetry.after_context is None
+        ):
+            return None
+        return StreamChunk.context_compressed(
+            {
+                "before": telemetry.before_context.model_dump(mode="json"),
+                "after": telemetry.after_context.model_dump(mode="json"),
+                "status": "succeeded",
+            }
+        )
+
     async def _prepare_agent_call(
         self, state: AgentState
     ) -> tuple[list[Message], list[ToolDefinition] | None, ContextSnapshot | None]:
@@ -1392,6 +1413,7 @@ class AgentLoop:
                 compression_result = compression_result.model_copy(update={"telemetry": telemetry})
             self.last_compression = compression_result.telemetry
             await self._notify_compression(compression_result.telemetry)
+            self._log_session_compression(compression_result.telemetry)
         return prepared, tools, prepared_snapshot
 
     async def _record_agent_call(
@@ -1483,6 +1505,7 @@ class AgentLoop:
             result = result.model_copy(update={"telemetry": telemetry})
         self.last_compression = result.telemetry
         await self._notify_compression(result.telemetry)
+        self._log_session_compression(result.telemetry)
         return result
 
     async def _check_subagent_before_llm(self, state: AgentState) -> None:
@@ -1594,6 +1617,28 @@ class AgentLoop:
                 self.user_id or "default_user", session_id, run_id, seq, message
             )
             self._session_log_seq = next_seq
+        except Exception:  # pragma: no cover - emit-only contract
+            pass
+
+    def _log_session_compression(self, telemetry: CompressionTelemetry) -> None:
+        """Forward a successful compression to the session-event log (D2 task 5).
+
+        Opt-in (session_log.enabled); emit-only — logging failures never break
+        the loop."""
+        try:
+            from src.sdk import session_events as se
+
+            session_id = str(
+                getattr(self, "_flow_session_id", None) or "default"
+            ).strip() or "default"
+            run_id = str(getattr(self, "_flow_run_id", "") or uuid.uuid4().hex)
+            store = se.get_session_event_store(self.user_id or "default_user")
+            seq = getattr(self, "_session_log_seq", None) or store.next_sequence(
+                session_id
+            )
+            self._session_log_seq = se.log_compression(
+                self.user_id or "default_user", session_id, run_id, seq, telemetry
+            )
         except Exception:  # pragma: no cover - emit-only contract
             pass
 
@@ -1992,6 +2037,7 @@ class AgentLoop:
         try:
             iteration = 0
             overflow_retries = 0
+            streamed_compression: CompressionTelemetry | None = None
             while iteration < self.run_config.max_iterations:
                 # Cooperative cancellation check
                 if self.cancel_event and self.cancel_event.is_set():
@@ -2017,6 +2063,10 @@ class AgentLoop:
                 self.timings.record(
                     "context_assembly", (time.monotonic() - _t_ctx) * 1000.0
                 )
+                compression_chunk = self._stream_compression_chunk(streamed_compression)
+                if compression_chunk is not None:
+                    streamed_compression = self.last_compression
+                    yield compression_chunk
                 # The post-nudge final response is capped (FR-9).
                 call_options = (
                     self._with_final_response_cap(self.run_config.provider_options)

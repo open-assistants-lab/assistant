@@ -19,6 +19,7 @@ import threading
 import uuid
 from typing import Any
 
+from src.sdk.compression import CompressionStatus, CompressionTelemetry
 from src.sdk.messages import Message
 from src.sdk.run_events import (
     ContextCompressedEvent,
@@ -323,6 +324,53 @@ def log_model_message(
         )
     elif message.role == "system":
         _emit(InjectionEvent, {"kind": "supervisor", "content": content})
+    return sequence + 1
+
+
+def log_compression(
+    user_id: str,
+    session_id: str,
+    run_id: str,
+    sequence: int,
+    telemetry: CompressionTelemetry,
+) -> int:
+    """Log one successful compression as its canonical RunEvent (D2 task 5).
+
+    Returns the next sequence value; no-op (same sequence) when disabled or
+    when the attempt cannot be represented. Failed and skipped compressions
+    produce no durable event: the projection only ever renders successes, and
+    ``ContextCompressedData`` requires an ``after`` snapshot that failed
+    telemetry forbids.
+    """
+    if not session_log_enabled():
+        return sequence
+    before = telemetry.before_context
+    after = telemetry.after_context
+    if (
+        telemetry.status is not CompressionStatus.SUCCEEDED
+        or before is None
+        or after is None
+    ):
+        return sequence
+    ev = parse_run_event(
+        {
+            "schema_version": 1,
+            "event_id": uuid.uuid4().hex,
+            "sequence": sequence,
+            "timestamp": _utcnow(),
+            "session_id": session_id,
+            "run_id": run_id,
+            # The envelope attempt must equal both snapshots' attempts.
+            "attempt": before.attempt,
+            "type": "context_compressed",
+            "data": {
+                "before": before.model_dump(mode="json"),
+                "after": after.model_dump(mode="json"),
+                "status": "succeeded",
+            },
+        }
+    )
+    log_event(user_id, ev)
     return sequence + 1
 
 

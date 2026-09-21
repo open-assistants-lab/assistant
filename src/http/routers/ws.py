@@ -215,6 +215,11 @@ async def _run_agent_stream(
                 # see token accounting like SSE clients do.
                 await websocket.send_json(_with_workspace(data))
 
+            elif event_type == "context_compressed":
+                # D2 task 5: live context-updated notice; SSE already forwards
+                # this event, the WS path needed the same branch.
+                await websocket.send_json(_with_workspace(data))
+
             elif event_type == "interrupt":
                 if pending_ref is not None:
                     pending_ref[0] = {

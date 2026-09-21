@@ -51,6 +51,14 @@ class GeminiProvider(LLMProvider):
     def provider_id(self) -> str:
         return "gemini"
 
+    def get_client(self) -> httpx.AsyncClient:
+        """Underlying client for connection/key testing (D2 review F3).
+
+        The base implementation returns None, which made /settings/test-key
+        report every Gemini key as "Cannot test provider type".
+        """
+        return self._get_client()
+
     def _get_client(self) -> httpx.AsyncClient:
         if self._http_client is None or self._http_client.is_closed:
             self._http_client = httpx.AsyncClient(

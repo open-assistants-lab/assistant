@@ -23,6 +23,7 @@ from src.sdk.middleware_rubric import RubricMiddleware
 from src.sdk.run_events import (
     BlockData,
     BlockDeltaData,
+    ContextCompressedEvent,
     DoneData,
     DoneEvent,
     ErrorData,
@@ -387,6 +388,8 @@ def _stream_chunk_to_event(
             call_id=chunk.call_id or "",
             args=chunk.args or {},
         ).model_dump(), attempt)
+    elif ct == "context_compressed" and chunk.context:
+        return emit(ContextCompressedEvent, chunk.context, attempt)
     elif ct == "usage" and chunk.usage:
         return emit(UsageEvent, UsageEventData(
             category="agent",

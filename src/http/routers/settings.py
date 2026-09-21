@@ -73,14 +73,21 @@ logger = get_logger()
 router = APIRouter(prefix="/settings", tags=["settings"])
 
 
-def _key_test_error(status: int | None, err_body: object) -> dict[str, Any]:
+def _key_test_error(
+    status: int | None, err_body: object, secret: str | None = None
+) -> dict[str, Any]:
     if status == 401:
         return {"valid": False, "error": "Invalid API key (401 Unauthorized)"}
     if status == 403:
         return {"valid": False, "error": "API key lacks permission (403 Forbidden)"}
     if status == 429:
         return {"valid": True, "warning": "Rate limited — key appears valid"}
-    return {"valid": False, "error": str(err_body)[:200]}
+    text = str(err_body)
+    if secret:
+        # Provider error bodies and transport exceptions can echo the request
+        # URL (Gemini carries the key as a query parameter).
+        text = text.replace(secret, "***")
+    return {"valid": False, "error": text[:200]}
 
 
 async def _test_http_provider_key(prov: Any, provider: str, api_key: str) -> dict[str, Any] | None:
@@ -100,7 +107,7 @@ async def _test_http_provider_key(prov: Any, provider: str, api_key: str) -> dic
     status = getattr(response, "status_code", None)
     if status is not None and 200 <= status < 300:
         return {"valid": True}
-    return _key_test_error(status, getattr(response, "text", response))
+    return _key_test_error(status, getattr(response, "text", response), secret=api_key)
 
 
 def _setup_provider_key_test(provider: str, api_key: str) -> tuple[Any, str]:
@@ -602,13 +609,14 @@ async def test_api_key(body: TestKeyRequest) -> dict[str, Any]:
             err_body = getattr(e, "body", None) or getattr(
                 getattr(e, "response", None), "text", str(e)
             )
-            return _key_test_error(status, err_body)
+            return _key_test_error(status, err_body, secret=api_key)
 
         return {"valid": True}
 
     except Exception as e:
         logger.warning("test-key failed", {"provider": provider, "error": str(e)})
-        return {"valid": False, "error": f"Could not test key: {e}"}
+        safe_error = str(e).replace(api_key, "***") if api_key else str(e)
+        return {"valid": False, "error": f"Could not test key: {safe_error}"}
 
 
 @router.delete("/api-keys/{provider}", response_model=None)
