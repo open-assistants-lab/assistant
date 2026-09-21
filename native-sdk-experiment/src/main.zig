@@ -18,7 +18,6 @@ const history_key: u64 = 5;
 const sessions_key: u64 = 6;
 const delete_key: u64 = 7;
 const title_key: u64 = 8;
-const models_key: u64 = 9;
 const bootstrap_key: u64 = 19;
 const settings_key: u64 = 10;
 const settings_general_key: u64 = 11;
@@ -364,7 +363,6 @@ pub const Msg = union(enum) {
     delete_chat: u64,
     delete_chat_done: native_sdk.EffectResponse,
     title_generated: native_sdk.EffectResponse,
-    models_loaded: native_sdk.EffectResponse,
     cycle_model,
     toggle_theme,
     toggle_bubble: u64,
@@ -450,7 +448,6 @@ pub const Msg = union(enum) {
         "delete_chat",
         "delete_chat_done",
         "title_generated",
-        "models_loaded",
         "cycle_model",
         "settings_general_loaded",
         "grader_prompt_loaded",
@@ -715,10 +712,10 @@ fn contextCompressedLabel(allocator: std.mem.Allocator, data: std.json.ObjectMap
     var before_tokens: ?u32 = null;
     var after_tokens: ?u32 = null;
     if (data.get("before")) |before| if (before == .object) {
-        if (before.object.get("tokens")) |t| before_tokens = jsonCount(t);
+        if (before.object.get("estimated_tokens")) |t| before_tokens = jsonCount(t);
     };
     if (data.get("after")) |after| if (after == .object) {
-        if (after.object.get("tokens")) |t| after_tokens = jsonCount(t);
+        if (after.object.get("estimated_tokens")) |t| after_tokens = jsonCount(t);
     };
     if (before_tokens) |b| {
         if (after_tokens) |a| {
@@ -1181,43 +1178,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (findChatBySessionId(model, sid_str)) |chat| {
                 chat.title = model.allocator.dupe(u8, title_str) catch return;
                 chat.title_generated = true;
-            }
-        },
-        .models_loaded => |response| blk: {
-            // Chain the active chat's history fetch (see initFx comment).
-            defer fetchActiveChatHistory(model, fx);
-            if (response.outcome != .ok) break :blk;
-            const body = response.body;
-            if (body.len == 0) break :blk;
-            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch break :blk;
-            defer parsed.deinit();
-            const root = parsed.value;
-            const models_arr = root.object.get("models") orelse break :blk;
-            const arr = switch (models_arr) {
-                .array => |a| a,
-                else => return,
-            };
-            model.available_model_count = 0;
-            for (arr.items) |item| {
-                if (model.available_model_count >= max_models) break;
-                const id_val = item.object.get("id") orelse continue;
-                const name_val = item.object.get("name") orelse continue;
-                const pd_val = item.object.get("provider_display") orelse continue;
-                const prov_val = item.object.get("provider");
-                const key_source_val = item.object.get("key_source");
-                const id_str = switch (id_val) { .string => |s| s, else => continue };
-                const name_str = switch (name_val) { .string => |s| s, else => continue };
-                const pd_str = switch (pd_val) { .string => |s| s, else => continue };
-                const prov_str = if (prov_val) |v| switch (v) { .string => |s| s, else => "" } else "";
-                const key_source_str = if (key_source_val) |v| switch (v) { .string => |s| s, else => "" } else "";
-                model.available_models[model.available_model_count] = .{
-                    .id = model.allocator.dupe(u8, id_str) catch continue,
-                    .name = model.allocator.dupe(u8, name_str) catch continue,
-                    .provider = model.allocator.dupe(u8, prov_str) catch continue,
-                    .provider_display = model.allocator.dupe(u8, pd_str) catch continue,
-                    .key_source = model.allocator.dupe(u8, key_source_str) catch continue,
-                };
-                model.available_model_count += 1;
             }
         },
         .cycle_model => {
@@ -1717,9 +1677,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             firePendingSend(model, chat, fx);
         },
         .sessions_loaded => |response| blk: {
-            // Chain the models fetch (and from it, history) so startup never
-            // fires concurrent connects to the same host (ISCONN panic race).
-            defer fetchModels(model, fx);
+            // Chain the history fetch so startup never fires concurrent
+            // connects to the same host (ISCONN panic race). The model
+            // catalog is fetched at the end of the history handler.
+            defer fetchActiveChatHistory(model, fx);
             if (response.outcome != .ok) {
                 // A3: surface backend connection error
                 const chat = model.activeChat();
@@ -5483,16 +5444,6 @@ fn initFx(model: *Model, fx: *Effects) void {
     });
 }
 
-fn fetchModels(model: *Model, fx: *Effects) void {
-    fx.fetch(.{
-        .key = models_key,
-        .url = apiUrl(model, model.allocator, "/providers/models"),
-        .method = .GET,
-        .headers = acceptJsonHeaders(model, model.allocator),
-        .response = .buffered,
-        .on_response = Effects.responseMsg(.models_loaded),
-    });
-}
 
 fn fetchSettingsCatalog(model: *Model, fx: *Effects) void {
     fx.fetch(.{

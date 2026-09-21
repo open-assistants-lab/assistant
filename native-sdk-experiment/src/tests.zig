@@ -141,12 +141,12 @@ test "D3 successful context compression renders token reduction and failed compr
     const fk = sendAndStartStream(&model, &fx, "summarize context");
     const chat = model.activeChat();
 
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"context_compressed\",\"data\":{\"status\":\"succeeded\",\"before\":{\"tokens\":46000},\"after\":{\"tokens\":9000}}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"context_compressed\",\"data\":{\"status\":\"succeeded\",\"before\":{\"estimated_tokens\":46000},\"after\":{\"estimated_tokens\":9000}}}" } }, &fx);
     try testing.expectEqualStrings("system", chat._messages[chat.msg_count - 1].role);
     try testing.expectEqualStrings("Context updated · 46k → 9k tokens", chat._messages[chat.msg_count - 1].content);
 
     const before_count = chat.msg_count;
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"context_compressed\",\"data\":{\"status\":\"failed\",\"before\":{\"tokens\":8000},\"after\":{\"tokens\":4000}}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"context_compressed\",\"data\":{\"status\":\"failed\",\"before\":{\"estimated_tokens\":8000},\"after\":{\"estimated_tokens\":4000}}}" } }, &fx);
     try testing.expectEqual(before_count, chat.msg_count);
 }
 
@@ -159,7 +159,7 @@ test "D3 history reload renders persisted context compression events in order" {
     model.allocator = arena;
     const chat = model.activeChat();
 
-    const item_json = "{\"role\":\"context\",\"content\":\"ignored old copy\",\"metadata\":{\"event_type\":\"context_compressed\",\"status\":\"succeeded\",\"before\":{\"tokens\":46000},\"after\":{\"tokens\":9000}},\"timestamp\":\"2026-01-01T12:34:56Z\"}";
+    const item_json = "{\"role\":\"context\",\"content\":\"ignored old copy\",\"metadata\":{\"event_type\":\"context_compressed\",\"status\":\"succeeded\",\"before\":{\"estimated_tokens\":46000},\"after\":{\"estimated_tokens\":9000}},\"timestamp\":\"2026-01-01T12:34:56Z\"}";
     const parsed = try std.json.parseFromSlice(std.json.Value, arena, item_json, .{});
     defer parsed.deinit();
     main.addHistoryMessage(chat, arena, parsed.value);
@@ -292,10 +292,10 @@ test "models response labels selected model without credential source" {
     var fx = noopFx(arena);
 
     const models_body =
-        \\{"models":[{"id":"agnes:agnes-2.0-flash","name":"Agnes 2.0 Flash","provider":"agnes","provider_display":"Agnes","key_source":"hosted","billing_mode":"hosted"}]}
+        \\{"providers":[{"id":"agnes","name":"Agnes","key_source":"hosted","models":[{"id":"agnes:agnes-2.0-flash","name":"Agnes 2.0 Flash","provider":"agnes","provider_display":"Agnes","key_source":"hosted"}]}]}
     ;
-    main.update(&model, .{ .models_loaded = .{
-        .key = 9,
+    main.update(&model, .{ .settings_loaded = .{
+        .key = 10,
         .outcome = .ok,
         .body = models_body,
     } }, &fx);
@@ -315,10 +315,10 @@ test "hosted model shows change button" {
     var fx = noopFx(arena);
 
     const models_body =
-        \\{"models":[{"id":"agnes:agnes-2.0-flash","name":"Agnes 2.0 Flash","provider":"agnes","provider_display":"Agnes","key_source":"hosted","billing_mode":"hosted"}]}
+        \\{"providers":[{"id":"agnes","name":"Agnes","key_source":"hosted","models":[{"id":"agnes:agnes-2.0-flash","name":"Agnes 2.0 Flash","provider":"agnes","provider_display":"Agnes","key_source":"hosted"}]}]}
     ;
-    main.update(&model, .{ .models_loaded = .{
-        .key = 9,
+    main.update(&model, .{ .settings_loaded = .{
+        .key = 10,
         .outcome = .ok,
         .body = models_body,
     } }, &fx);
@@ -2189,14 +2189,14 @@ test "model menu lists only ready models and selects one" {
     var fx = noopFx(arena);
 
     const models_body =
-        \\{"models":[
-        \\{"id":"agnes:agnes-2.0-flash","name":"Agnes 2.0 Flash","provider":"agnes","provider_display":"Agnes","key_source":"hosted","billing_mode":"hosted"},
-        \\{"id":"openai:gpt-4.1","name":"GPT-4.1","provider":"openai","provider_display":"OpenAI","key_source":"none","billing_mode":"api_key"},
-        \\{"id":"ollama-cloud:deepseek-v4-flash:0731","name":"DeepSeek V4 Flash 0731","provider":"ollama-cloud","provider_display":"Ollama Cloud","key_source":"hosted","billing_mode":"hosted"}
+        \\{"providers":[
+        \\{"id":"agnes","name":"Agnes","key_source":"hosted","models":[{"id":"agnes:agnes-2.0-flash","name":"Agnes 2.0 Flash","provider":"agnes","provider_display":"Agnes","key_source":"hosted"}]},
+        \\{"id":"openai","name":"OpenAI","key_source":"none","models":[{"id":"openai:gpt-4.1","name":"GPT-4.1","provider":"openai","provider_display":"OpenAI","key_source":"none"}]},
+        \\{"id":"ollama-cloud","name":"Ollama Cloud","key_source":"hosted","models":[{"id":"ollama-cloud:deepseek-v4-flash:0731","name":"DeepSeek V4 Flash 0731","provider":"ollama-cloud","provider_display":"Ollama Cloud","key_source":"hosted"}]}
         \\]}
     ;
-    main.update(&model, .{ .models_loaded = .{
-        .key = 9,
+    main.update(&model, .{ .settings_loaded = .{
+        .key = 10,
         .outcome = .ok,
         .body = models_body,
     } }, &fx);
