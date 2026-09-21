@@ -241,13 +241,16 @@ def fail_always(msg: str = "error") -> str:
 
 
 _call_log: list[str] = []
+_call_intervals: list[tuple[float, float]] = []
 
 
 @tool
 def slow_read(query: str = "x") -> str:
     """A slow read-only tool (simulates latency)."""
     _call_log.append(f"slow_read:{query}")
+    started = time.monotonic()
     time.sleep(0.1)
+    _call_intervals.append((started, time.monotonic()))
     return f"result:{query}"
 
 
@@ -1149,7 +1152,14 @@ class TestParallelToolExecution:
         assert "wrote:/x" in results_by_name["destructive_write"]
 
     async def test_parallel_execution_concurrency(self):
-        """Multiple read-only tools actually execute concurrently (faster than sequential)."""
+        """Multiple read-only tools actually execute concurrently.
+
+        Structural assertion: the three call windows must overlap. The previous
+        wall-clock bound (< 0.35 s) flaked under load while proving nothing about
+        ordering — three sequential 0.1 s calls take ~0.3 s, so a busy machine
+        could exceed the bound with correct parallel behaviour.
+        """
+        _call_intervals.clear()
         provider = MockProvider(
             responses=[
                 Message.assistant(
@@ -1165,15 +1175,16 @@ class TestParallelToolExecution:
         )
         loop = AgentLoop(provider=provider, tools=[slow_read])
 
-        start = time.time()
         result = await loop.run([Message.user("Parallel")])
-        elapsed = time.time() - start
 
         tool_res = [m for m in result if m.role == "tool"]
         assert len(tool_res) == 3
+        assert len(_call_intervals) == 3
 
-        assert elapsed < 0.35, (
-            f"Parallel execution should be faster than sequential (took {elapsed:.2f}s)"
+        latest_start = max(start for start, _ in _call_intervals)
+        earliest_end = min(end for _, end in _call_intervals)
+        assert latest_start < earliest_end, (
+            f"parallel tool windows did not overlap: {_call_intervals}"
         )
 
     async def test_destructive_with_parallel_safe_batch(self):
