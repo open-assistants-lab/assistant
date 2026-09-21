@@ -98,6 +98,12 @@ No expiry, no quota, "operator is responsible for monitoring storage" — the sa
 
 Web + TUI + HTTP + CLI + MCP all read the same store, with **per-field opt-in** in MCP responses (`fields: []` default → cheap; `fields: [text]` → full body). This is the anti-pattern for LLM-consumed search APIs: defaulting to the whole document body on every result is what makes every call cost ~100KB. Their default is 10 results × snippet.
 
+### 2.8 **The path *is* the identity** — and a query field
+
+For watched files the document URL is the absolute path (`file://` — `url:/home/user/documents/report.pdf` auto-resolves to `file:///home/user/documents/report.pdf`); re-indexing the same path *replaces* the document (same source + absolute path per the lifecycle table), so the path is the primary key of a local document. It's searchable (`url:`) and queryable as a bare path, and deletion of the source file **does not delete the document** (kept unless `delete_on_remove: true`) — so the path is a *stable index key that outlives the file*, not a live reference. For remote imports the original source path is preserved in the document metadata (a snapshot re-import from a *different* path creates a new snapshot; the old one stays).
+
+**LLM-wiki lesson:** a file-based wiki can make *path an indexed field* rather than just an identity — `url_re:~/.*/notes/.*` is "all my notes" as a query. That's something a directory-listing approach (our `files_list`) can't express. **But note the mirror trap:** Hister's "path outlives file" model is the opposite of our `prune`/tombstone direction for knowledge (we want deletion to propagate); for *documents* their model is right (archive semantics), for *claims* it isn't (stale-forever is exactly the staleness problem).
+
 ## 3. What it does *not* do (our differentiators, confirmed)
 
 | | Hister | We |
