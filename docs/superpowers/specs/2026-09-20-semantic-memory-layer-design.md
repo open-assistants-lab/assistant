@@ -212,6 +212,8 @@ technical, PascalCase `[role][category]`, PyPI-free, no overclaim, says "knowled
 
 **Market datapoint:** `evermem` on PyPI is *"EverMem — md-first memory extraction framework"* — someone is already building markdown-first agent memory. Argues for a distinctive name over a generic one.
 
+**Competitor scan 2026-09-20:** **Hister** (AGPLv3, `github.com/asciimoo/hister`, Go single binary) — "your own search engine": full-content index of visited pages + watched local files, with the **exact untrusted-content framing we should mirror** (MCP responses under `structuredContent.untrusted_content`, `trust: "untrusted"`, control chars stripped) and an `added`/`updated` field in the query language that validates **recency-as-query-ability**. **No claims, no versions of the file itself** — its versioning stores diff-patches of *documents* in SQL, not file snapshots; `prune`/history gaps remain our differentiators. Its `visits` filter (retrieval-frequency ranking) is our `frequency` signal, in production.
+
 ---
 
 ## 8. Open questions
