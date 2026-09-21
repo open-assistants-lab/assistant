@@ -1789,9 +1789,11 @@ test "remove key clears the targeted provider not the first keyed one" {
     model.available_model_count = 2;
 
     main.update(&model, .{ .remove_key = 1 }, &fx);
-    const req = fx.pendingFetchAt(fx.pendingFetchCount() - 1).?;
-    main.update(&model, .{ .key_deleted = .{ .key = req.key, .outcome = .ok, .body = "" } }, &fx);
 
+    // D3: the credential lives in the keychain, not the sidecar's settings
+    // store (desktop mode refuses /settings/api-keys), so removal is local and
+    // synchronous — no fetch is queued.
+    try testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
     try testing.expect(!model.settings.providers[1].has_key);
     try testing.expect(model.settings.providers[0].has_key);
     try testing.expectEqual(@as(usize, 1), model.settings.providers[0].model_count);
@@ -2415,4 +2417,19 @@ test "disambiguateChatTitles falls back to session-id tail without created_at" {
 
     try testing.expect(!std.mem.eql(u8, model.chats[0].title, model.chats[1].title));
     try testing.expect(std.mem.endsWith(u8, model.chats[0].title, "…chat-7") or std.mem.endsWith(u8, model.chats[1].title, "…chat-7"));
+}
+
+test "D3 run request body carries the active credential only when set" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Local/ollama runs (no credential) must not invent a provider_keys field.
+    const without = main.runRequestBody(arena, "hi", "s1", "m1", "", "") orelse return error.ExpectedBody;
+    try testing.expect(std.mem.indexOf(u8, without, "provider_keys") == null);
+
+    // A keychain-restored credential is injected for the active provider.
+    const with_key = main.runRequestBody(arena, "hi", "s1", "m1", "openai", "sk-abc") orelse return error.ExpectedBody;
+    try testing.expect(std.mem.indexOf(u8, with_key, "\"provider_keys\":{\"openai\":\"sk-abc\"}") != null);
+    try testing.expect(std.mem.indexOf(u8, with_key, "\"message\":\"hi\"") != null);
 }

@@ -40,6 +40,9 @@ const max_oauth_poll_ticks: u16 = 60;
 /// app_assets.zig uses std.testing.io, which is test-build-only, so the
 /// production code carries the process Io here instead.
 var g_process_io: std.Io = undefined;
+/// Tests never capture a process Io (it is undefined in the test build), so
+/// keychain spawns are skipped there and the caller takes its failure path.
+var g_process_io_ready = false;
 
 const max_providers = 128;
 const max_provider_models = 512;
@@ -495,6 +498,11 @@ pub const Model = struct {
     first_run_key_value: []const u8 = "",
     first_run_key_selection: canvas.TextSelection = .{ .anchor = 0, .focus = 0 },
     first_run_status: []const u8 = "",
+    // D3 credential ownership: the active provider key lives in the macOS
+    // keychain (loaded at startup) and is injected per request; the sidecar
+    // never persists it.
+    active_provider: []const u8 = "",
+    active_provider_key: []const u8 = "",
     allocator: std.mem.Allocator = undefined,
 
     pub const view_unbound = .{
@@ -971,13 +979,14 @@ fn doSend(model: *Model, fx: *Effects) void {
 
     fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
 
-    const escaped = escapeJsonString(model.allocator, text) catch return;
-    const selected_model = model.selectedModel();
-    const body = std.fmt.allocPrint(
+    const body = runRequestBody(
         model.allocator,
-        "{{\"message\":\"{s}\",\"session_id\":\"{s}\",\"model\":\"{s}\"}}",
-        .{ escaped, chat.sessionId(), selected_model },
-    ) catch return;
+        text,
+        chat.sessionId(),
+        model.selectedModel(),
+        model.active_provider,
+        model.active_provider_key,
+    ) orelse return;
     fx.fetch(.{
         .key = chat.fetch_key,
         .url = apiUrl(model, model.allocator, "/message/stream"),
@@ -1344,8 +1353,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             chat.open_bubble_type = "";
             chat.status_text = "Resuming...";
             fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
-            const selected_model = model.selectedModel();
-            const body = std.fmt.allocPrint(model.allocator, "{{\"call_id\":\"{s}\",\"session_id\":\"{s}\",\"model\":\"{s}\"}}", .{ chat.pending_call_id, chat.sessionId(), selected_model }) catch return;
+            const body = std.fmt.allocPrint(
+                model.allocator,
+                "{{\"call_id\":\"{s}\",\"session_id\":\"{s}\",\"model\":\"{s}\"{s}}}",
+                .{ chat.pending_call_id, chat.sessionId(), model.selectedModel(), providerKeysFragment(model.allocator, model.active_provider, model.active_provider_key) },
+            ) catch return;
             chat.pending_tool = "";
             chat.pending_call_id = "";
             fx.fetch(.{
@@ -2741,23 +2753,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (model.settings.key_modal_visible and model.settings.key_testing) {
                 model.settings.key_testing = false;
                 if (valid) {
-                    const escaped_provider = escapeJsonString(model.allocator, model.settings.pending_provider_id) catch return;
-                    const escaped_key = escapeJsonString(model.allocator, model.settings.key_input) catch return;
-                    const save_body = std.fmt.allocPrint(
-                        model.allocator,
-                        "{{\"provider\":\"{s}\",\"api_key\":\"{s}\"}}",
-                        .{ escaped_provider, escaped_key },
-                    ) catch return;
-                    const fetch_key = model.allocFetchKey();
-                    fx.fetch(.{
-                        .key = fetch_key,
-                        .url = apiUrl(model, model.allocator, "/settings/api-keys"),
-                        .method = .POST,
-                        .headers = jsonHeaders(model, model.allocator),
-                        .body = save_body,
-                        .response = .buffered,
-                        .on_response = Effects.responseMsg(.key_saved),
-                    });
+                    saveProviderKeyLocally(
+                        model,
+                        fx,
+                        model.settings.pending_provider_id,
+                        model.settings.key_input,
+                        model.allocFetchKey(),
+                    );
                 } else {
                     model.settings.key_error = model.allocator.dupe(u8, error_msg) catch "Invalid key";
                 }
@@ -2768,24 +2770,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     const p = &model.settings.providers[i];
                     p.testing = false;
                     if (valid) {
-                        // Save the key
-                        const escaped_provider = escapeJsonString(model.allocator, p.id) catch return;
-                        const escaped_key = escapeJsonString(model.allocator, p.key_input) catch return;
-                        const save_body = std.fmt.allocPrint(
-                            model.allocator,
-                            "{{\"provider\":\"{s}\",\"api_key\":\"{s}\"}}",
-                            .{ escaped_provider, escaped_key },
-                        ) catch return;
-                        const fetch_key = model.allocFetchKey();
-                        fx.fetch(.{
-                            .key = fetch_key,
-                            .url = apiUrl(model, model.allocator, "/settings/api-keys"),
-                            .method = .POST,
-                            .headers = jsonHeaders(model, model.allocator),
-                            .body = save_body,
-                            .response = .buffered,
-                            .on_response = Effects.responseMsg(.key_saved),
-                        });
+                        saveProviderKeyLocally(model, fx, p.id, p.key_input, model.allocFetchKey());
                     } else {
                         p.test_error = model.allocator.dupe(u8, error_msg) catch "Invalid key";
                     }
@@ -2857,25 +2842,16 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const p = &model.settings.providers[idx];
             if (p.via_env) return;
             const provider_id = p.id;
-            const path = std.fmt.allocPrint(
-                model.allocator,
-                "/settings/api-keys/{s}",
-                .{provider_id},
-            ) catch return;
-            const url = apiUrl(model, model.allocator, path);
             const fetch_key = model.allocFetchKey();
             if (model.settings.pending_key_delete_count < max_pending_key_deletes) {
                 model.settings.pending_key_deletes[model.settings.pending_key_delete_count] = .{ .key = fetch_key, .provider_id = provider_id };
                 model.settings.pending_key_delete_count += 1;
             }
-            fx.fetch(.{
-                .key = fetch_key,
-                .url = url,
-                .method = .DELETE,
-                .headers = acceptJsonHeaders(model, model.allocator),
-                .response = .buffered,
-                .on_response = Effects.responseMsg(.key_deleted),
-            });
+            // D3: the key lives in the keychain, not the sidecar's store
+            // (desktop mode refuses /settings/api-keys). Delete locally and
+            // drive the existing handler; the pending entry correlates it.
+            keychainDeleteKey(model, provider_id);
+            update(model, .{ .key_deleted = .{ .key = fetch_key, .outcome = .ok, .body = "" } }, fx);
         },
         .key_deleted => |response| {
             if (response.outcome != .ok) return;
@@ -4127,6 +4103,87 @@ fn openSystemBrowser(url: []const u8) !void {
         std.heap.page_allocator.free(result.stderr);
     }
     if (result.term != .exited or result.term.exited != 0) return error.OpenFailed;
+}
+
+
+/// Keychain (D3 task 2). The native app owns provider credentials: a pasted key
+/// is stored in the macOS login keychain, never under ~/Assistant and never
+/// POSTed to the sidecar (desktop mode refuses /settings/api-keys). `security`
+/// is the supported path for a non-sandboxed app; the secret is passed as an
+/// argument because Zig 0.16's std.process.run has no stdin pipe and `security`
+/// retype-prompts when -w is omitted.
+const keychain_service = "dev.native-sdk.assistant.provider";
+const keychain_active_service = "dev.native-sdk.assistant.active-provider";
+
+fn keychainRun(model: *Model, argv: []const []const u8) ?[]const u8 {
+    if (!g_process_io_ready) return null;
+    const result = std.process.run(model.allocator, g_process_io, .{ .argv = argv }) catch return null;
+    if (result.term != .exited or result.term.exited != 0) {
+        model.allocator.free(result.stdout);
+        model.allocator.free(result.stderr);
+        return null;
+    }
+    model.allocator.free(result.stderr);
+    return result.stdout;
+}
+
+fn keychainStoreKey(model: *Model, provider: []const u8, key: []const u8) bool {
+    if (keychainRun(model, &.{ "security", "add-generic-password", "-U", "-a", provider, "-s", keychain_service, "-w", key }) == null) return false;
+    if (keychainRun(model, &.{ "security", "add-generic-password", "-U", "-a", "active", "-s", keychain_active_service, "-w", provider }) == null) return false;
+    return true;
+}
+
+fn keychainDeleteKey(model: *Model, provider: []const u8) void {
+    _ = keychainRun(model, &.{ "security", "delete-generic-password", "-a", provider, "-s", keychain_service });
+    _ = keychainRun(model, &.{ "security", "delete-generic-password", "-a", "active", "-s", keychain_active_service });
+}
+
+/// Restore the active provider credential at launch (Keychain -> memory).
+pub fn keychainLoadActive(model: *Model) void {
+    const provider_raw = keychainRun(model, &.{ "security", "find-generic-password", "-a", "active", "-s", keychain_active_service, "-w" }) orelse return;
+    const provider = std.mem.trim(u8, provider_raw, " \n\r\t");
+    if (provider.len == 0) return;
+    const key_raw = keychainRun(model, &.{ "security", "find-generic-password", "-a", provider, "-s", keychain_service, "-w" }) orelse return;
+    const key = std.mem.trim(u8, key_raw, " \n\r\t");
+    model.active_provider = model.allocator.dupe(u8, provider) catch return;
+    model.active_provider_key = model.allocator.dupe(u8, key) catch return;
+}
+
+/// Store the key locally and drive the existing `.key_saved` success path.
+fn saveProviderKeyLocally(model: *Model, fx: *Effects, provider_id: []const u8, api_key: []const u8, fetch_key: u64) void {
+    if (keychainStoreKey(model, provider_id, api_key)) {
+        model.active_provider = model.allocator.dupe(u8, provider_id) catch "";
+        model.active_provider_key = model.allocator.dupe(u8, api_key) catch "";
+        update(model, .{ .key_saved = .{ .key = fetch_key, .outcome = .ok, .body = "" } }, fx);
+    } else {
+        update(model, .{ .key_saved = .{ .key = fetch_key, .outcome = .rejected, .body = "" } }, fx);
+    }
+}
+
+/// The `provider_keys` fragment for run bodies; empty when no key is active
+/// (local/ollama runs need none).
+pub fn providerKeysFragment(allocator: std.mem.Allocator, provider: []const u8, key: []const u8) []const u8 {
+    if (provider.len == 0 or key.len == 0) return "";
+    const escaped_provider = escapeJsonString(allocator, provider) catch return "";
+    const escaped_key = escapeJsonString(allocator, key) catch return "";
+    return std.fmt.allocPrint(allocator, ",\"provider_keys\":{{\"{s}\":\"{s}\"}}", .{ escaped_provider, escaped_key }) catch "";
+}
+
+/// The `/message/stream` body, with the active credential injected.
+pub fn runRequestBody(
+    allocator: std.mem.Allocator,
+    message: []const u8,
+    session_id: []const u8,
+    model_id: []const u8,
+    provider: []const u8,
+    key: []const u8,
+) ?[]const u8 {
+    const escaped = escapeJsonString(allocator, message) catch return null;
+    return std.fmt.allocPrint(
+        allocator,
+        "{{\"message\":\"{s}\",\"session_id\":\"{s}\",\"model\":\"{s}\"{s}}}",
+        .{ escaped, session_id, model_id, providerKeysFragment(allocator, provider, key) },
+    ) catch null;
 }
 
 /// Apply a text-input event to one credential form field, mirroring the
@@ -5495,6 +5552,7 @@ fn keyFallback(keyboard: canvas.WidgetKeyboardEvent) ?Msg {
 
 pub fn main(init: std.process.Init) !void {
     g_process_io = init.io;
+    g_process_io_ready = true;
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -5530,6 +5588,9 @@ pub fn main(init: std.process.Init) !void {
             app_state.model.launch_error = "Could not read Assistant connection settings";
         };
     }
+    // D3 task 2: restore the credential the native app owns (Keychain); it is
+    // injected per request and never persisted by the sidecar.
+    keychainLoadActive(&app_state.model);
 
     // Stress-test mode: seed a synthetic transcript of N messages so the
     // virtual list can be exercised at scale without a backend.
