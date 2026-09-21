@@ -352,19 +352,31 @@ def test_desktop_detail_and_mutation_routes_reject_excluded_tools(client, deskto
 
 
 def test_desktop_subagent_start_rejects_a_disabled_subagent(client, desktop_env):
-    """Job routes re-check capability rather than trusting a stored def."""
+    """Job routes re-check capability rather than trusting a stored def.
+
+    The definition is created first so a 404 cannot merely mean "not found";
+    the error detail must name the capability rejection.
+    """
     from src.config import reload_settings
     from src.sdk.capabilities import set_resource_enabled
 
     reload_settings()
+    headers = {"Authorization": "Bearer desktop-contract-test-token"}
+    created = client.post(
+        "/v1/subagents",
+        headers=headers,
+        json={"name": "blocked-agent", "description": "fixture"},
+    )
+    assert created.status_code == 200, created.text
     set_resource_enabled("default_user", "subagents", "blocked-agent", False)
     try:
         r = client.post(
             "/v1/subagents/blocked-agent/start",
-            headers={"Authorization": "Bearer desktop-contract-test-token"},
+            headers=headers,
             json={"task": "do it"},
         )
         assert r.status_code == 404, r.status_code
+        assert "disabled" in r.json()["detail"], r.json()
     finally:
         os.environ.pop("DEPLOYMENT_MODE", None)
         reload_settings()

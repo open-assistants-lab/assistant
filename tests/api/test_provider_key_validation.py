@@ -58,3 +58,20 @@ async def test_test_key_reaches_the_gemini_http_path(monkeypatch):
         settings_mod.TestKeyRequest(provider="gemini", api_key="AIza-secret")
     )
     assert verdict == {"valid": True}
+
+
+@pytest.mark.asyncio
+async def test_failed_key_test_never_echoes_the_key(monkeypatch):
+    """D2 re-review N4: the outer failure path must redact the key too."""
+    from src.http.routers import settings as settings_mod
+
+    def _explode(provider: str, api_key: str):
+        raise RuntimeError(f"transport failed for {api_key}")
+
+    monkeypatch.setattr(settings_mod, "_setup_provider_key_test", _explode)
+    verdict = await settings_mod.test_api_key(
+        settings_mod.TestKeyRequest(provider="openai", api_key="sk-super-secret")
+    )
+    assert verdict["valid"] is False
+    assert "sk-super-secret" not in verdict["error"]
+    assert "***" in verdict["error"]

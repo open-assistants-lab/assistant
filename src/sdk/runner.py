@@ -1432,6 +1432,12 @@ async def _verification_engine(
                 break
 
             # 1. Run one attempt.
+            # The loop stamps compression snapshots (and the durable record)
+            # with this attempt; the stream mapper validates them against the
+            # same counter. Leaving it at 1 made a compression on a rerun
+            # attempt fail event validation and abandon the run (D2 re-review
+            # N1).
+            loop._flow_attempt = attempt  # type: ignore[attr-defined]
             result_messages: list[Message] = []
             if stream:
                 async for chunk in loop.run_stream(input_messages):

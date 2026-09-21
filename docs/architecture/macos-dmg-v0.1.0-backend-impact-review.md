@@ -216,6 +216,11 @@ OS-assigned from the ephemeral range (49152+ on macOS), so it can never equal
 one of those four; that is the exclusion mechanism, and the D2 contract tests
 cover the allowlist behaviour.
 
+**Decision A (2026-09-21):** the allowlist governs automatic **discovery**
+(`/local-models`) only. Endpoint **validation** accepts any explicit http(s)
+URL the user typed — a vLLM on `127.0.0.1:5678` or a LAN host included —
+because a manual entry is not a scan. Malformed URLs are still rejected.
+
 A generic OpenAI-compatible configuration is the extensibility boundary for v0.1.0; arbitrary runtime provider plugins are not.
 
 ## 5. Client/backend compatibility contract

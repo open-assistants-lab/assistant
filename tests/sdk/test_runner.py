@@ -1182,3 +1182,93 @@ def test_current_turn_messages_scopes_to_last_user_message():
 
     # No user message at all: return everything (defensive fallback).
     assert [m.role for m in _current_turn_messages([Message.assistant("x")])] == ["assistant"]
+
+
+class _CompressOnRetry:
+    """Scripted compression that only fires on the second verification attempt."""
+
+    def __init__(self) -> None:
+        from tests.sdk.test_sdk_loop import ScriptedCompressionMiddleware
+
+        self._middleware = ScriptedCompressionMiddleware(automatic=False)
+
+    async def abefore_model(self, state):
+        context = state.extra.get("_compression_context")
+        if context is None or context.attempt < 2:
+            return None
+        result = await self._middleware.force_summarize(state, context)
+        if result.compressed and result.artifact:
+            state.messages = [
+                message.to_message() for message in result.artifact.replacement_messages
+            ]
+        return {"extra": {"_compression_result": result}}
+
+
+@pytest.mark.asyncio
+async def test_compression_on_a_rerun_attempt_validates(monkeypatch):
+    """D2 re-review N1: a compression in attempt >= 2 must not fail the run.
+
+    The verification engine advances its own attempt counter; the loop's
+    `_flow_attempt` (which stamps the compression snapshots) must follow it, or
+    the emitted `context_compressed` event fails validation against the stream
+    attempt and the run is marked FAILED.
+    """
+    from src.sdk import runner as runner_mod
+    from src.sdk.loop import AgentLoop
+    from src.sdk.run_events import parse_run_event
+    from tests.sdk.test_sdk_loop import MockProvider, _measured_snapshot
+
+    async def _no_rubric(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "src.sdk.middleware_rubric.load_rubric_middleware", _no_rubric
+    )
+
+    fired = {"n": 0}
+
+    async def fake_fire(loop, user_id, session_id, model):
+        if fired["n"] == 0:
+            fired["n"] += 1
+            return [[Message.user("revise")]]
+        return []
+
+    monkeypatch.setattr(runner_mod, "_fire_pending_reruns", fake_fire)
+
+    loop = AgentLoop(
+        provider=MockProvider([Message.assistant("done")]),
+        middlewares=[_CompressOnRetry()],
+        user_id="u1",
+        context_measurer=lambda **kwargs: _measured_snapshot(**kwargs),
+    )
+    loop._flow_session_id = "s1"
+
+    compressed: list[tuple[int, dict]] = []
+    async for item in runner_mod._verification_engine(
+        loop, [Message.user("hello")], "u1", "s1", None, None, None, True, "off"
+    ):
+        if (
+            isinstance(item, runner_mod.ChunkItem)
+            and item.chunk.type == "context_compressed"
+        ):
+            compressed.append((item.attempt, item.chunk.context or {}))
+
+    assert compressed, "no compression chunk was emitted for the rerun attempt"
+    attempt, context = compressed[0]
+    assert attempt == 2
+    assert context["before"]["attempt"] == attempt
+    # The exact mapping that failed before the fix: envelope attempt = stream
+    # attempt, snapshot attempts = loop attempt.
+    parse_run_event(
+        {
+            "schema_version": 1,
+            "event_id": "e1",
+            "sequence": 1,
+            "timestamp": datetime.now(UTC),
+            "session_id": "s1",
+            "run_id": "r1",
+            "attempt": attempt,
+            "type": "context_compressed",
+            "data": context,
+        }
+    )

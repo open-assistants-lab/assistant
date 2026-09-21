@@ -1378,6 +1378,11 @@ async def approve_tool(req: ApproveRequest, request: Request = None, _: None = D
                             "cache_creation_tokens": u.cache_creation_tokens,
                         })
 
+                elif event.kind == "context_compressed" and event.context:
+                    # D2 task 5: the resumed stream carries the compression
+                    # payload too; the adapter previously dropped it.
+                    yield sse("context_compressed", event.context)
+
                 elif event.kind == "done":
                     # Audit E-streaming: a resumed run may finish with empty
                     # final content (e.g. tool-only turn or silent failure).

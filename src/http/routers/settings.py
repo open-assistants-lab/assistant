@@ -614,8 +614,8 @@ async def test_api_key(body: TestKeyRequest) -> dict[str, Any]:
         return {"valid": True}
 
     except Exception as e:
-        logger.warning("test-key failed", {"provider": provider, "error": str(e)})
         safe_error = str(e).replace(api_key, "***") if api_key else str(e)
+        logger.warning("test-key failed", {"provider": provider, "error": safe_error})
         return {"valid": False, "error": f"Could not test key: {safe_error}"}
 
 

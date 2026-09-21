@@ -1633,9 +1633,10 @@ class AgentLoop:
             ).strip() or "default"
             run_id = str(getattr(self, "_flow_run_id", "") or uuid.uuid4().hex)
             store = se.get_session_event_store(self.user_id or "default_user")
-            seq = getattr(self, "_session_log_seq", None) or store.next_sequence(
-                session_id
-            )
+            # Always allocate from the store: the per-loop cache can be stale
+            # when two cached loops share a session, and a PRIMARY KEY collision
+            # would silently drop the record (D2 re-review N2).
+            seq = store.next_sequence(session_id)
             self._session_log_seq = se.log_compression(
                 self.user_id or "default_user", session_id, run_id, seq, telemetry
             )
