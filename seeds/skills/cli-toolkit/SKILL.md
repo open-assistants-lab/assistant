@@ -98,6 +98,23 @@ second limit layered on top. Values of `0`, negative numbers, booleans, and
 non-numeric text are rejected at load time rather than silently disabling the cap;
 that tool is skipped with a warning and the rest of the session still starts.
 
+**Sandbox limits.** A custom command runs through the same sandbox seam as
+`shell_execute` — one `sh -c` invocation with the workspace files directory as
+its working directory — so these caps also apply to it:
+
+- the workspace write budget (`shell_tool.max_write_mb`, default 64 MB) is
+  enforced with `RLIMIT_FSIZE`: a single file cannot exceed it, and the command
+  fails rather than filling the disk;
+- captured output is capped at `shell_tool.max_output_kb` (default 100 KB);
+  larger results are paged to a result file and readable with `tool_result_read`;
+- CPU limits apply, plus an address-space cap on Linux (macOS lacks
+  `RLIMIT_AS`), and the child environment is scrubbed of credentials;
+- the declared `timeout_seconds` stays the only wall-clock cap.
+
+Pipelines (`ocrmypdf … && pdftotext …`, `a | b`) are supported. On the hard
+sandbox backends (`bwrap`/`runc`) custom command tools are disabled instead of
+being run outside the sandbox.
+
 If a command must outlive a client connection (or the caller cannot wait for it),
 use the async governance path instead — that requires **both**
 `execution_mode: async` and a configured `executor:` block (see the governed-operations

@@ -118,7 +118,10 @@ def _apply_write_limit(resource_mod: Any, max_write_bytes: int) -> None:
 class SandboxLimits:
     """Resource caps applied to sandboxed execution."""
 
-    timeout_seconds: float = 30.0
+    timeout_seconds: float | None = 30.0
+    # `None` means unbounded: a custom TOOL.md may declare
+    # `timeout_seconds: none` (#23), which removes the wall-clock cap.
+    # Backends must then skip the derived limits (RLIMIT_CPU) themselves.
     max_output_bytes: int = 200_000
     # Issue #32 part 3: bytes a sandboxed command may write (RLIMIT_FSIZE),
     # independent of how much output we capture. Deriving it from
@@ -126,6 +129,35 @@ class SandboxLimits:
     max_write_bytes: int = 64 * 1024 * 1024
     env_mode: str = "scrubbed"  # "scrubbed" | "inherit"
     memory_mb: int = 512  # SB1 review P1: RLIMIT_AS cap
+
+
+def _apply_soft_rlimits(resource_mod: Any, lim: SandboxLimits) -> None:
+    """Set the soft backend's per-process caps inside the child.
+
+    RLIMIT_NPROC is deliberately not set here. Without a PID namespace it is
+    enforced against the *real UID's* process count across the whole host, so
+    a fixed number turns into "the operator's ambient process count must stay
+    under 256" — and every forked command (a `a | b` pipeline, a tool that
+    spawns a helper) dies with EAGAIN on a busy machine. Issue #34 surfaced
+    this through custom TOOL.md commands, which are typically pipelines.
+    ``BwrapSandboxBackend`` keeps its NPROC cap because ``--unshare-pid``
+    makes the count namespace-local, where it bounds the command's own tree.
+    """
+    _apply_write_limit(resource_mod, lim.max_write_bytes)
+    if lim.timeout_seconds is not None:
+        # 'none' (#23) removes the wall-clock cap: an unbounded declaration
+        # has no number to derive RLIMIT_CPU from.
+        cpu_cap = int(lim.timeout_seconds) + 2
+        resource_mod.setrlimit(resource_mod.RLIMIT_CPU, (cpu_cap, cpu_cap))
+    # M4/SB1 review P1: memory cap — a runaway code_execute must not OOM the
+    # host. RLIMIT_AS is Linux-only, so cap where the platform supports it.
+    rlimit = getattr(resource_mod, "RLIMIT_AS", None)
+    if rlimit is not None:
+        try:
+            memory_bytes = getattr(lim, "memory_mb", 512) * 1024 * 1024
+            resource_mod.setrlimit(rlimit, (memory_bytes, memory_bytes))
+        except (OSError, ValueError):
+            pass
 
 
 @dataclass
@@ -158,6 +190,7 @@ class SandboxBackend(Protocol):
         limits: SandboxLimits | None = None,
         *,
         env_extra: dict[str, str] | None = None,
+        user_id: str | None = None,
     ) -> SandboxResult: ...
 
     def validate_write_path(self, path: Path, workspace_root: Path) -> str | None:
@@ -204,6 +237,7 @@ class NullSandboxBackend:
         limits: SandboxLimits | None = None,
         *,
         env_extra: dict[str, str] | None = None,
+        user_id: str | None = None,
     ) -> SandboxResult:
         lim = limits or SandboxLimits()
         from src.sdk.observability import operational_telemetry_span
@@ -250,7 +284,8 @@ class SoftSandboxBackend:
     - cwd is forced to the caller-provided workspace root
     - env is scrubbed (allowlist + secret denylist)
     - timeout + output caps enforced
-    - resource limits (FSIZE/CPU/NPROC) via preexec_fn
+    - resource limits (FSIZE/CPU, plus AS where the platform has it) via
+      preexec_fn; RLIMIT_NPROC is deliberately left to the namespaced backend
     - static write-target validation: `validate_source` scans code for
       absolute outside-workspace write targets BEFORE spawn; `validate_write_path`
       resolves any explicit path against the workspace root.
@@ -294,22 +329,7 @@ class SoftSandboxBackend:
         def _preexec() -> None:  # pragma: no cover - runs in child
             import resource
 
-            _apply_write_limit(resource, lim.max_write_bytes)
-            resource.setrlimit(resource.RLIMIT_CPU, (int(lim.timeout_seconds) + 2, int(lim.timeout_seconds) + 2))
-            # M4/SB1 review P1: memory cap — a runaway code_execute must not
-            # OOM the host. RLIMIT_NPROC kept per docstring claim.
-            # RLIMIT_AS/NPROC are Linux-only; macOS lacks both — cap where
-            # the platform supports it (review P1 was about host OOM).
-            for rname, value in (
-                ("RLIMIT_AS", getattr(lim, "memory_mb", 512) * 1024 * 1024),
-                ("RLIMIT_NPROC", 256),
-            ):
-                rlimit = getattr(resource, rname, None)
-                if rlimit is not None:
-                    try:
-                        resource.setrlimit(rlimit, (value, value))
-                    except (OSError, ValueError):
-                        pass
+            _apply_soft_rlimits(resource, lim)
             try:
                 os.setsid()
             except OSError:
@@ -505,9 +525,11 @@ class BwrapSandboxBackend:
             import resource
 
             _apply_write_limit(resource, lim.max_write_bytes)
-            resource.setrlimit(
-                resource.RLIMIT_CPU, (int(lim.timeout_seconds) + 2,) * 2
-            )
+            if lim.timeout_seconds is not None:
+                # An unbounded declaration (#23) has no number to derive
+                # RLIMIT_CPU from; the wall-clock cap stays off instead.
+                cpu_cap = int(lim.timeout_seconds) + 2
+                resource.setrlimit(resource.RLIMIT_CPU, (cpu_cap, cpu_cap))
             rlimit = getattr(resource, "RLIMIT_AS", None)
             if rlimit is not None:
                 try:

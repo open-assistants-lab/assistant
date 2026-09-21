@@ -38,6 +38,64 @@ CORE_TOOL_NAMES: set[str] = {
 }
 
 
+def run_custom_command(
+    rendered: str,
+    user_id: str = DEFAULT_USER_ID,
+    workspace_id: str = "personal",
+    timeout_seconds: float | None = None,
+) -> str:
+    """Execute a rendered TOOL.md command through the sandbox seam (issue #34).
+
+    TOOL.md commands are shell strings, so the single argv invocation
+    ``["sh", "-c", rendered]`` gives them the same transport as every other
+    command path: RLIMIT_FSIZE/CPU (plus AS where the platform supports it),
+    the uid drop, the scrubbed env, and the workspace-forced cwd. The capture
+    and write budgets come from the operator's ``shell_tool.*`` settings; the
+    wall-clock cap comes from the tool's own ``annotations.timeout_seconds``
+    (#23).
+
+    Raises the same distinct failures as ``shell_execute``: a timeout or a
+    signal kill propagates instead of returning a success string, so
+    governance never receipts a command that did not finish (#24/#25).
+    """
+    from src.config import get_settings
+    from src.sdk.sandbox import SandboxLimits, get_sandbox_backend
+    from src.sdk.tool_results import format_output, raise_command_killed, raise_timeout
+    from src.storage.paths import get_paths
+
+    cfg = getattr(get_settings(), "shell_tool", None)
+    limits = SandboxLimits(
+        timeout_seconds=timeout_seconds,
+        max_output_bytes=int(getattr(cfg, "max_output_kb", 100)) * 1024,
+        max_write_bytes=int(getattr(cfg, "max_write_mb", 64)) * 1024 * 1024,
+    )
+    root_path = get_paths(user_id, workspace_id=workspace_id).workspace_files_dir()
+    root_path.mkdir(parents=True, exist_ok=True)
+
+    command = " ".join(rendered.split())
+    started = time.monotonic()
+    result = get_sandbox_backend().run(
+        ["sh", "-c", rendered], root_path, limits, user_id=user_id
+    )
+    elapsed = time.monotonic() - started
+
+    if result.timed_out:
+        raise_timeout(command, timeout_seconds, elapsed)
+    if result.signalled:
+        raise_command_killed(
+            command, -result.exit_code if result.exit_code < 0 else None, elapsed
+        )
+    if 128 < result.exit_code <= 192:
+        # Issue #32 part 2: a pipeline member's signal death is reported by
+        # the shell as 128+n (positive), which the signalled flag misses.
+        raise_command_killed(command, result.exit_code - 128, elapsed)
+
+    output = result.stdout + result.stderr
+    if result.exit_code != 0:
+        return f"Command failed (exit {result.exit_code}):\n{output[:2000]}"
+    return format_output(output, user_id, workspace_id)
+
+
 def _parse_tool_file(
     tool_path: Path, user_id: str = DEFAULT_USER_ID, workspace_id: str = "personal",
 ) -> ToolDefinition | None:
@@ -143,58 +201,12 @@ def _parse_tool_file(
                 return f"Tool '{tool_name}' not found on PATH."
 
             try:
-                started = time.monotonic()
-                result = _subprocess.run(
-                    rendered,
-                    shell=True,
-                    capture_output=True,
-                    timeout=command_timeout,
-                    text=True,
-                )
-                output = result.stdout + result.stderr
-                if result.returncode < 0:
-                    # Issue #25: killed by a signal (RLIMIT_AS/CPU/NPROC/FSIZE
-                    # or another). Here returncode is the OS status directly,
-                    # so a negative value is a real signal — unlike the sandbox
-                    # seam, which also reports a synthetic -1 for its own
-                    # timeout and therefore needs an explicit flag. Returning
-                    # the partial output made governance record executed: true
-                    # for a command that never finished.
-                    from src.sdk.tool_results import raise_command_killed
-
-                    raise_command_killed(
-                        " ".join(rendered.split()),
-                        -result.returncode,
-                        time.monotonic() - started,
-                    )
-                if 128 < result.returncode <= 192:
-                    # Issue #32 part 2: when a pipeline member is killed, bash
-                    # reports the LAST command's death as 128+n (positive), so
-                    # the negative-code check above misses it and the run was
-                    # returned as a failure *string* — which governance receipts
-                    # as a successful execution. A command that deliberately
-                    # exits 128+n is indistinguishable; both are failures, so
-                    # only the marker differs.
-                    from src.sdk.tool_results import raise_command_killed
-
-                    raise_command_killed(
-                        " ".join(rendered.split()),
-                        result.returncode - 128,
-                        time.monotonic() - started,
-                    )
-                if result.returncode != 0:
-                    return f"Command failed (exit {result.returncode}):\n{output[:2000]}"
-                from src.sdk.tool_results import format_output
-
-                return format_output(output, user_id, workspace_id)
-            except _subprocess.TimeoutExpired:
-                from src.sdk.tool_results import raise_command_timeout
-
-                raise_command_timeout(rendered, command_timeout, started)
-            except CommandKilledError:
-                # A signal kill must propagate: the catch-all below would turn it
-                # back into a string and governance would record executed: true for
-                # a command that never finished (issue #25).
+                return run_custom_command(rendered, user_id, workspace_id, command_timeout)
+            except (_subprocess.TimeoutExpired, CommandKilledError):
+                # A cap-killed or signal-killed command must propagate: the
+                # catch-all below would turn it back into a string and
+                # governance would record executed: true for a command that
+                # never finished (issues #24/#25).
                 raise
             except Exception as e:
                 return ToolResult(content=f"Command error: {e}", is_error=True)

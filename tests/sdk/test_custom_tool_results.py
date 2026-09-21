@@ -60,7 +60,11 @@ def test_command_output_boundary_and_recovery(tmp_path, result_scope, mode, size
         assert page["content"] == output[5000:]
         assert page["end"] == len(output)
         assert page["has_more"] is False
-        assert sum(call.kwargs.get("shell", False) for call in run.call_args_list) == 1
+        assert sum(
+            call.args[0] == ["sh", "-c", "echo fixture"]
+            for call in run.call_args_list
+            if call.args
+        ) == 1
 
 
 @pytest.mark.parametrize("mode", ["parsed", "reconstructed"])
@@ -85,7 +89,12 @@ def test_command_errors_unchanged_and_timeout_now_fails(tmp_path, result_scope, 
     with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 7, "oops", "!")):
         assert td.function() == "Command failed (exit 7):\noops!"
     # Issue #23: a cap-killed command must fail, never return a success string.
-    with patch("subprocess.run", side_effect=[None, subprocess.TimeoutExpired("echo", 300)]):
+    def cap_kill(*args, **kwargs):
+        if args and args[0] == ["sh", "-c", "echo fixture"]:
+            raise subprocess.TimeoutExpired("echo fixture", 300)
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    with patch("subprocess.run", side_effect=cap_kill):
         with pytest.raises(subprocess.TimeoutExpired) as exc:
             td.function()
     assert "timed_out" in exc.value.output

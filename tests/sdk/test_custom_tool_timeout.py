@@ -36,15 +36,16 @@ def test_declared_timeout_reaches_subprocess(tmp_path, mode, declared, expected)
     else:
         block = "" if declared is None else f"  {declared}"
         td = write_tool(tmp_path, block)
-    calls: list[float | None] = []
+    calls: list[tuple[list[str] | None, float | None]] = []
 
     def record(*args, **kwargs):
-        calls.append(kwargs.get("timeout", "missing"))
+        calls.append((args[0] if args else None, kwargs.get("timeout", "missing")))
         return subprocess.CompletedProcess([], 0, "ok", "")
 
     with patch("subprocess.run", side_effect=record):
         td.function()
-    assert calls[1] == expected
+    executed = [timeout for argv, timeout in calls if argv and argv[:2] == ["sh", "-c"]]
+    assert executed == [expected]
 
 
 @pytest.mark.parametrize("mode", ["parsed", "reconstructed"])
@@ -56,7 +57,7 @@ def test_cap_kill_surfaces_as_failure_not_success(tmp_path, mode, monkeypatch):
     monkeypatch.setattr("src.sdk.tool_results.time.monotonic", lambda: 100.0)
 
     def kill(*args, **kwargs):
-        if kwargs.get("shell"):
+        if args and args[0][:2] == ["sh", "-c"]:
             raise subprocess.TimeoutExpired("echo fixture", 300)
         return subprocess.CompletedProcess([], 0, "", "")
 
@@ -85,8 +86,16 @@ def test_timeout_raises_distinct_failure_with_elapsed(tmp_path, mode, monkeypatc
     else:
         td = write_tool(tmp_path)
     ticks = iter([100.0, 142.5])
-    monkeypatch.setattr("src.sdk.tool_results.time.monotonic", lambda: next(ticks))
-    with patch("subprocess.run", side_effect=[None, subprocess.TimeoutExpired("echo", 300)]):
+    monkeypatch.setattr(
+        "src.sdk.tool_results.time.monotonic", lambda: next(ticks, 142.5)
+    )
+
+    def cap_kill(*args, **kwargs):
+        if args and args[0][:2] == ["sh", "-c"]:
+            raise subprocess.TimeoutExpired("echo", 300)
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    with patch("subprocess.run", side_effect=cap_kill):
         with pytest.raises(subprocess.TimeoutExpired) as exc:
             td.function()
     detail = exc.value.output
@@ -162,12 +171,13 @@ def test_index_round_trip_preserves_declared_timeout(tmp_path):
     calls = []
 
     def record(*args, **kwargs):
-        calls.append(kwargs.get("timeout", "missing"))
+        calls.append((args[0] if args else None, kwargs.get("timeout", "missing")))
         return subprocess.CompletedProcess([], 0, "ok", "")
 
     with patch("subprocess.run", side_effect=record):
         restored.function()
-    assert calls[1] == 42.0
+    executed = [timeout for argv, timeout in calls if argv and argv[:2] == ["sh", "-c"]]
+    assert executed == [42.0]
 
 
 def test_malformed_tool_is_skipped_not_session_fatal(tmp_path):
