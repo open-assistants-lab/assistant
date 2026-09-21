@@ -715,3 +715,17 @@ class TestReviewFixes4da4110f:
 
         dp = DataPaths(user_id="default_user")
         assert dp.root == Path.home() / "Assistant"
+
+
+def test_effective_settings_enable_the_session_log(desktop_env, monkeypatch):
+    """D3 decision A: desktop mode turns the session-event log on.
+
+    The durable `context_compressed` timeline record only exists with the log
+    enabled, so desktop forces it in the same place it forces roots/mode.
+    """
+    from src.config import get_settings
+    from src.http import desktop as desktop_mod
+
+    monkeypatch.setenv("SESSION_LOG_ENABLED", "false")
+    desktop_mod.apply_desktop_settings()
+    assert get_settings().session_log.enabled is True
