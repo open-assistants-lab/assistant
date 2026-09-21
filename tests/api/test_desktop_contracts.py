@@ -12,6 +12,7 @@ failed-compression replay).
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -260,16 +261,28 @@ def test_desktop_mode_refuses_server_side_key_persistence(client, desktop_env):
     # No key material may appear anywhere durable — not just settings JSON:
     # logs, the message store, the session log and the rendezvous file too.
     secret = "sk-secret-persist-me"
+    from src.app_logging import get_logger
+
+    scan_roots = [desktop_env]
+    log_dir = Path(get_logger().json_dir)
+    if log_dir.exists():
+        scan_roots.append(log_dir)
+    import time as _time
+
+    fresh_after = _time.time() - 120
     leaks: list[str] = []
-    for path in desktop_env.rglob("*"):
-        if not path.is_file():
-            continue
-        try:
-            content = path.read_bytes().decode("utf-8", errors="ignore")
-        except OSError:
-            continue
-        if secret in content:
-            leaks.append(str(path))
+    for root in scan_roots:
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                if root == log_dir and path.stat().st_mtime < fresh_after:
+                    continue  # only this run's log lines
+                content = path.read_bytes().decode("utf-8", errors="ignore")
+            except OSError:
+                continue
+            if secret in content:
+                leaks.append(str(path))
     assert not leaks, f"secret leaked into: {leaks}"
 
 

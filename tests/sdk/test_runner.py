@@ -1185,17 +1185,25 @@ def test_current_turn_messages_scopes_to_last_user_message():
 
 
 class _CompressOnRetry:
-    """Scripted compression that only fires on the second verification attempt."""
+    """Scripted compression that only fires on its second invocation.
+
+    The gate is a local call counter, not `context.attempt`: with the
+    attempt-based gate a regression in `_flow_attempt` would suppress the
+    chunk entirely and the test would fail on "no compression chunk", not on
+    the attempt mismatch it exists to catch (D2 re-review P2-1).
+    """
 
     def __init__(self) -> None:
         from tests.sdk.test_sdk_loop import ScriptedCompressionMiddleware
 
         self._middleware = ScriptedCompressionMiddleware(automatic=False)
+        self.calls = 0
 
     async def abefore_model(self, state):
-        context = state.extra.get("_compression_context")
-        if context is None or context.attempt < 2:
+        self.calls += 1
+        if self.calls < 2:
             return None
+        context = state.extra["_compression_context"]
         result = await self._middleware.force_summarize(state, context)
         if result.compressed and result.artifact:
             state.messages = [

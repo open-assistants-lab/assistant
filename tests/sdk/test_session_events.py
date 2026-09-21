@@ -243,3 +243,26 @@ class TestCompressionLogging:
             == 7
         )
         assert se.get_session_event_store("u1").events("s1") == []
+
+    def test_stale_loop_cache_does_not_drop_the_record(self, slog):
+        """D2 re-review N2: allocation comes from the store, not the cache.
+
+        A second cached loop for the same session can hold a stale
+        `_session_log_seq`; using it would collide on the PRIMARY KEY and the
+        emit-only error handling would silently drop the compression record.
+        """
+        from src.sdk.loop import AgentLoop
+
+        se = slog
+        store = se.get_session_event_store("u1")
+        store.append(_env(1, "s1", "r1", "user_prompt", {"content": "hi"}))
+
+        loop = AgentLoop(provider=None, tools=[], user_id="u1")
+        loop._flow_session_id = "s1"
+        loop._flow_run_id = "r1"
+        loop._session_log_seq = 1  # stale: row 1 already exists
+        loop._log_session_compression(self._telemetry(CompressionStatus.SUCCEEDED))
+
+        rows = store.events("s1")
+        assert [e.type for e in rows] == ["user_prompt", "context_compressed"]
+        assert rows[1].sequence == 2

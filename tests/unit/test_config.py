@@ -145,3 +145,21 @@ class TestObservabilityValidation:
                 settings_module.get_settings()
         finally:
             settings_module._config = None
+
+
+def test_session_log_env_override(monkeypatch):
+    """D2 re-review residual: SESSION_LOG_ENABLED is the documented form.
+
+    SessionLogConfig was the only nested config without an env_prefix, so the
+    documented `SESSION_LOG_ENABLED=true` did not work (only the nested
+    `SESSION_LOG__ENABLED` form did).
+    """
+    import src.config.settings as settings_module
+
+    monkeypatch.setenv("SESSION_LOG_ENABLED", "true")
+    settings_module._config = None
+    try:
+        assert settings_module.get_settings().session_log.enabled is True
+    finally:
+        settings_module._config = None
+        monkeypatch.delenv("SESSION_LOG_ENABLED", raising=False)

@@ -524,6 +524,8 @@ class SessionLogConfig(_BaseSettings):
 
     enabled: bool = False
 
+    model_config = SettingsConfigDict(env_prefix="SESSION_LOG_")
+
 
 class MeteringConfig(_BaseSettings):
     """Usage metering (Phase 2 M1.1). OFF by default: the OSS sink is a no-op

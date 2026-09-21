@@ -190,6 +190,38 @@ async def test_approve_stream_forwards_usage_events(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_approve_stream_forwards_context_compressed(monkeypatch):
+    """D2 re-review N6/P2-2: the resumed run's compression payload survives."""
+    conversation_router._pending_interrupts["u:default"] = {
+        "tool": "time_get",
+        "call_id": "call-1",
+    }
+    payload = {
+        "before": {"attempt": 1, "estimated_tokens": 46000},
+        "after": {"attempt": 1, "estimated_tokens": 9000},
+        "status": "succeeded",
+    }
+
+    async def fake_stream(**kwargs):
+        yield StreamChunk.text_delta("hello")
+        yield StreamChunk.context_compressed(payload)
+        yield StreamChunk.done("world")
+
+    _install(monkeypatch, _Store(), fake_stream)
+
+    response = await conversation_router.approve_tool(
+        conversation_router.ApproveRequest(user_id="u", call_id="call-1")
+    )
+    frames = await _consume(response)
+    events = _parse_events(frames)
+
+    compressed = [e for e in events if e["type"] == "context_compressed"]
+    assert compressed, f"no context_compressed event forwarded: {[e['type'] for e in events]}"
+    assert compressed[0]["data"]["before"]["estimated_tokens"] == 46000
+    assert compressed[0]["data"]["after"]["estimated_tokens"] == 9000
+
+
+@pytest.mark.asyncio
 async def test_approve_loop_failure_restores_pending_interrupt(monkeypatch):
     """P2-4: if get_sdk_loop/approve fails post-acquire, the pending interrupt
     is restored so a retry can succeed instead of 404ing forever."""
