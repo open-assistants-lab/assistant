@@ -193,7 +193,7 @@ test "D3 launch states render starting first-run and unavailable recovery" {
     _ = try expectByText(tree.root, .button, "Reconnect");
 }
 
-test "D3 first-run API key submit uses provider classification contract" {
+test "D3 first-run API key submit validates the selected provider without sending a classify request" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -208,9 +208,148 @@ test "D3 first-run API key submit uses provider classification contract" {
     main.update(&model, .first_run_submit, &fx);
 
     const request = fx.pendingFetchAt(0).?;
-    try testing.expectEqualStrings("http://127.0.0.1:49152/v1/providers/classify-key", request.url);
+    try testing.expectEqualStrings("http://127.0.0.1:49152/v1/providers/validate-key", request.url);
+    try testing.expect(std.mem.indexOf(u8, request.body, "\"provider\":\"anthropic\"") != null);
     try testing.expect(std.mem.indexOf(u8, request.body, "sk-ant-test") != null);
+    try testing.expect(std.mem.indexOf(u8, request.url, "classify-key") == null);
     try expectHeader(request.headers, "Authorization", "Bearer launch-token");
+}
+
+test "D3 first-run validation stores the credential and requests the model catalog" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    try main.configureBackend(&model, arena, "http://127.0.0.1:49152", "launch-token");
+    model.launch_state = .first_run;
+    model.first_run_key_value = "sk-ant-test";
+    var fx = noopFx(arena);
+
+    main.update(&model, .{ .first_run_checked = .{ .key = 26, .outcome = .ok, .body = "{\"provider\":\"anthropic\",\"valid\":true}" } }, &fx);
+
+    try testing.expectEqualStrings("anthropic", model.active_provider);
+    try testing.expectEqualStrings("sk-ant-test", model.active_provider_key);
+    const request = fx.pendingFetchAt(0).?;
+    try testing.expectEqualStrings("http://127.0.0.1:49152/v1/settings/model-catalog?max_models_per_provider=20&max_providers=64", request.url);
+}
+
+test "D3 first-run catalog response enables the verified provider models" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    model.launch_state = .first_run;
+    model.active_provider = "anthropic";
+    model.active_provider_key = "sk-ant-test";
+    var fx = noopFx(arena);
+    const catalog_body =
+        \\{"providers":[{"id":"anthropic","name":"Anthropic","key_source":"none","has_key":false,"models":[{"id":"anthropic:claude","name":"Claude","provider":"anthropic","provider_display":"Anthropic","key_source":"none"}]}]}
+    ;
+
+    main.update(&model, .{ .settings_loaded = .{ .key = 10, .outcome = .ok, .body = catalog_body } }, &fx);
+
+    try testing.expect(model.first_run_model_picker);
+    try testing.expectEqualStrings("user", model.available_models[0].key_source);
+    try testing.expect(model.settings.providers[0].has_key);
+}
+
+test "D3 first-run model picker transitions to connected" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    model.launch_state = .first_run;
+    model.first_run_model_picker = true;
+    model.available_models[0] = .{ .id = "anthropic:claude", .name = "Claude", .provider = "anthropic", .provider_display = "Anthropic", .key_source = "user" };
+    model.available_model_count = 1;
+    var fx = noopFx(arena);
+
+    const tree = try buildTree(arena, &model);
+    _ = try expectByText(tree.root, .button, "Claude");
+
+    main.update(&model, .{ .first_run_select_model = 0 }, &fx);
+    try testing.expectEqual(main.LaunchState.connected, model.launch_state);
+    try testing.expect(!model.first_run_model_picker);
+    try testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
+    const request = fx.pendingFetchAt(0).?;
+    try testing.expectEqualStrings("http://assistant.invalid/v1/settings", request.url);
+}
+
+test "D3 first-run local scan populates a model picker" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    try main.configureBackend(&model, arena, "http://127.0.0.1:49152", "launch-token");
+    model.launch_state = .first_run;
+    var fx = noopFx(arena);
+
+    main.update(&model, .first_run_scan_local, &fx);
+    const request = fx.pendingFetchAt(0).?;
+    try testing.expectEqualStrings("http://127.0.0.1:49152/v1/providers/local-models?endpoint=http://127.0.0.1:11434", request.url);
+    main.update(&model, .{ .first_run_discovery = .{ .key = 26, .outcome = .ok, .body = "{\"models\":[{\"id\":\"llama3\",\"name\":\"Llama 3\"}]}" } }, &fx);
+    try testing.expect(model.first_run_model_picker);
+    try testing.expectEqualStrings("ollama:llama3", model.available_models[0].id);
+}
+
+test "D3 first-run custom endpoint control validates the entered URL" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    try main.configureBackend(&model, arena, "http://127.0.0.1:49152", "launch-token");
+    model.launch_state = .first_run;
+    var fx = noopFx(arena);
+
+    main.update(&model, .first_run_custom_endpoint, &fx);
+    main.update(&model, .{ .first_run_key_input = .{ .insert_text = "http://127.0.0.1:5678" } }, &fx);
+    main.update(&model, .first_run_submit, &fx);
+    const request = fx.pendingFetchAt(0).?;
+    try testing.expectEqualStrings("http://127.0.0.1:49152/v1/providers/validate-endpoint", request.url);
+    try testing.expect(std.mem.indexOf(u8, request.body, "http://127.0.0.1:5678") != null);
+}
+
+test "D3 unavailable reconnect control restarts the startup fetch" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    try main.configureBackend(&model, arena, "http://127.0.0.1:49152", "launch-token");
+    model.launch_state = .unavailable;
+    var fx = noopFx(arena);
+
+    main.update(&model, .reconnect, &fx);
+    try testing.expectEqual(main.LaunchState.starting, model.launch_state);
+    const request = fx.pendingFetchAt(0).?;
+    try testing.expectEqualStrings("http://127.0.0.1:49152/v1/conversation/sessions", request.url);
+}
+
+test "D3 connector requests leave identity resolution to the sidecar" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    try main.configureBackend(&model, arena, "http://127.0.0.1:49152", "launch-token");
+    var fx = noopFx(arena);
+
+    main.update(&model, .settings_tools, &fx);
+    const request = fx.pendingFetchAt(1).?;
+    try testing.expectEqualStrings("http://127.0.0.1:49152/connectors/catalog", request.url);
+    try testing.expect(std.mem.indexOf(u8, request.url, "user_id=") == null);
 }
 
 test "D3 connected empty state has only text starter prompts" {

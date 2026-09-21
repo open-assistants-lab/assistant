@@ -73,6 +73,7 @@ const SettingsSection = enum { providers_models, general, tools };
 const ToolsSection = enum { builtin, connections };
 
 pub const LaunchState = enum { starting, first_run, connected, unavailable };
+const FirstRunMode = enum { key, custom_endpoint, local_models };
 
 const ToolRow = struct {
     name: []const u8,
@@ -406,7 +407,12 @@ pub const Msg = union(enum) {
     cancel_connect,
     first_run_key_input: canvas.TextInputEvent,
     first_run_submit,
+    first_run_scan_local,
+    first_run_custom_endpoint,
     first_run_checked: native_sdk.EffectResponse,
+    first_run_discovery: native_sdk.EffectResponse,
+    first_run_select_model: usize,
+    reconnect,
     settings_providers_models,
     settings_general,
     settings_loaded: native_sdk.EffectResponse,
@@ -498,6 +504,8 @@ pub const Model = struct {
     first_run_key_value: []const u8 = "",
     first_run_key_selection: canvas.TextSelection = .{ .anchor = 0, .focus = 0 },
     first_run_status: []const u8 = "",
+    first_run_mode: FirstRunMode = .key,
+    first_run_model_picker: bool = false,
     // D3 credential ownership: the active provider key lives in the macOS
     // keychain (loaded at startup) and is injected per request; the sidecar
     // never persists it.
@@ -671,8 +679,7 @@ fn apiRawUrl(model: *const Model, allocator: std.mem.Allocator, path: []const u8
 }
 
 fn connectorUrl(model: *const Model, allocator: std.mem.Allocator, path: []const u8) []const u8 {
-    const separator: []const u8 = if (std.mem.indexOfScalar(u8, path, '?') == null) "?" else "&";
-    return std.fmt.allocPrint(allocator, "{s}{s}{s}user_id=default_user", .{ model.api_base_url, path, separator }) catch path;
+    return std.fmt.allocPrint(allocator, "{s}{s}", .{ model.api_base_url, path }) catch path;
 }
 
 fn requestHeaders(model: *const Model, allocator: std.mem.Allocator, content_type: []const u8, accept: []const u8) []const std.http.Header {
@@ -2349,30 +2356,160 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.first_run_key_selection = next.selection;
         },
         .first_run_submit => {
-            const key = std.mem.trim(u8, model.first_run_key_value, " \n\r\t");
-            if (key.len == 0) {
-                model.first_run_status = "Paste an API key or choose a local model.";
-                return;
+            switch (model.first_run_mode) {
+                .custom_endpoint => {
+                    const endpoint = std.mem.trim(u8, model.first_run_key_value, " \n\r\t");
+                    if (endpoint.len == 0) {
+                        model.first_run_status = "Enter an http(s) endpoint first.";
+                        return;
+                    }
+                    const escaped = escapeJsonString(model.allocator, endpoint) catch return;
+                    const body = std.fmt.allocPrint(model.allocator, "{{\"endpoint\":\"{s}\"}}", .{escaped}) catch return;
+                    model.first_run_status = "Checking endpoint…";
+                    fx.fetch(.{
+                        .key = first_run_key,
+                        .url = apiUrl(model, model.allocator, "/providers/validate-endpoint"),
+                        .method = .POST,
+                        .headers = jsonHeaders(model, model.allocator),
+                        .body = body,
+                        .response = .buffered,
+                        .on_response = Effects.responseMsg(.first_run_discovery),
+                    });
+                },
+                .key => {
+                    const key = std.mem.trim(u8, model.first_run_key_value, " \n\r\t");
+                    const provider = classifyFirstRunProvider(key);
+                    if (provider.len == 0) {
+                        model.first_run_status = "This key needs a provider-specific prefix. Use Settings to choose a provider.";
+                        return;
+                    }
+                    const escaped_provider = escapeJsonString(model.allocator, provider) catch return;
+                    const escaped_key = escapeJsonString(model.allocator, key) catch return;
+                    const body = std.fmt.allocPrint(
+                        model.allocator,
+                        "{{\"provider\":\"{s}\",\"api_key\":\"{s}\"}}",
+                        .{ escaped_provider, escaped_key },
+                    ) catch return;
+                    model.first_run_status = "Verifying the key with the selected provider…";
+                    fx.fetch(.{
+                        .key = first_run_key,
+                        .url = apiUrl(model, model.allocator, "/providers/validate-key"),
+                        .method = .POST,
+                        .headers = jsonHeaders(model, model.allocator),
+                        .body = body,
+                        .response = .buffered,
+                        .on_response = Effects.responseMsg(.first_run_checked),
+                    });
+                },
+                .local_models => return,
             }
-            const escaped = escapeJsonString(model.allocator, key) catch return;
-            const body = std.fmt.allocPrint(model.allocator, "{{\"key\":\"{s}\"}}", .{escaped}) catch return;
-            model.first_run_status = "Checking key locally…";
+        },
+        .first_run_scan_local => {
+            model.first_run_mode = .local_models;
+            model.first_run_model_picker = false;
+            model.first_run_status = "Scanning Ollama on this Mac…";
             fx.fetch(.{
                 .key = first_run_key,
-                .url = apiUrl(model, model.allocator, "/providers/classify-key"),
-                .method = .POST,
-                .headers = jsonHeaders(model, model.allocator),
-                .body = body,
+                .url = apiUrl(model, model.allocator, "/providers/local-models?endpoint=http://127.0.0.1:11434"),
+                .method = .GET,
+                .headers = acceptJsonHeaders(model, model.allocator),
                 .response = .buffered,
-                .on_response = Effects.responseMsg(.first_run_checked),
+                .on_response = Effects.responseMsg(.first_run_discovery),
             });
+        },
+        .first_run_custom_endpoint => {
+            model.first_run_mode = .custom_endpoint;
+            model.first_run_model_picker = false;
+            model.first_run_key_value = "";
+            model.first_run_key_selection = .{ .anchor = 0, .focus = 0 };
+            model.first_run_status = "Enter a custom http(s) endpoint, then press Validate endpoint.";
         },
         .first_run_checked => |response| {
             if (response.outcome != .ok) {
                 model.first_run_status = "Could not validate this key. Check the connection and try again.";
                 return;
             }
-            model.first_run_status = "Key recognized. Choose a model to continue.";
+            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, response.body, .{}) catch {
+                model.first_run_status = "The provider returned an invalid validation response.";
+                return;
+            };
+            defer parsed.deinit();
+            const root = parsed.value;
+            const valid = if (root.object.get("valid")) |v| v == .bool and v.bool else false;
+            if (!valid) {
+                const error_msg = if (root.object.get("error")) |e| switch (e) {
+                    .string => |s| s,
+                    else => "The provider rejected this key.",
+                } else "The provider rejected this key.";
+                model.first_run_status = model.allocator.dupe(u8, error_msg) catch "The provider rejected this key.";
+                return;
+            }
+            const provider = if (root.object.get("provider")) |v| jsonString(v) orelse "" else "";
+            if (provider.len == 0 or !storeFirstRunCredential(model, provider, model.first_run_key_value)) {
+                model.first_run_status = "The key could not be stored in Keychain.";
+                return;
+            }
+            model.first_run_model_picker = false;
+            model.first_run_status = "Key verified. Loading available models…";
+            fetchSettingsCatalog(model, fx);
+        },
+        .first_run_discovery => |response| {
+            if (response.outcome != .ok) {
+                model.first_run_status = "The discovery request failed. Check the connection and try again.";
+                return;
+            }
+            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, response.body, .{}) catch {
+                model.first_run_status = "The sidecar returned an invalid discovery response.";
+                return;
+            };
+            defer parsed.deinit();
+            const root = parsed.value;
+            if (model.first_run_mode == .custom_endpoint) {
+                const reachable = if (root.object.get("reachable")) |v| v == .bool and v.bool else false;
+                model.first_run_status = if (reachable)
+                    "Endpoint is reachable. Add its model in Settings to continue."
+                else
+                    "Endpoint could not be reached. Check the URL and try again.";
+                return;
+            }
+            model.available_model_count = 0;
+            if (root.object.get("models")) |models_value| {
+                if (models_value == .array) {
+                    for (models_value.array.items) |item| {
+                        if (model.available_model_count >= max_models) break;
+                        const id = if (item.object.get("id")) |v| jsonString(v) orelse continue else continue;
+                        const name = if (item.object.get("name")) |v| jsonString(v) orelse id else id;
+                        const idx = model.available_model_count;
+                        model.available_models[idx] = .{
+                            .id = std.fmt.allocPrint(model.allocator, "ollama:{s}", .{id}) catch continue,
+                            .name = model.allocator.dupe(u8, name) catch continue,
+                            .provider = "ollama",
+                            .provider_display = "Ollama",
+                            .key_source = "local",
+                        };
+                        model.available_model_count += 1;
+                    }
+                }
+            }
+            if (model.available_model_count == 0) {
+                model.first_run_status = "No local models found. Paste a provider key or use a custom endpoint.";
+                return;
+            }
+            model.first_run_model_picker = true;
+            model.first_run_status = "Choose a local model to continue.";
+        },
+        .first_run_select_model => |idx| {
+            if (idx >= model.available_model_count) return;
+            model.selected_model_idx = idx;
+            model.first_run_model_picker = false;
+            model.launch_state = .connected;
+            model.first_run_status = "";
+            saveSettingsModel(model, fx, idx);
+        },
+        .reconnect => {
+            model.launch_state = .starting;
+            model.launch_error = "";
+            initFx(model, fx);
         },
         .close_form => {
             model.tools.form_open = false;
@@ -2527,6 +2664,22 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     }
                 }
                 sortSettingsProviders(&model.settings);
+                if (model.launch_state == .first_run and model.active_provider_key.len > 0) {
+                    for (0..model.settings.provider_count) |pi| {
+                        if (std.mem.eql(u8, model.settings.providers[pi].id, model.active_provider)) {
+                            model.settings.providers[pi].has_key = true;
+                            model.settings.providers[pi].key_source = "user";
+                            for (0..model.settings.providers[pi].model_count) |mi| {
+                                const model_idx = model.settings.providers[pi].model_indices[mi];
+                                if (model_idx < model.available_model_count) {
+                                    model.available_models[model_idx].key_source = "user";
+                                }
+                            }
+                        }
+                    }
+                    model.first_run_model_picker = model.available_model_count > 0;
+                    model.first_run_status = if (model.first_run_model_picker) "Choose a model to continue." else "No models are available for this provider.";
+                }
             }
         },
         .settings_general_loaded => |response| {
@@ -3478,7 +3631,7 @@ fn buildLaunchPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         .unavailable => "Assistant needs attention",
         .connected => "Assistant",
     };
-    var nodes: [10]AppUi.Node = undefined;
+    var nodes: [14]AppUi.Node = undefined;
     var count: usize = 0;
     nodes[count] = ui.text(.{ .size = .heading }, title);
     count += 1;
@@ -3490,21 +3643,37 @@ fn buildLaunchPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         .first_run => {
             nodes[count] = ui.text(.{ .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, "Paste an API key, scan for a local model, or enter a custom endpoint.");
             count += 1;
-            nodes[count] = ui.el(.textarea, .{
-                .text = model.first_run_key_value,
-                .placeholder = "Paste API key…",
-                .on_input = AppUi.inputMsg(.first_run_key_input),
-                .height = 44,
-                .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
-            }, .{});
-            count += 1;
-            nodes[count] = ui.row(.{ .gap = 8, .cross = .center }, .{
-                ui.button(.{ .on_press = .first_run_submit, .variant = .primary, .min_width = 132 }, "Continue"),
-                ui.button(.{ .variant = .ghost, .min_width = 132 }, "Scan local models"),
-                ui.button(.{ .variant = .ghost, .min_width = 132 }, "Custom endpoint"),
-            });
-            count += 1;
-            nodes[count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, "Check likely providers only runs after you review and consent to the candidates.");
+            if (model.first_run_model_picker) {
+                nodes[count] = ui.text(.{ .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, "Choose a model to finish setup.");
+                count += 1;
+                var model_nodes: [6]AppUi.Node = undefined;
+                var model_count: usize = 0;
+                const limit = @min(model.available_model_count, model_nodes.len);
+                for (0..limit) |i| {
+                    model_nodes[model_count] = ui.button(.{ .on_press = .{ .first_run_select_model = i }, .variant = .ghost, .grow = 1 }, model.available_models[i].name);
+                    model_count += 1;
+                }
+                nodes[count] = ui.column(.{ .gap = 8, .cross = .stretch }, model_nodes[0..model_count]);
+                count += 1;
+            } else {
+                const input_placeholder = if (model.first_run_mode == .custom_endpoint) "http://127.0.0.1:8000" else "Paste API key…";
+                nodes[count] = ui.el(.textarea, .{
+                    .text = model.first_run_key_value,
+                    .placeholder = input_placeholder,
+                    .on_input = AppUi.inputMsg(.first_run_key_input),
+                    .height = 44,
+                    .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
+                }, .{});
+                count += 1;
+                const submit_label = if (model.first_run_mode == .custom_endpoint) "Validate endpoint" else "Verify key";
+                nodes[count] = ui.row(.{ .gap = 8, .cross = .center }, .{
+                    ui.button(.{ .on_press = .first_run_submit, .variant = .primary, .min_width = 132 }, submit_label),
+                    ui.button(.{ .on_press = .first_run_scan_local, .variant = .ghost, .min_width = 132 }, "Scan local models"),
+                    ui.button(.{ .on_press = .first_run_custom_endpoint, .variant = .ghost, .min_width = 132 }, "Custom endpoint"),
+                });
+                count += 1;
+            }
+            nodes[count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, "Provider-specific keys are checked only with the selected provider.");
             count += 1;
             if (model.first_run_status.len > 0) {
                 nodes[count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, model.first_run_status);
@@ -3515,7 +3684,7 @@ fn buildLaunchPanel(ui: *AppUi, model: *const Model) AppUi.Node {
             const copy = if (model.launch_error.len > 0) model.launch_error else "The local sidecar is unavailable.";
             nodes[count] = ui.text(.{ .style_tokens = .{ .foreground = .destructive }, .wrap = true }, copy);
             count += 1;
-            nodes[count] = ui.button(.{ .variant = .primary, .min_width = 132 }, "Reconnect");
+            nodes[count] = ui.button(.{ .on_press = .reconnect, .variant = .primary, .min_width = 132 }, "Reconnect");
             count += 1;
         },
         .connected => {},
@@ -4147,6 +4316,25 @@ pub fn keychainLoadActive(model: *Model) void {
     const key = std.mem.trim(u8, key_raw, " \n\r\t");
     model.active_provider = model.allocator.dupe(u8, provider) catch return;
     model.active_provider_key = model.allocator.dupe(u8, key) catch return;
+}
+
+fn classifyFirstRunProvider(key: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, key, "sk-ant-")) return "anthropic";
+    if (std.mem.startsWith(u8, key, "sk-or-")) return "openrouter";
+    if (std.mem.startsWith(u8, key, "sk-proj-")) return "openai";
+    if (std.mem.startsWith(u8, key, "AIza")) return "gemini";
+    if (std.mem.startsWith(u8, key, "r8_") or std.mem.startsWith(u8, key, "gsk_")) return "groq";
+    return "";
+}
+
+fn storeFirstRunCredential(model: *Model, provider: []const u8, key: []const u8) bool {
+    // In production this must succeed in Keychain. Unit tests do not have a
+    // process Io and therefore exercise the same memory handoff without a
+    // real `security` subprocess or touching the user's login keychain.
+    if (g_process_io_ready and !keychainStoreKey(model, provider, key)) return false;
+    model.active_provider = model.allocator.dupe(u8, provider) catch return false;
+    model.active_provider_key = model.allocator.dupe(u8, key) catch return false;
+    return true;
 }
 
 /// Store the key locally and drive the existing `.key_saved` success path.
@@ -5591,6 +5779,9 @@ pub fn main(init: std.process.Init) !void {
     // D3 task 2: restore the credential the native app owns (Keychain); it is
     // injected per request and never persisted by the sidecar.
     keychainLoadActive(&app_state.model);
+    if (app_state.model.active_provider_key.len == 0) {
+        app_state.model.launch_state = .first_run;
+    }
 
     // Stress-test mode: seed a synthetic transcript of N messages so the
     // virtual list can be exercised at scale without a backend.
