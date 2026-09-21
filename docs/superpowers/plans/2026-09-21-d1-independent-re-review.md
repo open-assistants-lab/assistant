@@ -86,6 +86,16 @@ regression was found in the four commits.
   17 files to 42 / 10 during adoption, surfacing a real `runner.py` import bug
   (fixed) and leaving one deliberate hold-out documented in the policy.
 
-Remaining before D1 can be recorded as passing: the D0 sign-off decisions
-(bootstrap payload shape, six-component release tuple, backend/security review
-memo) — decisions, not code.
+## D1 closure — recorded 2026-09-21
+
+The gate owner signed off the three decision-only items:
+
+| Decision | Outcome |
+|---|---|
+| Bootstrap payload shape | **1-A** — today's payload (`versions`, `capability_profile`, `migration`, `identity`, `sidecar`) is canonical; the design doc records it; the launch token is the ownership binding, so no separate nonce field is carried |
+| Release tuple | **2-A** — browser-component pinning is deferred to the packaging phase (D5); the final release gate must record all six pinned components |
+| Backend/security review memo | **3-A** — completed and marked final (`docs/architecture/macos-dmg-v0.1.0-backend-impact-review.md`); every review question is answered or explicitly escalated |
+
+**D1 is closed.** All exit-gate rows are MET (re-review PASS for the delta,
+both P2 evidence rows closed), the quality-gate policy is adopted and enforced
+in CI, and the sign-offs above are recorded. **D2 is the next gate.**

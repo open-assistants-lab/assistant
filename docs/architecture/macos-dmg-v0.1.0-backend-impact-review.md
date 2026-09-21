@@ -1,6 +1,6 @@
 # macOS DMG v0.1.0 — Backend Impact Review Memo
 
-> **Status:** Draft for peer review (backend/security lane verified 2026-09-05 — see §3.1 amendment). This records confirmed product direction and the backend changes it implies. It is not an implementation plan and does not authorize code changes.
+> **Status:** Final for the desktop v0.1.0 D1 gate (2026-09-21). The remaining review questions are answered in §8, §2 records which current-state gaps D1 closed, and §5 carries the canonical bootstrap payload. This records confirmed product direction and the backend changes it implies; it is not an implementation plan and does not authorize code changes.
 >
 > **Audience:** Backend, security, release-engineering, and product reviewers.
 
@@ -60,6 +60,20 @@ The current repository does not yet meet the desktop-product contract:
 | `config.yaml` enables email sync. | Email is unavailable in v0.1.0. | The desktop profile must disable background email sync as well as all email/contact/todo tool registrations. **Current-state correction (review P2): `start_interval_sync` (`email_sync.py:468`) is never invoked in the repo — sync is an on-demand tool. The actual unconditional background task in the lifespan is the ConnectKit token-refresh loop (`_refresh_loop`, 300s, no enable flag); desktop mode must not start it.** |
 | `native package --archive` packages the current native app only. **(External toolchain — unverified in this repo; only `native build/test/automate` are documented. Source or verify against the native toolchain.)** | DMG contains the native GUI, a production backend helper, and a managed browser-automation runtime. | Add a desktop release assembly process; a bare native-app DMG is insufficient. |
 
+**D1 closure status (2026-09-21).** The remediation merged as
+`61777b6b..830ee0d4` (independent re-review: PASS for the delta) closed the
+gaps above as follows:
+
+| Gap | Closed by |
+|---|---|
+| Distribution/console rename to `assistant` | D1 task 1 (verified in the re-review) |
+| Dynamic loopback endpoint + server-owned identity | D1 tasks 2–3; WS identity in `4b16ac4a`; startup ownership in `830ee0d4` |
+| Both roots under `~/Assistant` + migration | D1 task 4; duplicate-target and sibling conflicts refuse before moving |
+| `Messages/` canonical, `Conversation/` not recreated | D1 task 4 (`DataPaths.conversation_dir()`) |
+| Email/contact/todo tools and background work disabled | D1 task 5; ConnectKit refresh + scheduler skipped in desktop mode |
+| Local API requires the launch token | §3.1 amendment resolved (desktop forces `SOLO_BYPASS=false`; only `/health` exempt) |
+| Bundled browser runtime | Remains D5/D6 packaging work (not a D1 item) |
+
 ## 3. Backend changes required for local desktop operation
 
 ### 3.1 Desktop sidecar lifecycle
@@ -74,7 +88,7 @@ Required properties:
 - Publish a runtime rendezvous document only after the server is ready. It should contain the port, PID, launch nonce, server version, API version, and protocol version. It must never contain API-provider keys.
 - The native app starts the helper, waits for authenticated readiness, and performs graceful shutdown/restart only for a sidecar matching its nonce.
 - The local API should require a per-launch runtime bearer token for all non-health endpoints. Loopback alone is not a sufficient process-level boundary against other software running as the same macOS user.
-  - **⚠️ Amendment (verified review, P1): today this requirement is DEFEATED BY DEFAULTS.** `SOLO_BYPASS` defaults to `True` and `SharedSecretResolver.resolve` (`src/http/auth/shared_secret.py:27-32`) short-circuits localhost **before** checking the Bearer token — a loopback sidecar with `API_KEY` set still accepts unauthenticated local calls today. **Desktop mode MUST disable `SOLO_BYPASS`** (or the desktop resolver bypasses the localhost shortcut entirely and requires the launch token). The §7 test "rejects requests without its launch token" is only effective with that change — as written, it would fail today.
+  - **⚠️ Amendment (verified review, P1) — RESOLVED 2026-09-21:** `SOLO_BYPASS` used to default to `True`, and `SharedSecretResolver.resolve` (`src/http/auth/shared_secret.py:27-32`) short-circuited localhost **before** checking the Bearer token, so a loopback sidecar with `API_KEY` set accepted unauthenticated local calls. Desktop mode now forces `SOLO_BYPASS=false` before stores initialize, and every non-health HTTP path and conversation WebSocket requires the desktop launch token (`830ee0d4`, `4b16ac4a`). The §7 test "rejects requests without its launch token" is effective; `tests/api/test_desktop_server.py::TestBootstrapEndpoint` asserts the 401.
 - The sidecar must keep `~/Assistant` writable and treat the application bundle as read-only.
 
 A likely shape is a dedicated internal mode such as `assistant desktop-server`, while `assistant http` remains the explicit developer/server command. The public product command remains `assistant`. **(Review P2): an existing switch point is `DeploymentConfig.mode` (`src/config/settings.py:28-32`, default `"solo"`, docstring already references `.dmg/.exe`) — the desktop-server mode should extend this existing flag rather than imply a greenfield mode concept.**
@@ -190,6 +204,13 @@ Requirements:
 - Always offer manual URL + model-ID entry.
 - Distinguish Ollama's native API from generic OpenAI-compatible APIs.
 
+**Implemented allowlist (2026-09-21):** hosts `127.0.0.1`, `localhost`, `::1`;
+ports `11434` (Ollama), `1234` (LM Studio), `8000`, `8080` — see
+`src/http/routers/desktop_providers.py:32-33`. The sidecar's own port is
+OS-assigned from the ephemeral range (49152+ on macOS), so it can never equal
+one of those four; that is the exclusion mechanism, and the D2 contract tests
+cover the allowlist behaviour.
+
 A generic OpenAI-compatible configuration is the extensibility boundary for v0.1.0; arbitrary runtime provider plugins are not.
 
 ## 5. Client/backend compatibility contract
@@ -200,14 +221,29 @@ Add a bootstrap endpoint or authenticated readiness payload with at least:
 
 ```json
 {
-  "server_version": "0.1.0",
-  "api_version": 1,
-  "stream_protocol_version": 1,
-  "identity": {"mode": "single_user"},
+  "versions": {
+    "app": "0.1.0",
+    "api": "v1",
+    "stream_protocol": "v1-block-stream",
+    "agent_browser": "unpinned",
+    "browser_runtime": "unpinned"
+  },
   "capability_profile": "desktop-v0.1.0",
-  "data_root_state": "ready"
+  "migration": {"migrated": true, "source": "fresh", "migration_version": 1},
+  "identity": {"user_id": "default_user", "workspace": "personal"},
+  "sidecar": {"mode": "desktop-server", "data_root": "~/Assistant", "system_dir": "~/Assistant/.system"}
 }
 ```
+
+**Canonical shape — decision 1-A (2026-09-21).** The payload above is the
+accepted contract; the earlier sketch of this section
+(`server_version` / `api_version` / `stream_protocol_version` /
+`identity.mode` / `data_root_state`) was never implemented and is superseded.
+The launch token binds the response to the launcher — a rogue local process
+cannot answer an authenticated request — so the payload carries no additional
+nonce field; the rendezvous record stays non-secret discovery metadata.
+`tests/api/test_desktop_server.py::TestBootstrapEndpoint` pins the shape and
+the 401 without token.
 
 The native app must fail clearly if the expected API/protocol range is not available. The backend must not leave the UI to discover a protocol mismatch midway through streamed output.
 
@@ -259,12 +295,41 @@ Before shipping, tests must demonstrate:
 
 ## 8. Review questions / unresolved decisions
 
-1. Should the desktop backend require a runtime bearer token for loopback API calls in v0.1.0? This memo recommends yes.
-2. Which high-confidence provider signatures are supported at launch, and who owns their ongoing maintenance?
-3. Which exact localhost endpoints/ports are allowed for discovery? The list must be explicit and testable rather than an open port scan.
-4. What browser-profile persistence policy balances convenient signed-in sessions with secret handling and supportability? The runtime must keep its profile under `.system/browser/` and use platform secure storage where supported.
-5. Does the first arm64 release include the memory/vector extra, or does it ship a smaller runtime profile? This affects DMG size, signing, cold start, and feature parity.
-6. What is the recovery/support policy if root-level data and `~/Assistant/Users/native_sdk_chat/` both exist after an interrupted/manual migration?
+All questions are answered or explicitly escalated as of 2026-09-21;
+questions 7–9 were decided 2026-09-05.
+
+1. **Bearer token required? — DECIDED 2026-09-21: yes, implemented.** Desktop
+   mode requires the launch token on every non-health HTTP path and on
+   conversation WebSockets; only `/health` and `/health/ready` are exempt
+   (`src/http/main.py:286-296`, `tests/api/test_desktop_server.py`).
+2. **High-confidence provider signatures at launch, and ownership — DECIDED.**
+   Local classification matches only these prefixes and sends nothing:
+   `sk-ant-` (Anthropic), `sk-or-` (OpenRouter), `sk-proj-` and `sk-` (OpenAI),
+   `AIza` (Gemini), `r8_` and `gsk_` (Groq) — `src/http/routers/desktop_providers.py:57-65`.
+   Ownership: the backend team owns the list; changes are code changes with a
+   contract test, reviewed each release. The generic `sk-` shape stays an
+   ambiguous case handled by the consent-gated check-likely flow (D2 review
+   owns the "explicit reviewed candidates" compliance question).
+3. **Allowed discovery endpoints/ports — DECIDED.** Exact list recorded in
+   §4.3 (`127.0.0.1`/`localhost`/`::1` on 11434, 1234, 8000, 8080); no open
+   port scan; the sidecar's ephemeral port is outside the list by construction.
+4. **Browser-profile persistence policy — DECIDED.** Profile and cache live
+   under `~/Assistant/.system/browser/`; session secrets use the macOS secure
+   store where supported and never reach logs, tool results, rendezvous files,
+   or exported diagnostics; the bundled, version-pinned runtime is D5 work.
+5. **Memory/vector extra in the first arm64 release — RECOMMENDED: include it.**
+   Memory recall is core product behaviour, so the first arm64 build should
+   carry the extra. The D5 packaging spike must confirm sentence-transformers /
+   chromadb sign and notarize cleanly and that cold start stays acceptable;
+   drop to a reduced runtime profile only if that proves impractical. Owner:
+   release engineering.
+6. **Recovery policy when root data and `Users/native_sdk_chat/` both exist —
+   DECIDED: refuse and require an explicit support action.** The migration
+   writes `~/Assistant/.system/migration-recovery.json`, moves nothing, and
+   leaves both trees intact (implemented and tested, including the sibling and
+   duplicate-target cases). Support procedure: inspect the recovery record,
+   back up both trees, choose the authoritative one, then rerun; the migration
+   marker is written only after the new layout passes storage checks.
 7. **Dev-route stripping (review P2) — DECIDED 2026-09-05:** desktop mode strips the dev router entirely (incl. `/dev/gmail-demo`).
 8. **MCP enablement (review P2) — DECIDED 2026-09-05:** desktop mode keeps `mcp.enabled: true` (the shipped config stands).
 9. **`shell_execute` stance (review P2) — DECIDED 2026-09-05:** keep-with-HITL in the consumer DMG (destructive=True interrupts on every use; the sandboxed execution leg applies).
@@ -276,5 +341,11 @@ Before shipping, tests must demonstrate:
 3. Replace native hard-coded connection/identity assumptions and implement first-run against the stable backend contract.
 4. Build the self-contained backend helper and perform an unsigned arm64 DMG smoke release.
 5. Add Developer ID signing, notarization, clean-machine installation verification, and tag-driven release automation.
+
+**Status (2026-09-21): steps 1–2 are done** — the contract and migration policy
+are recorded here, and the backend desktop mode, capability profile, credential
+boundary, and discovery contract passed the D1 gate. Step 3 (D3), step 4 (D5),
+and step 5 (D6) remain. The D2 contract review covers the provider/resource/
+event-history fixtures for steps 2's client-facing surface.
 
 No production code has been changed by this memo.

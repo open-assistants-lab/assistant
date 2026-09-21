@@ -236,7 +236,7 @@ A small active-work indicator remains valid only while tools/subagents are genui
 
 The companion memo owns detailed backend review. This design requires:
 
-1. Authenticated desktop sidecar bootstrap/readiness payload with server/API/stream protocol versions, desktop identity/capability profile, and data-root readiness.
+1. Authenticated desktop sidecar bootstrap/readiness payload with server/API/stream protocol versions, desktop identity/capability profile, and data-root readiness. **Canonical shape (decision 1-A, 2026-09-21):** `versions` (app / api / stream_protocol / agent_browser / browser_runtime), `capability_profile`, `migration`, `identity`, and `sidecar` — see the backend impact review §5. The launch token is the ownership binding; the payload carries no separate nonce field.
 2. Dynamic loopback port, per-launch token, ownership nonce, single-instance lock, and graceful lifecycle contract.
 3. `Messages/` migration and data-root mapping before stores initialize.
 4. Desktop-only disabled email/contact/todo capabilities and email scheduler.
