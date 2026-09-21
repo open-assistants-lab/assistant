@@ -359,8 +359,12 @@ async def get_conversation(
 def _context_event_message(event: ContextCompressedEvent) -> dict[str, Any]:
     before = event.data.before.estimated_tokens
     after = event.data.after.estimated_tokens
+
+    def token_label(value: int) -> str:
+        return f"{value // 1000}k" if value >= 1000 else str(value)
+
     content = (
-        f"Context updated · {before // 1000}k → {after // 1000}k tokens"
+        f"Context updated · {token_label(before)} → {token_label(after)} tokens"
         if before is not None and after is not None
         else "Context updated"
     )
