@@ -102,3 +102,78 @@ class TestResearchLoop:
             content = tsv_path.read_text()
             assert "val_metric" in content
             assert "Small improvement" in content
+
+
+class TestSubagentTargetScoring:
+    """Issue #31: score from `delegate()`'s real return shapes."""
+
+    @pytest.mark.asyncio
+    async def test_evaluate_scores_success_output_and_error_result(
+        self, monkeypatch, tmp_path
+    ):
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.research import SubagentTarget
+        from src.sdk.tools import ToolResult
+
+        target = SubagentTarget(tmp_path / "agent" / "PROFILE.md", eval_task="do it")
+
+        async def succeed(self, agent_name, task, parent_id=None, timeout_seconds=None):
+            return "the subagent output"  # delegate()'s real success shape
+
+        monkeypatch.setattr(SubagentCoordinator, "delegate", succeed)
+        assert await target.evaluate() == 1.0
+
+        async def fail(self, agent_name, task, parent_id=None, timeout_seconds=None):
+            return ToolResult(content="Timeout: too slow", is_error=True)  # real failure shape
+
+        monkeypatch.setattr(SubagentCoordinator, "delegate", fail)
+        assert await target.evaluate() == 0.2
+
+    @pytest.mark.asyncio
+    async def test_evaluate_does_not_swallow_programming_errors(
+        self, monkeypatch, tmp_path
+    ):
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.research import SubagentTarget
+
+        target = SubagentTarget(tmp_path / "agent" / "PROFILE.md", eval_task="do it")
+
+        async def explode(self, agent_name, task, parent_id=None, timeout_seconds=None):
+            raise RuntimeError("coordinator unavailable")
+
+        monkeypatch.setattr(SubagentCoordinator, "delegate", explode)
+        with pytest.raises(RuntimeError, match="coordinator unavailable"):
+            await target.evaluate()
+
+
+class TestResearchLoopEvaluatorErrors:
+    @pytest.mark.asyncio
+    async def test_evaluator_error_is_recorded_not_treated_as_improvement(self):
+        class BrokenTarget(ResearchTarget):
+            def __init__(self) -> None:
+                self.rolled_back = False
+                self.calls = 0
+
+            def get_current(self) -> str:
+                return "current"
+
+            def apply_change(self, change_description: str) -> None:
+                return None
+
+            async def evaluate(self) -> float:
+                self.calls += 1
+                if self.calls == 1:
+                    return 0.5  # the baseline evaluation succeeds
+                raise RuntimeError("evaluator exploded")
+
+            def rollback(self) -> None:
+                self.rolled_back = True
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = BrokenTarget()
+            loop = ResearchLoop(target=target, experiment_dir=Path(tmpdir))
+            result = await loop.run_experiment("try something")
+
+        assert result.status == "error"
+        assert result.improved is False
+        assert target.rolled_back is True

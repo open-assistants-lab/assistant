@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from src.sdk.subagent_models import SubagentResult
 from src.storage.paths import DEFAULT_USER_ID
 
 
@@ -181,16 +180,24 @@ class SubagentTarget(ResearchTarget):
         self.agent_def_path.write_text(change_description, encoding="utf-8")
 
     async def evaluate(self) -> float:
-        try:
-            from src.sdk.coordinator import SubagentCoordinator
+        """Score the subagent's current definition (issue #31).
 
-            coord = SubagentCoordinator(self.user_id, self.workspace_id)
-            result: SubagentResult = await coord.delegate(self.agent_def_path.stem, self.eval_task)  # type: ignore[assignment]
-            if result.success:
-                return 1.0
+        `delegate()` returns the run's output text on success and an
+        `is_error` ToolResult on cancellation/timeout/failure — it has never
+        returned a `SubagentResult`, so the old `.success` read raised
+        `AttributeError` into a bare `except` and every evaluation scored 0.0
+        (no change could ever beat the baseline). Programming errors are no
+        longer swallowed: they propagate to the research loop, which records a
+        failed experiment instead of treating them as an improvement.
+        """
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.tools import ToolResult
+
+        coord = SubagentCoordinator(self.user_id, self.workspace_id)
+        result = await coord.delegate(self.agent_def_path.stem, self.eval_task)
+        if isinstance(result, ToolResult) and result.is_error:
             return 0.2
-        except Exception:
-            return 0.0
+        return 1.0
 
     def rollback(self) -> None:
         if self._backup is not None:
@@ -280,7 +287,20 @@ class ResearchLoop:
         try:
             new_metric = await self.target.evaluate()
         except Exception:
-            new_metric = 1.0
+            # A broken evaluator must not read as an improvement: roll the
+            # change back and record the error (issue #31 criterion 3).
+            self.target.rollback()
+            result = ExperimentResult(
+                target_name=str(target_name),
+                metric_value=baseline,
+                metric_name=self.metric_name,
+                improved=False,
+                commit_hash=self._get_commit_hash(),
+                description=change_description[:200],
+                status="error",
+            )
+            self._log_result(result)
+            return result
 
         improved = new_metric > baseline
         status = "keep" if improved else "discard"
