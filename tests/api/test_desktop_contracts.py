@@ -11,7 +11,7 @@ failed-compression replay).
 
 from __future__ import annotations
 
-import json
+import os
 from pathlib import Path
 
 import pytest
@@ -214,17 +214,46 @@ def test_non_desktop_key_persistence_still_works(client):
 # ---------------------------------------------------------------------------
 
 
-def test_desktop_resource_listings_exclude_email_contacts_todos(client, desktop_env):
-    for path in ("/v1/tools", "/v1/skills", "/v1/subagents"):
+def test_desktop_tool_listing_excludes_the_registered_family_tool(client, desktop_env):
+    """The desktop registry filter must be visible in the tool listing.
+
+    `email_draft` is the only registered tool in a desktop-excluded family
+    (the previously asserted names are registered in no mode, so asserting
+    them could never fail). The registry is rebuilt under the desktop
+    environment first: it is populated lazily at first use, so a process that
+    built it earlier would otherwise mask a filter regression.
+    """
+    from src.config import reload_settings
+    from src.sdk import native_tools
+
+    reload_settings()
+    native_tools.reset_native_tools()
+    try:
+        r = client.get(
+            "/v1/tools", headers={"Authorization": "Bearer desktop-contract-test-token"}
+        )
+        assert r.status_code == 200, r.status_code
+        names = {tool["name"] for tool in r.json()["tools"]}
+        assert "email_draft" not in names
+        assert "shell_execute" in names and "browser_open" in names
+    finally:
+        os.environ.pop("DEPLOYMENT_MODE", None)
+        reload_settings()
+        native_tools.reset_native_tools()
+
+    # control: the same registry build admits the tool outside desktop mode
+    control_names = {tool.name for tool in native_tools.get_native_tools()}
+    assert "email_draft" in control_names
+
+
+def test_skills_and_subagents_listings_remain_reachable_in_desktop_mode(
+    client, desktop_env
+):
+    for path in ("/v1/skills", "/v1/subagents"):
         r = client.get(
             path, headers={"Authorization": "Bearer desktop-contract-test-token"}
         )
         assert r.status_code == 200, f"{path}: {r.status_code}"
-        body = r.json()
-        text = json.dumps(body).lower()
-        assert "email_send" not in text
-        assert "contacts_add" not in text
-        assert "todos_extract" not in text
 
 
 # ---------------------------------------------------------------------------
