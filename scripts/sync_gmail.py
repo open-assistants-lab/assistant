@@ -12,6 +12,9 @@ Usage:
 Requires: gws CLI installed and authenticated.
 """
 
+# sys.path setup below must precede the src imports.
+# ruff: noqa: E402
+
 import argparse
 import sys
 from pathlib import Path

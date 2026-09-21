@@ -30,8 +30,6 @@ class TestTierResolution:
         assert svc.resolve_tier("u1", "files_read") == "autonomous"
 
     def test_tier_from_settings_mapping(self, svc, monkeypatch):
-        from src.config.settings import reload_settings
-
         monkeypatch.setenv("GOVERNANCE_TIERS", '{"files_delete": "explicit"}')
         from src.config import reload_settings
 

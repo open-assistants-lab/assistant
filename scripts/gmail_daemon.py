@@ -9,6 +9,9 @@ Usage:
   python3 scripts/gmail_daemon.py --watch --project gws-cli-20260428
 """
 
+# sys.path setup below must precede the src imports.
+# ruff: noqa: E402
+
 import json
 import os
 import signal

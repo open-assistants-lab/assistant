@@ -13,8 +13,7 @@ from agentprofile import AgentProfile, dumps_profile
 from fastapi.testclient import TestClient
 
 from src.http.main import app
-from src.sdk import profile_loader, runner
-from src.sdk.session_worker import SessionWorkerRegistry, get_session_registry
+from src.sdk.session_worker import SessionWorkerRegistry
 
 
 def _write_profile(data_root, user_id, profile: AgentProfile) -> None:

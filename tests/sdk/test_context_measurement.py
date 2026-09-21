@@ -11,6 +11,10 @@ from src.sdk.context_measurement import (
     resolve_context_window,
 )
 from src.sdk.messages import Message, ToolCall, Usage
+from src.sdk.middleware_summarization import (
+    SummarizationMiddleware,
+    count_tokens_approximately,
+)
 from src.sdk.providers.base import ModelInfo
 from src.sdk.run_models import ContextFreshness, ContextSnapshot, ContextSource
 from src.sdk.tools import ToolDefinition
@@ -292,11 +296,6 @@ def test_estimate_message_tokens_tolerates_objects_without_reasoning() -> None:
 
 
 # --- Audit P3: token-count measurement reuse ---------------------------------
-
-from src.sdk.middleware_summarization import (
-    SummarizationMiddleware,
-    count_tokens_approximately,
-)
 
 
 def test_token_based_cutoff_matches_brute_force_reference() -> None:

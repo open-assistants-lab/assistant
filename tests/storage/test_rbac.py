@@ -17,7 +17,7 @@ def test_default_role_is_staff(tmp_path):
 
 def test_owner_role_on_org_creation(tmp_path):
     s = _store(tmp_path)
-    tid = s.create_org("acme", owner_id="founder")
+    s.create_org("acme", owner_id="founder")
     assert s.role_of("founder") == "owner"
     assert s.is_owner("founder") is True
 

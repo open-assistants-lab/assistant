@@ -8,6 +8,7 @@ agent scheduler always reported zero.
 """
 
 from src.sdk.tools_core.email_db import parse_email_flags
+from src.sdk.tools_core.email_sync import _clamp_watermark, _resolve_watermark
 
 
 class FakeMsg:
@@ -49,8 +50,6 @@ def test_recent_flag_does_not_trigger_flagged():
 
 
 # --- Fix round 1: NULL watermark guard + future Date-header clamp ---
-
-from src.sdk.tools_core.email_sync import _clamp_watermark, _resolve_watermark
 
 
 def test_resolve_watermark_none_means_never_synced():

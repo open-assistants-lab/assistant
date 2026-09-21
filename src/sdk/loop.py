@@ -360,6 +360,10 @@ class AgentLoop:
         # execution boundary (registry hits AND lazy-loads) so a mid-session
         # scope change cannot be bypassed via an already-registered tool.
         self._caps_check = caps_check
+        # Set by the runner when it wires a live loop to a rebuilt registry or
+        # a rebuilt native-tool policy; read defensively (getattr) below.
+        self._native_tool_deployment_disabled: Callable[[str], bool] | None = None
+        self.profile_timeout_seconds: float | None = None
         self.rubric: str | None = None
         # Steer queue (Pi-style): a message submitted while the agent works is
         # delivered after the current tool completes, cancelling remaining

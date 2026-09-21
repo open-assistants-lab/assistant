@@ -1,4 +1,7 @@
 # mypy: disable-error-code="assignment"
+# load_dotenv() must run before the imports below so they read the loaded
+# configuration; the module imports after it deliberately.
+# ruff: noqa: E402
 import asyncio
 import json
 import os

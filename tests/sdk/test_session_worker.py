@@ -30,7 +30,7 @@ class TestSessionWorkerRegistry:
     @pytest.mark.asyncio
     async def test_acquire_release_cycle(self) -> None:
         registry = SessionWorkerRegistry()
-        lock = await registry.acquire("chat-1")
+        await registry.acquire("chat-1")
         assert "chat-1" in registry.active_sessions
         await registry.release("chat-1")
         assert "chat-1" not in registry.active_sessions

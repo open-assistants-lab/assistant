@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -199,7 +199,7 @@ def instrument_provider_http(provider: Any) -> None:
                 return getattr(client, "aclose", None)
             return getattr(client, name)
 
-    def _wrap_post(client: Any):
+    def _wrap_post(client: Any) -> Callable[..., Any]:
         async def wrapped(url: str, **kwargs: Any) -> Any:
             from urllib.parse import urlparse
 
@@ -237,7 +237,7 @@ def instrument_provider_http(provider: Any) -> None:
 
         return wrapped
 
-    def _wrap_stream(client: Any):
+    def _wrap_stream(client: Any) -> Callable[..., Any]:
         def wrapped(method: str, url: str, **kwargs: Any) -> Any:
             from urllib.parse import urlparse
 

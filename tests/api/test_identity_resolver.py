@@ -324,7 +324,6 @@ class TestMissingUserIdWarning:
                 verification=VerificationOutcome(),
             )
 
-        import src.http.routers.conversation as conv
 
         class _Factory:
             async def __call__(self, *a, **k):

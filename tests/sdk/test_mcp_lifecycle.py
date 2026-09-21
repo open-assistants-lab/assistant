@@ -168,7 +168,6 @@ async def test_reconnect_single_flight_no_double_pop_race(monkeypatch):
     pop B's newer entry — and no double _create_connection spawn."""
     manager = MCPManager("race-user")
     monkeypatch.setattr(manager, "_ensure_started", AsyncMock())
-    creations = 0
 
     async def _slow_create(server_name, server_config):
         nonlocal creations_count

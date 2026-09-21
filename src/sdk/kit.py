@@ -225,7 +225,14 @@ def kit_install(kit_dir: str | Path, user_id: str = "default_user") -> dict[str,
     current_caps = load_user_capabilities(user_id).get("tools", {})
     current_caps = current_caps if isinstance(current_caps, dict) else {}
     affected_tools = set(tools_to_enable) | set(existing_previous_scopes)
-    rollback_scopes = {tool: current_caps.get(tool) for tool in affected_tools}
+    rollback_scopes: dict[str, bool | None] = {
+        tool: (
+            current_caps.get(tool)
+            if isinstance(current_caps.get(tool), bool)
+            else None
+        )
+        for tool in affected_tools
+    }
     previous_tool_scopes = {
         tool: existing_previous_scopes.get(tool, current_caps.get(tool))
         for tool in tools_to_enable
@@ -310,8 +317,8 @@ def kit_install(kit_dir: str | Path, user_id: str = "default_user") -> dict[str,
         shutil.rmtree(state_dir, ignore_errors=True)
         shutil.rmtree(profile_target_dir, ignore_errors=True)
         shutil.rmtree(backup_root, ignore_errors=True)
-        for tool, previous in rollback_scopes.items():
-            set_resource_enabled(user_id, "tools", tool, previous)
+        for tool, previous_scope in rollback_scopes.items():
+            set_resource_enabled(user_id, "tools", tool, previous_scope)
         raise
     shutil.rmtree(backup_root, ignore_errors=True)
 

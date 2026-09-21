@@ -766,9 +766,6 @@ class TestProviderCallIdPairingB17:
         assert any(e.canonical_type == "error" for e in events)
 
 
-from types import SimpleNamespace
-
-
 class _Ctx:
     def __init__(self, resp):
         self.resp = resp

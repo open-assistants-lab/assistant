@@ -133,6 +133,7 @@ def test_ws_budget_gate_blocks_overbudget_tenant(monkeypatch, tmp_path):
     tid = ts.upsert_tenant("acme", monthly_budget_usd=10.0)
     ts.add_member(tid, "over_budget_user")
     from datetime import UTC, datetime
+
     from src.storage.metering import UsageEventRow
 
     get_metering_store("over_budget_user").record(

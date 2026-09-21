@@ -45,9 +45,9 @@ class TestTenantStore:
 @pytest.fixture()
 def billing_api(tmp_path, monkeypatch):
     """Isolated tenant.db + metering stores + solo-mode client."""
+    import src.storage.metering as metering_mod
     import src.storage.paths as paths_mod
     import src.storage.tenant as tenant_mod
-    import src.storage.metering as metering_mod
     from src.config.settings import reload_settings
 
     monkeypatch.delenv("METERING_ENABLED", raising=False)

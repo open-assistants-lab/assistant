@@ -13,8 +13,8 @@ from __future__ import annotations
 import asyncio
 import json
 from types import SimpleNamespace
-
 from unittest.mock import AsyncMock
+
 import pytest
 from fastapi import WebSocketDisconnect
 

@@ -596,7 +596,7 @@ async def test_run_service_same_session_different_users_do_not_block(monkeypatch
 
     registry = SessionWorkerRegistry()
     store = InMemoryMessageStore()
-    service_a = RunService("user-a", registry, store)
+    RunService("user-a", registry, store)
     service_b = RunService("user-b", registry, store)
 
     _lock = await registry.acquire("user-a::chat-1")

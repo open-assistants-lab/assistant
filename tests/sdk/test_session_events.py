@@ -128,8 +128,6 @@ class TestEmission:
 
         import asyncio
 
-        from src.sdk.loop import AgentLoop as _AL  # noqa: F401
-
         loop = AgentLoop(
             provider=Provider(),
             tools=[t1],

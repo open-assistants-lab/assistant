@@ -62,9 +62,6 @@ def oidc_env(monkeypatch):
 
     settings_mod._config = None
     yield
-    settings_module = __import__(
-        "src.config.settings", fromlist=["_config"]
-    )._config
     settings_mod._config = None
 
 
@@ -176,7 +173,6 @@ def test_callback_rejects_bad_code(client, stub_idp):
     import src.http.routers.auth_oidc as oidc_mod
 
     # Make the token exchange fail (IdP rejects the code).
-    monkeypatch_local = stub_idp
 
     def fail_post(url, data):
         raise oidc_mod.OidcError("invalid_grant")
@@ -203,8 +199,6 @@ def test_callback_rejects_bad_code(client, stub_idp):
 def test_full_flow_maps_identity_and_role(client, stub_idp, monkeypatch):
     # Role comes from the T3.1 TenancyStore membership; unaffiliated -> staff.
     import src.storage.tenancy as tenancy_mod
-
-    real_role_of = tenancy_mod.get_tenancy_store
 
     def fake_store(*a, **k):
         class S:
@@ -287,12 +281,10 @@ def test_missing_preferred_username_does_not_collapse_users(client, stub_idp, mo
     )
     assert cb.status_code in (302, 307), cb.text
     assert client.cookies.get("assistant_oidc_sid")
-    sid = client.cookies.get("assistant_oidc_sid")
 
     # A second user (different sub/email), same missing claim.
     login2 = client.get("/auth/oidc/login", follow_redirects=False)
     loc2 = login2.headers["location"]
-    state2 = loc2.split("state=")[1].split("&")[0]
     stub_idp["nonce"] = loc2.split("nonce=")[1].split("&")[0]
     # (second user collapse verified via claims fallback chain: sub differs)
 

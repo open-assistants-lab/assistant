@@ -215,7 +215,6 @@ async def test_approve_loop_failure_restores_pending_interrupt(monkeypatch):
         )
 
     # Pending restored + lock released → retry is possible.
-    skeys = [k for k, v in conversation_router._pending_interrupts.items() if v]
     assert any(
         v.get("call_id") == "call-1" for v in conversation_router._pending_interrupts.values()
     ), "pending interrupt was consumed by a failed approval"

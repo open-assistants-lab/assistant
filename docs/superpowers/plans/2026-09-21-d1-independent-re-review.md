@@ -69,3 +69,23 @@ regression was found in the four commits.
 - `/tmp/desktop-d1-rereview-evidence/` — delta diff, per-suite logs,
   `validation-summary.txt`, archived reviewer transcript, `mypy-full.txt`,
   quality-gate baseline.
+
+## Update — both P2 evidence gaps closed; quality-gate policy adopted (2026-09-21)
+
+- The two P2 evidence gaps are closed in commit `672f6f2e`: the desktop tool
+  listing now rebuilds the native registry under the desktop environment and
+  asserts the one registered excluded-family tool (`email_draft`) is absent
+  (with a non-desktop control that admits it), and the
+  `unexpected_legacy_siblings` migration branch has a test proving a
+  `Users/other_user/` sibling stops in recovery before any move. Both were
+  mutation-checked; the D1 surface reports 245 passed / 0 failed.
+- The plan's explicit precondition — the quality-gate policy — is resolved by
+  `docs/quality/quality-gate-policy.md` (zero-tolerance Ruff; checked-in mypy
+  ratchet; scoped evidence for gate reviews), with CI enforcement in
+  `.github/workflows/quality.yml`. The mypy baseline went from 62 errors /
+  17 files to 42 / 10 during adoption, surfacing a real `runner.py` import bug
+  (fixed) and leaving one deliberate hold-out documented in the policy.
+
+Remaining before D1 can be recorded as passing: the D0 sign-off decisions
+(bootstrap payload shape, six-component release tuple, backend/security review
+memo) — decisions, not code.

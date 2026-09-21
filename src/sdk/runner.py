@@ -150,9 +150,7 @@ def refresh_user_tool_registries(user_id: str, names: set[str] | None = None) ->
     caps = _load_user_capabilities(user_id)
     refreshed = 0
     for loop in _live_user_loops(user_id):
-        loop._caps_check = lambda name, current_caps=caps: _resource_enabled(
-            current_caps, "tools", name
-        )
+        loop._caps_check = lambda name: _resource_enabled(caps, "tools", name)
         loop._native_tool_deployment_disabled = native_tool_is_denied
         catalog = {tool.name: tool for tool in _current_tool_catalog(loop)}
         targets = names if names is not None else set(catalog) | set(loop._registry.list_names())
@@ -745,7 +743,7 @@ async def create_sdk_loop(
         """Issue #18 defect 3 escape hatch: mark the oldest store rows
         excluded from model context (include_in_model_context=False) so a
         session stuck on an oversized payload recovers WITHOUT an LLM."""
-        from src.sdk.messages import get_message_store
+        from src.storage.messages import get_message_store
 
         store = get_message_store(user_id)
         return store.mark_context_excluded(session_id, keep_messages)
