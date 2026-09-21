@@ -7,6 +7,11 @@ from datetime import UTC, datetime
 
 import pytest
 
+from src.sdk.compression import (
+    CompressionReason,
+    CompressionStatus,
+    CompressionTelemetry,
+)
 from src.sdk.messages import Message
 from src.sdk.run_events import parse_run_event
 
@@ -169,3 +174,72 @@ class TestEmission:
         events = slog.get_session_event_store("u1").events("s1")
         kinds = [e.data.kind for e in events if getattr(e, "type", "") == "injection"]
         assert "steer" in kinds
+
+
+class TestCompressionLogging:
+    """D2 task 5: successful compression becomes a durable replayable record."""
+
+    @staticmethod
+    def _snapshot(attempt: int, tokens: int):
+        from src.sdk.run_models import (
+            ContextFreshness,
+            ContextSnapshot,
+            ContextSource,
+        )
+
+        return ContextSnapshot(
+            model="mock:test",
+            attempt=attempt,
+            llm_call_index=attempt,
+            estimated_tokens=tokens,
+            context_window=100_000,
+            percentage=tokens / 100_000 * 100,
+            source=ContextSource.PREPARED_CONTEXT,
+            freshness=ContextFreshness.LIVE,
+            estimated=True,
+        )
+
+    def _telemetry(self, status: CompressionStatus) -> CompressionTelemetry:
+        kwargs: dict = {
+            "status": status,
+            "reason": CompressionReason.THRESHOLD,
+            "summary_model": "mock:test",
+            "persistence": {"status": "not_requested"},
+            "before_context": self._snapshot(1, 46_000),
+        }
+        if status is CompressionStatus.SUCCEEDED:
+            kwargs.update(
+                before_message_count=12,
+                after_message_count=2,
+                summarized_message_count=10,
+                after_context=self._snapshot(1, 9_000),
+            )
+        else:
+            kwargs["error_code"] = "not_compressed"
+        return CompressionTelemetry(**kwargs)
+
+    def test_successful_compression_projects_a_timeline_notice(self, slog):
+        se = slog
+        assert (
+            se.log_compression("u1", "s1", "r1", 1, self._telemetry(CompressionStatus.SUCCEEDED))
+            == 2
+        )
+        messages = se.deriveMessages("s1", "u1")
+        assert [m.content for m in messages] == ["Context updated · 46k → 9k tokens"]
+
+    def test_failed_compression_writes_no_success_record(self, slog):
+        se = slog
+        assert (
+            se.log_compression("u1", "s1", "r1", 1, self._telemetry(CompressionStatus.FAILED))
+            == 1
+        )
+        assert se.deriveMessages("s1", "u1") == []
+
+    def test_disabled_log_is_a_no_op(self, slog, monkeypatch):
+        se = slog
+        monkeypatch.setattr(se, "session_log_enabled", lambda: False)
+        assert (
+            se.log_compression("u1", "s1", "r1", 7, self._telemetry(CompressionStatus.SUCCEEDED))
+            == 7
+        )
+        assert se.get_session_event_store("u1").events("s1") == []

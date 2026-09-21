@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from src.http.auth import enforce_user_id
@@ -70,25 +71,60 @@ _KEY_SHAPES: tuple[tuple[str, str], ...] = (
     ("gsk_", "groq"),
 )
 
+# A prefix shared by more than one vendor family cannot be a high-confidence
+# match on its own (generic ``sk-`` is OpenAI's classic shape, but many
+# OpenAI-compatible vendors use it too).
+_AMBIGUOUS_PREFIXES = frozenset({"sk-"})
+
+
+def _shape_matches(key: str) -> list[tuple[str, str]]:
+    """Longest-prefix-only shape matches for *key*.
+
+    ``sk-ant-…`` matches both ``sk-ant-`` (Anthropic) and the generic
+    ``sk-`` (OpenAI). Only the longest match counts, so a provider-specific
+    key is never offered to a vendor that merely shares a shorter prefix
+    (D2 review F2).
+    """
+    matches = [(prefix, name) for prefix, name in _KEY_SHAPES if key.startswith(prefix)]
+    if not matches:
+        return []
+    longest = max(len(prefix) for prefix, _ in matches)
+    return [(prefix, name) for prefix, name in matches if len(prefix) == longest]
+
+
+def _shape_candidates(key: str) -> list[str]:
+    """Ordered, de-duplicated provider candidates for *key*."""
+    candidates: list[str] = []
+    for _, name in _shape_matches(key):
+        if name not in candidates:
+            candidates.append(name)
+    return candidates
+
+
+def _shape_confidence(key: str) -> str:
+    matches = _shape_matches(key)
+    if not matches or matches[0][0] in _AMBIGUOUS_PREFIXES:
+        return "low"
+    return "high"
+
 
 @router.post("/classify-key")
-def classify_key(body: _ClassifyRequest) -> dict[str, str]:
+def classify_key(body: _ClassifyRequest) -> dict[str, Any]:
     """High-confidence local key classification.
 
     Pure shape sniffing — the key is never transmitted or validated against
     any provider here (that is /validate-key or the consent-gated
-    /check-likely flow).
+    /check-likely flow). ``candidates`` names every provider that could own
+    the key (most specific first) so the client can preview before probing.
     """
     key = body.key.strip()
-    provider = "unknown"
-    for prefix, name in _KEY_SHAPES:
-        if key.startswith(prefix):
-            provider = name
-            break
+    candidates = _shape_candidates(key)
     return {
-        "provider": provider,
-        "confidence": "high" if provider != "unknown" else "low",
-        "key_prefix": key[:8],
+        "provider": candidates[0] if candidates else "unknown",
+        "confidence": _shape_confidence(key),
+        "candidates": candidates,
+        # Bounded display prefix: an 8-character key must not be echoed whole.
+        "key_prefix": key[:4] + ("…" if len(key) > 4 else ""),
     }
 
 
@@ -122,14 +158,34 @@ async def _probe_provider(provider: str, api_key: str) -> dict[str, Any]:
 class _CheckLikelyRequest(BaseModel):
     key: str
     consent: bool = False
+    # Explicit client-approved candidates (memo §4.2: the API accepts the
+    # reviewed provider IDs and never expands the list itself).
+    providers: list[str] | None = None
+
+
+_PROBEABLE_PROVIDERS = frozenset(name for _, name in _KEY_SHAPES)
+
+
+def _require_known_provider(provider: str) -> None:
+    """Only the reviewed candidate set may be probed (memo §4.2)."""
+    if provider not in _PROBEABLE_PROVIDERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown provider candidate: {provider}",
+        )
 
 
 @router.post("/check-likely")
 async def check_likely(body: _CheckLikelyRequest) -> dict[str, Any]:
-    """Explicit consent-gated candidate check (D0: no automatic probe)."""
-    if not body.consent:
-        from fastapi import HTTPException
+    """Explicit consent-gated candidate check (D0: no automatic probe).
 
+    The probe list is the client's explicitly approved ``providers`` when
+    supplied; otherwise only the single most-specific shape candidate is
+    probed. A provider-specific key (``sk-ant-``) is never sent to a vendor
+    that merely shares a shorter prefix (``sk-`` → OpenAI) — the pre-fix
+    behaviour sent it to both (D2 review F2).
+    """
+    if not body.consent:
         raise HTTPException(
             status_code=422,
             detail=(
@@ -138,30 +194,25 @@ async def check_likely(body: _CheckLikelyRequest) -> dict[str, Any]:
                 "candidate providers only."
             ),
         )
-    # Candidates derive from the key shape's most likely providers, ordered.
-    candidates: list[str] = []
     key = body.key.strip()
-    for prefix, name in _KEY_SHAPES:
-        if key.startswith(prefix) and name not in candidates:
-            candidates.append(name)
+    candidates = _shape_candidates(key)
+    if body.providers is not None:
+        approved: list[str] = []
+        for provider in body.providers:
+            if provider not in approved:
+                _require_known_provider(provider)
+                approved.append(provider)
+    else:
+        approved = candidates[:1]
 
     results = []
-    seen: list[str] = []
-    for provider in candidates:
-        if provider in seen:
-            continue
-        seen.append(provider)
+    for provider in approved:
         probe = await _probe_provider(provider, key)
         results.append({"provider": provider, **probe})
-    # ordered like the candidate list (review P2: list(set) was unordered)
-    return {"checked": seen, "results": results}
+    return {"candidates": candidates, "checked": approved, "results": results}
 
 
 # -- loopback-only local model discovery ------------------------------------
-
-
-class _ModelsResponse(BaseModel):
-    models: list[dict[str, str]]
 
 
 @router.get("/local-models")
@@ -196,31 +247,25 @@ class _ValidateEndpointRequest(BaseModel):
     endpoint: str
 
 
+def _manual_endpoint_error(endpoint: str) -> str | None:
+    """Shape check for an explicitly typed endpoint (decision A, 2026-09-21).
+
+    Automatic discovery stays allowlisted (``local-models``); a URL the user
+    typed is validated as-is, so a vLLM on 127.0.0.1:5678 or a LAN host works.
+    """
+    parsed = urlparse((endpoint or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return f"endpoint {endpoint!r} must be a full http(s) URL"
+    return None
+
+
 @router.post("/validate-endpoint")
 def validate_endpoint(body: _ValidateEndpointRequest) -> dict[str, Any]:
-    if not _endpoint_allowed(body.endpoint):
-        from fastapi import HTTPException
-
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"endpoint {body.endpoint!r} is not in the loopback discovery "
-                "allowlist (127.0.0.1/localhost on ports 11434, 1234, 8000, 8080)"
-            ),
-        )
+    error = _manual_endpoint_error(body.endpoint)
+    if error:
+        raise HTTPException(status_code=422, detail=error)
     try:
         _http.get(f"{body.endpoint.strip().rstrip('/')}/v1/models", timeout=3.0)
     except Exception:
         return {"reachable": False, "endpoint": body.endpoint}
     return {"reachable": True, "endpoint": body.endpoint}
-
-
-# -- available-model listing (catalog snapshot) ------------------------------
-
-
-@router.get("/models")
-def models() -> dict[str, Any]:
-    from src.http.routers.settings import _catalog_snapshot
-
-    providers, models = _catalog_snapshot()
-    return {"providers": providers, "models": models}

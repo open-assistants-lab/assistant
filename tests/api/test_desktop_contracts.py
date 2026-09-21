@@ -12,7 +12,6 @@ failed-compression replay).
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import pytest
 
@@ -69,6 +68,75 @@ def test_check_likely_providers_with_consent_checks_candidates_only(client, monk
     assert results["openai"]["valid"] is True
 
 
+def test_classify_key_reports_most_specific_candidates(client):
+    body = client.post(
+        "/v1/providers/classify-key", json={"key": "sk-ant-api03-abcdef123456"}
+    ).json()
+    assert body["provider"] == "anthropic"
+    assert body["candidates"] == ["anthropic"]
+    assert body["confidence"] == "high"
+    assert body["key_prefix"] == "sk-a…"
+
+
+def test_classify_generic_sk_is_low_confidence(client):
+    body = client.post(
+        "/v1/providers/classify-key", json={"key": "sk-abcdef123456"}
+    ).json()
+    assert body["provider"] == "openai"
+    assert body["candidates"] == ["openai"]
+    assert body["confidence"] == "low"
+
+
+def test_check_likely_never_probes_a_shorter_prefix_vendor(client, monkeypatch):
+    """`sk-ant-` must not also probe OpenAI via the generic `sk-` shape."""
+    seen: list[str] = []
+
+    async def fake_test(provider: str, api_key: str) -> dict[str, object]:
+        seen.append(provider)
+        return {"valid": True}
+
+    import src.http.routers.desktop_providers as dp
+
+    monkeypatch.setattr(dp, "_probe_provider", fake_test)
+    r = client.post(
+        "/v1/providers/check-likely",
+        json={"key": "sk-ant-api03-abcdef123456", "consent": True},
+    )
+    assert r.status_code == 200
+    assert seen == ["anthropic"]
+    assert r.json()["checked"] == ["anthropic"]
+
+
+def test_check_likely_probes_exactly_the_approved_candidates(client, monkeypatch):
+    seen: list[str] = []
+
+    async def fake_test(provider: str, api_key: str) -> dict[str, object]:
+        seen.append(provider)
+        return {"valid": True}
+
+    import src.http.routers.desktop_providers as dp
+
+    monkeypatch.setattr(dp, "_probe_provider", fake_test)
+    r = client.post(
+        "/v1/providers/check-likely",
+        json={
+            "key": "sk-or-v1-abcdef123456",
+            "consent": True,
+            "providers": ["openrouter"],
+        },
+    )
+    assert r.status_code == 200
+    assert seen == ["openrouter"]
+
+
+def test_check_likely_rejects_an_unknown_candidate(client):
+    r = client.post(
+        "/v1/providers/check-likely",
+        json={"key": "sk-abcdef123456", "consent": True, "providers": ["evil"]},
+    )
+    assert r.status_code == 422
+
+
 def test_local_models_loopback_allowlist_only(client, monkeypatch):
 
     class FakeResponse:
@@ -121,7 +189,13 @@ def test_local_models_rejects_non_allowlist_endpoints(client, endpoint):
     assert r.status_code == 422
 
 
-def test_validate_endpoint_loopback_ok_and_non_loopback_rejected(client, monkeypatch):
+def test_validate_endpoint_accepts_manual_urls(client, monkeypatch):
+    """Decision A: manual endpoints validate; discovery stays allowlisted.
+
+    Only the explicit URL is validated here — a port outside the discovery
+    allowlist (e.g. vLLM on 5678) and a LAN host are legitimate manual
+    choices; ``local-models`` keeps its allowlist (covered separately).
+    """
     import src.http.routers.desktop_providers as dp
 
     class FakeResponse:
@@ -133,25 +207,22 @@ def test_validate_endpoint_loopback_ok_and_non_loopback_rejected(client, monkeyp
     monkeypatch.setattr(
         dp._http, "get", lambda url, timeout: FakeResponse()
     )
-    r = client.post(
-        "/v1/providers/validate-endpoint",
-        json={"endpoint": "http://127.0.0.1:1234"},
-    )
-    assert r.status_code == 200
-    assert r.json()["reachable"] is True
+
+    for endpoint in (
+        "http://127.0.0.1:1234",   # allowlisted discovery port
+        "http://127.0.0.1:5678",   # manual: vLLM-style port
+        "http://192.168.1.9:8000",  # manual: LAN host
+    ):
+        r = client.post(
+            "/v1/providers/validate-endpoint", json={"endpoint": endpoint}
+        )
+        assert r.status_code == 200, endpoint
+        assert r.json()["reachable"] is True
 
     r = client.post(
-        "/v1/providers/validate-endpoint",
-        json={"endpoint": "http://example.com:1234"},
+        "/v1/providers/validate-endpoint", json={"endpoint": "not-a-url"}
     )
     assert r.status_code == 422
-
-
-def test_models_listing_under_v1(client):
-    r = client.get("/v1/providers/models")
-    assert r.status_code == 200
-    body = r.json()
-    assert "providers" in body and "models" in body
 
 
 # ---------------------------------------------------------------------------
@@ -178,12 +249,6 @@ def desktop_env(tmp_path, monkeypatch):
 
 
 def test_desktop_mode_refuses_server_side_key_persistence(client, desktop_env):
-    from src.storage.paths import get_paths
-
-    store = get_paths("default_user")
-    settings_file = (
-        Path(str(store.base)) if hasattr(store, "base") else None
-    )
     r = client.post(
         "/v1/settings/api-keys",
         headers={"Authorization": "Bearer desktop-contract-test-token"},
@@ -192,11 +257,20 @@ def test_desktop_mode_refuses_server_side_key_persistence(client, desktop_env):
     )
     assert r.status_code in (409, 422)  # refused: keys are runtime-only
 
-    # no key material may appear in any durable settings file
-    if settings_file is not None:
-        for p in Path(str(settings_file)).rglob("*.json"):
-            content = p.read_text(encoding="utf-8")
-            assert "sk-secret-persist-me" not in content
+    # No key material may appear anywhere durable — not just settings JSON:
+    # logs, the message store, the session log and the rendezvous file too.
+    secret = "sk-secret-persist-me"
+    leaks: list[str] = []
+    for path in desktop_env.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            content = path.read_bytes().decode("utf-8", errors="ignore")
+        except OSError:
+            continue
+        if secret in content:
+            leaks.append(str(path))
+    assert not leaks, f"secret leaked into: {leaks}"
 
 
 def test_non_desktop_key_persistence_still_works(client):
@@ -254,6 +328,46 @@ def test_skills_and_subagents_listings_remain_reachable_in_desktop_mode(
             path, headers={"Authorization": "Bearer desktop-contract-test-token"}
         )
         assert r.status_code == 200, f"{path}: {r.status_code}"
+
+
+def test_desktop_detail_and_mutation_routes_reject_excluded_tools(client, desktop_env):
+    """Filter enforcement applies to detail/mutation routes, not just the list."""
+    from src.config import reload_settings
+    from src.sdk import native_tools
+
+    reload_settings()
+    native_tools.reset_native_tools()
+    try:
+        headers = {"Authorization": "Bearer desktop-contract-test-token"}
+        r = client.get("/v1/tools/email_draft", headers=headers)
+        assert r.status_code == 404, r.status_code
+        r = client.patch(
+            "/v1/tools/email_draft", headers=headers, json={"scope": "none"}
+        )
+        assert r.status_code == 404, r.status_code
+    finally:
+        os.environ.pop("DEPLOYMENT_MODE", None)
+        reload_settings()
+        native_tools.reset_native_tools()
+
+
+def test_desktop_subagent_start_rejects_a_disabled_subagent(client, desktop_env):
+    """Job routes re-check capability rather than trusting a stored def."""
+    from src.config import reload_settings
+    from src.sdk.capabilities import set_resource_enabled
+
+    reload_settings()
+    set_resource_enabled("default_user", "subagents", "blocked-agent", False)
+    try:
+        r = client.post(
+            "/v1/subagents/blocked-agent/start",
+            headers={"Authorization": "Bearer desktop-contract-test-token"},
+            json={"task": "do it"},
+        )
+        assert r.status_code == 404, r.status_code
+    finally:
+        os.environ.pop("DEPLOYMENT_MODE", None)
+        reload_settings()
 
 
 # ---------------------------------------------------------------------------
@@ -328,8 +442,7 @@ def test_unknown_token_compression_projects_event_without_numbers(tmp_path, monk
     _append_event(store, 1, "s2", "context_compressed", _compressed_data(None, None))
     projected = se.deriveMessages("s2", "unk_user")
     assert len(projected) == 1
-    assert "Context updated" in projected[0].content
-    assert "→" not in projected[0].content.split("Context updated")[1] or "k" not in projected[0].content
+    assert projected[0].content == "Context updated"
 
 
 def test_failed_compression_never_appears_as_success(tmp_path, monkeypatch):
