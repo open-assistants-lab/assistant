@@ -273,3 +273,26 @@ async def test_concurrent_identical_finalization_writes_one_completion(tmp_path)
     await creator.close()
     await first_worker.close()
     await second_worker.close()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_events_cannot_reopen_a_terminal_receipt(tmp_path) -> None:
+    store = SQLiteReceiptStore(tmp_path / "receipts.db")
+    await store.initialize()
+    receipt = await store.create_or_get(make_request("req-terminal"))
+    await store.finalize(
+        receipt.receipt_id,
+        outcome=Outcome.SUCCEEDED,
+        executor_state=ExecutorState.TERMINAL,
+        effect_state=EffectState.APPLIED,
+        verification_state=VerificationState.VERIFIED,
+    )
+
+    with pytest.raises(ReceiptStateError):
+        await store.append_event(receipt.receipt_id, "execution.started", {})
+
+    restored = await store.get(receipt.receipt_id)
+    assert restored is not None
+    assert restored.outcome is Outcome.SUCCEEDED
+    assert restored.executor_state is ExecutorState.TERMINAL
+    await store.close()

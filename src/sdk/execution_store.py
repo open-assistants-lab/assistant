@@ -244,13 +244,15 @@ class SQLiteReceiptStore:
         await connection.execute("BEGIN IMMEDIATE")
         try:
             cursor = await connection.execute(
-                "SELECT request_id FROM execution_receipts WHERE receipt_id = ?",
+                "SELECT request_id, outcome FROM execution_receipts WHERE receipt_id = ?",
                 (receipt_id,),
             )
             receipt_row = await cursor.fetchone()
             await cursor.close()
             if receipt_row is None:
                 raise ValueError(f"unknown receipt: {receipt_id}")
+            if receipt_row["outcome"] is not None:
+                raise ReceiptStateError(f"receipt is already finalized: {receipt_id}")
 
             cursor = await connection.execute(
                 """
