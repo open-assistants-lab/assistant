@@ -842,8 +842,9 @@ class AgentLoop:
             )
         else:
             outcome = receipt.outcome.value if receipt.outcome is not None else "running"
+            message = "Command timed out" if outcome == "timed_out" else receipt.termination_reason or outcome
             result = ToolResult(
-                content=receipt.termination_reason or outcome,
+                content=message,
                 structured_content={
                     "receipt_id": receipt.receipt_id,
                     "outcome": outcome,
