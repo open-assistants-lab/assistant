@@ -25,7 +25,7 @@ The profiles are not separate agent implementations. They share:
 
 The profile selects capabilities, protected roots, credential policy, network policy, HITL policy, evidence policy, and the visible tool catalog.
 
-The central architectural change is to move from tool-specific execution paths to one execution kernel and one receipt contract. Native tools, custom `TOOL.md` tools, MCP tools, connector actions, shell commands, and subagent work should either execute through that kernel or be explicit adapters to it.
+The central architectural change is to move from tool-specific execution paths to one execution kernel and one shared execution lifecycle contract. The contract covers requests, lifecycle events, observations, artifacts, and the current terminal receipt projection. Native tools, custom `TOOL.md` tools, MCP tools, connector actions, shell commands, and subagent work should either execute through that kernel or be explicit adapters to it.
 
 ## 2. Goals
 
