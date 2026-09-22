@@ -121,3 +121,30 @@ async def test_executor_error_produces_failed_receipt(tmp_path) -> None:
     assert receipt.verification_state is VerificationState.UNKNOWN
     assert receipt.termination_reason == "executor_error"
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_persists_cancelled_receipt(tmp_path) -> None:
+    store = SQLiteReceiptStore(tmp_path / "receipts.db")
+    kernel = ExecutionKernel(store)
+    started = asyncio.Event()
+
+    async def executor(request: ExecutionRequest) -> ExecutionCompletion:
+        started.set()
+        await asyncio.Event().wait()
+        return ExecutionCompletion()
+
+    task = asyncio.create_task(kernel.run(make_request("req-cancel"), executor))
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    receipt = await store.get_by_request("req-cancel")
+    assert receipt is not None
+    assert receipt.outcome is Outcome.CANCELLED
+    assert receipt.executor_state is ExecutorState.TERMINAL
+    assert receipt.effect_state is EffectState.NOT_APPLICABLE
+    assert receipt.verification_state is VerificationState.NOT_REQUESTED
+    await store.close()

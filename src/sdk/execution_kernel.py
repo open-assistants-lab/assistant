@@ -50,16 +50,7 @@ class ExecutionKernel:
             else:
                 completion = await asyncio.wait_for(executor(request), timeout_seconds)
         except TimeoutError:
-            effect_state = (
-                EffectState.UNKNOWN
-                if request.expected_effect is not EffectState.NOT_APPLICABLE
-                else EffectState.NOT_APPLICABLE
-            )
-            verification_state = (
-                VerificationState.UNKNOWN
-                if effect_state is EffectState.UNKNOWN
-                else VerificationState.NOT_REQUESTED
-            )
+            effect_state, verification_state = _interrupted_states(request)
             return await self._store.finalize(
                 receipt.receipt_id,
                 outcome=Outcome.TIMED_OUT,
@@ -68,6 +59,17 @@ class ExecutionKernel:
                 verification_state=verification_state,
                 termination_reason="deadline_exceeded",
             )
+        except asyncio.CancelledError:
+            effect_state, verification_state = _interrupted_states(request)
+            await self._store.finalize(
+                receipt.receipt_id,
+                outcome=Outcome.CANCELLED,
+                executor_state=ExecutorState.TERMINAL,
+                effect_state=effect_state,
+                verification_state=verification_state,
+                termination_reason="cancelled",
+            )
+            raise
         except Exception as exc:
             return await self._store.finalize(
                 receipt.receipt_id,
@@ -89,3 +91,9 @@ class ExecutionKernel:
             verification_state=completion.verification_state,
             content=completion.content,
         )
+
+
+def _interrupted_states(request: ExecutionRequest) -> tuple[EffectState, VerificationState]:
+    if request.expected_effect is EffectState.NOT_APPLICABLE:
+        return EffectState.NOT_APPLICABLE, VerificationState.NOT_REQUESTED
+    return EffectState.UNKNOWN, VerificationState.UNKNOWN
