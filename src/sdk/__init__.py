@@ -26,12 +26,26 @@ Public API:
     SubagentResult, TaskStatus, TaskCancelledError - subagent models
     SubagentWorkQueueDB, get_work_queue - work queue database
     SubagentCoordinator, get_coordinator - subagent coordination
+    Outcome, ExecutorState, EffectState, VerificationState - execution lifecycle
+    ExecutionRequest, ExecutionEvent, Observation, Receipt - execution contracts
+    ReceiptStore, SQLiteReceiptStore - durable receipt storage
 """
 
 from agentprofile.models import AgentProfile
 from hybriddb import EmbeddingModelError, HybridDB, SearchMode
 
 from src.sdk.coordinator import SubagentCoordinator, get_coordinator
+from src.sdk.execution_models import (
+    EffectState,
+    ExecutionEvent,
+    ExecutionRequest,
+    ExecutorState,
+    Observation,
+    Outcome,
+    Receipt,
+    VerificationState,
+)
+from src.sdk.execution_store import ReceiptStore, SQLiteReceiptStore
 from src.sdk.guardrails import (
     GuardrailResult,
     GuardrailTripwire,
@@ -148,4 +162,14 @@ __all__ = [
     "get_work_queue",
     "SubagentCoordinator",
     "get_coordinator",
+    "Outcome",
+    "ExecutorState",
+    "EffectState",
+    "VerificationState",
+    "ExecutionRequest",
+    "ExecutionEvent",
+    "Observation",
+    "Receipt",
+    "ReceiptStore",
+    "SQLiteReceiptStore",
 ]
