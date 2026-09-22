@@ -1,6 +1,6 @@
 # Dual Agent Profiles and Shared Execution Kernel
 
-> **Status:** Proposed design; no implementation implied.
+> **Status:** Superseded on 2026-09-23. The Build/Use split is cancelled; the product keeps one capable agent mode and one shared execution runtime. Retain this document only as historical design context. Do not implement the dual-profile sections.
 >
 > **Related issues:** GitHub #35, #36, #37, #38, #39, #40, and #41.
 >

@@ -72,6 +72,7 @@ class SQLiteReceiptStore:
         self._path = Path(path)
         self._connection: aiosqlite.Connection | None = None
         self._initialize_lock = asyncio.Lock()
+        self._legacy_profile_column = False
 
     async def initialize(self) -> None:
         """Open the database, configure WAL, and create the receipt schema."""
@@ -93,7 +94,6 @@ class SQLiteReceiptStore:
                     run_id TEXT,
                     tool_call_id TEXT,
                     tool_name TEXT NOT NULL,
-                    profile TEXT NOT NULL,
                     request_created_at TEXT NOT NULL,
                     request_json TEXT NOT NULL,
                     outcome TEXT,
@@ -143,6 +143,10 @@ class SQLiteReceiptStore:
                 );
                 """
             )
+            cursor = await connection.execute("PRAGMA table_info(execution_receipts)")
+            columns = {row[1] for row in await cursor.fetchall()}
+            await cursor.close()
+            self._legacy_profile_column = "profile" in columns
             await connection.commit()
             self._connection = connection
 
@@ -154,23 +158,34 @@ class SQLiteReceiptStore:
     async def create_or_get(self, request: ExecutionRequest) -> Receipt:
         connection = await self._connection_or_initialize()
         request_data = request.model_dump(mode="json")
-        await connection.execute(
+        if self._legacy_profile_column:
+            insert_sql = """
+                INSERT INTO execution_receipts (
+                    receipt_id, request_id, run_id, tool_call_id, tool_name, profile,
+                    request_created_at, request_json, outcome, executor_state,
+                    effect_state, verification_state, termination_reason, started_at,
+                    finished_at, content_json, artifact_ids_json
+                ) VALUES (?, ?, ?, ?, ?, 'default', ?, ?, NULL, ?, ?, ?, NULL, NULL, NULL, ?, ?)
+                ON CONFLICT(request_id) DO NOTHING
             """
-            INSERT INTO execution_receipts (
-                receipt_id, request_id, run_id, tool_call_id, tool_name, profile,
-                request_created_at, request_json, outcome, executor_state,
-                effect_state, verification_state, termination_reason, started_at,
-                finished_at, content_json, artifact_ids_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL, NULL, NULL, ?, ?)
-            ON CONFLICT(request_id) DO NOTHING
-            """,
+        else:
+            insert_sql = """
+                INSERT INTO execution_receipts (
+                    receipt_id, request_id, run_id, tool_call_id, tool_name,
+                    request_created_at, request_json, outcome, executor_state,
+                    effect_state, verification_state, termination_reason, started_at,
+                    finished_at, content_json, artifact_ids_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL, NULL, NULL, ?, ?)
+                ON CONFLICT(request_id) DO NOTHING
+            """
+        await connection.execute(
+            insert_sql,
             (
                 uuid.uuid4().hex,
                 request.request_id,
                 request.run_id,
                 request.tool_call_id,
                 request.tool_name,
-                request.profile,
                 _datetime_to_text(request.created_at),
                 _json_dumps(request_data),
                 ExecutorState.NOT_STARTED.value,
@@ -503,7 +518,6 @@ class SQLiteReceiptStore:
             run_id=request_data.get("run_id"),
             tool_call_id=request_data.get("tool_call_id"),
             tool_name=request_data["tool_name"],
-            profile=request_data["profile"],
             executor_state=ExecutorState.NOT_STARTED,
             effect_state=EffectState.NOT_APPLICABLE,
             verification_state=VerificationState.NOT_REQUESTED,
@@ -542,7 +556,6 @@ class SQLiteReceiptStore:
             run_id=row["run_id"],
             tool_call_id=row["tool_call_id"],
             tool_name=row["tool_name"],
-            profile=row["profile"],
             outcome=Outcome(row["outcome"]) if row["outcome"] is not None else None,
             executor_state=ExecutorState(row["executor_state"]),
             effect_state=EffectState(row["effect_state"]),
@@ -603,7 +616,6 @@ def _request_identity(request_data: dict[str, Any]) -> dict[str, Any]:
             "run_id",
             "tool_call_id",
             "tool_name",
-            "profile",
             "expected_effect",
             "arguments",
         )

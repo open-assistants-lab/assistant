@@ -73,7 +73,7 @@ async def test_execute_approved_resolves_custom_tool(tmp_path, monkeypatch):
 
     monkeypatch.setattr(tc_mod, "get_custom_tools", lambda user_id: [snooze_execute])
 
-    pid = svc.create_pending("u1", "snooze_execute", {"store": "acme"}, tier="explicit")
+    pid = svc.create_pending("u1", "snooze_execute", {"store": "acme"}, permission="ask")
     svc.approve("u1", pid)
     out = await svc.execute_approved("u1", pid, registry=None)
 
@@ -96,7 +96,7 @@ async def test_unknown_tool_still_marks_executed_with_error(tmp_path, monkeypatc
     monkeypatch.setattr(gov, "governance_enabled", lambda: True)
     svc = GovernanceService()
 
-    pid = svc.create_pending("u1", "ghost_tool", {}, tier="explicit")
+    pid = svc.create_pending("u1", "ghost_tool", {}, permission="ask")
     svc.approve("u1", pid)
     out = await svc.execute_approved("u1", pid, registry=None)
 

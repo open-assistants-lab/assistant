@@ -21,7 +21,6 @@ def make_request(request_id: str, expected_effect: EffectState = EffectState.NOT
     return ExecutionRequest(
         request_id=request_id,
         tool_name="shell_execute",
-        profile="build",
         expected_effect=expected_effect,
         arguments={"command": "true"},
         created_at=datetime.now(UTC),

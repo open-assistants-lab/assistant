@@ -49,8 +49,6 @@ def _settings(summarization_enabled: bool, governance_enabled: bool) -> MagicMoc
     settings.verification.enabled = False
     settings.langfuse.enabled = False
     settings.governance.enabled = governance_enabled
-    settings.governance.tiers = {}
-    settings.governance.auto_send_expiry_seconds = 300
     return settings
 
 
@@ -82,7 +80,7 @@ async def _build_loop(
         "src.sdk.governance.governance_enabled",
         lambda: governance_enabled,
     )
-    # Governance tier source: the runner wires HITLMiddleware based on
+    # Permission source: the runner wires HITLMiddleware based on
     # settings.governance.enabled; the middleware itself reads tiers via the
     # governance service — patch its construction site to keep the test
     # loop free of a real store.

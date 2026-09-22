@@ -8,16 +8,7 @@ from typing import Any, Literal
 
 Permission = Literal["allow", "ask", "deny"]
 
-_PERMISSION_ALIASES = {
-    "allow": "allow",
-    "autonomous": "allow",
-    "ask": "ask",
-    "require_hitl": "ask",
-    "explicit": "ask",
-    "show_then_auto_send": "ask",
-    "deny": "deny",
-    "hard_block": "deny",
-}
+_PERMISSION_ALIASES = {"allow": "allow", "ask": "ask", "deny": "deny"}
 _PERMISSION_STRENGTH: dict[Permission, int] = {"allow": 0, "ask": 1, "deny": 2}
 
 

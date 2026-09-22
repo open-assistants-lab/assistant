@@ -31,14 +31,14 @@ def svc(tmp_path, monkeypatch):
 
     monkeypatch.setattr(gov, "_services", {})
     service = GovernanceService()
-    monkeypatch.setattr(service, "resolve_tier", lambda *_: "explicit")
+    monkeypatch.setattr(service, "resolve_permission", lambda *_: "ask")
     monkeypatch.setattr(service, "_log_execution_result", lambda *_: None)
     monkeypatch.setattr(service, "_emit_receipt", lambda *a, **k: None)
     return service
 
 
 def _run(svc, tool: ToolDefinition, arguments: dict | None = None):
-    proposal_id = svc.create_pending(USER, tool.name, arguments or {}, tier="explicit")
+    proposal_id = svc.create_pending(USER, tool.name, arguments or {}, permission="ask")
     svc.approve(USER, proposal_id)
     result = asyncio.run(svc.execute_approved(USER, proposal_id, registry=[tool]))
     return proposal_id, result
@@ -81,7 +81,7 @@ def test_timeout_and_kill_keep_their_own_outcome(svc):
 
 def test_unknown_tool_is_a_refusal_not_a_failure(svc):
     """A refusal is its own outcome: the tool never ran, but nothing broke."""
-    proposal_id = svc.create_pending(USER, "not_registered", {}, tier="explicit")
+    proposal_id = svc.create_pending(USER, "not_registered", {}, permission="ask")
     svc.approve(USER, proposal_id)
 
     result = asyncio.run(svc.execute_approved(USER, proposal_id, registry=[]))
@@ -146,13 +146,13 @@ def test_existing_databases_gain_the_column(tmp_path, monkeypatch):
     conn = sqlite3.connect(db)
     conn.execute(
         "CREATE TABLE proposals (proposal_id TEXT PRIMARY KEY, ts TEXT NOT NULL,"
-        " tool TEXT NOT NULL, arguments TEXT NOT NULL, tier TEXT NOT NULL,"
+        " tool TEXT NOT NULL, arguments TEXT NOT NULL, permission TEXT NOT NULL,"
         " status TEXT NOT NULL, expires_at TEXT, session_id TEXT, user_id TEXT,"
         " executor_json TEXT)"
     )
     conn.execute(
         "INSERT INTO proposals VALUES"
-        " ('legacy','t','demo_tool','{}','explicit','executed',NULL,NULL,?,NULL)",
+        " ('legacy','t','demo_tool','{}','ask','executed',NULL,NULL,?,NULL)",
         (USER,),
     )
     conn.commit()
@@ -197,15 +197,15 @@ def test_disabled_tool_is_a_refusal(svc, monkeypatch):
     assert result["structured_content"]["error"] == "tool disabled"
 
 
-def test_tier_change_is_a_refusal(svc, monkeypatch):
-    """A tier re-check that now refuses is a refusal, not a failure."""
+def test_permission_change_is_a_refusal(svc, monkeypatch):
+    """A permission re-check that now refuses is a refusal, not a failure."""
     import src.sdk.capabilities as caps_mod
 
     # Hermetic: don't read the ambient user capabilities file.
     monkeypatch.setattr(caps_mod, "load_capabilities", lambda root: {"tools": {}})
-    monkeypatch.setattr(svc, "resolve_tier", lambda *_: "hard_block")
+    monkeypatch.setattr(svc, "resolve_permission", lambda *_: "deny")
 
     _, result = _run(svc, _tool(fn=lambda **_: "should not run"))
 
     assert result["outcome"] == "refused", result
-    assert result["structured_content"]["error"] == "tier changed"
+    assert result["structured_content"]["error"] == "permission changed"

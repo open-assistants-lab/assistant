@@ -22,7 +22,6 @@ def make_request(request_id: str) -> ExecutionRequest:
         run_id="run-1",
         tool_call_id="call-1",
         tool_name="shell_execute",
-        profile="build",
         arguments={"command": "true"},
         created_at=datetime.now(UTC),
     )

@@ -1,5 +1,7 @@
 # Execution Kernel Contract and SQLite Receipt Store Implementation Plan
 
+> **Architecture decision:** The Build/Use profile split was cancelled on 2026-09-23. This plan now applies to one capable agent mode and one shared execution runtime; the `profile` field is intentionally absent from the execution contract.
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the first tested vertical slice of the shared execution kernel: normalized lifecycle contracts plus a durable SQLite receipt/event store that can later back desktop and Jen adapters.
@@ -108,7 +110,6 @@ class ExecutionRequest(BaseModel):
     run_id: str | None = None
     tool_call_id: str | None = None
     tool_name: str
-    profile: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
 
@@ -127,7 +128,6 @@ class Receipt(BaseModel):
     run_id: str | None = None
     tool_call_id: str | None = None
     tool_name: str
-    profile: str
     outcome: Outcome | None = None
     executor_state: ExecutorState
     effect_state: EffectState

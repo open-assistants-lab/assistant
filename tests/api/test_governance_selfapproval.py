@@ -56,7 +56,7 @@ def _key_for(user_id, scopes=""):
 
 def _make_pending(user_id: str, gov_svc) -> str:
     return gov_svc.create_pending(
-        user_id, "jobs_confirm", {"x": "1"}, tier="explicit"
+        user_id, "jobs_confirm", {"x": "1"}, permission="ask"
     )
 
 

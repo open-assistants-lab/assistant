@@ -57,7 +57,7 @@ def test_user_can_require_hitl_for_a_tool(monkeypatch, tmp_path) -> None:
     )
     service = GovernanceService(data_root=tmp_path)
 
-    assert service.resolve_tier_for_call("user", "files_read", {}) == "explicit"
+    assert service.resolve_permission_for_call("user", "files_read", {}) == "ask"
 
 
 def test_admin_deny_wins_over_user_allow(monkeypatch, tmp_path) -> None:
@@ -75,7 +75,7 @@ def test_admin_deny_wins_over_user_allow(monkeypatch, tmp_path) -> None:
     reload_settings()
     try:
         service = GovernanceService(data_root=tmp_path)
-        assert service.resolve_tier_for_call("user", "email_send", {}) == "hard_block"
+        assert service.resolve_permission_for_call("user", "email_send", {}) == "deny"
     finally:
         monkeypatch.delenv("GOVERNANCE_PERMISSIONS")
         reload_settings()
@@ -96,7 +96,7 @@ def test_user_can_make_admin_allow_stricter(monkeypatch, tmp_path) -> None:
     reload_settings()
     try:
         service = GovernanceService(data_root=tmp_path)
-        assert service.resolve_tier_for_call("user", "files_read", {}) == "explicit"
+        assert service.resolve_permission_for_call("user", "files_read", {}) == "ask"
     finally:
         monkeypatch.delenv("GOVERNANCE_PERMISSIONS")
         reload_settings()
@@ -122,5 +122,5 @@ async def test_middleware_applies_skill_permission(monkeypatch, tmp_path) -> Non
 
     assert result is not None
     assert result.structured_content is not None
-    assert result.structured_content["governance"] == "explicit"
+    assert result.structured_content["governance"] == "ask"
     assert result.structured_content["status"] == "pending"

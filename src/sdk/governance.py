@@ -1,18 +1,8 @@
-"""M4 governance service — durable approval-gated tools (issue #6, plan M4-1).
+"""Durable approval workflow for permission-gated tool calls.
 
-Tiers (declared by ToolAnnotations.requires_approval, set per tool via
-GOVERNANCE_TIERS settings mapping — read live so changes take effect without
-redeploy):
-- autonomous: pass through
-- show_then_auto_send: durable pending with LAZY expiry (auto-approve unless
-  cancelled — evaluated at read time, no scheduler dependency)
-- explicit: durable pending until a human approves
-- hard_block: synthetic refusal result (never an exception)
-
-Pending proposals + receipts are durable per-user SQLite under
-data/private/governance/. Proposal -> approval -> execution events flow on the
-CaptureBus as AuditEvent kind="approve". In-run replay-resume is DEFERRED to
-the session-log work (R-SL1) by design.
+Permission decisions are ``allow``, ``ask``, or ``deny``. This service owns
+pending proposals, approval transitions, execution records, and receipts;
+policy evaluation lives in :class:`PermissionPolicy`.
 """
 
 from __future__ import annotations
@@ -22,7 +12,7 @@ import sqlite3
 import subprocess
 import threading
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -38,23 +28,6 @@ from src.sdk.session_events import (
 from src.sdk.tool_results import KILLED_MARKER, TIMEOUT_MARKER, CommandKilledError
 from src.sdk.tools import ToolResult
 from src.storage.paths import DataPaths
-
-Tier = str  # "autonomous" | "show_then_auto_send" | "explicit" | "hard_block"
-
-
-def _tier_to_permission(tier: Tier) -> str:
-    if tier == "hard_block":
-        return "deny"
-    if tier in {"show_then_auto_send", "explicit"}:
-        return "ask"
-    return "allow"
-
-
-def _permission_to_tier(permission: str) -> Tier:
-    return {"allow": "autonomous", "ask": "explicit", "deny": "hard_block"}.get(
-        permission, "explicit"
-    )
-
 
 #: Outcomes a consumed proposal can carry. `status` stays 'executed' — it means
 #: "approved and consumed, terminal" and replay_resume depends on it — while
@@ -73,7 +46,7 @@ OUTCOME_FAILED = "failed"
 OUTCOME_TIMED_OUT = TIMEOUT_MARKER
 OUTCOME_KILLED = KILLED_MARKER
 # Mirrors the three refusal codes set by the branches below.
-_REFUSAL_ERRORS = frozenset({"tool disabled", "tier changed", "unknown tool"})
+_REFUSAL_ERRORS = frozenset({"tool disabled", "permission changed", "unknown tool"})
 
 
 def outcome_for(result: dict[str, Any]) -> str:
@@ -95,10 +68,6 @@ _services: dict[str, GovernanceService] = {}
 _lock = threading.Lock()
 
 
-def _now_minus(seconds: int) -> datetime:
-    return datetime.now(UTC) - timedelta(seconds=seconds)
-
-
 def governance_enabled() -> bool:
     from src.config.settings import get_settings
 
@@ -110,7 +79,7 @@ logger = get_logger()
 
 
 class GovernanceService:
-    """Tier resolution + durable pending proposals + receipts."""
+    """Permission resolution + durable pending proposals + receipts."""
 
     def __init__(self, data_root: str | None = None) -> None:
         self._paths = DataPaths() if data_root is None else DataPaths(data_root=data_root)
@@ -135,7 +104,7 @@ class GovernanceService:
                 ts TEXT NOT NULL,
                 tool TEXT NOT NULL,
                 arguments TEXT NOT NULL,
-                tier TEXT NOT NULL,
+                permission TEXT NOT NULL,
                 status TEXT NOT NULL,
                 expires_at TEXT,
                 session_id TEXT,
@@ -145,14 +114,47 @@ class GovernanceService:
             )
             """
         )
-        # Migration-safe: pre-session-log DBs lack the columns.
-        for column in ("session_id", "user_id", "executor_json", "outcome"):
+        # Migration-safe: older databases lack the newer columns. Historical
+        # proposals are conservatively treated as requiring approval.
+        for column in ("permission", "session_id", "user_id", "executor_json", "outcome"):
             try:
                 conn.execute(f"ALTER TABLE proposals ADD COLUMN {column} TEXT")
                 conn.commit()
             except sqlite3.OperationalError:
                 pass
+        conn.execute("UPDATE proposals SET permission = 'ask' WHERE permission IS NULL")
         conn.execute("UPDATE proposals SET user_id = ? WHERE user_id IS NULL", (user_id,))
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(proposals)")}
+        if "tier" in columns:
+            conn.execute("ALTER TABLE proposals RENAME TO proposals_legacy")
+            conn.execute(
+                """
+                CREATE TABLE proposals (
+                    proposal_id TEXT PRIMARY KEY,
+                    ts TEXT NOT NULL,
+                    tool TEXT NOT NULL,
+                    arguments TEXT NOT NULL,
+                    permission TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    expires_at TEXT,
+                    session_id TEXT,
+                    user_id TEXT,
+                    executor_json TEXT,
+                    outcome TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO proposals
+                    (proposal_id, ts, tool, arguments, permission, status,
+                     expires_at, session_id, user_id, executor_json, outcome)
+                SELECT proposal_id, ts, tool, arguments, 'ask', status,
+                       expires_at, session_id, user_id, executor_json, outcome
+                FROM proposals_legacy
+                """
+            )
+            conn.execute("DROP TABLE proposals_legacy")
         conn.commit()
         conn.execute(
             """
@@ -167,12 +169,12 @@ class GovernanceService:
         conn.commit()
         return conn
 
-    # -- tier resolution ---------------------------------------------------
+    # -- permission resolution ----------------------------------------------
 
-    def resolve_tier_for_call(
+    def resolve_permission_for_call(
         self, user_id: str, tool_name: str, tool_input: dict[str, Any]
-    ) -> Tier:
-        """Resolve item permission, preserving the legacy tier vocabulary."""
+    ) -> str:
+        """Resolve the effective allow/ask/deny decision for one call."""
         from src.config.settings import get_settings
 
         user_permissions: dict[str, Any] = {}
@@ -189,68 +191,30 @@ class GovernanceService:
                 {"error": str(exc), "tool": tool_name},
                 user_id=user_id,
             )
-            return "explicit"
+            return "ask"
 
         governance = getattr(get_settings(), "governance", None)
         admin_permissions = getattr(governance, "permissions", None) or {}
-        legacy_tier = self.resolve_tier(user_id, tool_name)
-        if not admin_permissions and not user_permissions:
-            return legacy_tier
-
-        permission = PermissionPolicy(
-            admin=admin_permissions,
-            user=user_permissions,
-        ).resolve(
-            tool_name,
-            tool_input,
-            fallback=_tier_to_permission(legacy_tier),
+        fallback = self._default_permission(tool_name)
+        return PermissionPolicy(admin=admin_permissions, user=user_permissions).resolve(
+            tool_name, tool_input, fallback=fallback
         )
-        return _permission_to_tier(permission)
 
-    def resolve_tier(self, user_id: str, tool_name: str) -> Tier:
-        # Capabilities profile first (plan M4-1: tier source is the user's
-        # capabilities.yaml governance_tiers section), then deployment
-        # settings, then annotation default.
-        try:
-            from src.sdk.capabilities import (
-                load_capabilities,
-                user_capabilities_root,
-            )
+    def resolve_permission(self, user_id: str, tool_name: str) -> str:
+        """Resolve a tool permission without item-specific arguments."""
+        return self.resolve_permission_for_call(user_id, tool_name, {})
 
-            caps = load_capabilities(user_capabilities_root(user_id))
-            cap_tiers = caps.get("governance_tiers") or {}
-            if tool_name in cap_tiers:
-                return str(cap_tiers[tool_name])
-        except FileNotFoundError:
-            pass  # no capabilities file — normal fallback chain
-        except Exception as exc:
-            # Bug-hunt P2: a corrupt capabilities.yaml must not silently
-            # downgrade tiers to autonomous (fail closed -> conservative
-            # explicit pending until the admin fixes the file).
-            logger.warning(
-                "governance.capabilities_load_failed",
-                {"error": str(exc), "tool": tool_name},
-                user_id=user_id,
-            )
-            return "explicit"
-        from src.config.settings import get_settings
-
-        gov = getattr(get_settings(), "governance", None)
-        tiers = getattr(gov, "tiers", None) or {}
-        if tool_name in tiers:
-            return str(tiers[tool_name])
-        # Annotation declares: requires_approval defaults to explicit.
+    @staticmethod
+    def _default_permission(tool_name: str) -> str:
         try:
             from src.sdk.native_tools import get_native_tools
 
-            td = next(
-                (x for x in get_native_tools() if x.name == tool_name), None
-            )
+            definition = next((x for x in get_native_tools() if x.name == tool_name), None)
         except Exception:
-            td = None
-        if td is not None and getattr(td.annotations, "requires_approval", False):
-            return "explicit"
-        return "autonomous"
+            definition = None
+        if definition is not None and getattr(definition.annotations, "requires_approval", False):
+            return "ask"
+        return "allow"
 
     # -- durable pendings ---------------------------------------------------
 
@@ -259,31 +223,25 @@ class GovernanceService:
         user_id: str,
         tool: str,
         arguments: dict[str, Any],
-        tier: str = "explicit",
+        permission: str = "ask",
         session_id: str | None = None,
         executor: Any | None = None,
     ) -> str:
         proposal_id = uuid.uuid4().hex
-        # _now_minus(-N) = now + N — single clock helper so tests shift time
-        # by patching this one function (lazy-expiry contract).
-        expiry = (
-            _now_minus(-self._expiry_seconds()).isoformat()
-            if tier == "show_then_auto_send"
-            else None
-        )
+        expiry = None
         # The HITL boundary snapshots an async executor from the active loop
         # registry. Do not resolve tool paths here: ordinary synchronous
         # governance proposals must not trigger custom-tool discovery.
         executor_json = json.dumps(executor.model_dump(mode="json"), sort_keys=True) if executor else None
         with self._conn(user_id) as conn:
             conn.execute(
-                "INSERT INTO proposals (proposal_id, ts, tool, arguments, tier, status, expires_at, session_id, user_id, executor_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO proposals (proposal_id, ts, tool, arguments, permission, status, expires_at, session_id, user_id, executor_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     proposal_id,
                     datetime.now(UTC).isoformat(),
                     tool,
                     json.dumps(arguments or {}, sort_keys=True),
-                    tier,
+                    permission,
                     "pending",
                     expiry,
                     session_id,
@@ -305,9 +263,7 @@ class GovernanceService:
         return proposal_id
 
     def record_override(self, user_id: str, tool: str) -> None:
-        """M4-2 anti-fatigue: count a tier override for a tool (user acted
-        against the configured tier — approving after flagging, or editing
-        args before approve)."""
+        """M4-2 anti-fatigue: count a permission override for a tool."""
         with self._conn(user_id) as conn:
             conn.execute(
                 "INSERT INTO tool_stats (tool, overrides) VALUES (?, 1)"
@@ -343,7 +299,7 @@ class GovernanceService:
     def get_pending(self, user_id: str, proposal_id: str) -> dict[str, Any] | None:
         with self._conn(user_id) as conn:
             row = conn.execute(
-                "SELECT proposal_id, tool, arguments, tier, status, expires_at,"
+                "SELECT proposal_id, tool, arguments, permission, status, expires_at,"
                 " session_id, executor_json, outcome FROM proposals WHERE proposal_id = ?",
                 (proposal_id,),
             ).fetchone()
@@ -353,7 +309,7 @@ class GovernanceService:
             "proposal_id": row[0],
             "tool": row[1],
             "arguments": json.loads(row[2]),
-            "tier": row[3],
+            "permission": row[3],
             "status": row[4],
             "expires_at": row[5],
             "session_id": row[6],
@@ -364,11 +320,7 @@ class GovernanceService:
     def approve(
         self, user_id: str, proposal_id: str, count_override: bool = True
     ) -> bool:
-        """Idempotent approve: True only on the transition pending->approved.
-
-        count_override=False for MACHINE approvals (lazy expiry auto-approve
-        in resolve_pending) — counting those as human overrides inflated
-        override_rate (review P1 on 4a6826f)."""
+        """Idempotent approve: True only on the transition pending->approved."""
 
         with self._lock, self._conn(user_id) as conn:
             cur = conn.execute(
@@ -386,16 +338,10 @@ class GovernanceService:
             row = self.get_pending(user_id, proposal_id) or {}
             tool = str(row.get("tool") or "")
             with self._conn(user_id) as conn:
-                # M4-2: approvals per tool; approving a show_then_auto_send
-                # early IS the override of the auto-send window.
-                override = (
-                    count_override and row.get("tier") == "show_then_auto_send"
-                )
                 conn.execute(
-                    "INSERT INTO tool_stats (tool, approvals, overrides) VALUES (?, 1, ?)"
-                    " ON CONFLICT(tool) DO UPDATE SET approvals = approvals + 1,"
-                    " overrides = overrides + ?",
-                    (tool, 1 if override else 0, 1 if override else 0),
+                    "INSERT INTO tool_stats (tool, approvals) VALUES (?, 1)"
+                    " ON CONFLICT(tool) DO UPDATE SET approvals = approvals + 1",
+                    (tool,),
                 )
                 conn.commit()
         return newly
@@ -420,8 +366,8 @@ class GovernanceService:
         definition = self._active_tool_definition(user_id, row["tool"])
         if definition is None or self.execution_mode_for_tool(user_id, row["tool"]) != "async":
             raise ValueError("async tool is no longer enabled")
-        if self.resolve_tier(user_id, row["tool"]) != row["tier"] or row["tier"] == "hard_block":
-            raise ValueError("governance tier changed")
+        if self.resolve_permission(user_id, row["tool"]) != row["permission"] or row["permission"] == "deny":
+            raise ValueError("permission changed")
         executor = self.external_executor_for_tool(user_id, row["tool"])
         snapshot = row.get("executor")
         if executor is None or snapshot != executor.model_dump(mode="json"):
@@ -474,20 +420,9 @@ class GovernanceService:
         return self.operations.get_operation(user_id, operation_id)
 
     def resolve_pending(self, user_id: str, proposal_id: str) -> dict[str, Any]:
-        """Lazy expiry evaluation for show_then_auto_send (read-time, no
-        scheduler): expired => auto-approved unless cancelled."""
+        """Read one durable pending without changing its status."""
         row: dict[str, Any] | None = self.get_pending(user_id, proposal_id)
-        if row is None:
-            return {"status": "missing"}
-        if row["status"] == "pending" and row["tier"] == "show_then_auto_send":
-            exp = row.get("expires_at")
-            if exp and _now_minus(0) > datetime.fromisoformat(exp):
-                # Machine auto-approval: NOT a human override (review P1 —
-                # counting it inflated override_rate on every pendings scan).
-                self.approve(user_id, proposal_id, count_override=False)
-                row = self.get_pending(user_id, proposal_id)
-                assert row is not None  # just created it — durable store
-        return row
+        return row if row is not None else {"status": "missing"}
 
     async def execute_approved(
         self,
@@ -514,9 +449,9 @@ class GovernanceService:
         tool = row["tool"]
         arguments = row["arguments"] or {}
         try:
-            # Bug-hunt P1: the execution leg re-checks (a) tool enablement for
-            # this user and (b) the CURRENT tier — a pending created before a
-            # tool was disabled or moved to hard_block must not execute.
+            # The execution leg re-checks (a) tool enablement for this user
+            # and (b) the CURRENT permission — a pending created before a
+            # tool was disabled or denied must not execute.
             from src.sdk.capabilities import (
                 load_capabilities,
                 resource_enabled,
@@ -547,15 +482,15 @@ class GovernanceService:
                     user_id, f"executed:{proposal_id}", tool=tool, correlation=proposal_id
                 )
                 return result
-            tier_now = self.resolve_tier(user_id, tool)
-            if tier_now == "hard_block":
+            permission_now = self.resolve_permission(user_id, tool)
+            if permission_now == "deny":
                 result = {
                     "content": (
-                        f"Tool '{tool}' is now hard_block tier — approval "
-                        "refused (tier re-checked at execution time)."
+                        f"Tool '{tool}' is now denied — approval "
+                        "refused (permission re-checked at execution time)."
                     ),
                     "structured_content": {
-                        "executed": False, "error": "tier changed",
+                        "executed": False, "error": "permission changed",
                     },
                     "is_error": True,
                 }
@@ -792,12 +727,6 @@ class GovernanceService:
         receipts live in the per-user audit store via the same bus)."""
         return list(self._recent)
 
-    def _expiry_seconds(self) -> int:
-        from src.config.settings import get_settings
-
-        gov = getattr(get_settings(), "governance", None)
-        return int(getattr(gov, "auto_send_expiry_seconds", 300))
-
     def _emit_receipt(
         self, user_id: str, detail: str, tool: str = "", correlation: str | None = None
     ) -> None:
@@ -829,9 +758,9 @@ def iter_governance_user_ids() -> list[str]:
 
 
 def get_governance_service(user_id: str = "default_user") -> GovernanceService:
-    """Process-wide per-user governance service (tier resolution is always
-    available; whether pendings are CREATED is gated by governance.enabled,
-    checked by the middleware, not here)."""
+    """Process-wide per-user governance service with live permission
+    resolution; whether pendings are CREATED is gated by governance.enabled,
+    checked by the middleware, not here."""
     with _lock:
         svc = _services.get(user_id)
         if svc is None:

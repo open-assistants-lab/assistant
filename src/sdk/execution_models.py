@@ -56,7 +56,6 @@ class ExecutionRequest(BaseModel):
     run_id: str | None = None
     tool_call_id: str | None = None
     tool_name: str
-    profile: str
     expected_effect: EffectState = EffectState.NOT_APPLICABLE
     arguments: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
@@ -104,7 +103,6 @@ class Receipt(BaseModel):
     run_id: str | None = None
     tool_call_id: str | None = None
     tool_name: str
-    profile: str
     outcome: Outcome | None = None
     executor_state: ExecutorState
     effect_state: EffectState

@@ -113,11 +113,11 @@ def test_governed_native_timeout_records_not_executed(tool_name, tmp_path, monke
     monkeypatch.setattr(gov, "_services", {})
     svc = GovernanceService()
     user = "timeout_user"
-    monkeypatch.setattr(svc, "resolve_tier", lambda *_: "explicit")
+    monkeypatch.setattr(svc, "resolve_permission", lambda *_: "ask")
     monkeypatch.setattr(svc, "_log_execution_result", lambda *_: None)
     monkeypatch.setattr(svc, "_emit_receipt", lambda *a, **k: None)
 
-    proposal_id = svc.create_pending(user, td.name, args, tier="explicit")
+    proposal_id = svc.create_pending(user, td.name, args, permission="ask")
     svc.approve(user, proposal_id)
     result = asyncio.run(svc.execute_approved(user, proposal_id, registry=[td]))
     assert result["structured_content"]["executed"] is False, result

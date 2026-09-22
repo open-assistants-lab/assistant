@@ -345,7 +345,6 @@ class AgentLoop:
         compression_sink: CompressionObserver | None = None,
         capture_bus: CaptureBus | None = None,
         execution_store: ReceiptStore | None = None,
-        execution_profile: str = "use",
     ) -> None:
         self.provider = provider
         self.system_prompt = system_prompt
@@ -365,7 +364,6 @@ class AgentLoop:
         self.capture_bus = capture_bus or _audit.default_capture_bus
         self._execution_store = execution_store
         self._execution_kernel: ExecutionKernel | None = None
-        self.execution_profile = execution_profile
         self.subagent_ctx: SubagentContext | None = None
         self.cancel_event: asyncio.Event | None = cancel_event
         # Capability gate (audit E24-tools): when provided, returns True iff
@@ -722,7 +720,7 @@ class AgentLoop:
 
     async def _run_guards(self, tc: ToolCall) -> ToolResult | None:
         """Run middleware guard_tool_call hooks (M4-1). First non-None result
-        REPLACES execution (hard_block refusal / pending acknowledgment).
+        REPLACES execution (deny refusal / pending acknowledgment).
         Emit-only: guard exceptions never break the loop."""
         for mw in self.middlewares:
             guard = getattr(mw, "guard_tool_call", None)
@@ -810,7 +808,6 @@ class AgentLoop:
             run_id=run_id,
             tool_call_id=tc.id,
             tool_name=tc.name,
-            profile=self.execution_profile,
             expected_effect=EffectState.NOT_APPLICABLE,
             arguments=tc.arguments,
             created_at=datetime.now(UTC),
@@ -985,7 +982,7 @@ class AgentLoop:
                 logger.warning(f"wrap_tool_call error in {mw_name} for {tc.name}", exc_info=True)
 
         # M4-1 governance gate (issues #6/#12/#19): a middleware may REPLACE
-        # execution with a synthetic ToolResult (hard_block refusal / pending
+        # execution with a synthetic ToolResult (deny refusal / pending
         # ack). One dispatch, one guard evaluation.
         guard_result = await self._run_guards(tc_exec)
         if guard_result is not None:
