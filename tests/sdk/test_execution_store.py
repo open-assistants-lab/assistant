@@ -196,6 +196,8 @@ async def test_events_have_monotonic_sequences_per_receipt(tmp_path) -> None:
     receipt = await store.create_or_get(make_request("req-sequence"))
 
     first = await store.append_event(receipt.receipt_id, "execution.started", {})
+    with pytest.raises(ReceiptStateError):
+        await store.append_event(receipt.receipt_id, "execution.started", {})
     second = await store.append_event(receipt.receipt_id, "execution.output", {"ok": True})
 
     assert [first.sequence, second.sequence] == [1, 2]

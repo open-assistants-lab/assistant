@@ -57,6 +57,7 @@ class ExecutionRequest(BaseModel):
     tool_call_id: str | None = None
     tool_name: str
     profile: str
+    expected_effect: EffectState = EffectState.NOT_APPLICABLE
     arguments: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
 
@@ -83,6 +84,16 @@ class ExecutionEvent(BaseModel):
     event_type: str
     payload: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
+
+
+class ExecutionCompletion(BaseModel):
+    """Executor-provided completion details consumed by the kernel."""
+
+    outcome: Outcome = Outcome.SUCCEEDED
+    effect_state: EffectState = EffectState.NOT_APPLICABLE
+    verification_state: VerificationState = VerificationState.NOT_REQUESTED
+    content: dict[str, Any] = Field(default_factory=dict)
+    observations: list[Observation] = Field(default_factory=list)
 
 
 class Receipt(BaseModel):

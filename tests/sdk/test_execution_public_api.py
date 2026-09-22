@@ -1,10 +1,13 @@
 import src.sdk as public_api
+import src.sdk.execution_kernel as execution_kernel
 import src.sdk.execution_models as execution_models
 import src.sdk.execution_store as execution_store
 
 
 def test_execution_contract_is_publicly_exported() -> None:
+    assert public_api.ExecutionKernel is execution_kernel.ExecutionKernel
     assert public_api.EffectState is execution_models.EffectState
+    assert public_api.ExecutionCompletion is execution_models.ExecutionCompletion
     assert public_api.ExecutionEvent is execution_models.ExecutionEvent
     assert public_api.ExecutionRequest is execution_models.ExecutionRequest
     assert public_api.ExecutorState is execution_models.ExecutorState

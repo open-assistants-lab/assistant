@@ -258,7 +258,8 @@ class SQLiteReceiptStore:
         await connection.execute("BEGIN IMMEDIATE")
         try:
             cursor = await connection.execute(
-                "SELECT request_id, outcome FROM execution_receipts WHERE receipt_id = ?",
+                "SELECT request_id, outcome, executor_state "
+                "FROM execution_receipts WHERE receipt_id = ?",
                 (receipt_id,),
             )
             receipt_row = await cursor.fetchone()
@@ -267,6 +268,11 @@ class SQLiteReceiptStore:
                 raise ValueError(f"unknown receipt: {receipt_id}")
             if receipt_row["outcome"] is not None:
                 raise ReceiptStateError(f"receipt is already finalized: {receipt_id}")
+            if (
+                event_type == "execution.started"
+                and receipt_row["executor_state"] == ExecutorState.RUNNING.value
+            ):
+                raise ReceiptStateError(f"receipt is already running: {receipt_id}")
 
             cursor = await connection.execute(
                 """
@@ -592,7 +598,15 @@ def _optional_datetime(value: str | None) -> datetime | None:
 def _request_identity(request_data: dict[str, Any]) -> dict[str, Any]:
     return {
         key: request_data.get(key)
-        for key in ("request_id", "run_id", "tool_call_id", "tool_name", "profile", "arguments")
+        for key in (
+            "request_id",
+            "run_id",
+            "tool_call_id",
+            "tool_name",
+            "profile",
+            "expected_effect",
+            "arguments",
+        )
     }
 
 
