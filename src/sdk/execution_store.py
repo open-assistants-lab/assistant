@@ -153,6 +153,7 @@ class SQLiteReceiptStore:
 
     async def create_or_get(self, request: ExecutionRequest) -> Receipt:
         connection = await self._connection_or_initialize()
+        request_data = request.model_dump(mode="json")
         await connection.execute(
             """
             INSERT INTO execution_receipts (
@@ -171,7 +172,7 @@ class SQLiteReceiptStore:
                 request.tool_name,
                 request.profile,
                 _datetime_to_text(request.created_at),
-                _json_dumps(request.model_dump(mode="json")),
+                _json_dumps(request_data),
                 ExecutorState.NOT_STARTED.value,
                 EffectState.NOT_APPLICABLE.value,
                 VerificationState.NOT_REQUESTED.value,
@@ -180,6 +181,19 @@ class SQLiteReceiptStore:
             ),
         )
         await connection.commit()
+        cursor = await connection.execute(
+            "SELECT request_json FROM execution_receipts WHERE request_id = ?",
+            (request.request_id,),
+        )
+        stored_row = await cursor.fetchone()
+        await cursor.close()
+        if stored_row is None:
+            raise RuntimeError("receipt disappeared after idempotent creation")
+        stored_data = json.loads(stored_row["request_json"])
+        if _request_identity(stored_data) != _request_identity(_redact_for_storage(request_data)):
+            raise ReceiptStateError(
+                f"request_id is already bound to a different execution: {request.request_id}"
+            )
         receipt = await self.get_by_request(request.request_id)
         if receipt is None:
             raise RuntimeError("receipt disappeared after idempotent creation")
@@ -573,6 +587,13 @@ def _datetime_from_text(value: str) -> datetime:
 
 def _optional_datetime(value: str | None) -> datetime | None:
     return _datetime_from_text(value) if value is not None else None
+
+
+def _request_identity(request_data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: request_data.get(key)
+        for key in ("request_id", "run_id", "tool_call_id", "tool_name", "profile", "arguments")
+    }
 
 
 _SENSITIVE_KEY_PARTS = ("api_key", "password", "secret", "token")

@@ -44,6 +44,21 @@ async def test_create_or_get_is_idempotent(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_same_request_id_with_different_arguments_is_rejected(tmp_path) -> None:
+    store = SQLiteReceiptStore(tmp_path / "receipts.db")
+    await store.initialize()
+    await store.create_or_get(make_request("req-reuse"))
+    conflicting = make_request("req-reuse").model_copy(
+        update={"arguments": {"command": "false"}}
+    )
+
+    with pytest.raises(ReceiptStateError):
+        await store.create_or_get(conflicting)
+
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_receipt_survives_store_restart(tmp_path) -> None:
     database = tmp_path / "receipts.db"
     first_store = SQLiteReceiptStore(database)
