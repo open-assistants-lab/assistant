@@ -239,12 +239,118 @@ class SQLiteReceiptStore:
     async def append_event(
         self, receipt_id: str, event_type: str, payload: dict[str, Any]
     ) -> ExecutionEvent:
-        raise NotImplementedError
+        connection = await self._connection_or_initialize()
+        created_at = datetime.now(UTC)
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await connection.execute(
+                "SELECT request_id FROM execution_receipts WHERE receipt_id = ?",
+                (receipt_id,),
+            )
+            receipt_row = await cursor.fetchone()
+            await cursor.close()
+            if receipt_row is None:
+                raise ValueError(f"unknown receipt: {receipt_id}")
+
+            cursor = await connection.execute(
+                """
+                SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence
+                FROM execution_events
+                WHERE receipt_id = ?
+                """,
+                (receipt_id,),
+            )
+            sequence_row = await cursor.fetchone()
+            await cursor.close()
+            if sequence_row is None:
+                raise RuntimeError("failed to allocate event sequence")
+            sequence = int(sequence_row["next_sequence"])
+            event = ExecutionEvent(
+                event_id=uuid.uuid4().hex,
+                receipt_id=receipt_id,
+                request_id=receipt_row["request_id"],
+                sequence=sequence,
+                event_type=event_type,
+                payload=payload,
+                created_at=created_at,
+            )
+            await connection.execute(
+                """
+                INSERT INTO execution_events (
+                    event_id, receipt_id, request_id, sequence, event_type,
+                    payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.event_id,
+                    event.receipt_id,
+                    event.request_id,
+                    event.sequence,
+                    event.event_type,
+                    _json_dumps(event.payload),
+                    _datetime_to_text(event.created_at),
+                ),
+            )
+            if event_type == "execution.started":
+                await connection.execute(
+                    """
+                    UPDATE execution_receipts
+                    SET executor_state = ?, started_at = COALESCE(started_at, ?)
+                    WHERE receipt_id = ?
+                    """,
+                    (
+                        ExecutorState.RUNNING.value,
+                        _datetime_to_text(created_at),
+                        receipt_id,
+                    ),
+                )
+            await connection.commit()
+            return event
+        except Exception:
+            await connection.rollback()
+            raise
 
     async def record_observation(
         self, receipt_id: str, observation: Observation
     ) -> Receipt:
-        raise NotImplementedError
+        connection = await self._connection_or_initialize()
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await connection.execute(
+                "SELECT 1 FROM execution_receipts WHERE receipt_id = ?",
+                (receipt_id,),
+            )
+            exists = await cursor.fetchone()
+            await cursor.close()
+            if exists is None:
+                raise ValueError(f"unknown receipt: {receipt_id}")
+            await connection.execute(
+                """
+                INSERT INTO execution_observations (
+                    observation_id, receipt_id, kind, source, authoritative,
+                    correlation_id, observed_at, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(observation_id) DO NOTHING
+                """,
+                (
+                    observation.observation_id,
+                    receipt_id,
+                    observation.kind,
+                    observation.source,
+                    int(observation.authoritative),
+                    observation.correlation_id,
+                    _datetime_to_text(observation.observed_at),
+                    _json_dumps(observation.payload),
+                ),
+            )
+            await connection.commit()
+        except Exception:
+            await connection.rollback()
+            raise
+        receipt = await self.get(receipt_id)
+        if receipt is None:
+            raise RuntimeError("receipt disappeared after observation")
+        return receipt
 
     async def finalize(
         self,
@@ -257,10 +363,147 @@ class SQLiteReceiptStore:
         termination_reason: str | None = None,
         content: dict[str, Any] | None = None,
     ) -> Receipt:
-        raise NotImplementedError
+        connection = await self._connection_or_initialize()
+        requested_content = content or {}
+        requested_state = (
+            outcome,
+            executor_state,
+            effect_state,
+            verification_state,
+            termination_reason,
+            requested_content,
+        )
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await connection.execute(
+                "SELECT * FROM execution_receipts WHERE receipt_id = ?",
+                (receipt_id,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None:
+                raise ValueError(f"unknown receipt: {receipt_id}")
+            current = await self._row_to_receipt(row)
+            if current.outcome is not None:
+                current_state = (
+                    current.outcome,
+                    current.executor_state,
+                    current.effect_state,
+                    current.verification_state,
+                    current.termination_reason,
+                    current.content,
+                )
+                if current_state == requested_state:
+                    await connection.commit()
+                    return current
+                raise ReceiptStateError(f"receipt is already finalized: {receipt_id}")
+
+            finished_at = datetime.now(UTC)
+            payload = {
+                "outcome": outcome.value,
+                "executor_state": executor_state.value,
+                "effect_state": effect_state.value,
+                "verification_state": verification_state.value,
+                "termination_reason": termination_reason,
+                "finished_at": _datetime_to_text(finished_at),
+                "content": requested_content,
+            }
+            cursor = await connection.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence "
+                "FROM execution_events WHERE receipt_id = ?",
+                (receipt_id,),
+            )
+            sequence_row = await cursor.fetchone()
+            await cursor.close()
+            if sequence_row is None:
+                raise RuntimeError("failed to allocate completion sequence")
+            sequence = int(sequence_row["next_sequence"])
+            await connection.execute(
+                """
+                INSERT INTO execution_events (
+                    event_id, receipt_id, request_id, sequence, event_type,
+                    payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    uuid.uuid4().hex,
+                    receipt_id,
+                    current.request_id,
+                    sequence,
+                    "execution.completed",
+                    _json_dumps(payload),
+                    _datetime_to_text(finished_at),
+                ),
+            )
+            await connection.execute(
+                """
+                UPDATE execution_receipts
+                SET outcome = ?, executor_state = ?, effect_state = ?,
+                    verification_state = ?, termination_reason = ?,
+                    finished_at = ?, content_json = ?
+                WHERE receipt_id = ? AND outcome IS NULL
+                """,
+                (
+                    outcome.value,
+                    executor_state.value,
+                    effect_state.value,
+                    verification_state.value,
+                    termination_reason,
+                    _datetime_to_text(finished_at),
+                    _json_dumps(requested_content),
+                    receipt_id,
+                ),
+            )
+            await connection.commit()
+        except Exception:
+            await connection.rollback()
+            raise
+        result = await self.get(receipt_id)
+        if result is None:
+            raise RuntimeError("receipt disappeared after finalization")
+        return result
 
     async def rebuild(self, receipt_id: str) -> Receipt | None:
-        raise NotImplementedError
+        connection = await self._connection_or_initialize()
+        cursor = await connection.execute(
+            "SELECT * FROM execution_receipts WHERE receipt_id = ?",
+            (receipt_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return None
+
+        request_data = json.loads(row["request_json"])
+        rebuilt = Receipt(
+            receipt_id=row["receipt_id"],
+            request_id=request_data["request_id"],
+            run_id=request_data.get("run_id"),
+            tool_call_id=request_data.get("tool_call_id"),
+            tool_name=request_data["tool_name"],
+            profile=request_data["profile"],
+            executor_state=ExecutorState.NOT_STARTED,
+            effect_state=EffectState.NOT_APPLICABLE,
+            verification_state=VerificationState.NOT_REQUESTED,
+        )
+        for event in await self.list_events(receipt_id):
+            if event.event_type == "execution.started":
+                rebuilt.executor_state = ExecutorState.RUNNING
+                rebuilt.started_at = event.created_at
+            elif event.event_type == "execution.completed":
+                payload = event.payload
+                rebuilt.outcome = Outcome(payload["outcome"])
+                rebuilt.executor_state = ExecutorState(payload["executor_state"])
+                rebuilt.effect_state = EffectState(payload["effect_state"])
+                rebuilt.verification_state = VerificationState(
+                    payload["verification_state"]
+                )
+                rebuilt.termination_reason = payload.get("termination_reason")
+                rebuilt.finished_at = _datetime_from_text(payload["finished_at"])
+                rebuilt.content = payload.get("content") or {}
+        observations = await self._observations_for(receipt_id)
+        rebuilt.observations = observations
+        return rebuilt
 
     async def _connection_or_initialize(self) -> aiosqlite.Connection:
         if self._connection is None:
@@ -270,31 +513,7 @@ class SQLiteReceiptStore:
         return self._connection
 
     async def _row_to_receipt(self, row: aiosqlite.Row) -> Receipt:
-        connection = await self._connection_or_initialize()
-        cursor = await connection.execute(
-            """
-            SELECT observation_id, kind, source, authoritative, correlation_id,
-                   observed_at, payload_json
-            FROM execution_observations
-            WHERE receipt_id = ?
-            ORDER BY observed_at, observation_id
-            """,
-            (row["receipt_id"],),
-        )
-        observation_rows = await cursor.fetchall()
-        await cursor.close()
-        observations = [
-            Observation(
-                observation_id=observation_row["observation_id"],
-                kind=observation_row["kind"],
-                source=observation_row["source"],
-                authoritative=bool(observation_row["authoritative"]),
-                correlation_id=observation_row["correlation_id"],
-                observed_at=_datetime_from_text(observation_row["observed_at"]),
-                payload=json.loads(observation_row["payload_json"]),
-            )
-            for observation_row in observation_rows
-        ]
+        observations = await self._observations_for(row["receipt_id"])
         return Receipt(
             receipt_id=row["receipt_id"],
             request_id=row["request_id"],
@@ -314,6 +533,33 @@ class SQLiteReceiptStore:
             artifact_ids=json.loads(row["artifact_ids_json"]),
         )
 
+    async def _observations_for(self, receipt_id: str) -> list[Observation]:
+        connection = await self._connection_or_initialize()
+        cursor = await connection.execute(
+            """
+            SELECT observation_id, kind, source, authoritative, correlation_id,
+                   observed_at, payload_json
+            FROM execution_observations
+            WHERE receipt_id = ?
+            ORDER BY observed_at, observation_id
+            """,
+            (receipt_id,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [
+            Observation(
+                observation_id=row["observation_id"],
+                kind=row["kind"],
+                source=row["source"],
+                authoritative=bool(row["authoritative"]),
+                correlation_id=row["correlation_id"],
+                observed_at=_datetime_from_text(row["observed_at"]),
+                payload=json.loads(row["payload_json"]),
+            )
+            for row in rows
+        ]
+
 
 def _datetime_to_text(value: datetime) -> str:
     return value.astimezone(UTC).isoformat()
@@ -327,5 +573,25 @@ def _optional_datetime(value: str | None) -> datetime | None:
     return _datetime_from_text(value) if value is not None else None
 
 
+_SENSITIVE_KEY_PARTS = ("api_key", "password", "secret", "token")
+
+
 def _json_dumps(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return json.dumps(_redact_for_storage(value), sort_keys=True, separators=(",", ":"))
+
+
+def _redact_for_storage(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            key_text = str(key).lower()
+            if key_text == "key" or any(part in key_text for part in _SENSITIVE_KEY_PARTS):
+                redacted[key] = "[REDACTED]"
+            else:
+                redacted[key] = _redact_for_storage(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_for_storage(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_for_storage(item) for item in value]
+    return value
