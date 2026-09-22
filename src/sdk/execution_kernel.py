@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from collections.abc import Awaitable, Callable
 
 from src.sdk.execution_models import (
@@ -49,7 +50,7 @@ class ExecutionKernel:
                 completion = await executor(request)
             else:
                 completion = await asyncio.wait_for(executor(request), timeout_seconds)
-        except TimeoutError:
+        except (TimeoutError, subprocess.TimeoutExpired):
             effect_state, verification_state = _interrupted_states(request)
             return await self._store.finalize(
                 receipt.receipt_id,

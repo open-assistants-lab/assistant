@@ -1,4 +1,5 @@
 import asyncio
+import subprocess
 from datetime import UTC, datetime
 
 import pytest
@@ -102,6 +103,21 @@ async def test_local_timeout_has_no_effect_to_verify(tmp_path) -> None:
     assert receipt.outcome is Outcome.TIMED_OUT
     assert receipt.effect_state is EffectState.NOT_APPLICABLE
     assert receipt.verification_state is VerificationState.NOT_REQUESTED
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_subprocess_timeout_produces_timed_out_receipt(tmp_path) -> None:
+    store = SQLiteReceiptStore(tmp_path / "receipts.db")
+    kernel = ExecutionKernel(store)
+
+    async def executor(request: ExecutionRequest) -> ExecutionCompletion:
+        raise subprocess.TimeoutExpired("echo hi", 1)
+
+    receipt = await kernel.run(make_request("req-subprocess-timeout"), executor)
+
+    assert receipt.outcome is Outcome.TIMED_OUT
+    assert receipt.termination_reason == "deadline_exceeded"
     await store.close()
 
 
