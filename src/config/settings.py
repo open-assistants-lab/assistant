@@ -118,6 +118,8 @@ class GovernanceConfig(_BaseSettings):
     enabled: bool = False
     # tool name -> tier: autonomous | show_then_auto_send | explicit | hard_block
     tiers: dict[str, str] = Field(default_factory=dict)
+    # item-level permissions: tools/skills/subagents -> allow/ask/deny
+    permissions: dict[str, dict[str, str]] = Field(default_factory=dict)
     auto_send_expiry_seconds: int = 300
     operation_callback_secret: str = Field(
         default="",

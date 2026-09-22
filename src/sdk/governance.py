@@ -29,6 +29,7 @@ from typing import Any
 from src.app_logging import get_logger
 from src.sdk.audit import AuditEvent
 from src.sdk.governance_operations import GovernanceOperationStore, GovernedOperation
+from src.sdk.permission_policy import PermissionPolicy
 from src.sdk.run_events import ToolResultData, ToolResultEvent
 from src.sdk.session_events import (
     get_session_event_store,
@@ -39,6 +40,21 @@ from src.sdk.tools import ToolResult
 from src.storage.paths import DataPaths
 
 Tier = str  # "autonomous" | "show_then_auto_send" | "explicit" | "hard_block"
+
+
+def _tier_to_permission(tier: Tier) -> str:
+    if tier == "hard_block":
+        return "deny"
+    if tier in {"show_then_auto_send", "explicit"}:
+        return "ask"
+    return "allow"
+
+
+def _permission_to_tier(permission: str) -> Tier:
+    return {"allow": "autonomous", "ask": "explicit", "deny": "hard_block"}.get(
+        permission, "explicit"
+    )
+
 
 #: Outcomes a consumed proposal can carry. `status` stays 'executed' — it means
 #: "approved and consumed, terminal" and replay_resume depends on it — while
@@ -152,6 +168,44 @@ class GovernanceService:
         return conn
 
     # -- tier resolution ---------------------------------------------------
+
+    def resolve_tier_for_call(
+        self, user_id: str, tool_name: str, tool_input: dict[str, Any]
+    ) -> Tier:
+        """Resolve item permission, preserving the legacy tier vocabulary."""
+        from src.config.settings import get_settings
+
+        user_permissions: dict[str, Any] = {}
+        try:
+            from src.sdk.capabilities import load_capabilities, user_capabilities_root
+
+            caps = load_capabilities(user_capabilities_root(user_id))
+            user_permissions = caps.get("permissions") or {}
+        except FileNotFoundError:
+            user_permissions = {}
+        except Exception as exc:
+            logger.warning(
+                "governance.permission_load_failed",
+                {"error": str(exc), "tool": tool_name},
+                user_id=user_id,
+            )
+            return "explicit"
+
+        governance = getattr(get_settings(), "governance", None)
+        admin_permissions = getattr(governance, "permissions", None) or {}
+        legacy_tier = self.resolve_tier(user_id, tool_name)
+        if not admin_permissions and not user_permissions:
+            return legacy_tier
+
+        permission = PermissionPolicy(
+            admin=admin_permissions,
+            user=user_permissions,
+        ).resolve(
+            tool_name,
+            tool_input,
+            fallback=_tier_to_permission(legacy_tier),
+        )
+        return _permission_to_tier(permission)
 
     def resolve_tier(self, user_id: str, tool_name: str) -> Tier:
         # Capabilities profile first (plan M4-1: tier source is the user's

@@ -55,7 +55,7 @@ class HITLMiddleware(Middleware):
         if not governance_enabled():
             return None
         svc = get_governance_service(self.user_id)
-        tier = svc.resolve_tier(self.user_id, tool_name)
+        tier = svc.resolve_tier_for_call(self.user_id, tool_name, tool_input)
         if tier == "autonomous":
             return None
         if tier == "hard_block":
