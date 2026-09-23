@@ -12,7 +12,7 @@ The local-first desktop track has one unified execution mode, item-level `allow`
 
 ## Evidence
 
-- Full Python suite: **3196 passed, 26 skipped**.
+- Full Python suite: **3196 passed, 27 skipped**.
 - Focused permission/governance/connector suites: passing.
 - Ruff: clean for modified source modules.
 - Mypy: clean for modified source modules.
@@ -26,9 +26,9 @@ The local-first desktop track has one unified execution mode, item-level `allow`
 
 ## Non-blocking follow-ups
 
-1. Integrate `PostgresReceiptStore` into Jen's application lifecycle and migration tooling; the adapter now exists behind the existing `ReceiptStore` protocol.
-2. Add provider readback/reconciliation where a connector supports it; Gmail send currently records the provider acknowledgement/message id.
-3. Re-run native/frontend gates immediately before packaging because unrelated native UI changes remain uncommitted in the worktree.
+1. Keep `PostgresReceiptStore` unwired for now; revisit Jen lifecycle and migration integration when hosted receipt persistence is required.
+2. Keep Gmail/email readback and reconciliation deferred.
+3. Native/frontend/package gates have been re-run and passed; repeat them immediately before a final release artifact if native files change.
 4. Preserve the existing one-process-per-user and trusted-network deployment constraints.
 
 ## Explicit exclusions
