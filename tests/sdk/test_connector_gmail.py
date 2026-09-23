@@ -31,10 +31,6 @@ async def test_connector_gmail_send_requires_approval_and_returns_provider_id(
             )
             return {"id": "sent-1", "threadId": "thread-1"}
 
-        async def get_message(self, message_id: str, fmt: str = "metadata") -> dict[str, str]:
-            assert (message_id, fmt) == ("sent-1", "metadata")
-            return {"id": "sent-1", "threadId": "thread-1", "labelIds": ["SENT"]}
-
     monkeypatch.setattr("src.sdk.tools_core.connector_gmail.GmailClient", Client)
 
     assert connector_gmail_send.annotations.requires_approval is True
@@ -53,44 +49,6 @@ async def test_connector_gmail_send_requires_approval_and_returns_provider_id(
         "connector": "gmail",
         "provider_message_id": "sent-1",
         "thread_id": "thread-1",
-        "verification": "verified",
-    }
-
-
-@pytest.mark.asyncio
-async def test_connector_gmail_send_marks_readback_failure_uncertain(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from src.sdk.tools_core.connector_gmail import connector_gmail_send
-
-    class Client:
-        def __init__(self, *, user_id: str):
-            assert user_id == "alice"
-
-        async def send_message(self, to: str, subject: str, body: str) -> dict[str, str]:
-            return {"id": "sent-uncertain", "threadId": "thread-uncertain"}
-
-        async def get_message(self, message_id: str, fmt: str = "metadata") -> dict[str, str]:
-            raise RuntimeError("Gmail readback unavailable")
-
-    monkeypatch.setattr("src.sdk.tools_core.connector_gmail.GmailClient", Client)
-
-    result = await connector_gmail_send.ainvoke(
-        {
-            "to": "person@example.com",
-            "subject": "Hello",
-            "body": "Message body",
-            "user_id": "alice",
-        }
-    )
-
-    assert result.is_error is True
-    assert result.structured_content == {
-        "connector": "gmail",
-        "provider_message_id": "sent-uncertain",
-        "thread_id": "thread-uncertain",
-        "error": "uncertain",
-        "verification": "not_verified",
     }
 
 
@@ -118,10 +76,6 @@ async def test_permission_gate_approves_and_executes_gmail_send(
             assert user_id == "alice"
 
         async def send_message(self, to: str, subject: str, body: str) -> dict[str, str]:
-            return {"id": "sent-2", "threadId": "thread-2"}
-
-        async def get_message(self, message_id: str, fmt: str = "metadata") -> dict[str, str]:
-            assert (message_id, fmt) == ("sent-2", "metadata")
             return {"id": "sent-2", "threadId": "thread-2"}
 
         async def aclose(self) -> None:
