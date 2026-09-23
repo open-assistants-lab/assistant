@@ -1111,9 +1111,9 @@ class TestSubagentCoordinator:
 
         original_set_failed = db.set_failed
 
-        async def cancelled_set_failed(task_id_, error):
+        async def cancelled_set_failed(task_id_, error, **kwargs):
             await db.request_cancel(task_id_)
-            return await original_set_failed(task_id_, error)
+            return await original_set_failed(task_id_, error, **kwargs)
 
         monkeypatch.setattr(coordinator, "_run_loop", fake_run_loop)
         monkeypatch.setattr(coordinator, "_publish_completion", fake_publish)
@@ -1404,9 +1404,9 @@ class TestSubagentCoordinator:
 
         original_set_failed = db.set_failed
 
-        async def cancel_before_fail(task_id: str, error: str):
+        async def cancel_before_fail(task_id: str, error: str, **kwargs):
             await db.request_cancel(task_id)
-            return await original_set_failed(task_id, error)
+            return await original_set_failed(task_id, error, **kwargs)
 
         monkeypatch.setattr(coordinator, "_run_loop", fake_run_loop)
         monkeypatch.setattr(db, "set_failed", cancel_before_fail)
@@ -1434,9 +1434,9 @@ class TestSubagentCoordinator:
 
         original_set_failed = db.set_failed
 
-        async def cancel_before_fail(task_id: str, error: str):
+        async def cancel_before_fail(task_id: str, error: str, **kwargs):
             await db.request_cancel(task_id)
-            return await original_set_failed(task_id, error)
+            return await original_set_failed(task_id, error, **kwargs)
 
         monkeypatch.setattr(coordinator, "_run_loop", fake_run_loop)
         monkeypatch.setattr(db, "set_failed", cancel_before_fail)

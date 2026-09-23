@@ -27,6 +27,7 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS work_queue (
     id TEXT PRIMARY KEY,
     parent_id TEXT,
+    parent_session_id TEXT,
     user_id TEXT NOT NULL,
     workspace_id TEXT NOT NULL DEFAULT 'personal',
     agent_name TEXT NOT NULL,
@@ -37,6 +38,8 @@ CREATE TABLE IF NOT EXISTS work_queue (
     error TEXT,
     instructions TEXT DEFAULT '[]',
     config TEXT DEFAULT '{}',
+    launch_plan TEXT NOT NULL DEFAULT '{}',
+    terminal_reason TEXT,
     cancel_requested INTEGER DEFAULT 0,
     claimed_by TEXT,
     claimed_at TEXT,
@@ -50,6 +53,19 @@ CREATE TABLE IF NOT EXISTS work_queue (
 CREATE INDEX IF NOT EXISTS idx_wq_user_status ON work_queue(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_wq_parent ON work_queue(parent_id);
 CREATE INDEX IF NOT EXISTS idx_wq_workspace ON work_queue(workspace_id, status);
+
+CREATE TABLE IF NOT EXISTS completion_events (
+    task_id TEXT PRIMARY KEY,
+    parent_session_id TEXT,
+    agent_name TEXT,
+    workspace_id TEXT,
+    status TEXT NOT NULL,
+    result TEXT,
+    error TEXT,
+    delivered_at TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -97,10 +113,22 @@ class SubagentWorkQueueDB:
             "heartbeat_at": "TEXT",
             "started_at": "TEXT",
             "completed_at": "TEXT",
+            "parent_session_id": "TEXT",
+            "launch_plan": "TEXT NOT NULL DEFAULT '{}'",
+            "terminal_reason": "TEXT",
         }
         for name, ddl in columns.items():
             if name not in existing:
                 await db.execute(f"ALTER TABLE work_queue ADD COLUMN {name} {ddl}")
+        cursor = await db.execute("PRAGMA table_info(completion_events)")
+        event_columns = {row["name"] for row in await cursor.fetchall()}
+        for name, ddl in {
+            "parent_session_id": "TEXT",
+            "agent_name": "TEXT",
+            "workspace_id": "TEXT",
+        }.items():
+            if name not in event_columns:
+                await db.execute(f"ALTER TABLE completion_events ADD COLUMN {name} {ddl}")
         await db.commit()
 
     async def close(self) -> None:
@@ -114,17 +142,20 @@ class SubagentWorkQueueDB:
         task: str,
         config: AgentProfile,
         parent_id: str | None = None,
+        parent_session_id: str | None = None,
+        launch_plan: dict[str, Any] | None = None,
     ) -> str:
         db = await self._get_db()
         task_id = _task_id()
         now = _now()
         await db.execute(
             """INSERT INTO work_queue
-            (id, parent_id, user_id, workspace_id, agent_name, task, status, progress, config, instructions, cancel_requested, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (id, parent_id, parent_session_id, user_id, workspace_id, agent_name, task, status, progress, config, launch_plan, instructions, cancel_requested, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) """,
             (
                 task_id,
                 parent_id,
+                parent_session_id,
                 self.user_id,
                 self.workspace_id,
                 agent_name,
@@ -132,6 +163,7 @@ class SubagentWorkQueueDB:
                 TaskStatus.PENDING.value,
                 "{}",
                 config.model_dump_json(),
+                json.dumps(launch_plan or {}, sort_keys=True),
                 "[]",
                 0,
                 now,
@@ -210,13 +242,18 @@ class SubagentWorkQueueDB:
     async def set_completed(self, task_id: str, result: SubagentResult) -> bool:
         db = await self._get_db()
         now = _now()
+        row = await self.get_task(task_id)
+        if row and row.get("launch_plan"):
+            plan = json.loads(row["launch_plan"] or "{}")
+            result = result.model_copy(update={"launch_plan_id": plan.get("plan_id")})
         cursor = await db.execute(
             """UPDATE work_queue
-            SET status = ?, result = ?, completed_at = ?, updated_at = ?
+            SET status = ?, result = ?, terminal_reason = ?, completed_at = ?, updated_at = ?
             WHERE id = ? AND user_id = ? AND status IN (?, ?) AND cancel_requested = 0""",
             (
                 TaskStatus.COMPLETED.value,
                 result.model_dump_json(),
+                result.terminal_reason,
                 now,
                 now,
                 task_id,
@@ -224,24 +261,113 @@ class SubagentWorkQueueDB:
                 TaskStatus.PENDING.value,
                 TaskStatus.RUNNING.value,
             ),
+        )
+        if cursor.rowcount > 0:
+            await db.execute(
+                """INSERT INTO completion_events
+                (task_id, parent_session_id, agent_name, workspace_id, status, result, error, created_at)
+                SELECT id, parent_session_id, agent_name, workspace_id, ?, ?, ?, ?
+                FROM work_queue WHERE id = ? AND user_id = ?
+                ON CONFLICT(task_id) DO NOTHING""",
+                (
+                    TaskStatus.COMPLETED.value,
+                    result.model_dump_json(),
+                    None,
+                    now,
+                    task_id,
+                    self.user_id,
+                ),
+            )
+        await db.commit()
+        return cursor.rowcount > 0
+
+    async def list_undelivered_completion_events(self) -> list[dict[str, Any]]:
+        db = await self._get_db()
+        cursor = await db.execute(
+            """SELECT task_id, parent_session_id, agent_name, workspace_id,
+            status, result, error, attempts, created_at
+            FROM completion_events WHERE delivered_at IS NULL ORDER BY created_at"""
+        )
+        rows = await cursor.fetchall()
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            event = dict(row)
+            event["result"] = json.loads(event["result"]) if event["result"] else None
+            events.append(event)
+        return events
+
+    async def mark_completion_event_delivered(self, task_id: str) -> bool:
+        """Acknowledge an outbox event only after its consumer succeeds."""
+        db = await self._get_db()
+        cursor = await db.execute(
+            """UPDATE completion_events
+            SET delivered_at = ?, attempts = attempts + 1
+            WHERE task_id = ? AND delivered_at IS NULL""",
+            (_now(), task_id),
         )
         await db.commit()
         return cursor.rowcount > 0
 
-    async def set_failed(self, task_id: str, error: str) -> bool:
+    async def record_completion_delivery_attempt(self, task_id: str) -> bool:
+        """Record a failed delivery attempt without suppressing replay."""
+        db = await self._get_db()
+        cursor = await db.execute(
+            """UPDATE completion_events SET attempts = attempts + 1
+            WHERE task_id = ? AND delivered_at IS NULL""",
+            (task_id,),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+    async def _insert_completion_event(
+        self,
+        task_id: str,
+        status: TaskStatus,
+        result: SubagentResult,
+        error: str | None,
+        created_at: str,
+    ) -> None:
+        db = await self._get_db()
+        task_row = await self.get_task(task_id)
+        if task_row and task_row.get("launch_plan"):
+            plan = json.loads(task_row["launch_plan"] or "{}")
+            result = result.model_copy(update={"launch_plan_id": plan.get("plan_id")})
+        await db.execute(
+            """INSERT INTO completion_events
+            (task_id, parent_session_id, agent_name, workspace_id, status, result, error, created_at)
+            SELECT id, parent_session_id, agent_name, workspace_id, ?, ?, ?, ?
+            FROM work_queue WHERE id = ? AND user_id = ?
+            ON CONFLICT(task_id) DO NOTHING""",
+            (status.value, result.model_dump_json(), error, created_at, task_id, self.user_id),
+        )
+
+    async def set_failed(
+        self,
+        task_id: str,
+        error: str,
+        terminal_status: TaskStatus = TaskStatus.FAILED,
+    ) -> bool:
+        if terminal_status not in {TaskStatus.FAILED, TaskStatus.TIMED_OUT}:
+            raise ValueError("terminal_status must be failed or timed_out")
         db = await self._get_db()
         now = _now()
         result = SubagentResult(
-            name="", task="", success=False, output="", error=error
+            name="",
+            task="",
+            success=False,
+            output="",
+            error=error,
+            terminal_reason=terminal_status.value,
         )
         cursor = await db.execute(
             """UPDATE work_queue
-            SET status = ?, result = ?, error = ?, completed_at = ?, updated_at = ?
+            SET status = ?, result = ?, error = ?, terminal_reason = ?, completed_at = ?, updated_at = ?
             WHERE id = ? AND user_id = ? AND status IN (?, ?) AND cancel_requested = 0""",
             (
-                TaskStatus.FAILED.value,
+                terminal_status.value,
                 result.model_dump_json(),
                 error,
+                result.terminal_reason,
                 now,
                 now,
                 task_id,
@@ -250,6 +376,10 @@ class SubagentWorkQueueDB:
                 TaskStatus.RUNNING.value,
             ),
         )
+        if cursor.rowcount > 0:
+            await self._insert_completion_event(
+                task_id, terminal_status, result, error, now
+            )
         await db.commit()
         return cursor.rowcount > 0
 
@@ -257,14 +387,36 @@ class SubagentWorkQueueDB:
         db = await self._get_db()
         now = _now()
         result = SubagentResult(
-            name="", task="", success=False, output="", error="cancelled by supervisor"
+            name="",
+            task="",
+            success=False,
+            output="",
+            error="cancelled by supervisor",
+            terminal_reason="cancelled",
         )
         cursor = await db.execute(
             """UPDATE work_queue
-            SET status = ?, result = ?, cancel_requested = 1, completed_at = ?, updated_at = ?
+            SET status = ?, result = ?, terminal_reason = ?, cancel_requested = 1,
+                completed_at = ?, updated_at = ?
             WHERE id = ? AND user_id = ?""",
-            (TaskStatus.CANCELLED.value, result.model_dump_json(), now, now, task_id, self.user_id),
+            (
+                TaskStatus.CANCELLED.value,
+                result.model_dump_json(),
+                result.terminal_reason,
+                now,
+                now,
+                task_id,
+                self.user_id,
+            ),
         )
+        if cursor.rowcount > 0:
+            await self._insert_completion_event(
+                task_id,
+                TaskStatus.CANCELLED,
+                result,
+                "cancelled by supervisor",
+                now,
+            )
         await db.commit()
         return cursor.rowcount > 0
 
@@ -275,22 +427,40 @@ class SubagentWorkQueueDB:
         error = "subagent task interrupted by restart; last heartbeat is stale"
         result = SubagentResult(name="", task="", success=False, output="", error=error)
         cursor = await db.execute(
-            """UPDATE work_queue
-            SET status = ?, result = ?, error = ?, completed_at = ?, updated_at = ?
-            WHERE status IN (?, ?) AND (heartbeat_at IS NULL OR heartbeat_at < ?)""",
+            """SELECT id FROM work_queue
+            WHERE user_id = ? AND status IN (?, ?)
+            AND (heartbeat_at IS NULL OR heartbeat_at < ?)""",
             (
-                TaskStatus.FAILED.value,
-                result.model_dump_json(),
-                error,
-                now,
-                now,
+                self.user_id,
                 TaskStatus.RUNNING.value,
                 TaskStatus.CANCELLING.value,
                 cutoff,
             ),
         )
+        task_ids = [row["id"] for row in await cursor.fetchall()]
+        for task_id in task_ids:
+            changed = await db.execute(
+                """UPDATE work_queue
+                SET status = ?, result = ?, error = ?, completed_at = ?, updated_at = ?
+                WHERE id = ? AND user_id = ? AND status IN (?, ?)""",
+                (
+                    TaskStatus.FAILED.value,
+                    result.model_dump_json(),
+                    error,
+                    now,
+                    now,
+                    task_id,
+                    self.user_id,
+                    TaskStatus.RUNNING.value,
+                    TaskStatus.CANCELLING.value,
+                ),
+            )
+            if changed.rowcount:
+                await self._insert_completion_event(
+                    task_id, TaskStatus.FAILED, result, error, now
+                )
         await db.commit()
-        return cursor.rowcount
+        return len(task_ids)
 
     async def get_task(self, task_id: str) -> dict[str, Any] | None:
         db = await self._get_db()

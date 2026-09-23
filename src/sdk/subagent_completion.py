@@ -73,7 +73,8 @@ class SubagentCompletionBus:
 
         return _unsubscribe
 
-    async def publish(self, event: SubagentCompletion) -> None:
+    async def publish(self, event: SubagentCompletion) -> bool:
+        delivered = False
         for user_id, session_id, callback in list(self._subscribers):
             if user_id is not None and user_id != event.user_id:
                 continue
@@ -82,6 +83,8 @@ class SubagentCompletionBus:
             result = callback(event)
             if inspect.isawaitable(result):
                 await result
+            delivered = True
+        return delivered
 
 
 completion_bus = SubagentCompletionBus()

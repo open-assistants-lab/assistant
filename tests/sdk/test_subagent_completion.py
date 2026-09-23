@@ -1,151 +1,121 @@
+"""Durable completion outbox tests for subagent work-queue terminal transitions."""
+
+from __future__ import annotations
+
+import json
+
 import pytest
+from agentprofile.models import AgentProfile
 
-from src.sdk.subagent_models import SubagentResult
+from src.sdk.subagent_models import SubagentResult, TaskStatus
+from src.sdk.subagent_work_queue import SubagentWorkQueueDB
 
 
 @pytest.mark.asyncio
-async def test_completion_bus_publishes_to_matching_subscribers():
-    from src.sdk.subagent_completion import SubagentCompletion, completion_bus
+async def test_completion_transition_writes_one_durable_outbox_event(tmp_path, monkeypatch) -> None:
+    from src.storage.paths import DataPaths
 
-    seen = []
-
-    async def callback(event):
-        seen.append(event)
-
-    unsubscribe = completion_bus.subscribe("u", "s", callback)
+    paths = DataPaths(data_path=tmp_path, data_root=tmp_path, user_id="user")
+    monkeypatch.setattr("src.sdk.subagent_work_queue.get_paths", lambda _user_id: paths)
+    db = SubagentWorkQueueDB("user")
     try:
-        event = SubagentCompletion(
-            user_id="u",
-            workspace_id="personal",
-            session_id="s",
-            task_id="task-1",
-            agent_name="worker",
-            status="completed",
-            result=SubagentResult(name="worker", task="t", success=True, output="done"),
+        task_id = await db.insert_task(
+            "worker",
+            "review",
+            AgentProfile(name="worker"),
+            parent_session_id="session-1",
+            launch_plan={"plan_id": "plan-001", "effective_tools": ["files_read"]},
         )
-        await completion_bus.publish(event)
+        assert await db.set_completed(
+            task_id,
+            SubagentResult(name="worker", task="review", success=True, output="done"),
+        )
+        assert not await db.set_completed(
+            task_id,
+            SubagentResult(name="worker", task="review", success=True, output="second"),
+        )
+
+        events = await db.list_undelivered_completion_events()
+        assert len(events) == 1
+        assert events[0]["task_id"] == task_id
+        assert events[0]["parent_session_id"] == "session-1"
+        assert events[0]["status"] == "completed"
+        assert events[0]["result"]["output"] == "done"
+        task_row = await db.get_task(task_id)
+        assert task_row is not None
+        assert json.loads(task_row["launch_plan"])["plan_id"] == "plan-001"
+        assert events[0]["result"]["launch_plan_id"] == "plan-001"
+        assert await db.record_completion_delivery_attempt(task_id)
+        assert await db.mark_completion_event_delivered(task_id)
+        assert not await db.mark_completion_event_delivered(task_id)
+        assert await db.list_undelivered_completion_events() == []
     finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_replays_event_and_acknowledges_only_with_subscriber(
+    tmp_path, monkeypatch
+) -> None:
+    from src.sdk.coordinator import SubagentCoordinator
+    from src.sdk.subagent_completion import completion_bus
+    from src.storage.paths import DataPaths
+
+    paths = DataPaths(data_path=tmp_path, data_root=tmp_path, user_id="user")
+    monkeypatch.setattr("src.sdk.subagent_work_queue.get_paths", lambda _user_id: paths)
+    monkeypatch.setattr("src.sdk.coordinator.get_paths", lambda user_id: paths)
+    db = SubagentWorkQueueDB("user")
+    coordinator = SubagentCoordinator("user")
+    coordinator._db = db
+    received = []
+    try:
+        task_id = await db.insert_task(
+            "worker", "review", AgentProfile(name="worker"), parent_session_id="session-1"
+        )
+        await db.set_completed(
+            task_id,
+            SubagentResult(name="worker", task="review", success=True, output="done"),
+        )
+        assert await coordinator.drain_completion_events() == 0
+        assert len(await db.list_undelivered_completion_events()) == 1
+
+        unsubscribe = completion_bus.subscribe("user", "session-1", received.append)
+        assert await coordinator.drain_completion_events(session_id="session-1") == 1
+        assert received[0].task_id == task_id
+        assert await coordinator.drain_completion_events(session_id="session-1") == 0
         unsubscribe()
-
-    assert seen == [event]
-
-
-@pytest.mark.asyncio
-async def test_run_service_completion_handler_steers_active_parent_loop(monkeypatch):
-    from src.sdk.run_service import handle_subagent_completion
-    from src.sdk.subagent_completion import SubagentCompletion
-
-    steers = []
-
-    class FakeLoop:
-        def set_steer_sink(self, sink):
-            self.sink = sink
-
-        def steer(self, message):
-            steers.append(message)
-            self.sink(message)
-
-    persisted = []
-
-    class FakeStore:
-        def add_message(self, role, content, metadata=None, session_id="default"):
-            persisted.append((role, content, metadata, session_id))
-            return "msg1"
-
-    monkeypatch.setattr("src.sdk.run_service.get_user_loop", lambda user_id, session_id=None: FakeLoop())
-    monkeypatch.setattr("src.sdk.run_service.aget_message_store", lambda user_id, workspace_id="personal": FakeAwaitable(FakeStore()))
-
-    event = SubagentCompletion(
-        user_id="u",
-        workspace_id="personal",
-        session_id="s",
-        task_id="task-1",
-        agent_name="worker",
-        status="completed",
-        result=SubagentResult(name="worker", task="t", success=True, output="finished output"),
-    )
-
-    await handle_subagent_completion(event)
-
-    assert steers == ["Subagent 'worker' finished: finished output"]
-    assert persisted == [("user", "Subagent 'worker' finished: finished output", {"steer": True, "subagent_completion": True, "task_id": "task-1"}, "s")]
+    finally:
+        await db.close()
 
 
 @pytest.mark.asyncio
-async def test_run_service_completion_handler_persists_active_steer_before_boundary(monkeypatch):
-    from src.sdk.run_service import handle_subagent_completion
-    from src.sdk.subagent_completion import SubagentCompletion
+@pytest.mark.parametrize(
+    ("terminal", "expected_status"),
+    [("failed", "failed"), ("cancelled", "cancelled"), ("timed_out", "timed_out")],
+)
+async def test_failure_and_cancellation_write_one_durable_outbox_event(
+    tmp_path, monkeypatch, terminal, expected_status
+) -> None:
+    from src.storage.paths import DataPaths
 
-    class FakeLoop:
-        def set_steer_sink(self, sink):
-            self.sink = sink
+    paths = DataPaths(data_path=tmp_path, data_root=tmp_path, user_id="user")
+    monkeypatch.setattr("src.sdk.subagent_work_queue.get_paths", lambda _user_id: paths)
+    db = SubagentWorkQueueDB("user")
+    try:
+        task_id = await db.insert_task("worker", terminal, AgentProfile(name="worker"))
+        if terminal == "failed":
+            assert await db.set_failed(task_id, "provider error")
+        elif terminal == "timed_out":
+            assert await db.set_failed(
+                task_id, "timeout", terminal_status=TaskStatus.TIMED_OUT
+            )
+        else:
+            assert await db.set_cancelled(task_id)
 
-        def steer(self, message):
-            # Simulate a completion arriving during text generation: no tool
-            # boundary drains the steer, so AgentLoop never calls the sink.
-            self.message = message
-
-    persisted = []
-
-    class FakeStore:
-        def add_message(self, role, content, metadata=None, session_id="default"):
-            persisted.append((role, content, metadata, session_id))
-            return "msg1"
-
-    monkeypatch.setattr("src.sdk.run_service.get_user_loop", lambda user_id, session_id=None: FakeLoop())
-    monkeypatch.setattr("src.sdk.run_service.aget_message_store", lambda user_id, workspace_id="personal": FakeAwaitable(FakeStore()))
-
-    event = SubagentCompletion(
-        user_id="u",
-        workspace_id="personal",
-        session_id="s",
-        task_id="task-1",
-        agent_name="worker",
-        status="completed",
-        result=SubagentResult(name="worker", task="t", success=True, output="finished output"),
-    )
-
-    await handle_subagent_completion(event)
-
-    assert persisted == [("user", "Subagent 'worker' finished: finished output", {"steer": True, "subagent_completion": True, "task_id": "task-1"}, "s")]
-
-
-@pytest.mark.asyncio
-async def test_run_service_completion_handler_records_idle_followup(monkeypatch):
-    from src.sdk.run_service import handle_subagent_completion
-    from src.sdk.subagent_completion import SubagentCompletion
-
-    persisted = []
-
-    class FakeStore:
-        def add_message(self, role, content, metadata=None, session_id="default"):
-            persisted.append((role, content, metadata, session_id))
-            return "msg1"
-
-    monkeypatch.setattr("src.sdk.run_service.get_user_loop", lambda user_id, session_id=None: None)
-    monkeypatch.setattr("src.sdk.run_service.aget_message_store", lambda user_id, workspace_id="personal": FakeAwaitable(FakeStore()))
-
-    event = SubagentCompletion(
-        user_id="u",
-        workspace_id="personal",
-        session_id="s",
-        task_id="task-1",
-        agent_name="worker",
-        status="completed",
-        result=SubagentResult(name="worker", task="t", success=True, output="finished output"),
-    )
-
-    await handle_subagent_completion(event)
-
-    assert persisted == [("assistant", "Subagent 'worker' finished: finished output", {"subagent_completion": True, "task_id": "task-1", "status": "completed"}, "s")]
-
-
-class FakeAwaitable:
-    def __init__(self, value):
-        self.value = value
-
-    def __await__(self):
-        async def _inner():
-            return self.value
-
-        return _inner().__await__()
+        events = await db.list_undelivered_completion_events()
+        assert len(events) == 1
+        assert events[0]["task_id"] == task_id
+        assert events[0]["status"] == expected_status
+        assert events[0]["error"] in {"provider error", "cancelled by supervisor", "timeout"}
+    finally:
+        await db.close()

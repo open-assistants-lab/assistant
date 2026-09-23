@@ -204,7 +204,44 @@ class SubagentCoordinator:
                 {"count": count, "user_id": self.user_id, "workspace_id": self.workspace_id},
                 user_id="system",
             )
+        await self.drain_completion_events()
         return count
+
+    async def drain_completion_events(self, session_id: str | None = None) -> int:
+        """Replay undelivered terminal events; acknowledge only after bus consumers succeed."""
+        from src.sdk.subagent_completion import SubagentCompletion, completion_bus
+
+        db = await self._get_db()
+        delivered_count = 0
+        for row in await db.list_undelivered_completion_events():
+            parent_session_id = row.get("parent_session_id")
+            if not parent_session_id or (session_id and session_id != parent_session_id):
+                continue
+            try:
+                raw_result = row.get("result")
+                event = SubagentCompletion(
+                    user_id=self.user_id,
+                    workspace_id=row.get("workspace_id") or self.workspace_id,
+                    session_id=parent_session_id,
+                    task_id=row["task_id"],
+                    agent_name=row.get("agent_name") or "unknown",
+                    status=row["status"],
+                    result=SubagentResult.model_validate(raw_result) if raw_result else None,
+                    error=row.get("error"),
+                )
+                if await completion_bus.publish(event):
+                    if await db.mark_completion_event_delivered(row["task_id"]):
+                        delivered_count += 1
+                else:
+                    await db.record_completion_delivery_attempt(row["task_id"])
+            except Exception as exc:
+                await db.record_completion_delivery_attempt(row["task_id"])
+                logger.warning(
+                    "subagent.completion_replay_failed",
+                    {"task_id": row["task_id"], "error": str(exc)},
+                    user_id=self.user_id,
+                )
+        return delivered_count
 
     async def _get_db(self) -> SubagentWorkQueueDB:
         if self._db is None:
@@ -336,7 +373,9 @@ class SubagentCoordinator:
         )
 
         db = await self._get_db()
-        task_id = await db.insert_task(agent_name, task, profile, parent_id)
+        task_id = await db.insert_task(
+            agent_name, task, profile, parent_id, launch_plan=plan.model_dump(mode="json")
+        )
         await db.set_running(task_id)
 
         ctx = SubagentContext()
@@ -355,7 +394,11 @@ class SubagentCoordinator:
         except SubagentCancelledError:
             await db.set_cancelled(task_id)
         except TimeoutError:
-            failed = await db.set_failed(task_id, f"timeout after {profile.timeout_seconds}s")
+            failed = await db.set_failed(
+                task_id,
+                f"timeout after {profile.timeout_seconds}s",
+                terminal_status=TaskStatus.TIMED_OUT,
+            )
             if not failed:
                 await self._set_cancelled_if_requested(task_id, db)
         except Exception as e:
@@ -459,7 +502,9 @@ class SubagentCoordinator:
         )
 
         db = await self._get_db()
-        task_id = await db.insert_task(agent_name, task, profile, parent_id)
+        task_id = await db.insert_task(
+            agent_name, task, profile, parent_id, launch_plan=plan.model_dump(mode="json")
+        )
 
         ctx = SubagentContext(on_progress=self._make_progress_cb(task_id))
         await self._register_active_context(task_id, db, ctx)
@@ -494,7 +539,9 @@ class SubagentCoordinator:
             )
         except TimeoutError:
             error = f"timeout after {effective_timeout}s"
-            failed = await db.set_failed(task_id, error)
+            failed = await db.set_failed(
+                task_id, error, terminal_status=TaskStatus.TIMED_OUT
+            )
             if not failed:
                 await self._set_cancelled_if_requested(task_id, db)
             return ToolResult(
@@ -536,7 +583,14 @@ class SubagentCoordinator:
         )
 
         db = await self._get_db()
-        task_id = await db.insert_task(agent_name, task, profile, parent_id)
+        task_id = await db.insert_task(
+            agent_name,
+            task,
+            profile,
+            parent_id,
+            parent_session_id=parent_session_id,
+            launch_plan=plan.model_dump(mode="json"),
+        )
 
         ctx = SubagentContext(on_progress=self._make_progress_cb(task_id))
         await self._register_active_context(task_id, db, ctx)
@@ -620,7 +674,9 @@ class SubagentCoordinator:
             await self._publish_completion(task_id, profile.name, TaskStatus.CANCELLED.value, None, "cancelled", parent_session_id)
         except TimeoutError:
             error = f"timeout after {profile.timeout_seconds}s"
-            failed = await db.set_failed(task_id, error)
+            failed = await db.set_failed(
+                task_id, error, terminal_status=TaskStatus.TIMED_OUT
+            )
             if failed:
                 await self._publish_completion(
                     task_id, profile.name, TaskStatus.FAILED.value, None, error, parent_session_id
@@ -657,20 +713,7 @@ class SubagentCoordinator:
         if not parent_session_id:
             return
         try:
-            from src.sdk.subagent_completion import SubagentCompletion, completion_bus
-
-            await completion_bus.publish(
-                SubagentCompletion(
-                    user_id=self.user_id,
-                    workspace_id=self.requested_workspace_id,
-                    session_id=parent_session_id,
-                    task_id=task_id,
-                    agent_name=agent_name,
-                    status=status,
-                    result=result,
-                    error=error,
-                )
-            )
+            await self.drain_completion_events(session_id=parent_session_id)
         except Exception as exc:
             logger.warning(
                 "subagent.completion_publish_failed",
