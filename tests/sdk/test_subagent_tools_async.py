@@ -148,8 +148,9 @@ async def test_subagent_create_parses_new_json_fields_and_validates(monkeypatch)
         def load_def(self, name):
             return None
 
-        async def create(self, profile):
+        async def create(self, profile, tool_selection_mode=None):
             saved["profile"] = profile
+            saved["tool_selection_mode"] = tool_selection_mode
             return profile
 
     monkeypatch.setattr(
@@ -321,6 +322,64 @@ async def test_subagent_update_rejects_validation_errors_before_save(monkeypatch
 
     assert result == "Error: Unknown tool: not_a_tool"
     assert validated["tools"] == ["not_a_tool"]
+
+
+@pytest.mark.asyncio
+async def test_subagent_create_preserves_omitted_and_explicit_empty_tool_modes(monkeypatch):
+    from src.sdk.subagent_capabilities import ToolSelectionMode
+    from src.sdk.tools_core import subagent as mod
+
+    saved = []
+
+    class FakeCoordinator:
+        def load_def(self, name):
+            return None
+
+        async def create(self, profile, tool_selection_mode=ToolSelectionMode.LEGACY):
+            saved.append((profile, tool_selection_mode))
+            return profile
+
+    monkeypatch.setattr(mod, "get_coordinator", lambda *_args: FakeCoordinator())
+    monkeypatch.setattr(mod, "validate_agent_def", lambda *_args, **_kwargs: [])
+
+    await mod.subagent_create.ainvoke({"name": "safe", "user_id": "u"})
+    await mod.subagent_create.ainvoke({"name": "empty", "user_id": "u", "tools": []})
+    await mod.subagent_create.ainvoke(
+        {"name": "listed", "user_id": "u", "tools": ["files_read"]}
+    )
+
+    assert [mode for _profile, mode in saved] == [
+        ToolSelectionMode.SAFE_DEFAULT,
+        ToolSelectionMode.NONE,
+        ToolSelectionMode.ALLOWLIST,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_subagent_update_explicit_empty_tools_selects_none(monkeypatch):
+    from agentprofile.models import AgentProfile
+
+    from src.sdk.subagent_capabilities import ToolSelectionMode
+    from src.sdk.tools_core import subagent as mod
+
+    existing = AgentProfile(name="worker", tools=["files_read"])
+    seen = {}
+
+    class FakeCoordinator:
+        def load_def(self, name):
+            return existing
+
+        async def update(self, name, tool_selection_mode=None, **kwargs):
+            seen["mode"] = tool_selection_mode
+            seen["kwargs"] = kwargs
+            return existing.model_copy(update=kwargs)
+
+    monkeypatch.setattr(mod, "get_coordinator", lambda *_args: FakeCoordinator())
+    monkeypatch.setattr(mod, "validate_agent_def", lambda *_args, **_kwargs: [])
+
+    await mod.subagent_update.ainvoke({"name": "worker", "user_id": "u", "tools": []})
+
+    assert seen == {"mode": ToolSelectionMode.NONE, "kwargs": {"tools": []}}
 
 
 def test_subagent_delegate_does_not_accept_parent_session():

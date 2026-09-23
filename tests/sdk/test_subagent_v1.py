@@ -902,7 +902,7 @@ class TestSubagentCoordinator:
         assert "## Available Skills" in prompt
         assert "skill-creator" in prompt
         assert "Create reusable skills." in prompt
-        assert "skills_load(skill_name=...)" in prompt
+        assert "skills_load(name=...)" in prompt
         assert "SECRET FULL SKILL CONTENT" not in prompt
 
     @pytest.mark.asyncio
@@ -1480,6 +1480,28 @@ class TestSubagentCoordinator:
         loaded = load_profile(str(profile_path))
         assert loaded.name == "writer"
         assert loaded.tools == ["time_get"]
+
+    @pytest.mark.asyncio
+    async def test_create_and_update_persist_tool_selection_mode(self, mock_paths):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.subagent_capabilities import ToolSelectionMode
+
+        coord = SubagentCoordinator("test_user")
+        await coord.create(
+            AgentProfile(name="policy", tools=[]),
+            tool_selection_mode=ToolSelectionMode.SAFE_DEFAULT,
+        )
+        policy_path = mock_paths.user_subagents_dir() / "policy" / "runtime-policy.json"
+        assert json.loads(policy_path.read_text()) == {
+            "version": 1,
+            "tool_selection": "safe_default",
+        }
+        assert coord.load_tool_selection_mode("policy") is ToolSelectionMode.SAFE_DEFAULT
+
+        await coord.update("policy", tools=[], tool_selection_mode=ToolSelectionMode.NONE)
+        assert coord.load_tool_selection_mode("policy") is ToolSelectionMode.NONE
 
     @pytest.mark.asyncio
     async def test_definitions_are_user_level_across_workspace_ids(self, mock_paths):

@@ -130,7 +130,7 @@ async def subagent_create(
         description=description,
         model=model or "",
         system_prompt=system_prompt or "",
-        tools=tools or [],
+        tools=tools if tools is not None else [],
         skills=skills,
         max_llm_calls=max_llm_calls,
         cost_limit_usd=cost_limit_usd,
@@ -150,7 +150,16 @@ async def subagent_create(
     if existing is not None:
         return f"Error: Subagent '{name}' already exists. Use subagent_update to amend it."
 
-    await coordinator.create(agent_profile)
+    from src.sdk.subagent_capabilities import ToolSelectionMode
+
+    tool_selection_mode = (
+        ToolSelectionMode.SAFE_DEFAULT
+        if tools is None
+        else ToolSelectionMode.NONE
+        if not tools
+        else ToolSelectionMode.ALLOWLIST
+    )
+    await coordinator.create(agent_profile, tool_selection_mode=tool_selection_mode)
 
     lines = [f"Subagent '{name}' created successfully."]
     if model:
@@ -246,7 +255,16 @@ async def subagent_update(
     if errors:
         return "Error: " + "; ".join(errors)
 
-    updated = await coordinator.update(name, **update_kwargs)
+    from src.sdk.subagent_capabilities import ToolSelectionMode
+
+    tool_selection_mode = None
+    if tools is not None:
+        tool_selection_mode = ToolSelectionMode.NONE if not tools else ToolSelectionMode.ALLOWLIST
+    updated = await coordinator.update(
+        name,
+        tool_selection_mode=tool_selection_mode,
+        **update_kwargs,
+    )
 
     if updated is None:
         return f"Error: Failed to update subagent '{name}'."

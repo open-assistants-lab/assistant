@@ -116,7 +116,7 @@ def _build_system_prompt(
                 parts.insert(
                     0,
                     "## Available Skills\n"
-                    "Use skills_load(skill_name=...) before following a skill's instructions.\n"
+                    "Use skills_load(name=...) before following a skill's instructions.\n"
                     + "\n".join(skill_entries),
                 )
         except Exception:
@@ -213,7 +213,11 @@ class SubagentCoordinator:
                 self._recovery_task = asyncio.create_task(self._recover_stale_jobs())
         return self._db
 
-    async def create(self, profile: AgentProfile) -> AgentProfile:
+    async def create(
+        self,
+        profile: AgentProfile,
+        tool_selection_mode: Any | None = None,
+    ) -> AgentProfile:
         agent_path = self.base_path / profile.name
         agent_path.mkdir(parents=True, exist_ok=True)
 
@@ -233,8 +237,12 @@ class SubagentCoordinator:
             pass
 
         # Write PROFILE.md (frontmatter + body)
-        (agent_path / "PROFILE.md").write_text(
-            dumps_profile(profile)
+        (agent_path / "PROFILE.md").write_text(dumps_profile(profile))
+        (agent_path / "runtime-policy.json").write_text(
+            json.dumps(
+                {"version": 1, "tool_selection": getattr(tool_selection_mode, "value", "legacy")},
+                indent=2,
+            )
         )
 
         # Write companion files
@@ -256,7 +264,12 @@ class SubagentCoordinator:
         )
         return profile
 
-    async def update(self, name: str, **kwargs: Any) -> AgentProfile | None:
+    async def update(
+        self,
+        name: str,
+        tool_selection_mode: Any | None = None,
+        **kwargs: Any,
+    ) -> AgentProfile | None:
         current = self.load_def(name)
         if current is None:
             return None
@@ -268,6 +281,14 @@ class SubagentCoordinator:
 
         # Write PROFILE.md
         (agent_path / "PROFILE.md").write_text(dumps_profile(updated))
+
+        if tool_selection_mode is not None:
+            (agent_path / "runtime-policy.json").write_text(
+                json.dumps(
+                    {"version": 1, "tool_selection": getattr(tool_selection_mode, "value", "legacy")},
+                    indent=2,
+                )
+            )
 
         # Write companion files
         provider_path = agent_path / "provider.json"
@@ -797,6 +818,19 @@ class SubagentCoordinator:
                         scoped.append((profile, "user"))
 
         return scoped
+
+    def load_tool_selection_mode(self, name: str) -> Any:
+        """Load the explicit profile policy; old profiles remain legacy."""
+        from src.sdk.subagent_capabilities import ToolSelectionMode
+
+        policy_path = self.base_path / name / "runtime-policy.json"
+        if not policy_path.exists():
+            return ToolSelectionMode.LEGACY
+        try:
+            value = json.loads(policy_path.read_text()).get("tool_selection")
+            return ToolSelectionMode(value)
+        except (OSError, ValueError, json.JSONDecodeError, TypeError):
+            return ToolSelectionMode.LEGACY
 
     def load_def(self, name: str) -> AgentProfile | None:
         profile_path = self.base_path / name / "PROFILE.md"
