@@ -29,7 +29,7 @@ Public API:
     ExecutionKernel - shared execution orchestration
     Outcome, ExecutorState, EffectState, VerificationState - execution lifecycle
     ExecutionRequest, ExecutionCompletion, ExecutionEvent, Observation, Receipt - execution contracts
-    ReceiptStore, SQLiteReceiptStore - durable receipt storage
+    ReceiptStore, SQLiteReceiptStore, PostgresReceiptStore - durable receipt storage
     PermissionPolicy - pure allow/ask/deny policy resolution
 """
 
@@ -63,6 +63,7 @@ from src.sdk.messages import Message, StreamChunk, ToolCall, Usage
 from src.sdk.middleware import Middleware
 from src.sdk.middleware_summarization import SummarizationMiddleware
 from src.sdk.permission_policy import PermissionPolicy
+from src.sdk.postgres_receipt_store import PostgresReceiptStore
 from src.sdk.providers.base import LLMProvider, ModelCost, ModelInfo
 from src.sdk.providers.factory import create_model_from_config, create_provider
 from src.sdk.providers.ollama import OllamaCloud
@@ -179,5 +180,6 @@ __all__ = [
     "Receipt",
     "ReceiptStore",
     "SQLiteReceiptStore",
+    "PostgresReceiptStore",
     "PermissionPolicy",
 ]

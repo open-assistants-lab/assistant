@@ -26,7 +26,7 @@ The local-first desktop track has one unified execution mode, item-level `allow`
 
 ## Non-blocking follow-ups
 
-1. Add `PostgresReceiptStore` for Jen behind the existing `ReceiptStore` protocol.
+1. Integrate `PostgresReceiptStore` into Jen's application lifecycle and migration tooling; the adapter now exists behind the existing `ReceiptStore` protocol.
 2. Add provider readback/reconciliation where a connector supports it; Gmail send currently records the provider acknowledgement/message id.
 3. Re-run native/frontend gates immediately before packaging because unrelated native UI changes remain uncommitted in the worktree.
 4. Preserve the existing one-process-per-user and trusted-network deployment constraints.

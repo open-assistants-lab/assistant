@@ -2,6 +2,7 @@ import src.sdk as public_api
 import src.sdk.execution_kernel as execution_kernel
 import src.sdk.execution_models as execution_models
 import src.sdk.execution_store as execution_store
+import src.sdk.postgres_receipt_store as postgres_receipt_store
 
 
 def test_execution_contract_is_publicly_exported() -> None:
@@ -16,4 +17,5 @@ def test_execution_contract_is_publicly_exported() -> None:
     assert public_api.Receipt is execution_models.Receipt
     assert public_api.ReceiptStore is execution_store.ReceiptStore
     assert public_api.SQLiteReceiptStore is execution_store.SQLiteReceiptStore
+    assert public_api.PostgresReceiptStore is postgres_receipt_store.PostgresReceiptStore
     assert public_api.VerificationState is execution_models.VerificationState
