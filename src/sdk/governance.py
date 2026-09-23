@@ -601,7 +601,13 @@ class GovernanceService:
                     "is_error": True,
                 }
             else:
-                out = await td.ainvoke(arguments)
+                invoke_arguments = dict(arguments)
+                properties = getattr(td, "parameters", {}).get("properties", {})
+                if "user_id" in properties:
+                    invoke_arguments["user_id"] = user_id
+                if "session_id" in properties:
+                    invoke_arguments["session_id"] = row.get("session_id")
+                out = await td.ainvoke(invoke_arguments)
                 if isinstance(out, ToolResult):
                     # Issue #26: a ToolResult carries its own outcome. Hard-coding
                     # is_error False here receipted a tool that ran and failed as
