@@ -44,7 +44,7 @@ from src.storage.paths import DataPaths
 #: `outcome is None` means "not applicable": rows written before this column
 #: existed, rows that were never executed (pending/approved/cancelled), and
 #: proposals consumed by the async leg, whose terminal state lives in the
-#: operation ledger. These five values are the frozen persisted vocabulary —
+#: operation ledger. These six values are the frozen persisted vocabulary —
 #: renaming one strands historical rows on the old literal.
 OUTCOME_SUCCEEDED = "succeeded"
 OUTCOME_REFUSED = "refused"
@@ -53,6 +53,7 @@ OUTCOME_FAILED = "failed"
 # column and the receipt cannot drift.
 OUTCOME_TIMED_OUT = TIMEOUT_MARKER
 OUTCOME_KILLED = KILLED_MARKER
+OUTCOME_UNCERTAIN = "uncertain"
 # Mirrors the three refusal codes set by the branches below.
 _REFUSAL_ERRORS = frozenset({"tool disabled", "permission changed", "unknown tool"})
 
@@ -61,14 +62,15 @@ def outcome_for(result: dict[str, Any]) -> str:
     """One word for what an executed proposal actually did.
 
     Kept deliberately small so a consumer can switch on it: a clean run, a
-    refusal (the tool never ran), a timeout, a signal kill, or a failure.
+    refusal (the tool never ran), a timeout, a signal kill, an uncertain
+    provider outcome, or a failure.
     """
     if not result.get("is_error"):
         return OUTCOME_SUCCEEDED
     error = str((result.get("structured_content") or {}).get("error") or "")
     if error in _REFUSAL_ERRORS:
         return OUTCOME_REFUSED
-    if error in (OUTCOME_TIMED_OUT, OUTCOME_KILLED):
+    if error in (OUTCOME_TIMED_OUT, OUTCOME_KILLED, OUTCOME_UNCERTAIN):
         return error
     return OUTCOME_FAILED
 

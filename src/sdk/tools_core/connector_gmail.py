@@ -30,12 +30,45 @@ async def _connector_gmail_send(
                 structured_content={"connector": "gmail", "error": "missing_message_id"},
                 is_error=True,
             )
+        try:
+            readback = await client.get_message(message_id, fmt="metadata")
+        except Exception:
+            return ToolResult(
+                content=(
+                    f"Gmail accepted message {message_id}, but provider readback "
+                    "failed; delivery is uncertain."
+                ),
+                structured_content={
+                    "connector": "gmail",
+                    "provider_message_id": message_id,
+                    "thread_id": sent.get("threadId"),
+                    "error": "uncertain",
+                    "verification": "not_verified",
+                },
+                is_error=True,
+            )
+        if str(readback.get("id") or "") != message_id:
+            return ToolResult(
+                content=(
+                    f"Gmail accepted message {message_id}, but provider readback "
+                    "did not identify it; delivery is uncertain."
+                ),
+                structured_content={
+                    "connector": "gmail",
+                    "provider_message_id": message_id,
+                    "thread_id": sent.get("threadId"),
+                    "error": "uncertain",
+                    "verification": "not_verified",
+                },
+                is_error=True,
+            )
         return ToolResult(
-            content=f"Gmail message sent: {message_id}",
+            content=f"Gmail message sent and verified: {message_id}",
             structured_content={
                 "connector": "gmail",
                 "provider_message_id": message_id,
                 "thread_id": sent.get("threadId"),
+                "verification": "verified",
             },
         )
     except GmailNotConnectedError as exc:

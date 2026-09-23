@@ -65,6 +65,22 @@ def test_failed_tool_result_is_not_a_clean_outcome(svc):
     assert result["is_error"] is True
 
 
+def test_uncertain_tool_result_stays_distinct_from_timeout(svc):
+    _, result = _run(
+        svc,
+        _tool(
+            fn=lambda **_: ToolResult(
+                content="Provider accepted the send, but readback failed.",
+                structured_content={"error": "uncertain"},
+                is_error=True,
+            )
+        ),
+    )
+
+    assert result["outcome"] == "uncertain", result
+    assert result["outcome"] != "timed_out"
+
+
 def test_timeout_and_kill_keep_their_own_outcome(svc):
     def times_out(**_kwargs):
         raise_timeout("probe", 1.0, 0.0)
