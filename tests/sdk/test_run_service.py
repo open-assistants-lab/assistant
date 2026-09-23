@@ -801,3 +801,57 @@ async def test_failed_streaming_run_skips_persist_run(monkeypatch):
     assert len(persist_calls) == 1
     assert persist_calls[0]["run_id"] == result.run_id
     assert result.final_message_id is not None
+
+
+def test_load_history_prefers_the_session_log_when_enabled(tmp_path, monkeypatch):
+    """D3 decision A: with the log on, history is the log projection.
+
+    `InMemoryMessageStore.get_messages_with_summary` returns [] here, so the
+    assertion proves the projection path ran rather than the store fallback.
+    """
+    from datetime import UTC, datetime
+
+    import src.storage.paths as paths_mod
+    from src.sdk import session_events as se
+    from src.sdk.run_events import parse_run_event
+    from src.sdk.session_worker import SessionWorkerRegistry
+
+    monkeypatch.setenv("DEPLOYMENT_DATA_ROOT", str(tmp_path / "data"))
+    monkeypatch.setattr(
+        paths_mod.DataPaths,
+        "root",
+        property(lambda self: tmp_path / "data"),
+        raising=False,
+    )
+    monkeypatch.setattr(se, "session_log_enabled", lambda: True)
+    se.reset_session_stores()
+
+    store = se.get_session_event_store("u1")
+    events = [
+        ("user_prompt", {"content": "hello"}),
+        ("text_delta", {"block_id": "text", "delta": "hi there"}),
+    ]
+    for sequence, (type_, data) in enumerate(events, start=1):
+        store.append(
+            parse_run_event(
+                {
+                    "schema_version": 1,
+                    "event_id": f"e{sequence}",
+                    "sequence": sequence,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s1",
+                    "run_id": "r1",
+                    "attempt": 1,
+                    "type": type_,
+                    "data": data,
+                }
+            )
+        )
+
+    service = RunService("u1", SessionWorkerRegistry(), InMemoryMessageStore())
+    history = service._load_history("s1")
+
+    assert [(m.role, m.content) for m in history] == [
+        ("user", "hello"),
+        ("assistant", "hi there"),
+    ]

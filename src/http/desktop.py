@@ -257,6 +257,10 @@ def apply_desktop_settings() -> None:
     os.environ["DEPLOYMENT_DATA_ROOT"] = str(home)
     os.environ["DEPLOYMENT_DATA_PATH"] = str(home / ".system")
     os.environ["SOLO_BYPASS"] = "false"
+    # D3 decision A (2026-09-21): the durable context-updated timeline record
+    # only exists with the session-event log enabled; desktop forces it like
+    # the other product-sidecar values (history then reads the log projection).
+    os.environ["SESSION_LOG_ENABLED"] = "true"
 
     from src.config import reload_settings
 
@@ -266,6 +270,7 @@ def apply_desktop_settings() -> None:
     settings.deployment.mode = "desktop-server"
     settings.deployment.data_root = str(home)
     settings.deployment.data_path = str(home / ".system")
+    settings.session_log.enabled = True
 
 
 

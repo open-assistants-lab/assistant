@@ -18,7 +18,6 @@ const history_key: u64 = 5;
 const sessions_key: u64 = 6;
 const delete_key: u64 = 7;
 const title_key: u64 = 8;
-const models_key: u64 = 9;
 const bootstrap_key: u64 = 19;
 const settings_key: u64 = 10;
 const settings_general_key: u64 = 11;
@@ -41,6 +40,9 @@ const max_oauth_poll_ticks: u16 = 60;
 /// app_assets.zig uses std.testing.io, which is test-build-only, so the
 /// production code carries the process Io here instead.
 var g_process_io: std.Io = undefined;
+/// Tests never capture a process Io (it is undefined in the test build), so
+/// keychain spawns are skipped there and the caller takes its failure path.
+var g_process_io_ready = false;
 
 const max_providers = 128;
 const max_provider_models = 512;
@@ -71,6 +73,7 @@ const SettingsSection = enum { providers_models, general, tools };
 const ToolsSection = enum { builtin, connections };
 
 pub const LaunchState = enum { starting, first_run, connected, unavailable };
+const FirstRunMode = enum { key, custom_endpoint, local_models };
 
 const ToolRow = struct {
     name: []const u8,
@@ -364,7 +367,6 @@ pub const Msg = union(enum) {
     delete_chat: u64,
     delete_chat_done: native_sdk.EffectResponse,
     title_generated: native_sdk.EffectResponse,
-    models_loaded: native_sdk.EffectResponse,
     cycle_model,
     toggle_theme,
     toggle_bubble: u64,
@@ -405,7 +407,12 @@ pub const Msg = union(enum) {
     cancel_connect,
     first_run_key_input: canvas.TextInputEvent,
     first_run_submit,
+    first_run_scan_local,
+    first_run_custom_endpoint,
     first_run_checked: native_sdk.EffectResponse,
+    first_run_discovery: native_sdk.EffectResponse,
+    first_run_select_model: usize,
+    reconnect,
     settings_providers_models,
     settings_general,
     settings_loaded: native_sdk.EffectResponse,
@@ -450,7 +457,6 @@ pub const Msg = union(enum) {
         "delete_chat",
         "delete_chat_done",
         "title_generated",
-        "models_loaded",
         "cycle_model",
         "settings_general_loaded",
         "grader_prompt_loaded",
@@ -498,6 +504,13 @@ pub const Model = struct {
     first_run_key_value: []const u8 = "",
     first_run_key_selection: canvas.TextSelection = .{ .anchor = 0, .focus = 0 },
     first_run_status: []const u8 = "",
+    first_run_mode: FirstRunMode = .key,
+    first_run_model_picker: bool = false,
+    // D3 credential ownership: the active provider key lives in the macOS
+    // keychain (loaded at startup) and is injected per request; the sidecar
+    // never persists it.
+    active_provider: []const u8 = "",
+    active_provider_key: []const u8 = "",
     allocator: std.mem.Allocator = undefined,
 
     pub const view_unbound = .{
@@ -666,8 +679,7 @@ fn apiRawUrl(model: *const Model, allocator: std.mem.Allocator, path: []const u8
 }
 
 fn connectorUrl(model: *const Model, allocator: std.mem.Allocator, path: []const u8) []const u8 {
-    const separator: []const u8 = if (std.mem.indexOfScalar(u8, path, '?') == null) "?" else "&";
-    return std.fmt.allocPrint(allocator, "{s}{s}{s}user_id=default_user", .{ model.api_base_url, path, separator }) catch path;
+    return std.fmt.allocPrint(allocator, "{s}{s}", .{ model.api_base_url, path }) catch path;
 }
 
 fn requestHeaders(model: *const Model, allocator: std.mem.Allocator, content_type: []const u8, accept: []const u8) []const std.http.Header {
@@ -715,10 +727,10 @@ fn contextCompressedLabel(allocator: std.mem.Allocator, data: std.json.ObjectMap
     var before_tokens: ?u32 = null;
     var after_tokens: ?u32 = null;
     if (data.get("before")) |before| if (before == .object) {
-        if (before.object.get("tokens")) |t| before_tokens = jsonCount(t);
+        if (before.object.get("estimated_tokens")) |t| before_tokens = jsonCount(t);
     };
     if (data.get("after")) |after| if (after == .object) {
-        if (after.object.get("tokens")) |t| after_tokens = jsonCount(t);
+        if (after.object.get("estimated_tokens")) |t| after_tokens = jsonCount(t);
     };
     if (before_tokens) |b| {
         if (after_tokens) |a| {
@@ -974,13 +986,14 @@ fn doSend(model: *Model, fx: *Effects) void {
 
     fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
 
-    const escaped = escapeJsonString(model.allocator, text) catch return;
-    const selected_model = model.selectedModel();
-    const body = std.fmt.allocPrint(
+    const body = runRequestBody(
         model.allocator,
-        "{{\"message\":\"{s}\",\"session_id\":\"{s}\",\"model\":\"{s}\"}}",
-        .{ escaped, chat.sessionId(), selected_model },
-    ) catch return;
+        text,
+        chat.sessionId(),
+        model.selectedModel(),
+        model.active_provider,
+        model.active_provider_key,
+    ) orelse return;
     fx.fetch(.{
         .key = chat.fetch_key,
         .url = apiUrl(model, model.allocator, "/message/stream"),
@@ -1183,43 +1196,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 chat.title_generated = true;
             }
         },
-        .models_loaded => |response| blk: {
-            // Chain the active chat's history fetch (see initFx comment).
-            defer fetchActiveChatHistory(model, fx);
-            if (response.outcome != .ok) break :blk;
-            const body = response.body;
-            if (body.len == 0) break :blk;
-            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, body, .{}) catch break :blk;
-            defer parsed.deinit();
-            const root = parsed.value;
-            const models_arr = root.object.get("models") orelse break :blk;
-            const arr = switch (models_arr) {
-                .array => |a| a,
-                else => return,
-            };
-            model.available_model_count = 0;
-            for (arr.items) |item| {
-                if (model.available_model_count >= max_models) break;
-                const id_val = item.object.get("id") orelse continue;
-                const name_val = item.object.get("name") orelse continue;
-                const pd_val = item.object.get("provider_display") orelse continue;
-                const prov_val = item.object.get("provider");
-                const key_source_val = item.object.get("key_source");
-                const id_str = switch (id_val) { .string => |s| s, else => continue };
-                const name_str = switch (name_val) { .string => |s| s, else => continue };
-                const pd_str = switch (pd_val) { .string => |s| s, else => continue };
-                const prov_str = if (prov_val) |v| switch (v) { .string => |s| s, else => "" } else "";
-                const key_source_str = if (key_source_val) |v| switch (v) { .string => |s| s, else => "" } else "";
-                model.available_models[model.available_model_count] = .{
-                    .id = model.allocator.dupe(u8, id_str) catch continue,
-                    .name = model.allocator.dupe(u8, name_str) catch continue,
-                    .provider = model.allocator.dupe(u8, prov_str) catch continue,
-                    .provider_display = model.allocator.dupe(u8, pd_str) catch continue,
-                    .key_source = model.allocator.dupe(u8, key_source_str) catch continue,
-                };
-                model.available_model_count += 1;
-            }
-        },
         .cycle_model => {
             if (model.available_model_count > 0) {
                 var attempts: usize = 0;
@@ -1384,8 +1360,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             chat.open_bubble_type = "";
             chat.status_text = "Resuming...";
             fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
-            const selected_model = model.selectedModel();
-            const body = std.fmt.allocPrint(model.allocator, "{{\"call_id\":\"{s}\",\"session_id\":\"{s}\",\"model\":\"{s}\"}}", .{ chat.pending_call_id, chat.sessionId(), selected_model }) catch return;
+            const body = std.fmt.allocPrint(
+                model.allocator,
+                "{{\"call_id\":\"{s}\",\"session_id\":\"{s}\",\"model\":\"{s}\"{s}}}",
+                .{ chat.pending_call_id, chat.sessionId(), model.selectedModel(), providerKeysFragment(model.allocator, model.active_provider, model.active_provider_key) },
+            ) catch return;
             chat.pending_tool = "";
             chat.pending_call_id = "";
             fx.fetch(.{
@@ -1717,9 +1696,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             firePendingSend(model, chat, fx);
         },
         .sessions_loaded => |response| blk: {
-            // Chain the models fetch (and from it, history) so startup never
-            // fires concurrent connects to the same host (ISCONN panic race).
-            defer fetchModels(model, fx);
+            // Chain the history fetch so startup never fires concurrent
+            // connects to the same host (ISCONN panic race). The model
+            // catalog is fetched at the end of the history handler.
+            defer fetchActiveChatHistory(model, fx);
             if (response.outcome != .ok) {
                 // A3: surface backend connection error
                 const chat = model.activeChat();
@@ -2376,30 +2356,160 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.first_run_key_selection = next.selection;
         },
         .first_run_submit => {
-            const key = std.mem.trim(u8, model.first_run_key_value, " \n\r\t");
-            if (key.len == 0) {
-                model.first_run_status = "Paste an API key or choose a local model.";
-                return;
+            switch (model.first_run_mode) {
+                .custom_endpoint => {
+                    const endpoint = std.mem.trim(u8, model.first_run_key_value, " \n\r\t");
+                    if (endpoint.len == 0) {
+                        model.first_run_status = "Enter an http(s) endpoint first.";
+                        return;
+                    }
+                    const escaped = escapeJsonString(model.allocator, endpoint) catch return;
+                    const body = std.fmt.allocPrint(model.allocator, "{{\"endpoint\":\"{s}\"}}", .{escaped}) catch return;
+                    model.first_run_status = "Checking endpoint…";
+                    fx.fetch(.{
+                        .key = first_run_key,
+                        .url = apiUrl(model, model.allocator, "/providers/validate-endpoint"),
+                        .method = .POST,
+                        .headers = jsonHeaders(model, model.allocator),
+                        .body = body,
+                        .response = .buffered,
+                        .on_response = Effects.responseMsg(.first_run_discovery),
+                    });
+                },
+                .key => {
+                    const key = std.mem.trim(u8, model.first_run_key_value, " \n\r\t");
+                    const provider = classifyFirstRunProvider(key);
+                    if (provider.len == 0) {
+                        model.first_run_status = "This key needs a provider-specific prefix. Use Settings to choose a provider.";
+                        return;
+                    }
+                    const escaped_provider = escapeJsonString(model.allocator, provider) catch return;
+                    const escaped_key = escapeJsonString(model.allocator, key) catch return;
+                    const body = std.fmt.allocPrint(
+                        model.allocator,
+                        "{{\"provider\":\"{s}\",\"api_key\":\"{s}\"}}",
+                        .{ escaped_provider, escaped_key },
+                    ) catch return;
+                    model.first_run_status = "Verifying the key with the selected provider…";
+                    fx.fetch(.{
+                        .key = first_run_key,
+                        .url = apiUrl(model, model.allocator, "/providers/validate-key"),
+                        .method = .POST,
+                        .headers = jsonHeaders(model, model.allocator),
+                        .body = body,
+                        .response = .buffered,
+                        .on_response = Effects.responseMsg(.first_run_checked),
+                    });
+                },
+                .local_models => return,
             }
-            const escaped = escapeJsonString(model.allocator, key) catch return;
-            const body = std.fmt.allocPrint(model.allocator, "{{\"key\":\"{s}\"}}", .{escaped}) catch return;
-            model.first_run_status = "Checking key locally…";
+        },
+        .first_run_scan_local => {
+            model.first_run_mode = .local_models;
+            model.first_run_model_picker = false;
+            model.first_run_status = "Scanning Ollama on this Mac…";
             fx.fetch(.{
                 .key = first_run_key,
-                .url = apiUrl(model, model.allocator, "/providers/classify-key"),
-                .method = .POST,
-                .headers = jsonHeaders(model, model.allocator),
-                .body = body,
+                .url = apiUrl(model, model.allocator, "/providers/local-models?endpoint=http://127.0.0.1:11434"),
+                .method = .GET,
+                .headers = acceptJsonHeaders(model, model.allocator),
                 .response = .buffered,
-                .on_response = Effects.responseMsg(.first_run_checked),
+                .on_response = Effects.responseMsg(.first_run_discovery),
             });
+        },
+        .first_run_custom_endpoint => {
+            model.first_run_mode = .custom_endpoint;
+            model.first_run_model_picker = false;
+            model.first_run_key_value = "";
+            model.first_run_key_selection = .{ .anchor = 0, .focus = 0 };
+            model.first_run_status = "Enter a custom http(s) endpoint, then press Validate endpoint.";
         },
         .first_run_checked => |response| {
             if (response.outcome != .ok) {
                 model.first_run_status = "Could not validate this key. Check the connection and try again.";
                 return;
             }
-            model.first_run_status = "Key recognized. Choose a model to continue.";
+            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, response.body, .{}) catch {
+                model.first_run_status = "The provider returned an invalid validation response.";
+                return;
+            };
+            defer parsed.deinit();
+            const root = parsed.value;
+            const valid = if (root.object.get("valid")) |v| v == .bool and v.bool else false;
+            if (!valid) {
+                const error_msg = if (root.object.get("error")) |e| switch (e) {
+                    .string => |s| s,
+                    else => "The provider rejected this key.",
+                } else "The provider rejected this key.";
+                model.first_run_status = model.allocator.dupe(u8, error_msg) catch "The provider rejected this key.";
+                return;
+            }
+            const provider = if (root.object.get("provider")) |v| jsonString(v) orelse "" else "";
+            if (provider.len == 0 or !storeFirstRunCredential(model, provider, model.first_run_key_value)) {
+                model.first_run_status = "The key could not be stored in Keychain.";
+                return;
+            }
+            model.first_run_model_picker = false;
+            model.first_run_status = "Key verified. Loading available models…";
+            fetchSettingsCatalog(model, fx);
+        },
+        .first_run_discovery => |response| {
+            if (response.outcome != .ok) {
+                model.first_run_status = "The discovery request failed. Check the connection and try again.";
+                return;
+            }
+            const parsed = std.json.parseFromSlice(std.json.Value, model.allocator, response.body, .{}) catch {
+                model.first_run_status = "The sidecar returned an invalid discovery response.";
+                return;
+            };
+            defer parsed.deinit();
+            const root = parsed.value;
+            if (model.first_run_mode == .custom_endpoint) {
+                const reachable = if (root.object.get("reachable")) |v| v == .bool and v.bool else false;
+                model.first_run_status = if (reachable)
+                    "Endpoint is reachable. Add its model in Settings to continue."
+                else
+                    "Endpoint could not be reached. Check the URL and try again.";
+                return;
+            }
+            model.available_model_count = 0;
+            if (root.object.get("models")) |models_value| {
+                if (models_value == .array) {
+                    for (models_value.array.items) |item| {
+                        if (model.available_model_count >= max_models) break;
+                        const id = if (item.object.get("id")) |v| jsonString(v) orelse continue else continue;
+                        const name = if (item.object.get("name")) |v| jsonString(v) orelse id else id;
+                        const idx = model.available_model_count;
+                        model.available_models[idx] = .{
+                            .id = std.fmt.allocPrint(model.allocator, "ollama:{s}", .{id}) catch continue,
+                            .name = model.allocator.dupe(u8, name) catch continue,
+                            .provider = "ollama",
+                            .provider_display = "Ollama",
+                            .key_source = "local",
+                        };
+                        model.available_model_count += 1;
+                    }
+                }
+            }
+            if (model.available_model_count == 0) {
+                model.first_run_status = "No local models found. Paste a provider key or use a custom endpoint.";
+                return;
+            }
+            model.first_run_model_picker = true;
+            model.first_run_status = "Choose a local model to continue.";
+        },
+        .first_run_select_model => |idx| {
+            if (idx >= model.available_model_count) return;
+            model.selected_model_idx = idx;
+            model.first_run_model_picker = false;
+            model.launch_state = .connected;
+            model.first_run_status = "";
+            saveSettingsModel(model, fx, idx);
+        },
+        .reconnect => {
+            model.launch_state = .starting;
+            model.launch_error = "";
+            initFx(model, fx);
         },
         .close_form => {
             model.tools.form_open = false;
@@ -2554,6 +2664,22 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     }
                 }
                 sortSettingsProviders(&model.settings);
+                if (model.launch_state == .first_run and model.active_provider_key.len > 0) {
+                    for (0..model.settings.provider_count) |pi| {
+                        if (std.mem.eql(u8, model.settings.providers[pi].id, model.active_provider)) {
+                            model.settings.providers[pi].has_key = true;
+                            model.settings.providers[pi].key_source = "user";
+                            for (0..model.settings.providers[pi].model_count) |mi| {
+                                const model_idx = model.settings.providers[pi].model_indices[mi];
+                                if (model_idx < model.available_model_count) {
+                                    model.available_models[model_idx].key_source = "user";
+                                }
+                            }
+                        }
+                    }
+                    model.first_run_model_picker = model.available_model_count > 0;
+                    model.first_run_status = if (model.first_run_model_picker) "Choose a model to continue." else "No models are available for this provider.";
+                }
             }
         },
         .settings_general_loaded => |response| {
@@ -2780,23 +2906,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (model.settings.key_modal_visible and model.settings.key_testing) {
                 model.settings.key_testing = false;
                 if (valid) {
-                    const escaped_provider = escapeJsonString(model.allocator, model.settings.pending_provider_id) catch return;
-                    const escaped_key = escapeJsonString(model.allocator, model.settings.key_input) catch return;
-                    const save_body = std.fmt.allocPrint(
-                        model.allocator,
-                        "{{\"provider\":\"{s}\",\"api_key\":\"{s}\"}}",
-                        .{ escaped_provider, escaped_key },
-                    ) catch return;
-                    const fetch_key = model.allocFetchKey();
-                    fx.fetch(.{
-                        .key = fetch_key,
-                        .url = apiUrl(model, model.allocator, "/settings/api-keys"),
-                        .method = .POST,
-                        .headers = jsonHeaders(model, model.allocator),
-                        .body = save_body,
-                        .response = .buffered,
-                        .on_response = Effects.responseMsg(.key_saved),
-                    });
+                    saveProviderKeyLocally(
+                        model,
+                        fx,
+                        model.settings.pending_provider_id,
+                        model.settings.key_input,
+                        model.allocFetchKey(),
+                    );
                 } else {
                     model.settings.key_error = model.allocator.dupe(u8, error_msg) catch "Invalid key";
                 }
@@ -2807,24 +2923,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     const p = &model.settings.providers[i];
                     p.testing = false;
                     if (valid) {
-                        // Save the key
-                        const escaped_provider = escapeJsonString(model.allocator, p.id) catch return;
-                        const escaped_key = escapeJsonString(model.allocator, p.key_input) catch return;
-                        const save_body = std.fmt.allocPrint(
-                            model.allocator,
-                            "{{\"provider\":\"{s}\",\"api_key\":\"{s}\"}}",
-                            .{ escaped_provider, escaped_key },
-                        ) catch return;
-                        const fetch_key = model.allocFetchKey();
-                        fx.fetch(.{
-                            .key = fetch_key,
-                            .url = apiUrl(model, model.allocator, "/settings/api-keys"),
-                            .method = .POST,
-                            .headers = jsonHeaders(model, model.allocator),
-                            .body = save_body,
-                            .response = .buffered,
-                            .on_response = Effects.responseMsg(.key_saved),
-                        });
+                        saveProviderKeyLocally(model, fx, p.id, p.key_input, model.allocFetchKey());
                     } else {
                         p.test_error = model.allocator.dupe(u8, error_msg) catch "Invalid key";
                     }
@@ -2896,25 +2995,16 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const p = &model.settings.providers[idx];
             if (p.via_env) return;
             const provider_id = p.id;
-            const path = std.fmt.allocPrint(
-                model.allocator,
-                "/settings/api-keys/{s}",
-                .{provider_id},
-            ) catch return;
-            const url = apiUrl(model, model.allocator, path);
             const fetch_key = model.allocFetchKey();
             if (model.settings.pending_key_delete_count < max_pending_key_deletes) {
                 model.settings.pending_key_deletes[model.settings.pending_key_delete_count] = .{ .key = fetch_key, .provider_id = provider_id };
                 model.settings.pending_key_delete_count += 1;
             }
-            fx.fetch(.{
-                .key = fetch_key,
-                .url = url,
-                .method = .DELETE,
-                .headers = acceptJsonHeaders(model, model.allocator),
-                .response = .buffered,
-                .on_response = Effects.responseMsg(.key_deleted),
-            });
+            // D3: the key lives in the keychain, not the sidecar's store
+            // (desktop mode refuses /settings/api-keys). Delete locally and
+            // drive the existing handler; the pending entry correlates it.
+            keychainDeleteKey(model, provider_id);
+            update(model, .{ .key_deleted = .{ .key = fetch_key, .outcome = .ok, .body = "" } }, fx);
         },
         .key_deleted => |response| {
             if (response.outcome != .ok) return;
@@ -3541,7 +3631,7 @@ fn buildLaunchPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         .unavailable => "Assistant needs attention",
         .connected => "Assistant",
     };
-    var nodes: [10]AppUi.Node = undefined;
+    var nodes: [14]AppUi.Node = undefined;
     var count: usize = 0;
     nodes[count] = ui.text(.{ .size = .heading }, title);
     count += 1;
@@ -3553,21 +3643,37 @@ fn buildLaunchPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         .first_run => {
             nodes[count] = ui.text(.{ .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, "Paste an API key, scan for a local model, or enter a custom endpoint.");
             count += 1;
-            nodes[count] = ui.el(.textarea, .{
-                .text = model.first_run_key_value,
-                .placeholder = "Paste API key…",
-                .on_input = AppUi.inputMsg(.first_run_key_input),
-                .height = 44,
-                .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
-            }, .{});
-            count += 1;
-            nodes[count] = ui.row(.{ .gap = 8, .cross = .center }, .{
-                ui.button(.{ .on_press = .first_run_submit, .variant = .primary, .min_width = 132 }, "Continue"),
-                ui.button(.{ .variant = .ghost, .min_width = 132 }, "Scan local models"),
-                ui.button(.{ .variant = .ghost, .min_width = 132 }, "Custom endpoint"),
-            });
-            count += 1;
-            nodes[count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, "Check likely providers only runs after you review and consent to the candidates.");
+            if (model.first_run_model_picker) {
+                nodes[count] = ui.text(.{ .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, "Choose a model to finish setup.");
+                count += 1;
+                var model_nodes: [6]AppUi.Node = undefined;
+                var model_count: usize = 0;
+                const limit = @min(model.available_model_count, model_nodes.len);
+                for (0..limit) |i| {
+                    model_nodes[model_count] = ui.button(.{ .on_press = .{ .first_run_select_model = i }, .variant = .ghost, .grow = 1 }, model.available_models[i].name);
+                    model_count += 1;
+                }
+                nodes[count] = ui.column(.{ .gap = 8, .cross = .stretch }, model_nodes[0..model_count]);
+                count += 1;
+            } else {
+                const input_placeholder = if (model.first_run_mode == .custom_endpoint) "http://127.0.0.1:8000" else "Paste API key…";
+                nodes[count] = ui.el(.textarea, .{
+                    .text = model.first_run_key_value,
+                    .placeholder = input_placeholder,
+                    .on_input = AppUi.inputMsg(.first_run_key_input),
+                    .height = 44,
+                    .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
+                }, .{});
+                count += 1;
+                const submit_label = if (model.first_run_mode == .custom_endpoint) "Validate endpoint" else "Verify key";
+                nodes[count] = ui.row(.{ .gap = 8, .cross = .center }, .{
+                    ui.button(.{ .on_press = .first_run_submit, .variant = .primary, .min_width = 132 }, submit_label),
+                    ui.button(.{ .on_press = .first_run_scan_local, .variant = .ghost, .min_width = 132 }, "Scan local models"),
+                    ui.button(.{ .on_press = .first_run_custom_endpoint, .variant = .ghost, .min_width = 132 }, "Custom endpoint"),
+                });
+                count += 1;
+            }
+            nodes[count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, "Provider-specific keys are checked only with the selected provider.");
             count += 1;
             if (model.first_run_status.len > 0) {
                 nodes[count] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, model.first_run_status);
@@ -3578,7 +3684,7 @@ fn buildLaunchPanel(ui: *AppUi, model: *const Model) AppUi.Node {
             const copy = if (model.launch_error.len > 0) model.launch_error else "The local sidecar is unavailable.";
             nodes[count] = ui.text(.{ .style_tokens = .{ .foreground = .destructive }, .wrap = true }, copy);
             count += 1;
-            nodes[count] = ui.button(.{ .variant = .primary, .min_width = 132 }, "Reconnect");
+            nodes[count] = ui.button(.{ .on_press = .reconnect, .variant = .primary, .min_width = 132 }, "Reconnect");
             count += 1;
         },
         .connected => {},
@@ -4166,6 +4272,106 @@ fn openSystemBrowser(url: []const u8) !void {
         std.heap.page_allocator.free(result.stderr);
     }
     if (result.term != .exited or result.term.exited != 0) return error.OpenFailed;
+}
+
+
+/// Keychain (D3 task 2). The native app owns provider credentials: a pasted key
+/// is stored in the macOS login keychain, never under ~/Assistant and never
+/// POSTed to the sidecar (desktop mode refuses /settings/api-keys). `security`
+/// is the supported path for a non-sandboxed app; the secret is passed as an
+/// argument because Zig 0.16's std.process.run has no stdin pipe and `security`
+/// retype-prompts when -w is omitted.
+const keychain_service = "dev.native-sdk.assistant.provider";
+const keychain_active_service = "dev.native-sdk.assistant.active-provider";
+
+fn keychainRun(model: *Model, argv: []const []const u8) ?[]const u8 {
+    if (!g_process_io_ready) return null;
+    const result = std.process.run(model.allocator, g_process_io, .{ .argv = argv }) catch return null;
+    if (result.term != .exited or result.term.exited != 0) {
+        model.allocator.free(result.stdout);
+        model.allocator.free(result.stderr);
+        return null;
+    }
+    model.allocator.free(result.stderr);
+    return result.stdout;
+}
+
+fn keychainStoreKey(model: *Model, provider: []const u8, key: []const u8) bool {
+    if (keychainRun(model, &.{ "security", "add-generic-password", "-U", "-a", provider, "-s", keychain_service, "-w", key }) == null) return false;
+    if (keychainRun(model, &.{ "security", "add-generic-password", "-U", "-a", "active", "-s", keychain_active_service, "-w", provider }) == null) return false;
+    return true;
+}
+
+fn keychainDeleteKey(model: *Model, provider: []const u8) void {
+    _ = keychainRun(model, &.{ "security", "delete-generic-password", "-a", provider, "-s", keychain_service });
+    _ = keychainRun(model, &.{ "security", "delete-generic-password", "-a", "active", "-s", keychain_active_service });
+}
+
+/// Restore the active provider credential at launch (Keychain -> memory).
+pub fn keychainLoadActive(model: *Model) void {
+    const provider_raw = keychainRun(model, &.{ "security", "find-generic-password", "-a", "active", "-s", keychain_active_service, "-w" }) orelse return;
+    const provider = std.mem.trim(u8, provider_raw, " \n\r\t");
+    if (provider.len == 0) return;
+    const key_raw = keychainRun(model, &.{ "security", "find-generic-password", "-a", provider, "-s", keychain_service, "-w" }) orelse return;
+    const key = std.mem.trim(u8, key_raw, " \n\r\t");
+    model.active_provider = model.allocator.dupe(u8, provider) catch return;
+    model.active_provider_key = model.allocator.dupe(u8, key) catch return;
+}
+
+fn classifyFirstRunProvider(key: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, key, "sk-ant-")) return "anthropic";
+    if (std.mem.startsWith(u8, key, "sk-or-")) return "openrouter";
+    if (std.mem.startsWith(u8, key, "sk-proj-")) return "openai";
+    if (std.mem.startsWith(u8, key, "AIza")) return "gemini";
+    if (std.mem.startsWith(u8, key, "r8_") or std.mem.startsWith(u8, key, "gsk_")) return "groq";
+    return "";
+}
+
+fn storeFirstRunCredential(model: *Model, provider: []const u8, key: []const u8) bool {
+    // In production this must succeed in Keychain. Unit tests do not have a
+    // process Io and therefore exercise the same memory handoff without a
+    // real `security` subprocess or touching the user's login keychain.
+    if (g_process_io_ready and !keychainStoreKey(model, provider, key)) return false;
+    model.active_provider = model.allocator.dupe(u8, provider) catch return false;
+    model.active_provider_key = model.allocator.dupe(u8, key) catch return false;
+    return true;
+}
+
+/// Store the key locally and drive the existing `.key_saved` success path.
+fn saveProviderKeyLocally(model: *Model, fx: *Effects, provider_id: []const u8, api_key: []const u8, fetch_key: u64) void {
+    if (keychainStoreKey(model, provider_id, api_key)) {
+        model.active_provider = model.allocator.dupe(u8, provider_id) catch "";
+        model.active_provider_key = model.allocator.dupe(u8, api_key) catch "";
+        update(model, .{ .key_saved = .{ .key = fetch_key, .outcome = .ok, .body = "" } }, fx);
+    } else {
+        update(model, .{ .key_saved = .{ .key = fetch_key, .outcome = .rejected, .body = "" } }, fx);
+    }
+}
+
+/// The `provider_keys` fragment for run bodies; empty when no key is active
+/// (local/ollama runs need none).
+pub fn providerKeysFragment(allocator: std.mem.Allocator, provider: []const u8, key: []const u8) []const u8 {
+    if (provider.len == 0 or key.len == 0) return "";
+    const escaped_provider = escapeJsonString(allocator, provider) catch return "";
+    const escaped_key = escapeJsonString(allocator, key) catch return "";
+    return std.fmt.allocPrint(allocator, ",\"provider_keys\":{{\"{s}\":\"{s}\"}}", .{ escaped_provider, escaped_key }) catch "";
+}
+
+/// The `/message/stream` body, with the active credential injected.
+pub fn runRequestBody(
+    allocator: std.mem.Allocator,
+    message: []const u8,
+    session_id: []const u8,
+    model_id: []const u8,
+    provider: []const u8,
+    key: []const u8,
+) ?[]const u8 {
+    const escaped = escapeJsonString(allocator, message) catch return null;
+    return std.fmt.allocPrint(
+        allocator,
+        "{{\"message\":\"{s}\",\"session_id\":\"{s}\",\"model\":\"{s}\"{s}}}",
+        .{ escaped, session_id, model_id, providerKeysFragment(allocator, provider, key) },
+    ) catch null;
 }
 
 /// Apply a text-input event to one credential form field, mirroring the
@@ -5483,16 +5689,6 @@ fn initFx(model: *Model, fx: *Effects) void {
     });
 }
 
-fn fetchModels(model: *Model, fx: *Effects) void {
-    fx.fetch(.{
-        .key = models_key,
-        .url = apiUrl(model, model.allocator, "/providers/models"),
-        .method = .GET,
-        .headers = acceptJsonHeaders(model, model.allocator),
-        .response = .buffered,
-        .on_response = Effects.responseMsg(.models_loaded),
-    });
-}
 
 fn fetchSettingsCatalog(model: *Model, fx: *Effects) void {
     fx.fetch(.{
@@ -5544,6 +5740,7 @@ fn keyFallback(keyboard: canvas.WidgetKeyboardEvent) ?Msg {
 
 pub fn main(init: std.process.Init) !void {
     g_process_io = init.io;
+    g_process_io_ready = true;
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -5578,6 +5775,12 @@ pub fn main(init: std.process.Init) !void {
             app_state.model.launch_state = .unavailable;
             app_state.model.launch_error = "Could not read Assistant connection settings";
         };
+    }
+    // D3 task 2: restore the credential the native app owns (Keychain); it is
+    // injected per request and never persisted by the sidecar.
+    keychainLoadActive(&app_state.model);
+    if (app_state.model.active_provider_key.len == 0 and init.environ_map.get("NATIVE_ASSISTANT_SKIP_FIRST_RUN") == null) {
+        app_state.model.launch_state = .first_run;
     }
 
     // Stress-test mode: seed a synthetic transcript of N messages so the

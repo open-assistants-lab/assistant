@@ -46,7 +46,7 @@ def _service(monkeypatch):
     from src.sdk.governance import GovernanceService
 
     svc = GovernanceService()
-    monkeypatch.setattr(svc, "resolve_tier", lambda *_: "explicit")
+    monkeypatch.setattr(svc, "resolve_permission", lambda *_: "ask")
     monkeypatch.setattr(svc, "_log_execution_result", lambda *_: None)
     monkeypatch.setattr(svc, "_emit_receipt", lambda *a, **k: None)
     return svc
@@ -54,7 +54,7 @@ def _service(monkeypatch):
 
 def _run_governed(monkeypatch, td: ToolDefinition, arguments: dict | None = None):
     svc = _service(monkeypatch)
-    proposal_id = svc.create_pending(USER, td.name, arguments or {}, tier="explicit")
+    proposal_id = svc.create_pending(USER, td.name, arguments or {}, permission="ask")
     svc.approve(USER, proposal_id)
     return asyncio.run(svc.execute_approved(USER, proposal_id, registry=[td]))
 

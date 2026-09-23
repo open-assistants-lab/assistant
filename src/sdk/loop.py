@@ -49,6 +49,14 @@ from src.sdk.compression import (
     SummaryPersistenceResult,
 )
 from src.sdk.context_measurement import build_context_snapshot
+from src.sdk.execution_kernel import ExecutionKernel
+from src.sdk.execution_models import (
+    EffectState,
+    ExecutionCompletion,
+    ExecutionRequest,
+    Outcome,
+)
+from src.sdk.execution_store import ReceiptStore, SQLiteReceiptStore
 from src.sdk.guardrails import (
     GuardrailResult,
     GuardrailTripwire,
@@ -73,7 +81,7 @@ from src.sdk.subagent_models import TaskCancelledError
 from src.sdk.tools import ToolDefinition, ToolRegistry, ToolResult
 from src.sdk.tracing import SpanType, TraceProvider
 from src.sdk.validation import repair_tool_call
-from src.storage.paths import DEFAULT_USER_ID
+from src.storage.paths import DEFAULT_USER_ID, DataPaths, _validate_path_id
 
 logger = logging.getLogger(__name__)
 
@@ -336,6 +344,7 @@ class AgentLoop:
         context_sink: ContextSink | None = None,
         compression_sink: CompressionObserver | None = None,
         capture_bus: CaptureBus | None = None,
+        execution_store: ReceiptStore | None = None,
     ) -> None:
         self.provider = provider
         self.system_prompt = system_prompt
@@ -353,6 +362,8 @@ class AgentLoop:
         # Audit capture bus (P0-T3): emit-only boundary. Sinks (audit store,
         # later metering) never affect control flow.
         self.capture_bus = capture_bus or _audit.default_capture_bus
+        self._execution_store = execution_store
+        self._execution_kernel: ExecutionKernel | None = None
         self.subagent_ctx: SubagentContext | None = None
         self.cancel_event: asyncio.Event | None = cancel_event
         # Capability gate (audit E24-tools): when provided, returns True iff
@@ -709,7 +720,7 @@ class AgentLoop:
 
     async def _run_guards(self, tc: ToolCall) -> ToolResult | None:
         """Run middleware guard_tool_call hooks (M4-1). First non-None result
-        REPLACES execution (hard_block refusal / pending acknowledgment).
+        REPLACES execution (deny refusal / pending acknowledgment).
         Emit-only: guard exceptions never break the loop."""
         for mw in self.middlewares:
             guard = getattr(mw, "guard_tool_call", None)
@@ -770,6 +781,8 @@ class AgentLoop:
         try:
             # Always route through ainvoke: sync tool bodies are offloaded to
             # a worker thread there (audit S1) instead of blocking the loop.
+            if tc.name == "shell_execute":
+                return await self._execute_shell_with_kernel(tc, tool_def)
             result = await tool_def.ainvoke(tc.arguments)
             logger.info(
                 f"sdk.tool_executed tool={tc.name} source={tool_def.function.__module__ if tool_def.function else 'unknown'}"
@@ -785,6 +798,77 @@ class AgentLoop:
             logger.error(f"tool_execution_error tool={tc.name}: {e}")
             self._emit_audit(kind="error", tool=tc.name, call_id=tc.id, detail=str(e))
             return ToolResult(content=str(e), is_error=True)
+
+    async def _execute_shell_with_kernel(self, tc: ToolCall, tool_def: ToolDefinition) -> ToolResult:
+        kernel = self._get_execution_kernel()
+        run_id = str(getattr(self, "_flow_run_id", "") or "direct")
+        request_id = f"{run_id}:{tc.id}" if run_id != "direct" else tc.id
+        request = ExecutionRequest(
+            request_id=request_id,
+            run_id=run_id,
+            tool_call_id=tc.id,
+            tool_name=tc.name,
+            expected_effect=EffectState.NOT_APPLICABLE,
+            arguments=tc.arguments,
+            created_at=datetime.now(UTC),
+        )
+
+        async def execute(request: ExecutionRequest) -> ExecutionCompletion:
+            raw_result = await tool_def.ainvoke(request.arguments)
+            result = ToolResult.from_raw(raw_result)
+            return ExecutionCompletion(
+                outcome=Outcome.FAILED if result.is_error else Outcome.SUCCEEDED,
+                content={
+                    "content": result.content,
+                    "structured_content": result.structured_content,
+                    "is_error": result.is_error,
+                },
+            )
+
+        receipt = await kernel.run(
+            request,
+            execute,
+            timeout_seconds=tool_def.annotations.timeout_seconds,
+        )
+        content = receipt.content
+        if "content" in content:
+            result = ToolResult(
+                content=str(content["content"]),
+                structured_content=content.get("structured_content"),
+                is_error=bool(content.get("is_error", False)),
+            )
+        else:
+            outcome = receipt.outcome.value if receipt.outcome is not None else "running"
+            message = "Command timed out" if outcome == "timed_out" else receipt.termination_reason or outcome
+            result = ToolResult(
+                content=message,
+                structured_content={
+                    "receipt_id": receipt.receipt_id,
+                    "outcome": outcome,
+                },
+                is_error=True,
+            )
+        logger.info(
+            f"sdk.tool_executed tool={tc.name} source={tool_def.function.__module__ if tool_def.function else 'unknown'}"
+        )
+        self._emit_audit(
+            kind="tool_result",
+            tool=tc.name,
+            call_id=tc.id,
+            detail=result.content[:200],
+        )
+        return result
+
+    def _get_execution_kernel(self) -> ExecutionKernel:
+        if self._execution_kernel is None:
+            store = self._execution_store
+            if store is None:
+                user_id = self.user_id or DEFAULT_USER_ID
+                _validate_path_id(user_id, "user_id")
+                path = DataPaths().root / "private" / "execution" / user_id / "receipts.db"
+                store = SQLiteReceiptStore(path)
+            self._execution_kernel = ExecutionKernel(store)
+        return self._execution_kernel
 
     async def _try_lazy_load(self, tc: ToolCall) -> ToolResult | None:
         """Try to lazy-load a tool from the index and reconstruct its function."""
@@ -898,7 +982,7 @@ class AgentLoop:
                 logger.warning(f"wrap_tool_call error in {mw_name} for {tc.name}", exc_info=True)
 
         # M4-1 governance gate (issues #6/#12/#19): a middleware may REPLACE
-        # execution with a synthetic ToolResult (hard_block refusal / pending
+        # execution with a synthetic ToolResult (deny refusal / pending
         # ack). One dispatch, one guard evaluation.
         guard_result = await self._run_guards(tc_exec)
         if guard_result is not None:

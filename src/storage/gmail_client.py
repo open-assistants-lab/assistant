@@ -14,6 +14,8 @@ Usage:
 
 from __future__ import annotations
 
+import base64
+from email.message import EmailMessage
 from typing import Any, cast
 
 import httpx
@@ -53,7 +55,13 @@ class GmailClient:
             from connectkit.bridge import ConnectKitBridge
 
             self._bridge = ConnectKitBridge(user_id, spec_dir=spec_dir, vault_path=vault_path)
+        self._owns_http = http is None
         self._http = http or httpx.AsyncClient(timeout=30)
+
+    async def aclose(self) -> None:
+        """Close the transport created by this client."""
+        if self._owns_http:
+            await self._http.aclose()
 
     @property
     def vault(self) -> CredentialVault:
@@ -128,6 +136,31 @@ class GmailClient:
         resp.raise_for_status()
         return resp
 
+    async def _post(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        headers = {"Authorization": f"Bearer {await self._access_token()}"}
+        resp = await self._http.post(
+            BASE_URL + path,
+            params=params or {},
+            headers=headers,
+            json=payload or {},
+        )
+        if resp.status_code == 401:
+            headers = {"Authorization": f"Bearer {await self._access_token(force_refresh=True)}"}
+            resp = await self._http.post(
+                BASE_URL + path,
+                params=params or {},
+                headers=headers,
+                json=payload or {},
+            )
+        resp.raise_for_status()
+        return resp
+
     # ── Gmail API surface ─────────────────────────────────────────────────────
 
     async def list_messages(
@@ -156,3 +189,19 @@ class GmailClient:
         """Download one attachment body."""
         resp = await self._get(f"/users/me/messages/{message_id}/attachments/{attachment_id}")
         return resp.content
+
+    async def send_message(self, to: str, subject: str, body: str) -> dict[str, Any]:
+        """Send a plain-text message through the connected Gmail account."""
+        if not to.strip() or not subject.strip():
+            raise ValueError("Recipient and subject are required.")
+        message = EmailMessage()
+        message["To"] = to
+        message["Subject"] = subject
+        message.set_content(body)
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii").rstrip("=")
+        response = await self._post(
+            "/users/me/messages/send",
+            params={"userId": "me"},
+            payload={"raw": raw},
+        )
+        return cast(dict[str, Any], response.json())

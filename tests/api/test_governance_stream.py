@@ -1,6 +1,6 @@
 """Issue #12 regression: governance guards must run on the streaming path.
 
-A hard_block-tier tool called via a streamed loop must NOT execute; the
+A denied tool called via a streamed loop must NOT execute; the
 model receives a synthetic governance refusal instead.
 """
 
@@ -31,7 +31,7 @@ def gov_svc(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_hard_block_tool_never_executes_on_stream(gov_svc, monkeypatch):
+async def test_denied_tool_never_executes_on_stream(gov_svc, monkeypatch):
     from src.sdk.loop import AgentLoop
     from src.sdk.messages import Message
 
@@ -56,20 +56,20 @@ async def test_hard_block_tool_never_executes_on_stream(gov_svc, monkeypatch):
     monkeypatch.setattr(
         "src.sdk.governance.get_governance_service", lambda user_id=None: gov_svc
     )
-    # Tier via capabilities profile (plan M4-1 tier source).
+    # Permission via capabilities profile.
     import src.sdk.capabilities as caps_mod
 
     monkeypatch.setattr(
         caps_mod,
         "load_capabilities",
-        lambda root: {"governance_tiers": {"gated_tool": "hard_block"}},
+        lambda root: {"permissions": {"tools": {"gated_tool": "deny"}}},
     )
 
     from src.sdk.tools import tool
 
     @tool(name="gated_tool")
     async def gated_tool(x: str = "") -> str:  # pragma: no cover - must not run
-        """Gated tool (hard_block tier)."""
+        """Gated tool (deny permission)."""
         executed.append(x)
         return "EXECUTED"
 
@@ -153,7 +153,7 @@ class TestStreamBlockedCallTerminal:
         monkeypatch.setattr(gov, "_services", {})
         monkeypatch.setattr(gov, "_metering_lock_holder", None, raising=False)
         monkeypatch.setenv("GOVERNANCE_ENABLED", "true")
-        monkeypatch.setenv("GOVERNANCE_TIERS", '{"explicit_tool": "explicit"}')
+        monkeypatch.setenv("GOVERNANCE_PERMISSIONS", '{"tools":{"explicit_tool":"ask"}}')
         reload_settings()
         yield
         monkeypatch.undo()

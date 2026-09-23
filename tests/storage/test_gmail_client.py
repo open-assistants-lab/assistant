@@ -17,7 +17,9 @@ auth:
   oauth2:
     authorize_url: https://accounts.google.com/o/oauth2/v2/auth
     token_url: https://oauth2.googleapis.com/token
-    scopes: [https://www.googleapis.com/auth/gmail.readonly]
+    scopes:
+      - https://www.googleapis.com/auth/gmail.readonly
+      - https://www.googleapis.com/auth/gmail.send
     pkce: true
 """
 
@@ -98,6 +100,25 @@ async def test_list_messages_parses_and_uses_token(gmail_env):
     assert captured["auth"] == "Bearer ya29.valid"
     assert "maxResults=50" in captured["url"]
     assert "from%3Aclient" in captured["url"]  # httpx percent-encodes the query
+
+
+@pytest.mark.asyncio
+async def test_send_message_posts_rfc822_payload(gmail_env):
+    spec_dir, vault_path = gmail_env
+    _bridge(spec_dir, vault_path, VALID_TOKEN)
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["json"] = request.read().decode("utf-8")
+        return httpx.Response(200, json={"id": "sent-1", "threadId": "thread-1"})
+
+    client = _client(spec_dir, vault_path, _http(handler))
+    result = await client.send_message("person@example.com", "Hello", "Message body")
+
+    assert result["id"] == "sent-1"
+    assert captured["url"].endswith("/users/me/messages/send?userId=me")
+    assert '"raw"' in captured["json"]
 
 
 @pytest.mark.asyncio

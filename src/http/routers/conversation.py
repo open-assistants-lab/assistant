@@ -23,6 +23,7 @@ from pydantic import BaseModel
 import src.config.user_settings_store as _user_settings_store
 import src.sdk.context_measurement as _context_measurement
 import src.sdk.run_models as _run_models
+import src.sdk.session_events as _session_events
 from src.app_logging import get_logger
 from src.config import get_settings
 from src.http.auth import require_auth, resolve_user_id
@@ -34,6 +35,7 @@ from src.http.conversation_persistence import (
 from src.http.models import MessageRequest, MessageResponse, VerificationVerdict
 from src.http.stream_adapter import adapt_stream_chunk
 from src.sdk.messages import Message, ToolCall
+from src.sdk.run_events import ContextCompressedEvent
 from src.sdk.run_models import display_model_name
 from src.sdk.run_service import RunService
 from src.sdk.runner import (
@@ -354,6 +356,57 @@ async def get_conversation(
     }
 
 
+def _context_event_message(event: ContextCompressedEvent) -> dict[str, Any]:
+    before = event.data.before.estimated_tokens
+    after = event.data.after.estimated_tokens
+
+    def token_label(value: int) -> str:
+        return f"{value // 1000}k" if value >= 1000 else str(value)
+
+    content = (
+        f"Context updated · {token_label(before)} → {token_label(after)} tokens"
+        if before is not None and after is not None
+        else "Context updated"
+    )
+    return {
+        "role": "context",
+        "content": content,
+        "source": "session_log",
+        "timestamp": event.timestamp.isoformat(),
+        "metadata": {
+            "event_type": "context_compressed",
+            "status": event.data.status,
+            "before": event.data.before.model_dump(mode="json"),
+            "after": event.data.after.model_dump(mode="json"),
+        },
+    }
+
+
+def _replay_context_events(
+    turns: list[dict[str, Any]], session_id: str, user_id: str
+) -> list[dict[str, Any]]:
+    """Merge durable successful compression events into the turns projection."""
+    if not _session_events.session_log_enabled():
+        return turns
+    events = _session_events.get_session_event_store(user_id).events(session_id)
+    for event in events:
+        if not isinstance(event, ContextCompressedEvent) or event.data.status != "succeeded":
+            continue
+        message = _context_event_message(event)
+        matching = next((turn for turn in turns if turn["run_id"] == event.run_id), None)
+        if matching is None:
+            turns.append({"run_id": event.run_id, "metadata": {}, "messages": [message]})
+            continue
+        messages = matching["messages"]
+        insert_at = len(messages)
+        for index, existing in enumerate(messages):
+            if existing["role"] not in {"user", "context"}:
+                insert_at = index
+                break
+        messages.insert(insert_at, message)
+    return turns
+
+
 @router.get("/conversation/turns")
 async def get_conversation_turns(
     user_id: str =  DEFAULT_USER_ID,
@@ -366,25 +419,26 @@ async def get_conversation_turns(
     user_id = resolve_user_id(request, user_id)
     conversation = await aget_message_store(user_id)
     sid = session_id or "default"
-    turns, next_cursor = conversation.get_turns(sid, limit=limit, cursor=cursor)
+    raw_turns, next_cursor = conversation.get_turns(sid, limit=limit, cursor=cursor)
+    turns = [
+        {
+            "run_id": t["run_id"],
+            "metadata": t["metadata"],
+            "messages": [
+                {
+                    "role": m.role,
+                    "content": m.content,
+                    "source": m.metadata.get("source") if m.metadata else None,
+                    "timestamp": m.ts.isoformat() if m.ts else None,
+                    "metadata": m.metadata,
+                }
+                for m in t["messages"]
+            ],
+        }
+        for t in raw_turns
+    ]
     return {
-        "turns": [
-            {
-                "run_id": t["run_id"],
-                "metadata": t["metadata"],
-                "messages": [
-                    {
-                        "role": m.role,
-                        "content": m.content,
-                        "source": m.metadata.get("source") if m.metadata else None,
-                        "timestamp": m.ts.isoformat() if m.ts else None,
-                        "metadata": m.metadata,
-                    }
-                    for m in t["messages"]
-                ],
-            }
-            for t in turns
-        ],
+        "turns": _replay_context_events(turns, sid, user_id),
         "next_cursor": next_cursor,
     }
 

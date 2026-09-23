@@ -116,9 +116,8 @@ class GovernanceConfig(_BaseSettings):
     """Durable approval-gated tools (M4, issue #6)."""
 
     enabled: bool = False
-    # tool name -> tier: autonomous | show_then_auto_send | explicit | hard_block
-    tiers: dict[str, str] = Field(default_factory=dict)
-    auto_send_expiry_seconds: int = 300
+    # item-level permissions: tools/skills/subagents -> allow/ask/deny
+    permissions: dict[str, dict[str, str]] = Field(default_factory=dict)
     operation_callback_secret: str = Field(
         default="",
         description="Required deployment secret for external governed-operation callbacks.",

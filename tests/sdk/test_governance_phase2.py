@@ -38,7 +38,7 @@ annotations:
 def test_async_approval_consumes_pending_and_returns_same_operation(tmp_path) -> None:
     service = GovernanceService(data_root=str(tmp_path))
     proposal_id = service.create_pending(
-        "alice", "menu_change_execute", {"store": "HQ"}, tier="explicit"
+        "alice", "menu_change_execute", {"store": "HQ"}, permission="ask"
     )
 
     operation, accepted_now = service.approve_async_operation("alice", proposal_id)
@@ -53,8 +53,8 @@ def test_async_approval_consumes_pending_and_returns_same_operation(tmp_path) ->
 
 def test_operation_listing_filters_by_status_and_cancel_is_durable(tmp_path) -> None:
     service = GovernanceService(data_root=str(tmp_path))
-    first = service.create_pending("alice", "menu_change_execute", {}, tier="explicit")
-    second = service.create_pending("alice", "menu_change_execute", {}, tier="explicit")
+    first = service.create_pending("alice", "menu_change_execute", {}, permission="ask")
+    second = service.create_pending("alice", "menu_change_execute", {}, permission="ask")
     first_operation, _ = service.approve_async_operation("alice", first)
     second_operation, _ = service.approve_async_operation("alice", second)
     assert service.operations.request_cancel("alice", second_operation.operation_id)

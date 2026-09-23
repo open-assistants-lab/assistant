@@ -141,12 +141,12 @@ test "D3 successful context compression renders token reduction and failed compr
     const fk = sendAndStartStream(&model, &fx, "summarize context");
     const chat = model.activeChat();
 
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"context_compressed\",\"data\":{\"status\":\"succeeded\",\"before\":{\"tokens\":46000},\"after\":{\"tokens\":9000}}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"context_compressed\",\"data\":{\"status\":\"succeeded\",\"before\":{\"estimated_tokens\":46000},\"after\":{\"estimated_tokens\":9000}}}" } }, &fx);
     try testing.expectEqualStrings("system", chat._messages[chat.msg_count - 1].role);
     try testing.expectEqualStrings("Context updated · 46k → 9k tokens", chat._messages[chat.msg_count - 1].content);
 
     const before_count = chat.msg_count;
-    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"context_compressed\",\"data\":{\"status\":\"failed\",\"before\":{\"tokens\":8000},\"after\":{\"tokens\":4000}}}" } }, &fx);
+    main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"context_compressed\",\"data\":{\"status\":\"failed\",\"before\":{\"estimated_tokens\":8000},\"after\":{\"estimated_tokens\":4000}}}" } }, &fx);
     try testing.expectEqual(before_count, chat.msg_count);
 }
 
@@ -159,7 +159,7 @@ test "D3 history reload renders persisted context compression events in order" {
     model.allocator = arena;
     const chat = model.activeChat();
 
-    const item_json = "{\"role\":\"context\",\"content\":\"ignored old copy\",\"metadata\":{\"event_type\":\"context_compressed\",\"status\":\"succeeded\",\"before\":{\"tokens\":46000},\"after\":{\"tokens\":9000}},\"timestamp\":\"2026-01-01T12:34:56Z\"}";
+    const item_json = "{\"role\":\"context\",\"content\":\"ignored old copy\",\"metadata\":{\"event_type\":\"context_compressed\",\"status\":\"succeeded\",\"before\":{\"estimated_tokens\":46000},\"after\":{\"estimated_tokens\":9000}},\"timestamp\":\"2026-01-01T12:34:56Z\"}";
     const parsed = try std.json.parseFromSlice(std.json.Value, arena, item_json, .{});
     defer parsed.deinit();
     main.addHistoryMessage(chat, arena, parsed.value);
@@ -193,7 +193,7 @@ test "D3 launch states render starting first-run and unavailable recovery" {
     _ = try expectByText(tree.root, .button, "Reconnect");
 }
 
-test "D3 first-run API key submit uses provider classification contract" {
+test "D3 first-run API key submit validates the selected provider without sending a classify request" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -208,9 +208,148 @@ test "D3 first-run API key submit uses provider classification contract" {
     main.update(&model, .first_run_submit, &fx);
 
     const request = fx.pendingFetchAt(0).?;
-    try testing.expectEqualStrings("http://127.0.0.1:49152/v1/providers/classify-key", request.url);
+    try testing.expectEqualStrings("http://127.0.0.1:49152/v1/providers/validate-key", request.url);
+    try testing.expect(std.mem.indexOf(u8, request.body, "\"provider\":\"anthropic\"") != null);
     try testing.expect(std.mem.indexOf(u8, request.body, "sk-ant-test") != null);
+    try testing.expect(std.mem.indexOf(u8, request.url, "classify-key") == null);
     try expectHeader(request.headers, "Authorization", "Bearer launch-token");
+}
+
+test "D3 first-run validation stores the credential and requests the model catalog" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    try main.configureBackend(&model, arena, "http://127.0.0.1:49152", "launch-token");
+    model.launch_state = .first_run;
+    model.first_run_key_value = "sk-ant-test";
+    var fx = noopFx(arena);
+
+    main.update(&model, .{ .first_run_checked = .{ .key = 26, .outcome = .ok, .body = "{\"provider\":\"anthropic\",\"valid\":true}" } }, &fx);
+
+    try testing.expectEqualStrings("anthropic", model.active_provider);
+    try testing.expectEqualStrings("sk-ant-test", model.active_provider_key);
+    const request = fx.pendingFetchAt(0).?;
+    try testing.expectEqualStrings("http://127.0.0.1:49152/v1/settings/model-catalog?max_models_per_provider=20&max_providers=64", request.url);
+}
+
+test "D3 first-run catalog response enables the verified provider models" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    model.launch_state = .first_run;
+    model.active_provider = "anthropic";
+    model.active_provider_key = "sk-ant-test";
+    var fx = noopFx(arena);
+    const catalog_body =
+        \\{"providers":[{"id":"anthropic","name":"Anthropic","key_source":"none","has_key":false,"models":[{"id":"anthropic:claude","name":"Claude","provider":"anthropic","provider_display":"Anthropic","key_source":"none"}]}]}
+    ;
+
+    main.update(&model, .{ .settings_loaded = .{ .key = 10, .outcome = .ok, .body = catalog_body } }, &fx);
+
+    try testing.expect(model.first_run_model_picker);
+    try testing.expectEqualStrings("user", model.available_models[0].key_source);
+    try testing.expect(model.settings.providers[0].has_key);
+}
+
+test "D3 first-run model picker transitions to connected" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    model.launch_state = .first_run;
+    model.first_run_model_picker = true;
+    model.available_models[0] = .{ .id = "anthropic:claude", .name = "Claude", .provider = "anthropic", .provider_display = "Anthropic", .key_source = "user" };
+    model.available_model_count = 1;
+    var fx = noopFx(arena);
+
+    const tree = try buildTree(arena, &model);
+    _ = try expectByText(tree.root, .button, "Claude");
+
+    main.update(&model, .{ .first_run_select_model = 0 }, &fx);
+    try testing.expectEqual(main.LaunchState.connected, model.launch_state);
+    try testing.expect(!model.first_run_model_picker);
+    try testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
+    const request = fx.pendingFetchAt(0).?;
+    try testing.expectEqualStrings("http://assistant.invalid/v1/settings", request.url);
+}
+
+test "D3 first-run local scan populates a model picker" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    try main.configureBackend(&model, arena, "http://127.0.0.1:49152", "launch-token");
+    model.launch_state = .first_run;
+    var fx = noopFx(arena);
+
+    main.update(&model, .first_run_scan_local, &fx);
+    const request = fx.pendingFetchAt(0).?;
+    try testing.expectEqualStrings("http://127.0.0.1:49152/v1/providers/local-models?endpoint=http://127.0.0.1:11434", request.url);
+    main.update(&model, .{ .first_run_discovery = .{ .key = 26, .outcome = .ok, .body = "{\"models\":[{\"id\":\"llama3\",\"name\":\"Llama 3\"}]}" } }, &fx);
+    try testing.expect(model.first_run_model_picker);
+    try testing.expectEqualStrings("ollama:llama3", model.available_models[0].id);
+}
+
+test "D3 first-run custom endpoint control validates the entered URL" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    try main.configureBackend(&model, arena, "http://127.0.0.1:49152", "launch-token");
+    model.launch_state = .first_run;
+    var fx = noopFx(arena);
+
+    main.update(&model, .first_run_custom_endpoint, &fx);
+    main.update(&model, .{ .first_run_key_input = .{ .insert_text = "http://127.0.0.1:5678" } }, &fx);
+    main.update(&model, .first_run_submit, &fx);
+    const request = fx.pendingFetchAt(0).?;
+    try testing.expectEqualStrings("http://127.0.0.1:49152/v1/providers/validate-endpoint", request.url);
+    try testing.expect(std.mem.indexOf(u8, request.body, "http://127.0.0.1:5678") != null);
+}
+
+test "D3 unavailable reconnect control restarts the startup fetch" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    try main.configureBackend(&model, arena, "http://127.0.0.1:49152", "launch-token");
+    model.launch_state = .unavailable;
+    var fx = noopFx(arena);
+
+    main.update(&model, .reconnect, &fx);
+    try testing.expectEqual(main.LaunchState.starting, model.launch_state);
+    const request = fx.pendingFetchAt(0).?;
+    try testing.expectEqualStrings("http://127.0.0.1:49152/v1/conversation/sessions", request.url);
+}
+
+test "D3 connector requests leave identity resolution to the sidecar" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    try main.configureBackend(&model, arena, "http://127.0.0.1:49152", "launch-token");
+    var fx = noopFx(arena);
+
+    main.update(&model, .settings_tools, &fx);
+    const request = fx.pendingFetchAt(1).?;
+    try testing.expectEqualStrings("http://127.0.0.1:49152/connectors/catalog", request.url);
+    try testing.expect(std.mem.indexOf(u8, request.url, "user_id=") == null);
 }
 
 test "D3 connected empty state has only text starter prompts" {
@@ -292,10 +431,10 @@ test "models response labels selected model without credential source" {
     var fx = noopFx(arena);
 
     const models_body =
-        \\{"models":[{"id":"agnes:agnes-2.0-flash","name":"Agnes 2.0 Flash","provider":"agnes","provider_display":"Agnes","key_source":"hosted","billing_mode":"hosted"}]}
+        \\{"providers":[{"id":"agnes","name":"Agnes","key_source":"hosted","models":[{"id":"agnes:agnes-2.0-flash","name":"Agnes 2.0 Flash","provider":"agnes","provider_display":"Agnes","key_source":"hosted"}]}]}
     ;
-    main.update(&model, .{ .models_loaded = .{
-        .key = 9,
+    main.update(&model, .{ .settings_loaded = .{
+        .key = 10,
         .outcome = .ok,
         .body = models_body,
     } }, &fx);
@@ -315,10 +454,10 @@ test "hosted model shows change button" {
     var fx = noopFx(arena);
 
     const models_body =
-        \\{"models":[{"id":"agnes:agnes-2.0-flash","name":"Agnes 2.0 Flash","provider":"agnes","provider_display":"Agnes","key_source":"hosted","billing_mode":"hosted"}]}
+        \\{"providers":[{"id":"agnes","name":"Agnes","key_source":"hosted","models":[{"id":"agnes:agnes-2.0-flash","name":"Agnes 2.0 Flash","provider":"agnes","provider_display":"Agnes","key_source":"hosted"}]}]}
     ;
-    main.update(&model, .{ .models_loaded = .{
-        .key = 9,
+    main.update(&model, .{ .settings_loaded = .{
+        .key = 10,
         .outcome = .ok,
         .body = models_body,
     } }, &fx);
@@ -1789,9 +1928,11 @@ test "remove key clears the targeted provider not the first keyed one" {
     model.available_model_count = 2;
 
     main.update(&model, .{ .remove_key = 1 }, &fx);
-    const req = fx.pendingFetchAt(fx.pendingFetchCount() - 1).?;
-    main.update(&model, .{ .key_deleted = .{ .key = req.key, .outcome = .ok, .body = "" } }, &fx);
 
+    // D3: the credential lives in the keychain, not the sidecar's settings
+    // store (desktop mode refuses /settings/api-keys), so removal is local and
+    // synchronous — no fetch is queued.
+    try testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
     try testing.expect(!model.settings.providers[1].has_key);
     try testing.expect(model.settings.providers[0].has_key);
     try testing.expectEqual(@as(usize, 1), model.settings.providers[0].model_count);
@@ -2189,14 +2330,14 @@ test "model menu lists only ready models and selects one" {
     var fx = noopFx(arena);
 
     const models_body =
-        \\{"models":[
-        \\{"id":"agnes:agnes-2.0-flash","name":"Agnes 2.0 Flash","provider":"agnes","provider_display":"Agnes","key_source":"hosted","billing_mode":"hosted"},
-        \\{"id":"openai:gpt-4.1","name":"GPT-4.1","provider":"openai","provider_display":"OpenAI","key_source":"none","billing_mode":"api_key"},
-        \\{"id":"ollama-cloud:deepseek-v4-flash:0731","name":"DeepSeek V4 Flash 0731","provider":"ollama-cloud","provider_display":"Ollama Cloud","key_source":"hosted","billing_mode":"hosted"}
+        \\{"providers":[
+        \\{"id":"agnes","name":"Agnes","key_source":"hosted","models":[{"id":"agnes:agnes-2.0-flash","name":"Agnes 2.0 Flash","provider":"agnes","provider_display":"Agnes","key_source":"hosted"}]},
+        \\{"id":"openai","name":"OpenAI","key_source":"none","models":[{"id":"openai:gpt-4.1","name":"GPT-4.1","provider":"openai","provider_display":"OpenAI","key_source":"none"}]},
+        \\{"id":"ollama-cloud","name":"Ollama Cloud","key_source":"hosted","models":[{"id":"ollama-cloud:deepseek-v4-flash:0731","name":"DeepSeek V4 Flash 0731","provider":"ollama-cloud","provider_display":"Ollama Cloud","key_source":"hosted"}]}
         \\]}
     ;
-    main.update(&model, .{ .models_loaded = .{
-        .key = 9,
+    main.update(&model, .{ .settings_loaded = .{
+        .key = 10,
         .outcome = .ok,
         .body = models_body,
     } }, &fx);
@@ -2415,4 +2556,19 @@ test "disambiguateChatTitles falls back to session-id tail without created_at" {
 
     try testing.expect(!std.mem.eql(u8, model.chats[0].title, model.chats[1].title));
     try testing.expect(std.mem.endsWith(u8, model.chats[0].title, "…chat-7") or std.mem.endsWith(u8, model.chats[1].title, "…chat-7"));
+}
+
+test "D3 run request body carries the active credential only when set" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Local/ollama runs (no credential) must not invent a provider_keys field.
+    const without = main.runRequestBody(arena, "hi", "s1", "m1", "", "") orelse return error.ExpectedBody;
+    try testing.expect(std.mem.indexOf(u8, without, "provider_keys") == null);
+
+    // A keychain-restored credential is injected for the active provider.
+    const with_key = main.runRequestBody(arena, "hi", "s1", "m1", "openai", "sk-abc") orelse return error.ExpectedBody;
+    try testing.expect(std.mem.indexOf(u8, with_key, "\"provider_keys\":{\"openai\":\"sk-abc\"}") != null);
+    try testing.expect(std.mem.indexOf(u8, with_key, "\"message\":\"hi\"") != null);
 }

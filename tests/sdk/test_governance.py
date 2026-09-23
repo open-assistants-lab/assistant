@@ -1,4 +1,4 @@
-"""M4 governance unit tests: tiers, durable pendings, receipts (issue #6)."""
+"""M4 governance unit tests: permissions, durable pendings, receipts (issue #6)."""
 
 
 import pytest
@@ -25,35 +25,34 @@ def svc(tmp_path, monkeypatch):
     return GovernanceService()
 
 
-class TestTierResolution:
-    def test_autonomous_default(self, svc):
-        assert svc.resolve_tier("u1", "files_read") == "autonomous"
+class TestPermissionResolution:
+    def test_allow_default(self, svc):
+        assert svc.resolve_permission("u1", "files_read") == "allow"
 
-    def test_tier_from_settings_mapping(self, svc, monkeypatch):
-        monkeypatch.setenv("GOVERNANCE_TIERS", '{"files_delete": "explicit"}')
+    def test_permission_from_settings_mapping(self, svc, monkeypatch):
+        monkeypatch.setenv("GOVERNANCE_PERMISSIONS", '{"tools":{"files_delete":"ask"}}')
         from src.config import reload_settings
 
         reload_settings()
         try:
-            assert svc.resolve_tier("u1", "files_delete") == "explicit"
+            assert svc.resolve_permission("u1", "files_delete") == "ask"
         finally:
-            monkeypatch.delenv("GOVERNANCE_TIERS")
+            monkeypatch.delenv("GOVERNANCE_PERMISSIONS")
             reload_settings()
 
-    def test_requires_approval_annotation_defaults_to_explicit(self, svc, monkeypatch):
-        """Annotation declares: a tool with requires_approval defaults to the
-        explicit tier unless a settings tier mapping overrides it."""
+    def test_requires_approval_annotation_defaults_to_ask(self, svc, monkeypatch):
+        """Annotation declares that a tool requires an approval request."""
         from src.sdk.tools import ToolAnnotations
 
         assert ToolAnnotations(requires_approval=True) is not None
 
-    def test_tier_change_takes_effect_without_redeploy(self, svc, monkeypatch):
+    def test_permission_change_takes_effect_without_redeploy(self, svc, monkeypatch):
         from src.config import reload_settings
 
-        assert svc.resolve_tier("u1", "jobs_add") == "autonomous"
-        monkeypatch.setenv("GOVERNANCE_TIERS", '{"jobs_add": "hard_block"}')
+        assert svc.resolve_permission("u1", "jobs_add") == "allow"
+        monkeypatch.setenv("GOVERNANCE_PERMISSIONS", '{"tools":{"jobs_add":"deny"}}')
         reload_settings()
-        assert svc.resolve_tier("u1", "jobs_add") == "hard_block"
+        assert svc.resolve_permission("u1", "jobs_add") == "deny"
 
 
 class TestDurablePendings:
@@ -79,25 +78,16 @@ class TestDurablePendings:
         assert svc.approve("u1", pid) is True  # first approve executes
         assert svc.approve("u1", pid) is False  # duplicate = no-op, not error
 
-    def test_show_then_auto_send_lazy_expiry(self, svc, monkeypatch):
-        pid = svc.create_pending("u1", "email_send", {}, tier="show_then_auto_send")
-        # Not expired -> still pending
+    def test_ask_pending_requires_approval(self, svc):
+        pid = svc.create_pending("u1", "email_send", {}, permission="ask")
         assert svc.resolve_pending("u1", pid)["status"] == "pending"
-        # Clock shifted 10 min FORWARD (past the 300s expiry) -> lazily
-        # auto-approved at read time (read-time evaluation, no scheduler).
-        monkeypatch.setattr(
-            "src.sdk.governance._now_minus",
-            lambda seconds: __import__("datetime").datetime.now(
-                __import__("datetime").UTC
-            )
-            + __import__("datetime").timedelta(minutes=10),
-        )
+        assert svc.approve("u1", pid) is True
         assert svc.resolve_pending("u1", pid)["status"] == "approved"
 
 
 class TestReceipts:
     def test_proposal_approval_execution_linked(self, svc):
-        pid = svc.create_pending("u1", "jobs_add", {}, tier="explicit")
+        pid = svc.create_pending("u1", "jobs_add", {}, permission="ask")
         assert svc.approve("u1", pid) is True
         events = [e for e in svc.recent_events("u1") if e.kind == "approve"]
         kinds = [e.detail for e in events]
@@ -110,19 +100,18 @@ class TestDisabled:
     def test_disabled_service_passes_all(self, monkeypatch):
         from src.config import reload_settings
 
-        monkeypatch.delenv("GOVERNANCE_TIERS", raising=False)
+        monkeypatch.delenv("GOVERNANCE_PERMISSIONS", raising=False)
         monkeypatch.setenv("GOVERNANCE_ENABLED", "false")
         reload_settings()
         try:
             s = get_governance_service("u1")
-            assert s.resolve_tier("u1", "files_delete") == "autonomous"
+            assert s.resolve_permission("u1", "files_delete") == "allow"
         finally:
             monkeypatch.delenv("GOVERNANCE_ENABLED")
             reload_settings()
 
 class TestHITLMiddleware:
-    """M4-1: middleware integration — synthetic refusal shape (hard_block),
-    durable pending (explicit), auto-send window (show_then_auto_send)."""
+    """M4-1: middleware integration for allow, ask, and deny."""
 
     def _mw(self, tmp_path, monkeypatch, user_id="u1"):
         import src.sdk.governance as gov
@@ -147,26 +136,26 @@ class TestHITLMiddleware:
         return HITLMiddleware(user_id=user_id)
 
     @pytest.mark.asyncio
-    async def test_hard_block_synthetic_refusal(self, tmp_path, monkeypatch):
+    async def test_deny_synthetic_refusal(self, tmp_path, monkeypatch):
         mw = self._mw(tmp_path, monkeypatch)
-        monkeypatch.setenv("GOVERNANCE_TIERS", '{"jobs_add": "hard_block"}')
+        monkeypatch.setenv("GOVERNANCE_PERMISSIONS", '{"tools":{"jobs_add":"deny"}}')
         from src.config import reload_settings
 
         reload_settings()
         result = await mw.guard_tool_call("jobs_add", {"title": "x"})
         assert result is not None and result.is_error
-        assert result.structured_content["governance"] == "hard_block"
+        assert result.structured_content["governance"] == "deny"
         assert result.structured_content["executed"] is False
 
     @pytest.mark.asyncio
-    async def test_autonomous_passes_through(self, tmp_path, monkeypatch):
+    async def test_allow_passes_through(self, tmp_path, monkeypatch):
         mw = self._mw(tmp_path, monkeypatch)
         assert await mw.guard_tool_call("files_read", {}) is None
 
     @pytest.mark.asyncio
-    async def test_explicit_creates_durable_pending(self, tmp_path, monkeypatch):
+    async def test_ask_creates_durable_pending(self, tmp_path, monkeypatch):
         mw = self._mw(tmp_path, monkeypatch)
-        monkeypatch.setenv("GOVERNANCE_TIERS", '{"email_send": "explicit"}')
+        monkeypatch.setenv("GOVERNANCE_PERMISSIONS", '{"tools":{"email_send":"ask"}}')
         from src.config import reload_settings
 
         reload_settings()
@@ -180,26 +169,26 @@ class TestHITLMiddleware:
         assert row is not None and row["status"] == "pending"
 
     @pytest.mark.asyncio
-    async def test_show_then_auto_send_window(self, tmp_path, monkeypatch):
+    async def test_ask_always_stays_pending_until_approved(self, tmp_path, monkeypatch):
         mw = self._mw(tmp_path, monkeypatch)
-        monkeypatch.setenv("GOVERNANCE_TIERS", '{"email_send": "show_then_auto_send"}')
+        monkeypatch.setenv("GOVERNANCE_PERMISSIONS", '{"tools":{"email_send":"ask"}}')
         from src.config import reload_settings
 
         reload_settings()
         result = await mw.guard_tool_call("email_send", {})
-        assert result.structured_content["governance"] == "show_then_auto_send"
-        assert result.structured_content["status"] in ("pending", "approved")
+        assert result.structured_content["governance"] == "ask"
+        assert result.structured_content["status"] == "pending"
 
 
 class TestExecutionLegChecks:
-    """Bug-hunt fixes: execution leg re-checks capabilities + current tier."""
+    """Bug-hunt fixes: execution leg re-checks capabilities + permission."""
 
     @pytest.fixture()
     def svc_with_pending(self, svc, monkeypatch):
-        async def fake_invoke(arguments):
+        async def fake_invoke(x):
             return "EXECUTED-BODY"
 
-        monkeypatch.setenv("GOVERNANCE_TIERS", '{"gated_tool": "explicit"}')
+        monkeypatch.setenv("GOVERNANCE_PERMISSIONS", '{"tools":{"gated_tool":"ask"}}')
         import src.sdk.governance as gov
 
         monkeypatch.setattr(gov, "governance_enabled", lambda: True)
@@ -208,14 +197,17 @@ class TestExecutionLegChecks:
         td = ToolDefinition(
             name="gated_tool",
             description="gated",
-            input_schema={"type": "object", "properties": {}},
-            ainvoke=fake_invoke,  # type: ignore[arg-type]
+            parameters={
+                "type": "object",
+                "properties": {"x": {"type": "string"}},
+            },
+            function=fake_invoke,  # type: ignore[arg-type]
         )
         monkeypatch.setattr(
             "src.sdk.native_tools.get_native_tools", lambda: [td]
         )
         pid = svc.create_pending(
-            "u1", "gated_tool", {"x": "1"}, tier="explicit"
+            "u1", "gated_tool", {"x": "1"}, permission="ask"
         )
         svc.approve("u1", pid)
         return svc, pid
@@ -234,8 +226,22 @@ class TestExecutionLegChecks:
         assert "disabled" in result["structured_content"].get("error", "")
 
     @pytest.mark.asyncio
-    async def test_hard_block_tier_change_refuses_execution(self, svc_with_pending, monkeypatch):
-        """Tier re-resolution: pending created as explicit, now hard_block."""
+    async def test_approved_execution_persists_kernel_receipt(self, svc_with_pending):
+        from src.sdk.execution_store import SQLiteReceiptStore
+
+        svc, pid = svc_with_pending
+        result = await svc.execute_approved("u1", pid)
+        assert result["is_error"] is False
+
+        store = SQLiteReceiptStore(svc._paths.root / "private" / "execution" / "u1" / "receipts.db")
+        receipt = await store.get_by_request(f"proposal:{pid}")
+        assert receipt is not None
+        assert receipt.outcome.value == "succeeded"
+        await store.close()
+
+    @pytest.mark.asyncio
+    async def test_deny_permission_change_refuses_execution(self, svc_with_pending, monkeypatch):
+        """Permission re-resolution: pending created as ask, now denied."""
         import src.sdk.governance as gov
 
         svc, pid = svc_with_pending
@@ -245,25 +251,25 @@ class TestExecutionLegChecks:
             lambda user_id=None: svc,
         )
         monkeypatch.setattr(
-            src_sdk_governance_tier_source(svc, monkeypatch), "resolve_tier"
+            src_sdk_governance_permission_source(svc, monkeypatch), "resolve_permission"
         ) if False else None
-        # Force resolve_tier to return hard_block via capabilities.
+        # Force resolve_permission to return deny via capabilities.
         import src.sdk.capabilities as caps_mod
 
         monkeypatch.setattr(
             caps_mod,
             "load_capabilities",
-            lambda root: {"governance_tiers": {"gated_tool": "hard_block"}},
+            lambda root: {"permissions": {"tools": {"gated_tool": "deny"}}},
         )
         result = await svc.execute_approved("u1", pid)
         assert result["is_error"] is True
-        assert "hard_block" in result["content"]
+        assert "denied" in result["content"]
 
 
 import src.sdk.governance as _gov_mod  # noqa: E402
 
 
-def src_sdk_governance_tier_source(svc, monkeypatch):  # pragma: no cover
+def src_sdk_governance_permission_source(svc, monkeypatch):  # pragma: no cover
     return _gov_mod
 
 
@@ -273,7 +279,7 @@ class TestPathTraversal:
             svc._db_path("../../tmp/evil")
 
     @pytest.mark.asyncio
-    async def test_resolve_tier_corrupt_caps_fails_closed(self, svc, monkeypatch):
+    async def test_resolve_permission_corrupt_caps_fails_closed(self, svc, monkeypatch):
         import src.sdk.capabilities as caps_mod
         import src.sdk.governance as gov
 
@@ -284,8 +290,8 @@ class TestPathTraversal:
         monkeypatch.setattr(
             gov, "get_governance_service", lambda user_id=None: svc
         )
-        tier = svc.resolve_tier("u1", "some_tool")
-        assert tier == "explicit"  # fail closed: conservative pending
+        permission = svc.resolve_permission("u1", "some_tool")
+        assert permission == "ask"  # fail closed: conservative pending
 
 
 class TestFatigueMetric:
@@ -301,16 +307,16 @@ class TestFatigueMetric:
         assert s["overrides"] == 1
         assert s["override_rate"] == pytest.approx(0.33)
 
-    def test_approve_counts_and_show_then_auto_send_is_override(self, svc):
-        pid_explicit = svc.create_pending("u1", "writer", {"a": 1}, tier="explicit")
-        pid_auto = svc.create_pending("u1", "mailer", {"b": 2}, tier="show_then_auto_send")
-        svc.approve("u1", pid_explicit)
-        svc.approve("u1", pid_auto)  # early approve = override of auto-send
+    def test_ask_approval_is_not_an_override(self, svc):
+        pid_writer = svc.create_pending("u1", "writer", {"a": 1}, permission="ask")
+        pid_mailer = svc.create_pending("u1", "mailer", {"b": 2}, permission="ask")
+        svc.approve("u1", pid_writer)
+        svc.approve("u1", pid_mailer)
         stats = {s["tool"]: s for s in svc.tool_stats("u1")}
         assert stats["writer"]["approvals"] == 1
         assert stats["writer"]["overrides"] == 0
         assert stats["mailer"]["approvals"] == 1
-        assert stats["mailer"]["overrides"] == 1
+        assert stats["mailer"]["overrides"] == 0
 
     def test_stats_empty_when_no_proposals(self, svc):
         assert svc.tool_stats("nobody") == []
@@ -344,7 +350,7 @@ class TestReplayResume:
         self._seed_run_events(monkeypatch, tmp_path, "ru", "sess-1")
 
         pid = svc.create_pending(
-            "ru", "writer", {"q": 1}, tier="explicit", session_id="sess-1"
+            "ru", "writer", {"q": 1}, permission="ask", session_id="sess-1"
         )
         svc.approve("ru", pid)
 
@@ -368,7 +374,7 @@ class TestReplayResume:
 
         monkeypatch.setattr(gov, "governance_enabled", lambda: True)
         pid = svc.create_pending(
-            "ru", "writer", {"q": 1}, tier="explicit", session_id=None
+            "ru", "writer", {"q": 1}, permission="ask", session_id=None
         )
         svc.approve("ru", pid)
         result = await svc.replay_resume("ru", pid)
@@ -384,7 +390,7 @@ class TestReplayResume:
         # flag is off at replay_resume call time, forcing the fallback.
         monkeypatch.setattr(se, "session_log_enabled", lambda: False)
         pid = svc.create_pending(
-            "ru", "writer", {"q": 1}, tier="explicit", session_id="sess-2"
+            "ru", "writer", {"q": 1}, permission="ask", session_id="sess-2"
         )
         svc.approve("ru", pid)
         result = await svc.replay_resume("ru", pid)
@@ -425,7 +431,7 @@ class TestSessionLogParity:
         )
 
         pid = svc.create_pending(
-            "u1", "gated_tool", {"x": "1"}, tier="explicit",
+            "u1", "gated_tool", {"x": "1"}, permission="ask",
             session_id="sess-1",
         )
         seq = store.next_sequence("sess-1")
@@ -484,7 +490,7 @@ class TestSessionLogParity:
         monkeypatch.setattr(gov, "get_session_event_store", lambda user_id: store)
 
         pid = svc.create_pending(
-            "u1", "gated_tool", {"x": "1"}, tier="explicit", session_id="sess-err",
+            "u1", "gated_tool", {"x": "1"}, permission="ask", session_id="sess-err",
         )
         assert svc.approve("u1", pid) is True
 
@@ -512,7 +518,7 @@ class TestSessionLogParity:
         store = SessionEventStore(str(tmp_path / "root" / "events.db"))
         monkeypatch.setattr(gov, "get_session_event_store", lambda user_id: store)
 
-        pid = svc.create_pending("u1", "gated_tool", {"x": "1"}, tier="explicit")
+        pid = svc.create_pending("u1", "gated_tool", {"x": "1"}, permission="ask")
         svc.approve("u1", pid)
 
         class FakeTD:
@@ -526,38 +532,6 @@ class TestSessionLogParity:
         out = asyncio.run(svc.execute_approved("u1", pid, [FakeTD()]))
         assert out["structured_content"]["executed"] is True
         assert store.events("sess-x") == []  # nothing written without linkage
-
-
-class TestOverrideCounting:
-    """Review P1-2: machine auto-approve at expiry is NOT a human override."""
-
-    def test_lazy_expiry_auto_approve_not_counted_as_override(
-        self, svc, monkeypatch
-    ):
-        import src.sdk.governance as gov
-
-        pid = svc.create_pending(
-            "u1", "auto_tool", {"x": "1"}, tier="show_then_auto_send"
-        )
-        # Freeze time past expiry: shift the clock helper.
-        real_now = gov._now_minus
-        monkeypatch.setattr(
-            gov, "_now_minus", lambda n: real_now(n - 10_000)
-        )
-        row = svc.resolve_pending("u1", pid)
-        assert row["status"] == "approved"  # auto-approved
-        stats = {s["tool"]: s for s in svc.tool_stats("u1")}
-        assert stats["auto_tool"]["approvals"] == 1
-        assert stats["auto_tool"]["overrides"] == 0  # NOT a human override
-
-    def test_human_early_approve_still_counts(self, svc):
-        pid = svc.create_pending(
-            "u1", "auto_tool", {"x": "1"}, tier="show_then_auto_send"
-        )
-        assert svc.approve("u1", pid) is True  # human approves early
-        stats = {s["tool"]: s for s in svc.tool_stats("u1")}
-        assert stats["auto_tool"]["overrides"] == 1
-
 
 
 class _CountingHITL(HITLMiddleware):
@@ -620,7 +594,7 @@ class TestBlockedCallTerminal:
         monkeypatch.setattr(gov, "_services", {})
         monkeypatch.setattr(gov, "_metering_lock_holder", None, raising=False)
         monkeypatch.setenv("GOVERNANCE_ENABLED", "true")
-        monkeypatch.setenv("GOVERNANCE_TIERS", '{"explicit_tool": "explicit"}')
+        monkeypatch.setenv("GOVERNANCE_PERMISSIONS", '{"tools":{"explicit_tool":"ask"}}')
         reload_settings()
         yield
         monkeypatch.undo()

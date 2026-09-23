@@ -1,13 +1,4 @@
-"""M4-1 review P0: enforcement wiring + execution leg + receipts (issue #6).
-
-Covers:
-- guard hook blocks hard_block tools with a synthetic refusal (no execution)
-- explicit tier: durable pending; approve endpoint executes EXACTLY once
-  (idempotent double-approve)
-- show_then_auto_send: window elapses at read time — pending before,
-  auto-approved + executed after (monkeypatched clock)
-- governance.enabled=false -> zero governance hooks in a loop
-"""
+"""M4-1 review P0: enforcement wiring + execution leg + receipts (issue #6)."""
 
 from __future__ import annotations
 
@@ -34,7 +25,7 @@ def gov_env(monkeypatch, tmp_path):
     monkeypatch.setattr(gov, "_services", {})
     monkeypatch.setattr(gov, "_metering_lock_holder", None, raising=False)
     monkeypatch.setenv("GOVERNANCE_ENABLED", "true")
-    monkeypatch.setenv("GOVERNANCE_TIERS", '{"email_send": "explicit"}')
+    monkeypatch.setenv("GOVERNANCE_PERMISSIONS", '{"tools":{"email_send":"ask"}}')
     reload_settings()
     yield
     monkeypatch.undo()
@@ -63,7 +54,7 @@ class TestGovernanceEndpoints:
         from src.sdk.governance import get_governance_service
 
         pid = get_governance_service("govu").create_pending(
-            "govu", "time_get", {"x": 1}, tier="explicit"
+            "govu", "time_get", {"x": 1}, permission="ask"
         )
 
         executed: list[dict] = []
@@ -94,7 +85,7 @@ class TestGovernanceEndpoints:
         from src.sdk.governance import get_governance_service
 
         pid = get_governance_service("govu").create_pending(
-            "govu", "email_send", {}, tier="explicit"
+            "govu", "email_send", {}, permission="ask"
         )
         r = client.post(f"/v1/governance/pendings/{pid}/cancel", params={"user_id": "govu"})
         assert r.status_code == 200
@@ -109,8 +100,8 @@ def grouter_module():
 
 
 class TestLoopGuardHook:
-    async def test_guard_blocks_hard_block_tool(self, gov_env, monkeypatch):
-        """A hard_block tool call returns the synthetic refusal WITHOUT
+    async def test_guard_blocks_denied_tool(self, gov_env, monkeypatch):
+        """A denied tool call returns the synthetic refusal WITHOUT
         executing the tool body."""
         from src.sdk.loop import AgentLoop, RunConfig
         from src.sdk.messages import Message
@@ -124,7 +115,7 @@ class TestLoopGuardHook:
             return "SHOULD NOT RUN"
 
         td = ToolDefinition(name="email_send", description="x", function=body)
-        monkeypatch.setenv("GOVERNANCE_TIERS", '{"email_send": "hard_block"}')
+        monkeypatch.setenv("GOVERNANCE_PERMISSIONS", '{"tools":{"email_send":"deny"}}')
         from src.config import reload_settings
 
         reload_settings()
@@ -151,7 +142,7 @@ class TestLoopGuardHook:
         from src.sdk.middleware_hitl import HITLMiddleware
 
         monkeypatch.setenv("GOVERNANCE_ENABLED", "false")
-        monkeypatch.setenv("GOVERNANCE_TIERS", '{"time_get": "hard_block"}')
+        monkeypatch.setenv("GOVERNANCE_PERMISSIONS", '{"tools":{"time_get":"deny"}}')
         from src.config import reload_settings
 
         reload_settings()
@@ -212,49 +203,20 @@ def test_tool_stats_endpoint(client, test_user_id):
     assert rows[0]["override_rate"] == 0.5
 
 
-def test_pendings_scan_reports_the_persisted_row_not_a_literal_status(
-    client, monkeypatch
-):
-    """A race during the auto-send scan must not be labelled "executed".
-
-    The scan used to merge a literal {"status": "executed", "outcome": ...}
-    into the row it returned, so a proposal settled differently meanwhile (for
-    example consumed by the async leg) still read as executed.
-    """
-    from datetime import UTC, datetime, timedelta
-
+def test_pendings_scan_reports_persisted_rows_without_execution(client):
+    """Listing approvals is read-only; execution happens on approval."""
     from src.sdk.governance import get_governance_service
 
-    svc = get_governance_service("govu")
-    pid = svc.create_pending(
-        "govu", "files_read", {"path": "x"}, tier="show_then_auto_send"
-    )
-    # Force the auto-send window to have elapsed and the row to be approved.
-    with svc._conn("govu") as conn:
+    service = get_governance_service("govu")
+    pid = service.create_pending("govu", "files_read", {"path": "x"}, permission="ask")
+    with service._conn("govu") as conn:
         conn.execute(
-            "UPDATE proposals SET expires_at=?, status='approved' WHERE proposal_id=?",
-            ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(), pid),
+            "UPDATE proposals SET status='approved' WHERE proposal_id=?", (pid,)
         )
         conn.commit()
 
-    import src.http.routers.governance as grouter
-
-    async def fake_execute(user_id, proposal_id, tool, arguments):
-        # Simulate the async leg consuming the proposal while the scan runs.
-        with svc._conn(user_id) as conn:
-            conn.execute(
-                "UPDATE proposals SET status='consumed' WHERE proposal_id=?",
-                (proposal_id,),
-            )
-            conn.commit()
-        return {"status": "consumed"}
-
-    monkeypatch.setattr(grouter, "execute_approved_tool", fake_execute)
-
-    r = client.get("/v1/governance/pendings", params={"user_id": "govu"})
-    assert r.status_code == 200
-    row = next(item for item in r.json() if item["proposal_id"] == pid)
-
-    assert row["status"] == "consumed", row
-    assert row["outcome"] is None, row
-    assert row["execution"] == {"status": "consumed"}, row
+    response = client.get("/v1/governance/pendings", params={"user_id": "govu"})
+    assert response.status_code == 200
+    row = next(item for item in response.json() if item["proposal_id"] == pid)
+    assert row["status"] == "approved"
+    assert "execution" not in row

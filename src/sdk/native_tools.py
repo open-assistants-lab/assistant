@@ -33,6 +33,7 @@ from src.sdk.tools_core.browser import (
     browser_snapshot,
 )
 from src.sdk.tools_core.code_execute import code_execute
+from src.sdk.tools_core.connector_gmail import connector_gmail_send
 from src.sdk.tools_core.corpus import index_corpus, search_corpus
 from src.sdk.tools_core.design_extractor import design_extract
 from src.sdk.tools_core.email_draft import email_draft
@@ -193,6 +194,8 @@ def _register_all() -> None:
         registry.register(code_execute)
     if not _desktop_excluded("email_draft"):
         registry.register(email_draft)
+    if not _desktop_excluded("connector_gmail_send"):
+        registry.register(connector_gmail_send)
     if not _desktop_excluded("design_extract"):
         registry.register(design_extract)
 

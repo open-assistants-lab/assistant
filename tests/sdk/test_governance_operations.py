@@ -113,14 +113,14 @@ def test_ledger_schema_preserves_legacy_proposal_data(tmp_path):
         conn.execute(
             """CREATE TABLE proposals (
                 proposal_id TEXT PRIMARY KEY, ts TEXT NOT NULL, tool TEXT NOT NULL,
-                arguments TEXT NOT NULL, tier TEXT NOT NULL, status TEXT NOT NULL,
+                arguments TEXT NOT NULL, permission TEXT NOT NULL, status TEXT NOT NULL,
                 expires_at TEXT, session_id TEXT
             )"""
         )
         conn.execute(
             """INSERT INTO proposals VALUES
             ('legacy', '2026-01-01T00:00:00+00:00', 'menu_change_execute', '{}',
-             'explicit', 'approved', NULL, 'session-42')"""
+             'ask', 'approved', NULL, 'session-42')"""
         )
 
     assert service.operations.approve_and_create_operation("alice", "legacy").proposal_id == "legacy"

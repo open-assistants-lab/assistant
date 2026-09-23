@@ -26,12 +26,30 @@ Public API:
     SubagentResult, TaskStatus, TaskCancelledError - subagent models
     SubagentWorkQueueDB, get_work_queue - work queue database
     SubagentCoordinator, get_coordinator - subagent coordination
+    ExecutionKernel - shared execution orchestration
+    Outcome, ExecutorState, EffectState, VerificationState - execution lifecycle
+    ExecutionRequest, ExecutionCompletion, ExecutionEvent, Observation, Receipt - execution contracts
+    ReceiptStore, SQLiteReceiptStore, PostgresReceiptStore - durable receipt storage
+    PermissionPolicy - pure allow/ask/deny policy resolution
 """
 
 from agentprofile.models import AgentProfile
 from hybriddb import EmbeddingModelError, HybridDB, SearchMode
 
 from src.sdk.coordinator import SubagentCoordinator, get_coordinator
+from src.sdk.execution_kernel import ExecutionKernel
+from src.sdk.execution_models import (
+    EffectState,
+    ExecutionCompletion,
+    ExecutionEvent,
+    ExecutionRequest,
+    ExecutorState,
+    Observation,
+    Outcome,
+    Receipt,
+    VerificationState,
+)
+from src.sdk.execution_store import ReceiptStore, SQLiteReceiptStore
 from src.sdk.guardrails import (
     GuardrailResult,
     GuardrailTripwire,
@@ -44,6 +62,8 @@ from src.sdk.loop import AgentLoop, CostTracker, Interrupt, RunConfig
 from src.sdk.messages import Message, StreamChunk, ToolCall, Usage
 from src.sdk.middleware import Middleware
 from src.sdk.middleware_summarization import SummarizationMiddleware
+from src.sdk.permission_policy import PermissionPolicy
+from src.sdk.postgres_receipt_store import PostgresReceiptStore
 from src.sdk.providers.base import LLMProvider, ModelCost, ModelInfo
 from src.sdk.providers.factory import create_model_from_config, create_provider
 from src.sdk.providers.ollama import OllamaCloud
@@ -148,4 +168,18 @@ __all__ = [
     "get_work_queue",
     "SubagentCoordinator",
     "get_coordinator",
+    "ExecutionKernel",
+    "Outcome",
+    "ExecutorState",
+    "EffectState",
+    "ExecutionCompletion",
+    "VerificationState",
+    "ExecutionRequest",
+    "ExecutionEvent",
+    "Observation",
+    "Receipt",
+    "ReceiptStore",
+    "SQLiteReceiptStore",
+    "PostgresReceiptStore",
+    "PermissionPolicy",
 ]

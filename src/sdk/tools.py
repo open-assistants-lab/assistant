@@ -57,8 +57,8 @@ class ToolAnnotations(BaseModel):
     destructive: bool = False
     idempotent: bool = False
     open_world: bool = False
-    # M4 (issue #6): declared by the tool author; the governance tier
-    # resolution maps this to "explicit" unless a settings tier overrides it.
+    # M4 (issue #6): declared by the tool author; permission resolution maps
+    # this to "ask" unless an item permission overrides it.
     requires_approval: bool = False
     # Issue #21: async execution is opt-in; existing tools retain synchronous
     # approval/execution behavior.

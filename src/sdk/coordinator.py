@@ -648,8 +648,8 @@ class SubagentCoordinator:
 
         summarization_mw = SummarizationMiddleware(model=model_str)
         middlewares: list[Any] = [summarization_mw]
-        # Bug-hunt P1: governance tiers must hold on delegated loops too —
-        # otherwise hard_block is bypassable via subagent_delegate.
+        # Bug-hunt P1: permissions must hold on delegated loops too —
+        # otherwise deny could be bypassed via subagent_delegate.
         from src.sdk.governance import governance_enabled
         from src.sdk.middleware_hitl import HITLMiddleware
 

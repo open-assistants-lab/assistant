@@ -1,9 +1,4 @@
-"""Governance pendings: list / approve (deterministic execution) / cancel.
-
-M4-1 review P0: the approval EXECUTION leg. Approve transitions the pending
-and executes the approved tool exactly once via the registry; show_then_auto_send
-proposals whose window has elapsed auto-approve + execute at READ time.
-"""
+"""Governance pendings: list / approve (deterministic execution) / cancel."""
 
 from __future__ import annotations
 
@@ -72,58 +67,16 @@ def _authorized_governance_user(request: Request, user_id: str) -> str:
 
 @router.get("/pendings")
 async def list_pendings(request: Request, user_id: str = DEFAULT_USER_ID) -> list[dict[str, Any]]:
-    """List pendings; lazily resolve expired show_then_auto_send windows
-    (auto-approve + execute — the window must actually elapse)."""
+    """List durable pending proposals without changing their status."""
     resolved_user = resolve_user_id(request, user_id)
     enforce_user_id(resolved_user, getattr(getattr(request, "state", None), "identity", None))
     user_id = resolved_user
     svc = _svc(user_id)
     out: list[dict[str, Any]] = []
     for pid in svc.list_pending_ids(user_id):
-        row = svc.resolve_pending(user_id, pid)  # lazy expiry at read time
-        if row is None or row["status"] == "missing":
-            continue
-        if row["tier"] == "show_then_auto_send" and row["status"] == "approved":
-            if row.get("executor") is not None:
-                # Issue #33: an executor-bearing proposal is the durable async
-                # path (#21). Running it here would execute a long tool inside
-                # this request, create no operation (so no cancel, no dispatch
-                # receipt), and settle the proposal through the synchronous
-                # leg. Mirror the approve endpoint instead.
-                try:
-                    executor = svc.validate_async_approval(user_id, row)
-                    created, _approved_now = svc.approve_external_operation(
-                        user_id, pid, executor
-                    )
-                    execution: dict[str, Any] = {
-                        "status": "accepted",
-                        "operation_id": created.operation.operation_id,
-                        # Parity with the approve endpoint's payload.
-                        "operation_status": created.operation.status.value,
-                    }
-                except ValueError as exc:
-                    # Fail closed without breaking the scan: leave the proposal
-                    # as it is and report why it was not dispatched. Log it too
-                    # — a deployment misconfiguration (missing callback secret,
-                    # non-allowlisted host) raises ValueError from the same call
-                    # chain and would otherwise be silent on this path.
-                    logger.warning(
-                        "governance.pendings_async_refused",
-                        {"proposal_id": pid, "tool": row["tool"], "error": str(exc)},
-                        user_id=user_id,
-                    )
-                    execution = {"status": "refused", "detail": str(exc)}
-            else:
-                exec_row = await execute_approved_tool(
-                    user_id, pid, row["tool"], row["arguments"]
-                )
-                execution = exec_row
-            # Re-read: a race (async consume, cancel, double-approve) may have
-            # settled the row differently, and the persisted status and outcome
-            # are the truth. Hard-coding "executed" here could label a consumed
-            # or cancelled proposal as executed with outcome None.
-            row = {**(svc.get_pending(user_id, pid) or row), "execution": execution}
-        out.append(row)
+        row = svc.resolve_pending(user_id, pid)
+        if row is not None and row["status"] != "missing":
+            out.append(row)
     return out
 
 
