@@ -18,6 +18,14 @@ from typing import Any
 
 from src.app_logging import get_logger
 from src.sdk.audit import AuditEvent
+from src.sdk.execution_kernel import ExecutionKernel
+from src.sdk.execution_models import (
+    EffectState,
+    ExecutionCompletion,
+    ExecutionRequest,
+    Outcome,
+)
+from src.sdk.execution_store import SQLiteReceiptStore
 from src.sdk.governance_operations import GovernanceOperationStore, GovernedOperation
 from src.sdk.permission_policy import PermissionPolicy
 from src.sdk.run_events import ToolResultData, ToolResultEvent
@@ -86,6 +94,7 @@ class GovernanceService:
         self._lock = threading.Lock()
         self.operations = GovernanceOperationStore(self._conn, self._lock)
         self._recent: list[AuditEvent] = []  # receipt ring buffer (process-local)
+        self._execution_kernels: dict[str, ExecutionKernel] = {}
 
     def _db_path(self, user_id: str) -> Path:
         from src.storage.paths import _validate_path_id
@@ -424,18 +433,79 @@ class GovernanceService:
         row: dict[str, Any] | None = self.get_pending(user_id, proposal_id)
         return row if row is not None else {"status": "missing"}
 
+    def _execution_kernel_for(self, user_id: str) -> ExecutionKernel:
+        kernel = self._execution_kernels.get(user_id)
+        if kernel is None:
+            from src.storage.paths import _validate_path_id
+
+            _validate_path_id(user_id, "user_id")
+            path = self._paths.root / "private" / "execution" / user_id / "receipts.db"
+            kernel = ExecutionKernel(SQLiteReceiptStore(path))
+            self._execution_kernels[user_id] = kernel
+        return kernel
+
+    @staticmethod
+    def _result_from_receipt(receipt: Any) -> dict[str, Any]:
+        stored = receipt.content.get("result") if receipt.content else None
+        if isinstance(stored, dict):
+            return stored
+        return {
+            "content": "Governed execution completed without a result payload.",
+            "structured_content": {"executed": False, "error": "missing result"},
+            "is_error": True,
+            "outcome": receipt.outcome.value if receipt.outcome is not None else OUTCOME_FAILED,
+        }
+
     async def execute_approved(
         self,
         user_id: str,
         proposal_id: str,
         registry: Any | None = None,
     ) -> dict[str, Any]:
-        """Deterministic execution leg (M4-1 review P0): run the approved
-        tool call EXACTLY once via the tool registry, then mark executed.
+        """Execute an approved proposal through the shared execution kernel."""
+        row = self.get_pending(user_id, proposal_id)
+        if row is None:
+            return {"status": "missing"}
+        if row["status"] == "executed":
+            return {"status": "executed", "already": True, "outcome": row.get("outcome")}
+        if row["status"] != "approved":
+            return {"status": row["status"]}
 
-        Idempotent: only an approved proposal executes; approved->executed
-        transition emits the execution receipt with the proposal id as
-        call_id (proposal -> approval -> execution chain on the bus)."""
+        request = ExecutionRequest(
+            request_id=f"proposal:{proposal_id}",
+            run_id=proposal_id,
+            tool_call_id=proposal_id,
+            tool_name=row["tool"],
+            expected_effect=EffectState.NOT_APPLICABLE,
+            arguments=row["arguments"] or {},
+            created_at=datetime.now(UTC),
+        )
+
+        async def execute(_: ExecutionRequest) -> ExecutionCompletion:
+            result = await self._execute_approved_once(user_id, proposal_id, registry)
+            try:
+                outcome = Outcome(str(result.get("outcome") or outcome_for(result)))
+            except ValueError:
+                outcome = Outcome.FAILED
+            return ExecutionCompletion(
+                outcome=outcome,
+                content={"result": result},
+            )
+
+        receipt = await self._execution_kernel_for(user_id).run(request, execute)
+        return self._result_from_receipt(receipt)
+
+    async def _execute_approved_once(
+        self,
+        user_id: str,
+        proposal_id: str,
+        registry: Any | None = None,
+    ) -> dict[str, Any]:
+        """Execute the approved proposal body once inside the kernel.
+
+        The outer method owns the shared execution lifecycle; this method
+        preserves the existing governance result and proposal transition.
+        """
         row = self.get_pending(user_id, proposal_id)
         if row is None:
             return {"status": "missing"}

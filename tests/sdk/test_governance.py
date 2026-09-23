@@ -185,7 +185,7 @@ class TestExecutionLegChecks:
 
     @pytest.fixture()
     def svc_with_pending(self, svc, monkeypatch):
-        async def fake_invoke(arguments):
+        async def fake_invoke(x):
             return "EXECUTED-BODY"
 
         monkeypatch.setenv("GOVERNANCE_PERMISSIONS", '{"tools":{"gated_tool":"ask"}}')
@@ -197,8 +197,11 @@ class TestExecutionLegChecks:
         td = ToolDefinition(
             name="gated_tool",
             description="gated",
-            input_schema={"type": "object", "properties": {}},
-            ainvoke=fake_invoke,  # type: ignore[arg-type]
+            parameters={
+                "type": "object",
+                "properties": {"x": {"type": "string"}},
+            },
+            function=fake_invoke,  # type: ignore[arg-type]
         )
         monkeypatch.setattr(
             "src.sdk.native_tools.get_native_tools", lambda: [td]
@@ -221,6 +224,20 @@ class TestExecutionLegChecks:
         result = await svc.execute_approved("u1", pid)
         assert result["is_error"] is True
         assert "disabled" in result["structured_content"].get("error", "")
+
+    @pytest.mark.asyncio
+    async def test_approved_execution_persists_kernel_receipt(self, svc_with_pending):
+        from src.sdk.execution_store import SQLiteReceiptStore
+
+        svc, pid = svc_with_pending
+        result = await svc.execute_approved("u1", pid)
+        assert result["is_error"] is False
+
+        store = SQLiteReceiptStore(svc._paths.root / "private" / "execution" / "u1" / "receipts.db")
+        receipt = await store.get_by_request(f"proposal:{pid}")
+        assert receipt is not None
+        assert receipt.outcome.value == "succeeded"
+        await store.close()
 
     @pytest.mark.asyncio
     async def test_deny_permission_change_refuses_execution(self, svc_with_pending, monkeypatch):
