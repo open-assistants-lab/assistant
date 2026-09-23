@@ -382,6 +382,58 @@ async def test_subagent_update_explicit_empty_tools_selects_none(monkeypatch):
     assert seen == {"mode": ToolSelectionMode.NONE, "kwargs": {"tools": []}}
 
 
+@pytest.mark.asyncio
+async def test_subagent_start_returns_structured_preflight_rejection(monkeypatch):
+    from src.sdk.tools_core import subagent as mod
+
+    class FakeCoordinator:
+        def load_def(self, _name):
+            return object()
+
+        async def start(self, *_args, **_kwargs):
+            from src.sdk.subagent_capabilities import (
+                CapabilityDecision,
+                SubagentLaunchPlan,
+                SubagentLaunchRejected,
+                ToolSelectionMode,
+            )
+
+            raise SubagentLaunchRejected(
+                SubagentLaunchPlan(
+                    plan_id="blocked",
+                    agent_name="writer",
+                    user_id="u",
+                    workspace_id="user",
+                    tool_selection_mode=ToolSelectionMode.ALLOWLIST,
+                    decisions=(
+                        CapabilityDecision(
+                            kind="tool",
+                            name="files_write",
+                            status="permission_ask",
+                            reason="ask",
+                        ),
+                    ),
+                    ready=False,
+                )
+            )
+
+    monkeypatch.setattr(mod, "get_coordinator", lambda *_args: FakeCoordinator())
+
+    result = ToolResult.from_raw(
+        await mod.subagent_start.ainvoke({"agent_name": "writer", "task": "write", "user_id": "u"})
+    )
+
+    assert result.is_error is True
+    assert result.structured_content == {
+        "status": "approval_required_before_start",
+        "reason": "capability_unavailable",
+        "tools": ["files_write"],
+        "skills": [],
+        "llm_started": False,
+        "queue_inserted": False,
+    }
+
+
 def test_subagent_delegate_does_not_accept_parent_session():
     """Inline delegation returns through its tool result, never the completion bus."""
     from src.sdk.tools_core import subagent as mod

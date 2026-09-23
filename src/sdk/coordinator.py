@@ -323,10 +323,17 @@ class SubagentCoordinator:
         """
         if not _subagent_enabled(self.user_id, agent_name):
             raise ValueError(f"Subagent '{agent_name}' is disabled.")
+        from src.sdk.subagent_capabilities import SubagentLaunchRejected
 
         profile = self.load_def(agent_name)
         if profile is None:
             raise ValueError(f"Subagent '{agent_name}' not found. Create it first with subagent_create.")
+        plan = self.preflight(agent_name)
+        if not plan.ready:
+            raise SubagentLaunchRejected(plan)
+        profile = profile.model_copy(
+            update={"tools": list(plan.effective_tools), "skills": list(plan.effective_skills)}
+        )
 
         db = await self._get_db()
         task_id = await db.insert_task(agent_name, task, profile, parent_id)
@@ -371,6 +378,22 @@ class SubagentCoordinator:
             ctx.cancel_event.set()
         _active[task_id] = ctx
 
+    def preflight(self, agent_name: str) -> Any:
+        """Resolve an immutable launch plan without queue, provider, or LLM side effects."""
+        from src.sdk.subagent_capabilities import build_launch_plan
+
+        profile = self.load_def(agent_name)
+        if profile is None:
+            raise ValueError(
+                f"Subagent '{agent_name}' not found. Create it first with subagent_create."
+            )
+        return build_launch_plan(
+            profile,
+            self.user_id,
+            self.workspace_id,
+            self.load_tool_selection_mode(agent_name),
+        )
+
     async def delegate(
         self,
         agent_name: str,
@@ -404,6 +427,32 @@ class SubagentCoordinator:
         if errors:
             raise ValueError("Invalid subagent definition: " + "; ".join(errors))
 
+        plan = self.preflight(agent_name)
+        if not plan.ready:
+            rejected = plan.rejected_decisions
+            status = (
+                "approval_required_before_start"
+                if any(item.status == "permission_ask" for item in rejected)
+                else "permission_denied_before_start"
+                if any(item.status == "permission_deny" for item in rejected)
+                else "capability_unavailable"
+            )
+            return ToolResult(
+                content="Subagent launch rejected before execution: declared capabilities are unavailable.",
+                structured_content={
+                    "status": status,
+                    "reason": "capability_unavailable",
+                    "tools": [item.name for item in rejected if item.kind == "tool"],
+                    "skills": [item.name for item in rejected if item.kind == "skill"],
+                    "llm_started": False,
+                    "queue_inserted": False,
+                },
+                is_error=True,
+            )
+
+        profile = profile.model_copy(
+            update={"tools": list(plan.effective_tools), "skills": list(plan.effective_skills)}
+        )
         effective_timeout = min(
             timeout_seconds or profile.timeout_seconds,
             profile.timeout_seconds,
@@ -470,6 +519,7 @@ class SubagentCoordinator:
     ) -> str:
         if not _subagent_enabled(self.user_id, agent_name):
             raise ValueError(f"Subagent '{agent_name}' is disabled.")
+        from src.sdk.subagent_capabilities import SubagentLaunchRejected
 
         profile = self.load_def(agent_name)
         if profile is None:
@@ -478,6 +528,12 @@ class SubagentCoordinator:
         errors = validate_agent_def(profile, user_id=self.user_id, workspace_id=self.workspace_id)
         if errors:
             raise ValueError("Invalid subagent definition: " + "; ".join(errors))
+        plan = self.preflight(agent_name)
+        if not plan.ready:
+            raise SubagentLaunchRejected(plan)
+        profile = profile.model_copy(
+            update={"tools": list(plan.effective_tools), "skills": list(plan.effective_skills)}
+        )
 
         db = await self._get_db()
         task_id = await db.insert_task(agent_name, task, profile, parent_id)
