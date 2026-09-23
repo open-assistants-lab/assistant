@@ -8,7 +8,7 @@ Agent definition is now handled by the OSS `agentprofile` package (AgentProfile)
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -63,6 +63,11 @@ class SubagentResult(BaseModel):
     llm_calls: int = 0
     error: str | None = None
     structured_output: dict[str, Any] | list[Any] | str | int | float | bool | None = None
+    terminal_reason: Literal[
+        "completed", "failed", "cancelled", "timed_out", "blocked", "uncertain"
+    ] = "completed"
+    verified: bool | None = None
+    launch_plan_id: str | None = None
 
 
 class TaskCancelledError(Exception):
