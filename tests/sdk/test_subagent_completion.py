@@ -60,8 +60,13 @@ async def test_completion_transition_writes_one_durable_outbox_event(tmp_path, m
 async def test_coordinator_replays_event_and_acknowledges_only_with_subscriber(
     tmp_path, monkeypatch
 ) -> None:
+    from src.sdk import subagent_completion as completion_module
     from src.sdk.coordinator import SubagentCoordinator
-    from src.sdk.subagent_completion import completion_bus
+    from src.sdk.subagent_completion import SubagentCompletionBus
+
+    isolated_bus = SubagentCompletionBus()
+    monkeypatch.setattr(completion_module, "completion_bus", isolated_bus)
+    completion_bus = isolated_bus
     from src.storage.paths import DataPaths
 
     paths = DataPaths(data_path=tmp_path, data_root=tmp_path, user_id="user")
@@ -81,12 +86,115 @@ async def test_coordinator_replays_event_and_acknowledges_only_with_subscriber(
         )
         assert await coordinator.drain_completion_events() == 0
         assert len(await db.list_undelivered_completion_events()) == 1
+        await db.close()
 
+        # A fresh connection/coordinator models process restart and replays persisted rows.
+        restarted_db = SubagentWorkQueueDB("user")
+        coordinator = SubagentCoordinator("user")
+        coordinator._db = restarted_db
         unsubscribe = completion_bus.subscribe("user", "session-1", received.append)
         assert await coordinator.drain_completion_events(session_id="session-1") == 1
         assert received[0].task_id == task_id
         assert await coordinator.drain_completion_events(session_id="session-1") == 0
         unsubscribe()
+    finally:
+        await db.close()
+        if coordinator._db is not db:
+            await coordinator._db.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_recovery_preserves_requested_cancellation_and_emits_event(
+    tmp_path, monkeypatch
+) -> None:
+    from src.storage.paths import DataPaths
+
+    paths = DataPaths(data_path=tmp_path, data_root=tmp_path, user_id="user")
+    monkeypatch.setattr("src.sdk.subagent_work_queue.get_paths", lambda _user_id: paths)
+    db = SubagentWorkQueueDB("user")
+    try:
+        task_id = await db.insert_task(
+            "worker", "work", AgentProfile(name="worker"), parent_session_id="session-1"
+        )
+        await db.set_running(task_id)
+        conn = await db._get_db()
+        await conn.execute(
+            "UPDATE work_queue SET cancel_requested = 1, status = 'cancelling', heartbeat_at = NULL WHERE id = ?",
+            (task_id,),
+        )
+        await conn.commit()
+
+        assert await db.mark_stale_running_failed(max_age_seconds=0) == 1
+        row = await db.get_task(task_id)
+        assert row is not None and row["status"] == "cancelled"
+        assert row["terminal_reason"] == "cancelled"
+        events = await db.list_undelivered_completion_events()
+        assert len(events) == 1 and events[0]["status"] == "cancelled"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_run_service_completion_consumer_deduplicates_replayed_task(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from src.sdk import run_service
+    from src.sdk.subagent_completion import SubagentCompletion
+    from src.sdk.subagent_models import SubagentResult
+
+    class FakeStore:
+        def __init__(self):
+            self.rows = []
+
+        def get_messages_by_session_id(self, _session_id, limit):
+            return self.rows[-limit:]
+
+        def add_message(self, role, content, metadata=None, session_id=None):
+            self.rows.append(
+                SimpleNamespace(role=role, content=content, metadata=metadata, session_id=session_id)
+            )
+
+    store = FakeStore()
+    monkeypatch.setattr(run_service, "aget_message_store", lambda *_args: _async_value(store))
+    monkeypatch.setattr(run_service, "get_user_loop", lambda *_args: None)
+    event = SubagentCompletion(
+        user_id="user",
+        workspace_id="personal",
+        session_id="session",
+        task_id="task-1",
+        agent_name="worker",
+        status="completed",
+        result=SubagentResult(name="worker", task="work", success=True, output="done"),
+    )
+
+    await run_service.handle_subagent_completion(event)
+    await run_service.handle_subagent_completion(event)
+
+    assert len(store.rows) == 1
+    assert store.rows[0].metadata["task_id"] == "task-1"
+
+
+async def _async_value(value):
+    return value
+
+
+@pytest.mark.asyncio
+async def test_delete_pending_agent_task_emits_completion_event(tmp_path, monkeypatch) -> None:
+    from src.storage.paths import DataPaths
+
+    paths = DataPaths(data_path=tmp_path, data_root=tmp_path, user_id="user")
+    monkeypatch.setattr("src.sdk.subagent_work_queue.get_paths", lambda _user_id: paths)
+    db = SubagentWorkQueueDB("user")
+    try:
+        task_id = await db.insert_task(
+            "worker", "work", AgentProfile(name="worker"), parent_session_id="session-1"
+        )
+        assert await db.request_cancel_active_tasks_for_agent("worker") == 1
+        row = await db.get_task(task_id)
+        events = await db.list_undelivered_completion_events()
+        assert row is not None and row["status"] == "cancelled"
+        assert len(events) == 1 and events[0]["task_id"] == task_id
     finally:
         await db.close()
 

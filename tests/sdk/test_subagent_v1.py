@@ -762,6 +762,22 @@ class TestSubagentCoordinator:
         assert "memory_profile" not in names
         assert "memory_reflection" not in names
 
+    def test_preflighted_empty_manifest_grants_no_tools(self):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import _build_tools_for_subagent
+
+        class FakeTool:
+            def __init__(self, name: str):
+                self.name = name
+
+        tools = [FakeTool("time_get"), FakeTool("message_search"), FakeTool("files_write")]
+        with patch("src.sdk.native_tools.get_native_tools", return_value=tools):
+            resolved = _build_tools_for_subagent(
+                AgentProfile(name="none", tools=[]), effective_tool_names=()
+            )
+        assert resolved == []
+
     def test_build_tools_allowlist_still_includes_message_search(self):
         from agentprofile.models import AgentProfile
 
@@ -771,7 +787,7 @@ class TestSubagentCoordinator:
         names = {t.name for t in _build_tools_for_subagent(d)}
 
         assert "time_get" in names
-        assert "message_search" in names
+        assert "message_search" not in names
 
     def test_build_tools_includes_skills_load_when_skills_configured(self):
         from agentprofile.models import AgentProfile
@@ -1076,7 +1092,7 @@ class TestSubagentCoordinator:
         task_id = await db.insert_task("test_agent", "do work", profile, None)
         published = []
 
-        async def fake_run_loop(task_id_, frozen_agent_def, task, db_, ctx=None):
+        async def fake_run_loop(task_id_, frozen_agent_def, task, db_, ctx=None, **kwargs):
             await db_.request_cancel(task_id_)
             return SubagentResult(name=frozen_agent_def.name, task=task, success=True, output="done")
 
@@ -1335,7 +1351,7 @@ class TestSubagentCoordinator:
         db = await coordinator._get_db()
         task_id = await db.insert_task("test_agent", "do work", profile)
 
-        async def fake_run_loop(task_id_: str, frozen_agent_def, task: str, db, ctx=None):
+        async def fake_run_loop(task_id_: str, frozen_agent_def, task: str, db, ctx=None, **kwargs):
             return SubagentResult(
                 name=frozen_agent_def.name,
                 task=task,
@@ -1364,7 +1380,7 @@ class TestSubagentCoordinator:
         db = await coordinator._get_db()
         task_id = await db.insert_task("test_agent", "do work", profile)
 
-        async def fake_run_loop(task_id_: str, frozen_agent_def, task: str, db, ctx=None):
+        async def fake_run_loop(task_id_: str, frozen_agent_def, task: str, db, ctx=None, **kwargs):
             return SubagentResult(
                 name=frozen_agent_def.name,
                 task=task,
@@ -1399,7 +1415,7 @@ class TestSubagentCoordinator:
         db = await coordinator._get_db()
         task_id = await db.insert_task("test_agent", "do work", profile)
 
-        async def fake_run_loop(task_id_: str, frozen_agent_def, task: str, db, ctx=None):
+        async def fake_run_loop(task_id_: str, frozen_agent_def, task: str, db, ctx=None, **kwargs):
             raise RuntimeError("boom")
 
         original_set_failed = db.set_failed
@@ -1429,7 +1445,7 @@ class TestSubagentCoordinator:
         db = await coordinator._get_db()
         task_id = await db.insert_task("test_agent", "do work", profile)
 
-        async def fake_run_loop(task_id_: str, frozen_agent_def, task: str, db, ctx=None):
+        async def fake_run_loop(task_id_: str, frozen_agent_def, task: str, db, ctx=None, **kwargs):
             raise TimeoutError
 
         original_set_failed = db.set_failed

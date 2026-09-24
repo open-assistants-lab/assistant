@@ -276,6 +276,24 @@ def stateful_action(action: str = "") -> str:
 class TestAgentLoopBasic:
     """Basic agent loop behavior."""
 
+    async def test_subagent_cancellation_blocks_tool_dispatch(self):
+        from src.sdk.subagent_context import SubagentCancelledError, SubagentContext
+
+        calls = []
+
+        @tool
+        def side_effect(value: str) -> str:
+            calls.append(value)
+            return value
+
+        loop = AgentLoop(provider=MockProvider(), tools=[side_effect])
+        loop.subagent_ctx = SubagentContext()
+        loop.subagent_ctx.cancel_event.set()
+
+        with pytest.raises(SubagentCancelledError):
+            await loop._execute_tool(ToolCall(id="call", name="side_effect", arguments={"value": "x"}))
+        assert calls == []
+
     async def test_subagent_doom_loop_gets_one_nudge_then_fails(self):
         from src.sdk.subagent_context import SubagentContext, SubagentDoomLoopError
 

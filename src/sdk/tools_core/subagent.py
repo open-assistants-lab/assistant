@@ -42,29 +42,6 @@ def _parse_object_json(value: str | None, field_name: str) -> tuple[dict[str, An
     return parsed, None
 
 
-def _launch_rejection(plan: Any) -> ToolResult:
-    rejected = plan.rejected_decisions
-    status = (
-        "approval_required_before_start"
-        if any(item.status == "permission_ask" for item in rejected)
-        else "permission_denied_before_start"
-        if any(item.status == "permission_deny" for item in rejected)
-        else "capability_unavailable"
-    )
-    return ToolResult(
-        content="Subagent launch rejected before execution: declared capabilities are unavailable.",
-        structured_content={
-            "status": status,
-            "reason": "capability_unavailable",
-            "tools": [item.name for item in rejected if item.kind == "tool"],
-            "skills": [item.name for item in rejected if item.kind == "skill"],
-            "llm_started": False,
-            "queue_inserted": False,
-        },
-        is_error=True,
-    )
-
-
 def _format_task(row: dict[str, Any], task_id: str) -> str:
     progress = json.loads(row.get("progress") or "{}")
     status = row.get("status", "unknown")
@@ -306,7 +283,7 @@ async def subagent_start(
     workspace_id: str = "personal",
     parent_id: str | None = None,
     session_id: str | None = None,
-) -> str:
+) -> str | ToolResult:
     """Start a subagent to execute a task. Returns job ID immediately.
 
     The subagent runs in the background. Use subagent_check to check status.
@@ -343,7 +320,26 @@ async def subagent_start(
         from src.sdk.subagent_capabilities import SubagentLaunchRejected
 
         if isinstance(exc, SubagentLaunchRejected):
-            return _launch_rejection(exc.plan)
+            rejected = exc.plan.rejected_decisions
+            status = (
+                "approval_required_before_start"
+                if any(item.status == "permission_ask" for item in rejected)
+                else "permission_denied_before_start"
+                if any(item.status == "permission_deny" for item in rejected)
+                else "capability_unavailable"
+            )
+            return ToolResult(
+                content="Subagent launch rejected before execution: declared capabilities are unavailable.",
+                structured_content={
+                    "status": status,
+                    "reason": "capability_unavailable",
+                    "tools": [item.name for item in rejected if item.kind == "tool"],
+                    "skills": [item.name for item in rejected if item.kind == "skill"],
+                    "llm_started": False,
+                    "queue_inserted": False,
+                },
+                is_error=True,
+            )
         raise
 
     return f"""Subagent job started for '{agent_name}'.

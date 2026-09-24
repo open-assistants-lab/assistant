@@ -738,6 +738,8 @@ class AgentLoop:
 
     async def _execute_tool(self, tc: ToolCall) -> ToolResult:
         """Execute a tool call, returning a ToolResult with structured content."""
+        if self.subagent_ctx and self.subagent_ctx.cancel_event.is_set():
+            raise SubagentCancelledError(self.subagent_ctx._task_id)
         tool_def = self._registry.get(tc.name)
         if tool_def is None:
             result = await self._try_lazy_load(tc)

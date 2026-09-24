@@ -92,6 +92,13 @@ async def handle_subagent_completion(event: Any) -> None:
 
     message = event.message()
     store = await aget_message_store(event.user_id, event.workspace_id)
+    existing = store.get_messages_by_session_id(event.session_id, limit=100000)
+    if any(
+        (row.metadata or {}).get("subagent_completion")
+        and (row.metadata or {}).get("task_id") == event.task_id
+        for row in existing
+    ):
+        return
     active_loop = get_user_loop(event.user_id, event.session_id)
     if active_loop is not None:
         persisted = False

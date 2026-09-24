@@ -39,8 +39,7 @@ logger = get_logger()
 
 _active: dict[str, SubagentContext] = {}
 
-# Constants for subagent tool filtering
-MANDATORY_SUBAGENT_TOOLS = {"message_search"}
+# Skill loading is included only when no precomputed launch manifest was supplied.
 OPTIONAL_SKILL_LOAD_TOOL = "skills_load"
 DENIED_SKILL_MANAGEMENT_TOOLS = {"skill_delete", "skill_update"}
 
@@ -56,14 +55,22 @@ def _subagent_enabled(user_id: str, name: str) -> bool:
     return resource_enabled(_load_user_caps(user_id), "subagents", name)
 
 
-def _build_tools_for_subagent(profile: AgentProfile, user_id: str | None = None) -> list[Any]:
+def _build_tools_for_subagent(
+    profile: AgentProfile,
+    user_id: str | None = None,
+    effective_tool_names: list[str] | tuple[str, ...] | None = None,
+) -> list[Any]:
     """Build the filtered tool list for a subagent."""
     from src.sdk.native_tools import get_native_tools
 
     all_native = get_native_tools()
     tool_map = {t.name: t for t in all_native}
 
-    allowed = set(profile.tools) if profile.tools else set(tool_map.keys())
+    allowed = (
+        set(effective_tool_names)
+        if effective_tool_names is not None
+        else set(profile.tools) if profile.tools else set(tool_map.keys())
+    )
     final = {
         name
         for name in allowed
@@ -71,14 +78,13 @@ def _build_tools_for_subagent(profile: AgentProfile, user_id: str | None = None)
         and not _is_denied_memory_tool(name)
         and name not in DENIED_SKILL_MANAGEMENT_TOOLS
     }
-    final.update(MANDATORY_SUBAGENT_TOOLS)
-    if profile.skills:
+    if effective_tool_names is None and profile.skills:
         final.add(OPTIONAL_SKILL_LOAD_TOOL)
 
-    if user_id:
+    if user_id and effective_tool_names is None:
+        caps = _load_user_caps(user_id)
         disabled_tools = {
-            name for name, enabled in _load_user_caps(user_id).get("tools", {}).items()
-            if not resource_enabled(_load_user_caps(user_id), "tools", name)
+            name for name in caps.get("tools", {}) if not resource_enabled(caps, "tools", name)
         }
         final.difference_update(disabled_tools)
 
@@ -86,7 +92,10 @@ def _build_tools_for_subagent(profile: AgentProfile, user_id: str | None = None)
 
 
 def _build_system_prompt(
-    profile: AgentProfile, user_id: str, workspace_id: str = "personal"
+    profile: AgentProfile,
+    user_id: str,
+    workspace_id: str = "personal",
+    effective_skill_names: list[str] | tuple[str, ...] | None = None,
 ) -> str:
     """Build the system prompt for a subagent, including loaded skill content."""
     parts: list[str] = []
@@ -99,28 +108,26 @@ def _build_system_prompt(
             parts.append(profile.description)
 
     if profile.skills:
-        try:
-            from src.skills.registry import get_skill_registry
+        from src.skills.registry import get_skill_registry
 
-            sr = get_skill_registry(user_id=user_id)
-            caps = _load_user_caps(user_id)
-            skill_entries = []
-            for skill_name in profile.skills:
-                if not resource_enabled(caps, "skills", skill_name):
-                    continue
-                skill = sr.get_skill(skill_name)
-                if skill:
-                    desc = skill.get("description", "")
-                    skill_entries.append(f"- **{skill_name}**: {desc}")
-            if skill_entries:
-                parts.insert(
-                    0,
-                    "## Available Skills\n"
-                    "Use skills_load(name=...) before following a skill's instructions.\n"
-                    + "\n".join(skill_entries),
-                )
-        except Exception:
-            pass
+        sr = get_skill_registry(user_id=user_id)
+        caps = _load_user_caps(user_id)
+        skill_entries = []
+        skill_names = effective_skill_names if effective_skill_names is not None else profile.skills
+        for skill_name in skill_names:
+            if effective_skill_names is None and not resource_enabled(caps, "skills", skill_name):
+                continue
+            skill = sr.get_skill(skill_name)
+            if skill is None:
+                raise ValueError(f"Preflighted skill '{skill_name}' is no longer in the registry")
+            desc = skill.get("description", "")
+            skill_entries.append(f"- **{skill_name}**: {desc}")
+        parts.insert(
+            0,
+            "## Available Skills\n"
+            "Use skills_load(name=...) before following a skill's instructions.\n"
+            + "\n".join(skill_entries),
+        )
 
     return "\n\n".join(parts)
 
@@ -383,7 +390,10 @@ class SubagentCoordinator:
 
         try:
             result = await asyncio.wait_for(
-                self._run_loop(task_id, profile, task, db, ctx),
+                self._run_loop(
+                    task_id, profile, task, db, ctx,
+                    effective_tool_names=plan.effective_tools,
+                ),
                 timeout=profile.timeout_seconds,
             )
             completed = await db.set_completed(task_id, result)
@@ -512,7 +522,10 @@ class SubagentCoordinator:
 
         try:
             result: SubagentResult = await asyncio.wait_for(
-                self._run_loop(task_id, profile, task, db, ctx),
+                self._run_loop(
+                    task_id, profile, task, db, ctx,
+                    effective_tool_names=plan.effective_tools,
+                ),
                 timeout=effective_timeout,
             )
             completed = await db.set_completed(task_id, result)
@@ -646,7 +659,16 @@ class SubagentCoordinator:
 
         try:
             result = await asyncio.wait_for(
-                self._run_loop(task_id, profile, task, db, ctx or SubagentContext()),
+                self._run_loop(
+                    task_id,
+                    profile,
+                    task,
+                    db,
+                    ctx or SubagentContext(),
+                    effective_tool_names=json.loads(row.get("launch_plan") or "{}").get(
+                        "effective_tools"
+                    ),
+                ),
                 timeout=profile.timeout_seconds,
             )
             latest = await db.get_task(task_id)
@@ -740,6 +762,7 @@ class SubagentCoordinator:
         task: str,
         db: SubagentWorkQueueDB,
         ctx: SubagentContext | None = None,
+        effective_tool_names: list[str] | tuple[str, ...] | None = None,
     ) -> SubagentResult:
         from src.sdk.loop import AgentLoop, CostTracker, RunConfig
         from src.sdk.middleware_summarization import SummarizationMiddleware
@@ -748,8 +771,15 @@ class SubagentCoordinator:
         model_str = profile.model or self.settings.agent.model
         provider = create_model_from_config(model_str, user_id=self.user_id)
 
-        tools = _build_tools_for_subagent(profile, user_id=self.user_id)
-        system_prompt = _build_system_prompt(profile, self.user_id, self.workspace_id)
+        tools = _build_tools_for_subagent(
+            profile, user_id=self.user_id, effective_tool_names=effective_tool_names
+        )
+        system_prompt = _build_system_prompt(
+            profile,
+            self.user_id,
+            self.workspace_id,
+            effective_skill_names=profile.skills if effective_tool_names is not None else None,
+        )
         try:
             from src.sdk.registry import get_model_info
 

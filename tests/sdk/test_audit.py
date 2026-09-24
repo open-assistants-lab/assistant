@@ -334,7 +334,9 @@ async def test_direct_loop_construction_sites_wire_audit_store(tmp_path, monkeyp
             pass
 
         async def run(self, messages, *, cost_tracker=None):  # noqa: ARG002
-            return []
+            from src.sdk.messages import Message
+
+            return [Message.user("hello"), Message.assistant("ok")]
 
     def _fake_create_model_from_config(*a, **k):
         return _FakeProvider()
