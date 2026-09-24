@@ -102,7 +102,7 @@ async def subagent_create(
         workspace_id: Workspace ID (defaults to current workspace)
         description: What this subagent does (shown to LLM for routing)
         model: Model to use (e.g., 'anthropic:claude-sonnet-4-20250514')
-        tools: List of tool names to allow (None = all native tools)
+        tools: Tool names to allow (None = curated safe defaults; [] = no tools)
         system_prompt: Custom system prompt
         skills: List of skill names to inject
         max_llm_calls: Per-task LLM call limit (default 50)
@@ -130,7 +130,7 @@ async def subagent_create(
         description=description,
         model=model or "",
         system_prompt=system_prompt or "",
-        tools=tools or [],
+        tools=tools if tools is not None else [],
         skills=skills,
         max_llm_calls=max_llm_calls,
         cost_limit_usd=cost_limit_usd,
@@ -150,7 +150,16 @@ async def subagent_create(
     if existing is not None:
         return f"Error: Subagent '{name}' already exists. Use subagent_update to amend it."
 
-    await coordinator.create(agent_profile)
+    from src.sdk.subagent_capabilities import ToolSelectionMode
+
+    tool_selection_mode = (
+        ToolSelectionMode.SAFE_DEFAULT
+        if tools is None
+        else ToolSelectionMode.NONE
+        if not tools
+        else ToolSelectionMode.ALLOWLIST
+    )
+    await coordinator.create(agent_profile, tool_selection_mode=tool_selection_mode)
 
     lines = [f"Subagent '{name}' created successfully."]
     if model:
@@ -246,7 +255,16 @@ async def subagent_update(
     if errors:
         return "Error: " + "; ".join(errors)
 
-    updated = await coordinator.update(name, **update_kwargs)
+    from src.sdk.subagent_capabilities import ToolSelectionMode
+
+    tool_selection_mode = None
+    if tools is not None:
+        tool_selection_mode = ToolSelectionMode.NONE if not tools else ToolSelectionMode.ALLOWLIST
+    updated = await coordinator.update(
+        name,
+        tool_selection_mode=tool_selection_mode,
+        **update_kwargs,
+    )
 
     if updated is None:
         return f"Error: Failed to update subagent '{name}'."
@@ -265,7 +283,7 @@ async def subagent_start(
     workspace_id: str = "personal",
     parent_id: str | None = None,
     session_id: str | None = None,
-) -> str:
+) -> str | ToolResult:
     """Start a subagent to execute a task. Returns job ID immediately.
 
     The subagent runs in the background. Use subagent_check to check status.
@@ -288,15 +306,41 @@ async def subagent_start(
     if existing is None:
         return f"Error: Subagent '{agent_name}' not found. Create it first with subagent_create."
 
-    if session_id is None:
-        task_id_str = await coordinator.start(agent_name, task, parent_id=parent_id)
-    else:
-        task_id_str = await coordinator.start(
-            agent_name,
-            task,
-            parent_id=parent_id,
-            parent_session_id=session_id,
-        )
+    try:
+        if session_id is None:
+            task_id_str = await coordinator.start(agent_name, task, parent_id=parent_id)
+        else:
+            task_id_str = await coordinator.start(
+                agent_name,
+                task,
+                parent_id=parent_id,
+                parent_session_id=session_id,
+            )
+    except Exception as exc:
+        from src.sdk.subagent_capabilities import SubagentLaunchRejected
+
+        if isinstance(exc, SubagentLaunchRejected):
+            rejected = exc.plan.rejected_decisions
+            status = (
+                "approval_required_before_start"
+                if any(item.status == "permission_ask" for item in rejected)
+                else "permission_denied_before_start"
+                if any(item.status == "permission_deny" for item in rejected)
+                else "capability_unavailable"
+            )
+            return ToolResult(
+                content="Subagent launch rejected before execution: declared capabilities are unavailable.",
+                structured_content={
+                    "status": status,
+                    "reason": "capability_unavailable",
+                    "tools": [item.name for item in rejected if item.kind == "tool"],
+                    "skills": [item.name for item in rejected if item.kind == "skill"],
+                    "llm_started": False,
+                    "queue_inserted": False,
+                },
+                is_error=True,
+            )
+        raise
 
     return f"""Subagent job started for '{agent_name}'.
 

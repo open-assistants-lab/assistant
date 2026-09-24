@@ -124,3 +124,107 @@ async def test_middleware_applies_skill_permission(monkeypatch, tmp_path) -> Non
     assert result.structured_content is not None
     assert result.structured_content["governance"] == "ask"
     assert result.structured_content["status"] == "pending"
+    assert len(service.list_pending_ids("user")) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("skill_name", "permission", "expected_provider_calls"),
+    [("deployment", "ask", 1), ("restricted", "deny", 2)],
+)
+async def test_child_runtime_ask_or_deny_never_executes_skill_tool(
+    monkeypatch, tmp_path, skill_name, permission, expected_provider_calls
+):
+    import src.sdk.capabilities as capabilities
+    import src.sdk.governance as governance
+    from src.sdk.loop import AgentLoop, RunConfig
+    from src.sdk.messages import Message, ToolCall
+    from src.sdk.providers.base import LLMProvider, ModelInfo
+    from src.sdk.subagent_context import SubagentContext
+    from src.sdk.tools import ToolAnnotations, ToolDefinition
+
+    monkeypatch.setattr(
+        capabilities,
+        "load_capabilities",
+        lambda _root: {"permissions": {"skills": {"deployment": "ask", "restricted": "deny"}}},
+    )
+    service = GovernanceService(data_root=tmp_path)
+    monkeypatch.setattr(governance, "governance_enabled", lambda: True)
+    monkeypatch.setattr(governance, "get_governance_service", lambda _user: service)
+    assert service.resolve_permission_for_call("user", "skills_load", {}) == "allow"
+    assert service.resolve_permission_for_call(
+        "user", "skills_load", {"name": skill_name}
+    ) == permission
+
+    tool_calls = 0
+
+    async def load_skill(name: str, user_id: str = "user") -> str:
+        nonlocal tool_calls
+        tool_calls += 1
+        return f"loaded {name} for {user_id}"
+
+    skill_tool = ToolDefinition(
+        name="skills_load",
+        description="Load a named skill",
+        parameters={
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "user_id": {"type": "string"}},
+            "required": ["name"],
+        },
+        annotations=ToolAnnotations(read_only=True),
+        function=load_skill,
+    )
+
+    class Provider(LLMProvider):
+        provider_id = "test"
+
+        def __init__(self):
+            self.calls = 0
+
+        async def chat(self, messages, tools=None, model=None, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return Message.assistant(
+                    tool_calls=[
+                        ToolCall(
+                            id="call-1",
+                            name="skills_load",
+                            arguments={"name": skill_name},
+                        )
+                    ]
+                )
+            return Message.assistant("The task is complete.")
+
+        def chat_stream(self, *args, **kwargs):
+            async def empty_stream():
+                if False:
+                    yield None
+            return empty_stream()
+
+        def count_tokens(self, text, model=None):
+            return len(text)
+
+        def get_model_info(self, model):
+            return ModelInfo(id=model, provider_id=self.provider_id)
+
+    context = SubagentContext()
+    provider = Provider()
+    loop = AgentLoop(
+        provider=provider,
+        tools=[skill_tool],
+        middlewares=[HITLMiddleware(user_id="user", subagent_context=context)],
+        run_config=RunConfig(max_iterations=3),
+        user_id="user",
+    )
+    loop.subagent_ctx = context
+
+    await loop.run([Message.user("Load the skill.")])
+
+    assert tool_calls == 0
+    assert provider.calls == expected_provider_calls
+    assert service.list_pending_ids("user") == []
+    if permission == "ask":
+        assert context.runtime_block is not None
+        assert context.runtime_block.error_code == "approval_required"
+    else:
+        assert context.runtime_block is None

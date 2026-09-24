@@ -10,14 +10,21 @@ from __future__ import annotations
 from typing import Any
 
 from src.sdk.middleware import Middleware
+from src.sdk.subagent_context import SubagentContext
 from src.sdk.tools import ToolResult
 
 
 class HITLMiddleware(Middleware):
     """Enforce the approval branch of the permission policy."""
 
-    def __init__(self, user_id: str = "default_user") -> None:
+    def __init__(
+        self,
+        user_id: str = "default_user",
+        *,
+        subagent_context: SubagentContext | None = None,
+    ) -> None:
         self.user_id = user_id
+        self.subagent_context = subagent_context
 
     @property
     def name(self) -> str:
@@ -50,8 +57,27 @@ class HITLMiddleware(Middleware):
                 is_error=True,
             )
 
-        # Ask: create a durable proposal. The session/executor snapshot lets
-        # approval-after-restart use the same existing resume path.
+        if self.subagent_context is not None:
+            message = (
+                f"Runtime approval is required for '{tool_name}'; "
+                "the subagent cannot pause for supervisor approval."
+            )
+            self.subagent_context.block_for_approval(tool_name, message)
+            return ToolResult(
+                content=message,
+                structured_content={
+                    "governance": "blocked",
+                    "permission": "ask",
+                    "tool": tool_name,
+                    "executed": False,
+                    "terminal_reason": "blocked",
+                    "error_code": "approval_required",
+                },
+                is_error=True,
+            )
+
+        # Main-agent Ask: create a durable proposal. The session/executor
+        # snapshot lets approval-after-restart use the same existing resume path.
         session_id: str | None = None
         executor: Any | None = None
         try:

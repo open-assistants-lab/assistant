@@ -15,6 +15,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -81,6 +82,22 @@ def profile():
 async def _wait_for_no_background_tasks(coordinator):
     while coordinator._background_tasks:
         await asyncio.sleep(0)
+
+
+async def _insert_runnable_task(
+    db: Any,
+    agent_name: str,
+    task: str,
+    profile: Any,
+    parent_id: str | None = None,
+) -> str:
+    return await db.insert_task(
+        agent_name,
+        task,
+        profile,
+        parent_id,
+        launch_plan={"effective_tools": ["time_get"], "effective_skills": []},
+    )
 
 
 # -- Model Tests --
@@ -762,6 +779,22 @@ class TestSubagentCoordinator:
         assert "memory_profile" not in names
         assert "memory_reflection" not in names
 
+    def test_preflighted_empty_manifest_grants_no_tools(self):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import _build_tools_for_subagent
+
+        class FakeTool:
+            def __init__(self, name: str):
+                self.name = name
+
+        tools = [FakeTool("time_get"), FakeTool("message_search"), FakeTool("files_write")]
+        with patch("src.sdk.native_tools.get_native_tools", return_value=tools):
+            resolved = _build_tools_for_subagent(
+                AgentProfile(name="none", tools=[]), effective_tool_names=()
+            )
+        assert resolved == []
+
     def test_build_tools_allowlist_still_includes_message_search(self):
         from agentprofile.models import AgentProfile
 
@@ -771,7 +804,7 @@ class TestSubagentCoordinator:
         names = {t.name for t in _build_tools_for_subagent(d)}
 
         assert "time_get" in names
-        assert "message_search" in names
+        assert "message_search" not in names
 
     def test_build_tools_includes_skills_load_when_skills_configured(self):
         from agentprofile.models import AgentProfile
@@ -807,6 +840,100 @@ class TestSubagentCoordinator:
         assert "time_get" in names
         assert "message_search" in names
         assert "skill_delete" not in names
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "files_list",
+            "files_read",
+            "files_glob_search",
+            "files_grep_search",
+            "skills_load",
+            "skills_reload",
+        ],
+    )
+    def test_child_scoped_tools_hide_and_bind_identity(self, tool_name, mock_paths):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import _build_tools_for_subagent
+        from src.sdk.tools import ToolDefinition
+
+        captured: dict[str, object] = {}
+        properties = {
+            "user_id": {"type": "string"},
+            "workspace_id": {"type": "string"},
+        }
+        if tool_name in {"skills_load", "skills_reload"}:
+            if tool_name == "skills_load":
+                properties["name"] = {"type": "string", "default": "approved"}
+        else:
+            properties["path"] = {"type": "string", "default": "."}
+            if tool_name in {"files_glob_search", "files_grep_search"}:
+                properties["pattern"] = {"type": "string", "default": "*"}
+        tool_def = ToolDefinition(
+            name=tool_name,
+            description="scoped test tool",
+            parameters={"type": "object", "properties": properties},
+            function=lambda **kwargs: captured.update(kwargs) or "ok",
+        )
+        with patch("src.sdk.native_tools.get_native_tools", return_value=[tool_def]):
+            [scoped] = _build_tools_for_subagent(
+                AgentProfile(name="child", tools=[tool_name]),
+                user_id="bound-user",
+                effective_tool_names=[tool_name],
+                workspace_id="bound-workspace",
+            )
+
+        assert "user_id" not in scoped.parameters["properties"]
+        assert "workspace_id" not in scoped.parameters["properties"]
+        supplied = {
+            "user_id": "attacker-user",
+            "workspace_id": "attacker-workspace",
+            "name": "approved",
+            "path": ".",
+            "pattern": "*",
+        }
+        assert scoped.invoke(supplied) == "ok"
+        assert captured["user_id"] == "bound-user"
+        assert captured["workspace_id"] == "bound-workspace"
+
+    @pytest.mark.parametrize(
+        ("tool_name", "path"),
+        [
+            ("files_list", "../secret.txt"),
+            ("files_list", "/tmp/secret.txt"),
+            ("files_read", "../secret.txt"),
+            ("files_read", "/tmp/secret.txt"),
+            ("files_glob_search", "../outside"),
+            ("files_glob_search", "/tmp"),
+            ("files_grep_search", "../outside"),
+            ("files_grep_search", "/tmp"),
+        ],
+    )
+    def test_child_scoped_file_tools_reject_parent_and_absolute_paths(
+        self, tool_name, path, mock_paths
+    ):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import _build_tools_for_subagent
+        from src.sdk.tools import ToolDefinition
+
+        tool_def = ToolDefinition(
+            name=tool_name,
+            description="scoped test tool",
+            parameters={"type": "object", "properties": {"path": {"type": "string"}}},
+            function=lambda **_kwargs: "must not run",
+        )
+        with patch("src.sdk.native_tools.get_native_tools", return_value=[tool_def]):
+            [scoped] = _build_tools_for_subagent(
+                AgentProfile(name="child", tools=[tool_name]),
+                user_id="test_user",
+                effective_tool_names=[tool_name],
+                workspace_id="sales",
+            )
+
+        with pytest.raises(ValueError, match="workspace-relative"):
+            scoped.invoke({"path": path})
 
     def test_build_tools_filters_user_disabled_tools(self, mock_paths, monkeypatch):
         from agentprofile.models import AgentProfile
@@ -902,11 +1029,11 @@ class TestSubagentCoordinator:
         assert "## Available Skills" in prompt
         assert "skill-creator" in prompt
         assert "Create reusable skills." in prompt
-        assert "skills_load(skill_name=...)" in prompt
+        assert "skills_load(name=...)" in prompt
         assert "SECRET FULL SKILL CONTENT" not in prompt
 
     @pytest.mark.asyncio
-    async def test_run_loop_passes_provider_options_and_user_workspace_to_agent_loop(self, mock_paths):
+    async def test_run_loop_passes_provider_options_and_requested_workspace_to_agent_loop(self, mock_paths):
         from agentprofile.models import AgentProfile
 
         from src.sdk.coordinator import SubagentCoordinator
@@ -942,7 +1069,7 @@ class TestSubagentCoordinator:
 
         assert captured_run_config is not None
         assert captured_run_config.provider_options == provider_options
-        assert captured_workspace_id == "user"
+        assert captured_workspace_id == "sales"
         assert captured_provider_args is not None
         assert captured_provider_args[1] == {"user_id": "test_user"}
 
@@ -1073,10 +1200,10 @@ class TestSubagentCoordinator:
         coordinator = SubagentCoordinator("test_user")
         await coordinator.create(profile)
         db = await coordinator._get_db()
-        task_id = await db.insert_task("test_agent", "do work", profile, None)
+        task_id = await _insert_runnable_task(db, "test_agent", "do work", profile)
         published = []
 
-        async def fake_run_loop(task_id_, frozen_agent_def, task, db_, ctx=None):
+        async def fake_run_loop(task_id_, frozen_agent_def, task, db_, ctx=None, **kwargs):
             await db_.request_cancel(task_id_)
             return SubagentResult(name=frozen_agent_def.name, task=task, success=True, output="done")
 
@@ -1100,7 +1227,7 @@ class TestSubagentCoordinator:
         coordinator = SubagentCoordinator("test_user")
         await coordinator.create(profile)
         db = await coordinator._get_db()
-        task_id = await db.insert_task("test_agent", "do work", profile, None)
+        task_id = await _insert_runnable_task(db, "test_agent", "do work", profile)
         published = []
 
         async def fake_run_loop(*args, **kwargs):
@@ -1111,9 +1238,9 @@ class TestSubagentCoordinator:
 
         original_set_failed = db.set_failed
 
-        async def cancelled_set_failed(task_id_, error):
+        async def cancelled_set_failed(task_id_, error, **kwargs):
             await db.request_cancel(task_id_)
-            return await original_set_failed(task_id_, error)
+            return await original_set_failed(task_id_, error, **kwargs)
 
         monkeypatch.setattr(coordinator, "_run_loop", fake_run_loop)
         monkeypatch.setattr(coordinator, "_publish_completion", fake_publish)
@@ -1325,6 +1452,69 @@ class TestSubagentCoordinator:
         assert config["model"] == profile.model
 
     @pytest.mark.asyncio
+    async def test_run_job_uses_workspace_and_capabilities_from_frozen_manifest(
+        self, mock_paths, profile, monkeypatch
+    ):
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.subagent_models import SubagentResult
+
+        coordinator = SubagentCoordinator("test_user", workspace_id="restart-default")
+        db = await coordinator._get_db()
+        task_id = await db.insert_task(
+            "test_agent",
+            "do work",
+            profile,
+            launch_plan={
+                "plan_id": "frozen-plan",
+                "requested_workspace_id": "stale-mirror",
+                "effective_tools": ["files_read"],
+                "effective_skills": [],
+                "canonical_manifest": {
+                    "requested_workspace_id": "original-workspace",
+                    "effective_tools": ["time_get"],
+                    "effective_skills": ["frozen-skill"],
+                },
+            },
+        )
+        captured: dict[str, object] = {}
+
+        async def fake_run_loop(task_id_, frozen_agent_def, task, _db, ctx=None, **kwargs):
+            captured.update(kwargs)
+            return SubagentResult(
+                name=frozen_agent_def.name,
+                task=task,
+                success=True,
+                output=f"completed {task_id_}",
+            )
+
+        monkeypatch.setattr(coordinator, "_run_loop", fake_run_loop)
+        await coordinator._run_job(task_id)
+
+        assert captured["workspace_id"] == "original-workspace"
+        assert captured["effective_tool_names"] == ["time_get"]
+        assert captured["effective_skill_names"] == ["frozen-skill"]
+
+    @pytest.mark.asyncio
+    async def test_run_job_fails_closed_when_frozen_manifest_is_missing(
+        self, mock_paths, profile, monkeypatch
+    ):
+        from src.sdk.coordinator import SubagentCoordinator
+
+        coordinator = SubagentCoordinator("test_user")
+        db = await coordinator._get_db()
+        task_id = await db.insert_task("test_agent", "do work", profile)
+
+        async def should_not_run(*_args, **_kwargs):
+            raise AssertionError("LLM loop must not run without a frozen manifest")
+
+        monkeypatch.setattr(coordinator, "_run_loop", should_not_run)
+        await coordinator._run_job(task_id)
+
+        row = await db.get_task(task_id)
+        assert row is not None and row["status"] == "failed"
+        assert "missing its frozen subagent capability manifest" in row["error"]
+
+    @pytest.mark.asyncio
     async def test_run_job_claims_pending_task_and_marks_completed(
         self, mock_paths, profile, monkeypatch
     ):
@@ -1333,9 +1523,9 @@ class TestSubagentCoordinator:
 
         coordinator = SubagentCoordinator("test_user")
         db = await coordinator._get_db()
-        task_id = await db.insert_task("test_agent", "do work", profile)
+        task_id = await _insert_runnable_task(db, "test_agent", "do work", profile)
 
-        async def fake_run_loop(task_id_: str, frozen_agent_def, task: str, db, ctx=None):
+        async def fake_run_loop(task_id_: str, frozen_agent_def, task: str, db, ctx=None, **kwargs):
             return SubagentResult(
                 name=frozen_agent_def.name,
                 task=task,
@@ -1354,6 +1544,53 @@ class TestSubagentCoordinator:
         assert result["output"] == f"completed {task_id}"
 
     @pytest.mark.asyncio
+    async def test_run_job_persists_runtime_approval_as_blocked_failure(
+        self, mock_paths, profile, monkeypatch
+    ):
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.subagent_models import SubagentResult
+
+        coordinator = SubagentCoordinator("test_user")
+        db = await coordinator._get_db()
+        task_id = await db.insert_task(
+            "test_agent",
+            "do work",
+            profile,
+            launch_plan={
+                "plan_id": "blocked-plan",
+                "effective_tools": ["time_get"],
+                "effective_skills": [],
+            },
+        )
+
+        async def blocked(_task_id, frozen_agent_def, task, _db, ctx=None, **kwargs):
+            return SubagentResult(
+                name=frozen_agent_def.name,
+                task=task,
+                success=False,
+                output="Blocked: approval required.",
+                error="Runtime approval is required.",
+                error_code="approval_required",
+                terminal_reason="blocked",
+                cost_usd=0.02,
+                llm_calls=1,
+                effective_tools=["time_get"],
+            )
+
+        monkeypatch.setattr(coordinator, "_run_loop", blocked)
+        await coordinator._run_job(task_id)
+
+        row = await db.get_task(task_id)
+        assert row is not None and row["status"] == "failed"
+        assert row["terminal_reason"] == "blocked"
+        assert row["error_code"] == "approval_required"
+        stored = await db.get_result(task_id)
+        assert stored is not None
+        assert stored.launch_plan_id == "blocked-plan"
+        assert stored.effective_tools == ["time_get"]
+        assert stored.llm_calls == 1 and stored.cost_usd == 0.02
+
+    @pytest.mark.asyncio
     async def test_run_job_preserves_cancel_racing_with_completion(
         self, mock_paths, profile, monkeypatch
     ):
@@ -1362,9 +1599,9 @@ class TestSubagentCoordinator:
 
         coordinator = SubagentCoordinator("test_user")
         db = await coordinator._get_db()
-        task_id = await db.insert_task("test_agent", "do work", profile)
+        task_id = await _insert_runnable_task(db, "test_agent", "do work", profile)
 
-        async def fake_run_loop(task_id_: str, frozen_agent_def, task: str, db, ctx=None):
+        async def fake_run_loop(task_id_: str, frozen_agent_def, task: str, db, ctx=None, **kwargs):
             return SubagentResult(
                 name=frozen_agent_def.name,
                 task=task,
@@ -1397,16 +1634,16 @@ class TestSubagentCoordinator:
 
         coordinator = SubagentCoordinator("test_user")
         db = await coordinator._get_db()
-        task_id = await db.insert_task("test_agent", "do work", profile)
+        task_id = await _insert_runnable_task(db, "test_agent", "do work", profile)
 
-        async def fake_run_loop(task_id_: str, frozen_agent_def, task: str, db, ctx=None):
+        async def fake_run_loop(task_id_: str, frozen_agent_def, task: str, db, ctx=None, **kwargs):
             raise RuntimeError("boom")
 
         original_set_failed = db.set_failed
 
-        async def cancel_before_fail(task_id: str, error: str):
+        async def cancel_before_fail(task_id: str, error: str, **kwargs):
             await db.request_cancel(task_id)
-            return await original_set_failed(task_id, error)
+            return await original_set_failed(task_id, error, **kwargs)
 
         monkeypatch.setattr(coordinator, "_run_loop", fake_run_loop)
         monkeypatch.setattr(db, "set_failed", cancel_before_fail)
@@ -1427,16 +1664,16 @@ class TestSubagentCoordinator:
 
         coordinator = SubagentCoordinator("test_user")
         db = await coordinator._get_db()
-        task_id = await db.insert_task("test_agent", "do work", profile)
+        task_id = await _insert_runnable_task(db, "test_agent", "do work", profile)
 
-        async def fake_run_loop(task_id_: str, frozen_agent_def, task: str, db, ctx=None):
+        async def fake_run_loop(task_id_: str, frozen_agent_def, task: str, db, ctx=None, **kwargs):
             raise TimeoutError
 
         original_set_failed = db.set_failed
 
-        async def cancel_before_fail(task_id: str, error: str):
+        async def cancel_before_fail(task_id: str, error: str, **kwargs):
             await db.request_cancel(task_id)
-            return await original_set_failed(task_id, error)
+            return await original_set_failed(task_id, error, **kwargs)
 
         monkeypatch.setattr(coordinator, "_run_loop", fake_run_loop)
         monkeypatch.setattr(db, "set_failed", cancel_before_fail)
@@ -1480,6 +1717,142 @@ class TestSubagentCoordinator:
         loaded = load_profile(str(profile_path))
         assert loaded.name == "writer"
         assert loaded.tools == ["time_get"]
+
+    @pytest.mark.asyncio
+    async def test_create_and_update_persist_tool_selection_mode(self, mock_paths):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.subagent_capabilities import ToolSelectionMode
+
+        coord = SubagentCoordinator("test_user")
+        await coord.create(
+            AgentProfile(name="policy", tools=[]),
+            tool_selection_mode=ToolSelectionMode.SAFE_DEFAULT,
+        )
+        policy_path = mock_paths.user_subagents_dir() / "policy" / "runtime-policy.json"
+        assert json.loads(policy_path.read_text()) == {
+            "version": 1,
+            "tool_selection": "safe_default",
+        }
+        assert coord.load_tool_selection_mode("policy") is ToolSelectionMode.SAFE_DEFAULT
+
+        await coord.update("policy", tools=[], tool_selection_mode=ToolSelectionMode.NONE)
+        assert coord.load_tool_selection_mode("policy") is ToolSelectionMode.NONE
+
+    @pytest.mark.asyncio
+    async def test_legacy_profile_policy_migrates_omitted_empty_and_allowlist_once(self, mock_paths):
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.subagent_capabilities import ToolSelectionMode
+
+        definitions = {
+            "omitted": """---
+name: omitted
+---
+worker body
+""",
+            "empty": """---
+name: empty
+tools: []
+---
+worker body
+""",
+            "allowlist": """---
+name: allowlist
+tools:
+  - files_read
+---
+worker body
+""",
+        }
+        expected = {
+            "omitted": ToolSelectionMode.SAFE_DEFAULT,
+            "empty": ToolSelectionMode.NONE,
+            "allowlist": ToolSelectionMode.ALLOWLIST,
+        }
+        coordinator = SubagentCoordinator("test_user")
+        for name, body in definitions.items():
+            agent_dir = mock_paths.user_subagents_dir() / name
+            agent_dir.mkdir(parents=True)
+            (agent_dir / "PROFILE.md").write_text(body)
+
+            assert coordinator.load_tool_selection_mode(name) is expected[name]
+            policy_path = agent_dir / "runtime-policy.json"
+            policy = json.loads(policy_path.read_text())
+            assert policy["version"] == 1
+            assert policy["tool_selection"] == expected[name].value
+            assert policy["migrated_from"] == "legacy"
+            first_write = policy_path.read_text()
+            assert coordinator.load_tool_selection_mode(name) is expected[name]
+            assert policy_path.read_text() == first_write
+
+        legacy_dir = mock_paths.user_subagents_dir() / "legacy-sentinel"
+        legacy_dir.mkdir(parents=True)
+        legacy_profile = """---
+name: legacy-sentinel
+tools: []
+---
+legacy body
+"""
+        (legacy_dir / "PROFILE.md").write_text(legacy_profile)
+        (legacy_dir / "runtime-policy.json").write_text(
+            json.dumps({"version": 1, "tool_selection": "legacy"})
+        )
+        assert coordinator.load_tool_selection_mode("legacy-sentinel") is ToolSelectionMode.NONE
+        assert (legacy_dir / "PROFILE.md").read_text() == legacy_profile
+        assert (
+            json.loads((legacy_dir / "runtime-policy.json").read_text())["migrated_from"]
+            == "legacy"
+        )
+
+    @pytest.mark.asyncio
+    async def test_corrupt_or_unknown_runtime_policy_fails_closed(self, mock_paths):
+        from src.sdk.coordinator import SubagentCoordinator
+
+        coordinator = SubagentCoordinator("test_user")
+        for name, payload in (
+            ("bad-version", {"version": 2, "tool_selection": "safe_default"}),
+            ("bad-mode", {"version": 1, "tool_selection": "all_tools"}),
+        ):
+            agent_dir = mock_paths.user_subagents_dir() / name
+            agent_dir.mkdir(parents=True)
+            (agent_dir / "PROFILE.md").write_text(f"""---
+name: {name}
+---
+""")
+            (agent_dir / "runtime-policy.json").write_text(json.dumps(payload))
+
+            with pytest.raises(ValueError, match="runtime policy"):
+                coordinator.load_tool_selection_mode(name)
+
+        malformed_dir = mock_paths.user_subagents_dir() / "malformed-json"
+        malformed_dir.mkdir(parents=True)
+        (malformed_dir / "PROFILE.md").write_text("---\nname: malformed-json\n---\n")
+        (malformed_dir / "runtime-policy.json").write_text("{broken")
+        with pytest.raises(ValueError, match="runtime policy"):
+            coordinator.load_tool_selection_mode("malformed-json")
+
+    @pytest.mark.asyncio
+    async def test_create_and_update_infer_omitted_empty_and_named_tool_modes(self, mock_paths):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.subagent_capabilities import ToolSelectionMode
+
+        coordinator = SubagentCoordinator("test_user")
+        await coordinator.create(AgentProfile(name="omitted"))
+        await coordinator.create(AgentProfile(name="empty", tools=[]))
+        await coordinator.create(AgentProfile(name="allowlist", tools=["files_read"]))
+        assert coordinator.load_tool_selection_mode("omitted") is ToolSelectionMode.SAFE_DEFAULT
+        assert coordinator.load_tool_selection_mode("empty") is ToolSelectionMode.NONE
+        assert coordinator.load_tool_selection_mode("allowlist") is ToolSelectionMode.ALLOWLIST
+
+        await coordinator.update("allowlist", description="changed", tools=None)
+        assert coordinator.load_tool_selection_mode("allowlist") is ToolSelectionMode.ALLOWLIST
+        await coordinator.update("allowlist", tools=[])
+        assert coordinator.load_tool_selection_mode("allowlist") is ToolSelectionMode.NONE
+        await coordinator.update("allowlist", tools=["files_list"])
+        assert coordinator.load_tool_selection_mode("allowlist") is ToolSelectionMode.ALLOWLIST
 
     @pytest.mark.asyncio
     async def test_definitions_are_user_level_across_workspace_ids(self, mock_paths):
@@ -1664,17 +2037,53 @@ class TestSubagentCoordinator:
         assert "enabled-skill" in prompt
         assert "disabled-skill" not in prompt
 
-    def test_get_coordinator_is_cached_by_user_id_only(self, mock_paths):
+    def test_get_coordinator_cache_preserves_requested_workspace_in_both_orders(
+        self, mock_paths, monkeypatch
+    ):
+        from agentprofile.models import AgentProfile
+
         from src.sdk import coordinator as coordinator_module
+        from src.sdk.subagent_capabilities import ToolSelectionMode
 
-        coordinator_module._coordinators.clear()
+        profile = AgentProfile(name="worker", tools=["files_read"])
+        recorded_workspaces: list[str] = []
 
-        sales = coordinator_module.get_coordinator("test_user", workspace_id="sales")
-        support = coordinator_module.get_coordinator("test_user", workspace_id="support")
+        def fake_build_plan(profile, user_id, workspace_id, mode):
+            recorded_workspaces.append(workspace_id)
+            return object()
 
-        assert sales is support
-        assert sales.workspace_id == "user"
-        assert support.workspace_id == "user"
+        monkeypatch.setattr(
+            "src.sdk.subagent_capabilities.build_launch_plan", fake_build_plan
+        )
+        for first_workspace, second_workspace in (("sales", "support"), ("support", "sales")):
+            coordinator_module._coordinators.clear()
+            first = coordinator_module.get_coordinator(
+                "test_user", workspace_id=first_workspace
+            )
+            second = coordinator_module.get_coordinator(
+                "test_user", workspace_id=second_workspace
+            )
+            monkeypatch.setattr(first, "load_def", lambda _name: profile)
+            monkeypatch.setattr(second, "load_def", lambda _name: profile)
+            monkeypatch.setattr(
+                first,
+                "load_tool_selection_mode",
+                lambda _name: ToolSelectionMode.ALLOWLIST,
+            )
+            monkeypatch.setattr(
+                second,
+                "load_tool_selection_mode",
+                lambda _name: ToolSelectionMode.ALLOWLIST,
+            )
+
+            assert first is not second
+            assert first.workspace_id == second.workspace_id == "user"
+            assert first.requested_workspace_id == first_workspace
+            assert second.requested_workspace_id == second_workspace
+            first.preflight("worker")
+            second.preflight("worker")
+
+        assert recorded_workspaces == ["sales", "support", "support", "sales"]
 
     @pytest.mark.asyncio
     async def test_work_queue_is_user_level_across_workspace_ids(self, mock_paths):
@@ -1994,6 +2403,71 @@ class TestDelegateFailureContract:
     the tool returned a plain string and governance receipted the run as
     executed with is_error false.
     """
+
+    @pytest.mark.asyncio
+    async def test_runtime_approval_block_is_failed_and_not_reported_as_success(
+        self, monkeypatch, db, profile
+    ):
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.subagent_capabilities import SubagentLaunchPlan, ToolSelectionMode
+        from src.sdk.subagent_models import SubagentResult
+        from src.sdk.tools import ToolResult
+
+        coord = SubagentCoordinator("test_user", "personal")
+        monkeypatch.setattr(coord, "load_def", lambda _name: profile)
+        monkeypatch.setattr("src.sdk.coordinator._subagent_enabled", lambda *a, **k: True)
+        plan = SubagentLaunchPlan(
+            plan_id="plan-approval",
+            agent_name=profile.name,
+            user_id="test_user",
+            workspace_id="personal",
+            tool_selection_mode=ToolSelectionMode.ALLOWLIST,
+            requested_tools=("time_get",),
+            effective_tools=("time_get",),
+            ready=True,
+        )
+        monkeypatch.setattr(coord, "preflight", lambda _name: plan)
+
+        async def fake_db():
+            return db
+
+        async def noop(*_args, **_kwargs):
+            return None
+
+        async def blocked(*_args, **_kwargs):
+            return SubagentResult(
+                name=profile.name,
+                task="task",
+                success=False,
+                output="Blocked: approval required.",
+                error="Runtime approval is required.",
+                error_code="approval_required",
+                terminal_reason="blocked",
+                cost_usd=0.02,
+                llm_calls=1,
+                effective_tools=["time_get"],
+            )
+
+        monkeypatch.setattr(coord, "_get_db", fake_db)
+        monkeypatch.setattr(coord, "_register_active_context", noop)
+        monkeypatch.setattr(coord, "_run_loop", blocked)
+
+        response = await coord.delegate("test_agent", "task")
+
+        assert isinstance(response, ToolResult)
+        assert response.is_error is True
+        assert response.structured_content["terminal_reason"] == "blocked"
+        assert response.structured_content["error_code"] == "approval_required"
+        tasks = await db.check_progress()
+        assert len(tasks) == 1
+        row = await db.get_task(tasks[0]["id"])
+        assert row is not None and row["status"] == "failed"
+        assert row["terminal_reason"] == "blocked"
+        stored = await db.get_result(tasks[0]["id"])
+        assert stored is not None and stored.terminal_reason == "blocked"
+        assert stored.launch_plan_id == "plan-approval"
+        assert stored.effective_tools == ["time_get"]
+        assert stored.llm_calls == 1 and stored.cost_usd == 0.02
 
     @pytest.mark.asyncio
     async def test_timeout_returns_an_error_result(self, monkeypatch, db, profile):

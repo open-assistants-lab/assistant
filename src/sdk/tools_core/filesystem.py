@@ -106,7 +106,13 @@ def files_list(path: str = ".", user_id: str =  DEFAULT_USER_ID, workspace_id: s
             return f"Not a directory: {path}"
 
         items = []
+        resolved_root = target.resolve()
         for item in sorted(target.iterdir()):
+            try:
+                if not item.resolve().is_relative_to(resolved_root):
+                    continue
+            except (OSError, RuntimeError):
+                continue
             item_type = "DIR" if item.is_dir() else "FILE"
             size = item.stat().st_size if item.is_file() else 0
             items.append(f"{item_type:6} {size:>10} {item.name}")

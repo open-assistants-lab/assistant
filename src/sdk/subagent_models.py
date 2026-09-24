@@ -8,9 +8,9 @@ Agent definition is now handled by the OSS `agentprofile` package (AgentProfile)
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 DEFAULT_DISALLOWED_TOOLS = [
     "subagent_create",
@@ -48,6 +48,7 @@ class TaskStatus(StrEnum):
     CANCELLING = "cancelling"
     COMPLETED = "completed"
     FAILED = "failed"
+    TIMED_OUT = "timed_out"
     CANCELLED = "cancelled"
 
 
@@ -62,7 +63,15 @@ class SubagentResult(BaseModel):
     cost_usd: float = 0.0
     llm_calls: int = 0
     error: str | None = None
+    error_code: str | None = None
     structured_output: dict[str, Any] | list[Any] | str | int | float | bool | None = None
+    terminal_reason: Literal[
+        "completed", "failed", "cancelled", "timed_out", "blocked", "uncertain"
+    ] = "completed"
+    verified: bool | None = None
+    launch_plan_id: str | None = None
+    effective_tools: list[str] = Field(default_factory=list)
+    effective_skills: list[str] = Field(default_factory=list)
 
 
 class TaskCancelledError(Exception):

@@ -276,6 +276,147 @@ def stateful_action(action: str = "") -> str:
 class TestAgentLoopBasic:
     """Basic agent loop behavior."""
 
+    async def test_subagent_cancellation_blocks_tool_dispatch(self):
+        from src.sdk.subagent_context import SubagentCancelledError, SubagentContext
+
+        calls = []
+
+        @tool
+        def side_effect(value: str) -> str:
+            calls.append(value)
+            return value
+
+        loop = AgentLoop(provider=MockProvider(), tools=[side_effect])
+        loop.subagent_ctx = SubagentContext()
+        loop.subagent_ctx.cancel_event.set()
+
+        with pytest.raises(SubagentCancelledError):
+            await loop._execute_tool(ToolCall(id="call", name="side_effect", arguments={"value": "x"}))
+        assert calls == []
+
+    async def test_subagent_cancellation_after_model_response_prevents_nonstreaming_dispatch(self):
+        from src.sdk.subagent_context import SubagentCancelledError, SubagentContext
+
+        calls = []
+        context = SubagentContext()
+
+        class CancellingProvider(MockProvider):
+            async def chat(self, *args, **kwargs):
+                context.cancel_event.set()
+                return Message.assistant(
+                    tool_calls=[
+                        ToolCall(id="pending", name="side_effect", arguments={"value": "x"})
+                    ]
+                )
+
+        @tool
+        def side_effect(value: str) -> str:
+            calls.append(value)
+            return value
+
+        loop = AgentLoop(provider=CancellingProvider(), tools=[side_effect])
+        loop.subagent_ctx = context
+
+        with pytest.raises(SubagentCancelledError):
+            await loop.run([Message.user("run it")])
+        assert calls == []
+
+    async def test_subagent_cancellation_after_model_response_prevents_streaming_dispatch(self):
+        from src.sdk.subagent_context import SubagentCancelledError, SubagentContext
+
+        calls = []
+        context = SubagentContext()
+
+        class CancellingStreamProvider(MockProvider):
+            async def chat_stream_impl(self, messages, tools, model, **kwargs):
+                context.cancel_event.set()
+                yield StreamChunk.tool_input_start(
+                    tool="side_effect", call_id="pending", args={"value": "x"}
+                )
+                yield StreamChunk.tool_input_end(tool="side_effect", call_id="pending")
+                yield StreamChunk.done(content="")
+
+        @tool
+        def side_effect(value: str) -> str:
+            calls.append(value)
+            return value
+
+        loop = AgentLoop(provider=CancellingStreamProvider(), tools=[side_effect])
+        loop.subagent_ctx = context
+
+        with pytest.raises(SubagentCancelledError):
+            _ = [chunk async for chunk in loop.run_stream([Message.user("run it")])]
+        assert calls == []
+
+    async def test_subagent_cannot_load_skill_outside_frozen_manifest(self):
+        from src.sdk.subagent_context import SubagentContext
+
+        calls = []
+        skill_loader = ToolDefinition(
+            name="skills_load",
+            description="Load skill",
+            parameters={"type": "object", "properties": {"name": {"type": "string"}}},
+            function=lambda name: calls.append(name) or f"loaded {name}",
+        )
+        loop = AgentLoop(provider=MockProvider(), tools=[skill_loader])
+        loop.subagent_ctx = SubagentContext(allowed_skill_names=frozenset({"approved"}))
+
+        result = await loop._execute_tool(
+            ToolCall(id="skill", name="skills_load", arguments={"name": "other"})
+        )
+
+        assert result.is_error is True
+        assert calls == []
+
+    async def test_skill_reload_does_not_expand_child_skill_allowlist(self):
+        from src.sdk.subagent_context import SubagentContext
+
+        loaded = []
+        reloads = []
+        skill_loader = ToolDefinition(
+            name="skills_load",
+            description="Load skill",
+            parameters={"type": "object", "properties": {"name": {"type": "string"}}},
+            function=lambda name: loaded.append(name) or f"loaded {name}",
+        )
+        skill_reloader = ToolDefinition(
+            name="skills_reload",
+            description="Reload skills",
+            parameters={"type": "object", "properties": {}},
+            function=lambda: reloads.append(True) or "reloaded",
+        )
+        loop = AgentLoop(provider=MockProvider(), tools=[skill_loader, skill_reloader])
+        loop.subagent_ctx = SubagentContext(allowed_skill_names=frozenset({"approved"}))
+
+        await loop._execute_tool(ToolCall(id="reload", name="skills_reload", arguments={}))
+        allowed = await loop._execute_tool(
+            ToolCall(id="allowed", name="skills_load", arguments={"name": "approved"})
+        )
+        denied = await loop._execute_tool(
+            ToolCall(id="denied", name="skills_load", arguments={"name": "new-after-reload"})
+        )
+
+        assert reloads == [True]
+        assert loaded == ["approved"]
+        assert allowed.is_error is False
+        assert denied.is_error is True
+
+    async def test_subagent_doom_loop_gets_one_nudge_then_fails(self):
+        from src.sdk.subagent_context import SubagentContext, SubagentDoomLoopError
+
+        loop = AgentLoop(provider=MockProvider(), tools=[])
+        loop.subagent_ctx = SubagentContext()
+        for _ in range(3):
+            loop.subagent_ctx.record_tool_call("files_read", '{"path":"x"}')
+        state = AgentState()
+
+        await loop._check_subagent_before_llm(state)
+        assert loop.subagent_ctx._doom_nudge_sent is True
+        assert "Do not repeat it" in state.messages[-1].content
+
+        with pytest.raises(SubagentDoomLoopError):
+            await loop._check_subagent_before_llm(state)
+
     async def test_simple_response_no_tools(self):
         """Agent returns final message when LLM responds without tool calls."""
         provider = MockProvider(responses=[Message.assistant(content="Hello!")])

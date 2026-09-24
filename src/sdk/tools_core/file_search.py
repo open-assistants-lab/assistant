@@ -83,8 +83,16 @@ def files_glob_search(pattern: str = "**/*", path: str = ".", user_id: str =  DE
         if not target.exists():
             return f"Directory not found: {path}"
 
+        resolved_root = root.resolve()
         matches = list(target.glob(pattern))
-        matches = [m for m in matches if str(m).startswith(str(root))]
+        safe_matches = []
+        for match in matches:
+            try:
+                if match.resolve().is_relative_to(resolved_root):
+                    safe_matches.append(match)
+            except (OSError, RuntimeError):
+                continue
+        matches = safe_matches
 
         if not matches:
             return f"No files matching {pattern} in {path}"
@@ -153,12 +161,23 @@ def files_grep_search(
         capped = False
 
         try:
+            resolved_root = root.resolve()
             walk_root = target.resolve()
+            if not walk_root.is_relative_to(resolved_root):
+                raise ValueError(f"Path outside user directory: {path}")
             for dir_path, dir_names, file_names in os.walk(walk_root):
-                # Prune dot-dirs and VCS dirs in place so os.walk never descends.
-                dir_names[:] = [
-                    d for d in dir_names if not d.startswith(".") and d not in _VCS_DIRS
-                ]
+                # Prune dot/VCS directories and any symlink whose target leaves
+                # this workspace before os.walk can descend into it.
+                safe_dir_names = []
+                for name in dir_names:
+                    if name.startswith(".") or name in _VCS_DIRS:
+                        continue
+                    try:
+                        if (Path(dir_path) / name).resolve().is_relative_to(resolved_root):
+                            safe_dir_names.append(name)
+                    except (OSError, RuntimeError):
+                        continue
+                dir_names[:] = safe_dir_names
                 for file_name in file_names:
                     file_path = Path(dir_path) / file_name
 
@@ -173,7 +192,10 @@ def files_grep_search(
                     except OSError:
                         continue
 
-                    if not str(file_path).startswith(str(root)):
+                    try:
+                        if not file_path.resolve().is_relative_to(resolved_root):
+                            continue
+                    except (OSError, RuntimeError):
                         continue
 
                     try:

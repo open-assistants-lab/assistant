@@ -1,15 +1,14 @@
-# Subagent Architecture Research
+# Subagent Architecture Research and Historical V1 Design
 
-**Status**: V1 design complete, pending implementation  
-**Date**: 2026-04-22 (updated, simplified V1)  
-**Original**: 2026-04-21  
-**Context**: Before redesigning our subagent system, comparing approaches from Claude Code, OpenAI Swarm, Google ADK, Pydantic AI, and CrewAI. Updated with decisions on coordination mechanism, supervision, dynamic creation, and scheduling. Simplified V1 to essentials after scope review.
+**Status**: Historical research plus implemented reliability contract (updated 2026-09-24)
+**Original research**: 2026-04-21
+**Context**: Framework comparisons and the original V1 proposal are retained for history. The current implementation contract below supersedes conflicting proposal text; see `docs/superpowers/specs/2026-09-24-subagent-architecture-simplification-review.md` for the decision record.
 
 ---
 
-## Our Current System
+## Original System Snapshot (2026-04; historical)
 
-We have **two** subagent mechanisms that don't talk to each other:
+At the time of the original research, there were **two** subagent mechanisms that did not talk to each other:
 
 ### 1. `Handoff` (in `src/sdk/handoffs.py`)
 - **Pattern**: Transfer/handoff (like OpenAI Swarm)
@@ -168,7 +167,23 @@ No framework in our comparison uses a database-backed work queue for inter-agent
 
 ---
 
-## V1 Design
+## Current Reliability Contract (2026-09-24)
+
+This section describes implemented behavior; the V1 proposal below is historical where it differs.
+
+- **Selection policy:** omitted/ambiguous legacy tool selection migrates visibly to `SAFE_DEFAULT`; explicit `tools=[]` means `NONE`; named tools mean exact `ALLOWLIST`. The runtime default is exactly `files_list`, `files_read`, `files_glob_search`, and `files_grep_search`. Custom and MCP tools are not admitted to child manifests by this change.
+- **Launch preflight:** `start`, synchronous `delegate`, and deprecated compatibility `invoke` reject missing, disabled, forbidden, `ask`, or `deny` declarations before queue/provider/LLM work. `invoke` remains because external consumers are unknown; no in-repository production caller of `SubagentCoordinator.invoke` was found.
+- **Manifest authority:** a successful launch stores a canonical manifest and full SHA-256 `plan_id`. Identity includes user, requested execution workspace, agent, selection mode, requested/effective tool and skill names, and deterministic resolved decision fields. Task execution and outbox replay prefer the frozen manifest; rows missing a frozen tool/skill snapshot fail closed rather than recomputing access. The coordinator cache is keyed by `(user_id, requested_workspace_id)`; user-level profile and queue storage remains separate from the requested execution workspace.
+- **Child tool scope:** the four default file tools and skill tools hide model-visible identity fields and bind user/workspace from the coordinator. Curated file paths must be workspace-relative; absolute and parent-traversing paths fail. List/glob/grep skip symlinks resolving outside the workspace. Broader tools require explicit allowlists and normal preflight/governance checks.
+- **Runtime governance:** actual arguments are still checked by child governance. A runtime `ask` stops the child with result-level `terminal_reason="blocked"` and `error_code="approval_required"`, without a child-owned pending proposal. Administrator `deny` remains authoritative. Main-agent HITL behavior is unchanged.
+- **Skills:** the child can load only preflighted skill names. `skills_reload` does not expand that run-scoped allowlist; identity is bound for child skill tools.
+- **Lifecycle and delivery:** `work_queue.status` owns task lifecycle. `result` owns output, usage, and result-level reason; `launch_plan` owns the execution capability snapshot; the completion outbox owns delivery state. Terminal transitions and outbox insertion are atomic. A lock on the shared per-user work-queue object serializes in-process drains across workspace coordinators. Delivery remains at-least-once: a crash after bus publication but before outbox acknowledgement may repeat a live WebSocket event. The parent consumer uses `subagent-completion:{task_id}` and an indexed message-store key for idempotent conversation-message application; this is not cross-database or socket-level exactly-once. Task claiming is atomic, so duplicate notifications do not duplicate task execution. Every routable terminal outcome is replayed; a task without a parent session is acknowledged without a conversation message, while its durable result remains queryable. Completion payload copies are retained because no task/outbox retention policy or proven reduced-payload replay contract exists.
+- **Terminal outcomes:** task status remains `completed`, `failed`, `timed_out`, or `cancelled`; `blocked` and `uncertain` are result-level distinctions. Empty final output is not success.
+- **Loop integration:** cancellation before dispatch and after a model response is covered in streaming and non-streaming tests. Existing loop/middleware paths were retained because no safe duplicate-hook consolidation was demonstrated. Main-agent HITL regression tests remain in place.
+
+We adopted selected Pi orchestration patterns—strict allowlists and preflight, immutable launch snapshots, lifecycle artifacts, replay, and verification-aware outcomes—without replacing Assistant's SQLite queue, per-user permission policy, governance approvals, or receipt authority.
+
+## Original V1 Proposal (Historical; superseded where it conflicts with the contract above)
 
 ### Core Principle
 

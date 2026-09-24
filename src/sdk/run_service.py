@@ -11,7 +11,7 @@ import asyncio
 import json
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -91,6 +91,7 @@ async def handle_subagent_completion(event: Any) -> None:
         return
 
     message = event.message()
+    delivery_key = f"subagent-completion:{event.task_id}"
     store = await aget_message_store(event.user_id, event.workspace_id)
     active_loop = get_user_loop(event.user_id, event.session_id)
     if active_loop is not None:
@@ -100,7 +101,8 @@ async def handle_subagent_completion(event: Any) -> None:
             nonlocal persisted
             if persisted:
                 return
-            store.add_message(
+            store.add_message_once(
+                delivery_key,
                 "user",
                 text,
                 metadata={
@@ -121,7 +123,8 @@ async def handle_subagent_completion(event: Any) -> None:
         active_loop.steer(message)
         return
 
-    store.add_message(
+    store.add_message_once(
+        delivery_key,
         "assistant",
         message,
         metadata={
@@ -563,7 +566,7 @@ class RunService:
             await self._registry.release(session_key(self._user_id, session_id))
 
 
-    def _load_history(self, session_id: str) -> list[Message]:
+    def _load_history(self, session_id: str) -> Sequence[StorageMessage | Message]:
         """P1-T10: history from the session-event log projection when the log
         is enabled (settings flag, shipped off); else the MessageStore path."""
         from src.sdk import session_events as se
