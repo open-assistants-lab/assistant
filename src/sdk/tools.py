@@ -133,6 +133,13 @@ class ToolResult(BaseModel):
 
     @model_validator(mode="after")
     def _infer_default_outcome(self) -> ToolResult:
+        if self.outcome is None:
+            explicit = (self.structured_content or {}).get("outcome")
+            if explicit:
+                try:
+                    self.outcome = Outcome(explicit)
+                except ValueError:
+                    self.outcome = None
         if self.is_error and self.outcome is Outcome.SUCCEEDED:
             raise ValueError("a ToolResult with is_error=True cannot have a successful outcome")
         if self.outcome is None:

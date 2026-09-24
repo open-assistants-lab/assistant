@@ -109,6 +109,16 @@ def test_tool_result_carries_explicit_outcome():
     assert result.outcome is Outcome.TIMED_OUT
 
 
+def test_tool_result_derives_outcome_from_structured_metadata():
+    result = ToolResult(
+        content="partial",
+        structured_content={"outcome": "incomplete"},
+        is_error=True,
+    )
+
+    assert result.outcome is Outcome.INCOMPLETE
+
+
 def test_tool_result_rejects_success_outcome_with_error_flag():
     with pytest.raises(ValueError, match="successful outcome"):
         ToolResult(content="contradictory", is_error=True, outcome=Outcome.SUCCEEDED)
