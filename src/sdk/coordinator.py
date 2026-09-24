@@ -316,10 +316,17 @@ class SubagentCoordinator:
         return count
 
     async def drain_completion_events(self, session_id: str | None = None) -> int:
-        """Replay undelivered terminal events; acknowledge only after bus consumers succeed."""
+        """Replay undelivered terminal events under the shared per-user drain lock."""
+        db = await self._get_db()
+        async with db.completion_drain_lock:
+            return await self._drain_completion_events(db, session_id)
+
+    async def _drain_completion_events(
+        self, db: SubagentWorkQueueDB, session_id: str | None
+    ) -> int:
+        """Publish and acknowledge pending outbox rows while holding the queue lock."""
         from src.sdk.subagent_completion import SubagentCompletion, completion_bus
 
-        db = await self._get_db()
         delivered_count = 0
         for row in await db.list_undelivered_completion_events():
             parent_session_id = row.get("parent_session_id")

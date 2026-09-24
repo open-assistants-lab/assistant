@@ -93,6 +93,7 @@ class SubagentWorkQueueDB:
         self._db: aiosqlite.Connection | None = None
         self._db_path = str(get_paths(user_id).work_queue_db())
         self._init_lock = asyncio.Lock()
+        self.completion_drain_lock = asyncio.Lock()
 
     async def _get_db(self) -> aiosqlite.Connection:
         if self._db is None:

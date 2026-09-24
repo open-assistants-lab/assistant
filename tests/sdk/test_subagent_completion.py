@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -173,6 +174,62 @@ async def test_coordinator_replays_event_and_acknowledges_only_with_subscriber(
         await db.close()
         if coordinator._db is not db:
             await coordinator._db.close()
+
+
+@pytest.mark.asyncio
+async def test_workspace_coordinators_serialize_completion_event_delivery(
+    tmp_path, monkeypatch
+) -> None:
+    from src.sdk import coordinator as coordinator_module
+    from src.sdk import subagent_completion as completion_module
+    from src.sdk import subagent_work_queue as work_queue_module
+    from src.sdk.coordinator import get_coordinator
+    from src.sdk.subagent_completion import SubagentCompletionBus
+    from src.storage.paths import DataPaths
+
+    paths = DataPaths(data_path=tmp_path, data_root=tmp_path, user_id="user")
+    monkeypatch.setattr(coordinator_module, "get_paths", lambda **_kwargs: paths)
+    monkeypatch.setattr(work_queue_module, "get_paths", lambda _user_id: paths)
+    monkeypatch.setattr(completion_module, "completion_bus", SubagentCompletionBus())
+    coordinator_module._coordinators.clear()
+    work_queue_module._db_cache.clear()
+
+    sales = get_coordinator("user", workspace_id="sales")
+    support = get_coordinator("user", workspace_id="support")
+    db = await work_queue_module.get_work_queue("user", workspace_id="user")
+    sales._db = db
+    support._db = db
+    task_id = await db.insert_task(
+        "worker",
+        "review",
+        AgentProfile(name="worker"),
+        parent_session_id="session-1",
+        launch_plan={"requested_workspace_id": "sales"},
+    )
+    await db.set_completed(
+        task_id,
+        SubagentResult(name="worker", task="review", success=True, output="done"),
+    )
+
+    published: list[str] = []
+
+    async def receive(event) -> None:
+        published.append(event.task_id)
+        await asyncio.sleep(0.05)
+
+    unsubscribe = completion_module.completion_bus.subscribe("user", None, receive)
+    try:
+        delivered = await asyncio.gather(
+            sales.drain_completion_events(), support.drain_completion_events()
+        )
+        assert sum(delivered) == 1
+        assert published == [task_id]
+        assert await db.list_undelivered_completion_events() == []
+    finally:
+        unsubscribe()
+        coordinator_module._coordinators.clear()
+        work_queue_module._db_cache.clear()
+        await db.close()
 
 
 @pytest.mark.asyncio
