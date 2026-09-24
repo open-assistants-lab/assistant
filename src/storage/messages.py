@@ -579,6 +579,8 @@ class MessageStore:
             return None
         if metadata.get("compression_reason") not in SUMMARY_REASONS:
             return None
+        if metadata.get("include_in_model_context") is False:
+            return None
         if "session_id" in metadata:
             return None
 
@@ -1160,6 +1162,34 @@ class MessageStore:
             except Exception:
                 cur.execute("ROLLBACK")
                 raise
+
+    def mark_summary_context_excluded(self, summary_id: str) -> bool:
+        """Hide one unusable summary from model context without deleting it."""
+        if not isinstance(summary_id, str) or not summary_id.strip():
+            return False
+        with self._core.db._connect() as cur:
+            cur.execute("BEGIN IMMEDIATE")
+            try:
+                row = cur.execute(
+                    "SELECT session_id FROM messages WHERE id = ? AND role = 'summary'",
+                    (summary_id,),
+                ).fetchone()
+                if row is None:
+                    cur.execute("ROLLBACK")
+                    return False
+                cur.execute(
+                    "UPDATE messages SET metadata = json_set("
+                    "COALESCE(metadata, '{}'), '$.include_in_model_context', json('false')) "
+                    "WHERE id = ? AND role = 'summary'",
+                    (summary_id,),
+                )
+                changed = cur.rowcount
+                cur.execute("COMMIT")
+            except Exception:
+                cur.execute("ROLLBACK")
+                raise
+        self._invalidate_summary_cache(str(row[0]))
+        return bool(changed)
 
     def mark_context_excluded(self, session_id: str, keep_messages: int) -> int:
         """Issue #18 escape hatch: mark all non-summary rows except the newest

@@ -81,6 +81,7 @@
 - Test: `tests/sdk/test_issue18.py`
 - Test: `tests/sdk/test_summarization_overhaul.py`
 - Test: `tests/sdk/test_summarization_incremental.py`
+- Test: `tests/sdk/test_runner.py`
 - Test: `tests/storage/test_messages_store.py`
 
 **Interfaces:**
@@ -192,7 +193,7 @@ uv run ruff check src/config/settings.py src/sdk/middleware_summarization.py src
 Commit:
 
 ```bash
-git add src/config/settings.py src/sdk/middleware_summarization.py src/storage/messages.py src/sdk/runner.py seeds/prompts/summarisation_prompt.md tests/sdk/test_issue18.py tests/sdk/test_summarization_overhaul.py tests/sdk/test_summarization_incremental.py tests/storage/test_messages_store.py
+git add src/config/settings.py src/sdk/middleware_summarization.py src/storage/messages.py src/sdk/runner.py seeds/prompts/summarisation_prompt.md tests/sdk/test_issue18.py tests/sdk/test_summarization_overhaul.py tests/sdk/test_summarization_incremental.py tests/sdk/test_runner.py tests/storage/test_messages_store.py
 git commit -m "fix: bound summary recovery context"
 ```
 

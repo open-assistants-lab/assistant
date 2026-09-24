@@ -57,6 +57,16 @@ class TestPayloadAwareTrigger:
         assert mw.payload_overhead_tokens == 0
 
 
+class TestSummaryBudget:
+    def test_oversized_summary_uses_bounded_fallback(self):
+        mw = _mw(max_summary_chars=100)
+
+        bounded = mw._bounded_summary("x" * 50_000)
+
+        assert len(bounded) <= 100
+        assert "[... summary omitted ...]" in bounded
+
+
 class TestEscapeHatch:
     @pytest.mark.asyncio
     async def test_summary_failure_forces_trim(self, monkeypatch, fake_mw_logger):
@@ -98,6 +108,38 @@ class TestEscapeHatch:
         events = [e for _, e, _ in fake_mw_logger.events]
         assert any("summarization.forced_trim" in e for e in events)
         assert any("summarization.persist" in e or "summarization.trigger" in e for e in events)
+
+    @pytest.mark.asyncio
+    async def test_failed_update_excludes_oversized_previous_summary(self, fake_mw_logger):
+        excluded: list[str] = []
+        mw = _mw(
+            keep=("messages", 2),
+            max_summary_chars=100,
+            summary_context_excluder=lambda summary_id: excluded.append(summary_id) or True,
+        )
+        mw.context_pruner = lambda session_id, keep_messages: 4
+        mw.payload_overhead_tokens = 0
+
+        async def broken_factory():
+            class Broken:
+                async def chat(self, **kwargs):
+                    raise TimeoutError("summary timed out")
+
+            return Broken()
+
+        mw.summary_provider_factory = broken_factory
+        previous = Message(
+            role="user",
+            content="Here is a summary of the conversation to date:\n" + "x" * 50_000,
+            source="summarization_middleware",
+            storage_id="summary-1",
+        )
+
+        update = await mw.abefore_model(_state([previous, *_big_history(4)]))
+
+        assert update is not None
+        assert excluded == ["summary-1"]
+        assert all(message.storage_id != "summary-1" for message in update["messages"])
 
 
 class TestTriggerLogging:

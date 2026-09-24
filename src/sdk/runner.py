@@ -748,6 +748,11 @@ async def create_sdk_loop(
         store = get_message_store(user_id)
         return store.mark_context_excluded(session_id, keep_messages)
 
+    def _exclude_summary(summary_id: str) -> bool:
+        from src.storage.messages import get_message_store
+
+        return get_message_store(user_id).mark_summary_context_excluded(summary_id)
+
     if summary_config.enabled:
         middlewares.append(
             SummarizationMiddleware(
@@ -760,6 +765,8 @@ async def create_sdk_loop(
                 summary_sink=_persist_summary,
                 payload_overhead_tokens=payload_overhead,
                 context_pruner=_prune_context,
+                max_summary_chars=summary_config.max_summary_chars,
+                summary_context_excluder=_exclude_summary,
             )
         )
 

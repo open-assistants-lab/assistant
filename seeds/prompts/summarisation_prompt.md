@@ -45,7 +45,7 @@ Use this EXACT format:
 - [Any data, examples, or references needed to continue]
 - [Or "(none)" if not applicable]
 
-Keep each section concise. Preserve exact file paths, function names, and error messages.
+Keep each section concise. Preserve exact file paths, function names, and error messages. The persisted summary has a hard character budget; omit lower-priority detail before exceeding that budget rather than allowing the summary to grow without bound.
 </instructions>
 
 The user will message you with the full message history from which you'll extract context to create a replacement. Carefully read through it all and think deeply about what information is most important to your overall goal and should be saved:

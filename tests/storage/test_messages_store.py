@@ -74,6 +74,27 @@ def test_message_session_id_is_preserved() -> None:
     assert messages[0].session_id == "session-a"
 
 
+def test_excluded_summary_is_hidden_from_model_context_but_kept_in_store() -> None:
+    store = _store()
+    message_id = store.add_message("user", "summarize me", session_id="session-a")
+    summary_id = store.add_summary_message(
+        "x" * 50_000,
+        session_id="session-a",
+        metadata={
+            "compression_reason": "threshold",
+            "summarized_message_ids": [message_id],
+            "preserved_message_ids": [],
+        },
+    )
+
+    assert store.mark_summary_context_excluded(summary_id) is True
+    assert all(message.id != summary_id for message in store.get_messages_with_summary("session-a"))
+    with store._core.db._connect() as cur:
+        stored = cur.execute("SELECT content FROM messages WHERE id = ?", (summary_id,)).fetchone()
+    assert stored is not None
+    assert stored[0] == "x" * 50_000
+
+
 def test_add_message_once_is_idempotent_per_session_and_keeps_delivery_key() -> None:
     store = _store()
 

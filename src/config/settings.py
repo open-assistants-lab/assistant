@@ -93,6 +93,12 @@ class SummarizationConfig(_BaseSettings):
     trigger: list[Any] = Field(default_factory=lambda: ["tokens", 50000])
     keep: list[Any] = Field(default_factory=lambda: ["messages", 20])
     trim_tokens_to_summarize: int | None = 4000
+    max_summary_chars: int = Field(
+        default=24_000,
+        ge=1_000,
+        le=200_000,
+        description="Hard character budget for persisted conversation summaries.",
+    )
     prompt_file: str = Field(default="summarisation_prompt.md", description="Filename for summary prompt — seeded per user from seeds/prompts/")
 
     # Old fields for backward compat

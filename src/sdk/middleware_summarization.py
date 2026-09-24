@@ -183,7 +183,9 @@ SUMMARY_MESSAGE_PREFIX = "Here is a summary of the conversation to date:"
 
 _DEFAULT_MESSAGES_TO_KEEP = 20
 _DEFAULT_TRIM_TOKEN_LIMIT = 4000
+_DEFAULT_MAX_SUMMARY_CHARS = 24_000
 _DEFAULT_FALLBACK_MESSAGE_COUNT = 15
+_SUMMARY_OMISSION_MARKER = "[... summary omitted ...]"
 
 
 class _SummaryGenerationError(Exception):
@@ -301,6 +303,8 @@ class SummarizationMiddleware(Middleware):
         summary_provider_factory: SummaryProviderFactory | None = None,
         payload_overhead_tokens: int = 0,
         context_pruner: Any | None = None,
+        max_summary_chars: int = _DEFAULT_MAX_SUMMARY_CHARS,
+        summary_context_excluder: Any | None = None,
     ) -> None:
         self.model = model
         self.trigger = trigger
@@ -317,6 +321,8 @@ class SummarizationMiddleware(Middleware):
         # that marks the oldest store rows excluded from model context
         # (include_in_model_context=False) WITHOUT needing an LLM summary.
         self.context_pruner = context_pruner
+        self.max_summary_chars = max(1, int(max_summary_chars))
+        self.summary_context_excluder = summary_context_excluder
         # Degraded-summary stash (audit B14): when the persistence sink
         # fails, the generated summary is cached here keyed by session so a
         # later successful sink can persist it — preserving the incremental
@@ -426,7 +432,6 @@ class SummarizationMiddleware(Middleware):
         elif (
             result.telemetry.status is CompressionStatus.FAILED
             and self.context_pruner is not None
-            and self.payload_overhead_tokens > 0
         ):
             # Issue #18 defect 3 escape hatch: the summary LLM call failed
             # (likely with the same oversized context that triggered this).
@@ -438,13 +443,29 @@ class SummarizationMiddleware(Middleware):
             )
             try:
                 pruned = self.context_pruner(context.session_id, keep_messages)
-                update["messages"] = messages[-keep_messages:]
+                retained = messages
+                previous_index = self._find_previous_summary_index(messages)
+                if previous_index >= 0 and self.summary_context_excluder is not None:
+                    previous = messages[previous_index]
+                    previous_text = self._extract_previous_summary(previous) or ""
+                    if (
+                        len(previous_text) > self.max_summary_chars
+                        and previous.storage_id
+                        and self.summary_context_excluder(previous.storage_id)
+                    ):
+                        retained = [
+                            message
+                            for message in messages
+                            if message.storage_id != previous.storage_id
+                        ]
+                update["messages"] = retained[-keep_messages:]
                 logger.warning(
                     "summarization.forced_trim",
                     {
                         "session_id": context.session_id,
                         "kept": keep_messages,
                         "pruned_rows": pruned,
+                        "summary_excluded": len(retained) != len(messages),
                         "error_code": result.telemetry.error_code,
                     },
                     user_id=self.user_id,
@@ -638,6 +659,17 @@ class SummarizationMiddleware(Middleware):
                 return i
         return -1
 
+    def _bounded_summary(self, text: str) -> str:
+        """Bound a summary while retaining both its beginning and end."""
+        if len(text) <= self.max_summary_chars:
+            return text
+        marker = f"\n\n{_SUMMARY_OMISSION_MARKER}\n\n"
+        available = max(0, self.max_summary_chars - len(marker))
+        head = available // 2
+        tail = available - head
+        suffix = text[-tail:] if tail else ""
+        return f"{text[:head]}{marker}{suffix}"
+
     @classmethod
     def _extract_previous_summary(cls, message: Message) -> str | None:
         """Extract the summary text from a previously injected summary message.
@@ -738,7 +770,11 @@ class SummarizationMiddleware(Middleware):
                 raise _SummaryGenerationError("empty_input", "no messages were selected")
             formatted = self._messages_to_conversation_text(messages_to_summarize)
             if previous_summary:
-                update_prompt = UPDATE_SUMMARY_PROMPT
+                previous_summary = self._bounded_summary(previous_summary)
+                update_prompt = (
+                    f"{UPDATE_SUMMARY_PROMPT}\n"
+                    f"- Keep the complete updated summary under {self.max_summary_chars} characters."
+                )
                 if instructions:
                     update_prompt = f"{update_prompt}\n\nAdditional focus: {instructions}"
                 prompt = (
@@ -767,7 +803,7 @@ class SummarizationMiddleware(Middleware):
                     "empty_response", "summary provider returned no content"
                 )
             usage = self._usage_aggregate(getattr(response, "usage", None))
-            return content, usage
+            return self._bounded_summary(content), usage
         except _SummaryGenerationError:
             raise
         except Exception as exc:
@@ -804,7 +840,7 @@ class SummarizationMiddleware(Middleware):
                     "empty_response", "summary provider returned no content"
                 )
             usage = self._usage_aggregate(getattr(response, "usage", None))
-            return content, usage
+            return self._bounded_summary(content), usage
         except _SummaryGenerationError:
             raise
         except Exception as exc:
@@ -1046,7 +1082,9 @@ class SummarizationMiddleware(Middleware):
         read_files, modified_files = self._extract_file_ops(
             [*summarized_messages, *turn_prefix]
         )
-        summary += self._format_file_operations(read_files, modified_files)
+        summary = self._bounded_summary(
+            summary + self._format_file_operations(read_files, modified_files)
+        )
 
         try:
             summary_message = self._build_new_messages(summary)[0]

@@ -46,6 +46,7 @@ def loop_factory(monkeypatch):
     settings.memory.summarization.get_keep.return_value = ("messages", 1)
     settings.memory.summarization.model = None
     settings.memory.summarization.trim_tokens_to_summarize = 4000
+    settings.memory.summarization.max_summary_chars = 24_000
     settings.memory.summarization.prompt_file = None
     settings.verification.enabled = False
     settings.langfuse.enabled = False
@@ -115,6 +116,19 @@ async def test_create_sdk_loop_flow_identity_carries_session(loop_factory):
     assert loop._flow_session_id == "chat-42"
     attempt, session_id = loop._flow_identity()
     assert session_id == "chat-42"
+
+
+@pytest.mark.asyncio
+async def test_summary_pruner_calls_real_message_store(loop_factory, monkeypatch):
+    store = MagicMock()
+    store.mark_context_excluded.return_value = 3
+    monkeypatch.setattr("src.storage.messages.get_message_store", lambda user_id: store)
+
+    loop = await loop_factory("chat-1")
+    middleware = loop.middlewares[0]
+
+    assert middleware.context_pruner("chat-1", 1) == 3
+    store.mark_context_excluded.assert_called_once_with("chat-1", 1)
 
 
 @pytest.mark.asyncio
@@ -511,6 +525,7 @@ async def test_run_sdk_agent_stream_triggers_summarization():
         settings.memory.summarization.get_keep = lambda: ("messages", 5)
         settings.memory.summarization.model = "ollama:test-model"
         settings.memory.summarization.trim_tokens_to_summarize = 4000
+        settings.memory.summarization.max_summary_chars = 24_000
         settings.memory.summarization.trigger_tokens = None
         settings.memory.summarization.keep_tokens = None
         settings.agent.model = "ollama:test-model"
@@ -1114,6 +1129,7 @@ async def test_create_sdk_loop_uses_saved_summarization_model(monkeypatch):
     settings.memory.summarization.get_keep.return_value = ("messages", 1)
     settings.memory.summarization.model = "openai:host-summary"
     settings.memory.summarization.trim_tokens_to_summarize = 4000
+    settings.memory.summarization.max_summary_chars = 24_000
     settings.memory.summarization.prompt_file = None
     settings.verification.enabled = False
     settings.langfuse.enabled = False
