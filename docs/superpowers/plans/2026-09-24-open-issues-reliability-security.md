@@ -86,7 +86,7 @@
 **Interfaces:**
 - Produces `SummarizationConfig.max_summary_chars: int = 24_000`.
 - Produces `MessageStore.mark_summary_context_excluded(summary_id: str) -> bool`.
-- Produces a bounded summary helper that preserves the beginning and end of an oversized text block with an explicit omission marker.
+- Produces a bounded summary helper that preserves the beginning and end of an oversized text block with the exact marker `[... summary omitted ...]`.
 - `SummarizationMiddleware` receives `max_summary_chars` and passes it to the bounded-summary helpers.
 
 - [ ] **Step 1: Write failing tests for the real escape hatch and summary bound.**
@@ -103,23 +103,26 @@ def test_prune_context_callback_is_invoked_with_session_and_boundary(middleware)
 
 
 def test_excluded_summary_is_not_selected_for_model_context(store):
-    summary_id = store.add_summary_message("x" * 50_000, session_id="s")
+    summary_id = store.add_summary_message(
+        "x" * 50_000,
+        session_id="s",
+        metadata={
+            "compression_reason": "threshold",
+            "summarized_message_ids": [],
+            "preserved_message_ids": [],
+        },
+    )
     store.mark_summary_context_excluded(summary_id)
 
     messages = store.get_messages_with_summary("s")
     assert all(message.id != summary_id for message in messages)
 
 
-async def test_oversized_generated_summary_uses_bounded_fallback(middleware):
-    middleware._summary_provider = type(
-        "Provider",
-        (),
-        {"chat": lambda self, messages: _summary_message("x" * 50_000)},
-    )()
+def test_oversized_summary_uses_bounded_fallback(middleware):
+    bounded = middleware._bounded_summary("x" * 50_000)
 
-    result = await middleware._compress(_compression_context(), _state_with_old_messages())
-
-    assert len(result.artifact.summary) <= middleware.max_summary_chars
+    assert len(bounded) <= middleware.max_summary_chars
+    assert "[summary omitted" in bounded
 ```
 
 The tests must assert persisted history remains available through the audit/store path while model-context selection excludes the unusable summary.
@@ -159,7 +162,7 @@ In `SummarizationMiddleware`:
 previous_summary = self._bounded_summary(previous_summary)
 ```
 
-The update prompt must state the exact maximum character budget. After provider generation, apply the same deterministic bound before persistence. If the generated result is over budget, persist a bounded fallback containing an explicit omission marker rather than the oversized text.
+The update prompt must state the exact maximum character budget. After provider generation, apply the same deterministic bound before persistence. If the generated result is over budget, persist a bounded fallback containing the exact omission marker rather than the oversized text. The helper must split the remaining budget between the beginning and end of the text so the total, including the marker, never exceeds `max_summary_chars`.
 
 On a failed summary call, if the newest summary exceeds the budget, mark that summary context-excluded before the forced message trim. The in-memory replacement must omit the unusable summary as well.
 
@@ -288,6 +291,7 @@ If the shell skill path does not exist, update the existing shell documentation 
 - `Outcome` accepts `refused` and `killed`; legacy `rejected` remains readable during migration.
 - `ToolResult` carries optional internal outcome metadata without changing provider tool schemas.
 - Governed proposal responses expose both `status` and authoritative `outcome`.
+- Every `AgentLoop` tool return is normalized to a `ToolResult` with an outcome. Read-only ungoverned tools emit that outcome in the tool/audit boundary; durable governed receipts remain owned by the execution kernel.
 
 - [ ] **Step 1: Write failing contract tests.**
 
@@ -329,7 +333,7 @@ Extend `Outcome` with canonical `REFUSED = "refused"` and `KILLED = "killed"` va
 
 Add an optional internal field or structured metadata field that is not included in model tool schemas. `ToolResult.from_raw()` derives `succeeded` for ordinary successful values; explicit error results must be constructed with the correct outcome by the execution boundary.
 
-Update synthetic `AgentLoop` results for unknown tool, disabled tool, permission refusal, timeout, cancellation, and tool-call budget exhaustion.
+Update synthetic `AgentLoop` results for unknown tool, disabled tool, permission refusal, timeout, cancellation, and tool-call budget exhaustion. Normalize every ordinary tool return through the same helper so a plain string cannot bypass outcome classification.
 
 - [ ] **Step 5: Make proposal responses authoritative about outcome.**
 
@@ -390,7 +394,7 @@ The test must simulate client disconnect while the run is still active, then ass
 uv run pytest -q tests/sdk/test_session_worker.py tests/api/test_stream_cancel_race.py tests/api/test_conversation.py
 ```
 
-If the current cleanup already passes the disconnect test, retain the test and do not add a redundant reaper. If it fails, use the failure to drive the lease implementation.
+The existing cleanup paths remain covered by the disconnect tests. The lease reaper is an additional safety net for a run that does not observe generator cancellation.
 
 - [ ] **Step 3: Add activity tracking and stale cancellation.**
 
@@ -400,7 +404,7 @@ Add a five-minute default setting:
 session_lease_timeout_seconds: int = Field(default=300, ge=30, le=3600)
 ```
 
-Add a monotonic `last_activity` field to `SessionLock`, a `touch()` method, and registry stale detection. Run service event boundaries and provider/tool completion points call `touch()`. Reaping requests cancellation and leaves lock removal to the existing `finally` release path, preventing concurrent ownership.
+Add a monotonic `last_activity` field to `SessionLock`, a `touch()` method, and registry stale detection. `SessionWorkerRegistry.acquire()` invokes `reap_stale()` before the busy check, and `RunService` touches the lock at event/provider/tool boundaries. Reaping requests cancellation and leaves lock removal to the existing `finally` release path, preventing concurrent ownership. The existing `/message/cancel` endpoint remains the explicit user recovery path if a non-cooperative provider call has not yet released its lock.
 
 - [ ] **Step 4: Verify, document, and commit.**
 
@@ -422,6 +426,7 @@ git commit -m "fix: recover dropped session runs"
 
 **Files:**
 - Modify: `src/config/settings.py`
+- Modify: `config.yaml`
 - Modify: `src/sdk/profile_loader.py`
 - Modify: `src/sdk/loop.py`
 - Modify: `src/sdk/run_models.py`
@@ -457,7 +462,7 @@ uv run pytest -q tests/sdk/test_sdk_loop.py tests/sdk/test_run_service.py tests/
 
 - [ ] **Step 3: Implement the setting and terminal state.**
 
-Add the validated setting and pass it into `RunConfig` whenever no more-specific profile value exists. At the end of the ReAct loop, record `termination_reason="iteration_limit"` and return an incomplete terminal result rather than an ordinary completion.
+Add the validated setting and document the default in `config.yaml`. Pass it into `RunConfig` whenever no more-specific profile value exists. At the end of the ReAct loop, record `termination_reason="iteration_limit"` and return an incomplete terminal result rather than an ordinary completion.
 
 - [ ] **Step 4: Verify and commit.**
 
@@ -469,7 +474,7 @@ uv run ruff check src/config/settings.py src/sdk/profile_loader.py src/sdk/loop.
 Commit:
 
 ```bash
-git add src/config/settings.py src/sdk/profile_loader.py src/sdk/loop.py src/sdk/run_models.py src/sdk/run_service.py tests/sdk/test_sdk_loop.py tests/sdk/test_run_service.py tests/config/test_settings_resolution.py
+git add src/config/settings.py config.yaml src/sdk/profile_loader.py src/sdk/loop.py src/sdk/run_models.py src/sdk/run_service.py tests/sdk/test_sdk_loop.py tests/sdk/test_run_service.py tests/config/test_settings_resolution.py
 git commit -m "feat: expose loop iteration limits"
 ```
 
@@ -556,7 +561,7 @@ git commit -m "feat: expose custom pipeline failure semantics"
 
 ```python
 def test_custom_command_above_capture_ceiling_is_explicitly_truncated(tmp_path):
-    tool = make_large_output_tool(tmp_path, size=100_000)
+    tool = make_large_output_tool(tmp_path, size=1_000_000)
     result = tool.function()
 
     assert isinstance(result, ToolResult)
@@ -566,7 +571,7 @@ def test_custom_command_above_capture_ceiling_is_explicitly_truncated(tmp_path):
     assert "tool_result_read" not in result.content
 ```
 
-Define `make_large_output_tool(tmp_path, size)` in the new test module using the existing `make_tool()` helper and a Python command that writes `size` bytes to stdout. The command must emit more than `max_output_bytes * 8`, not merely mock a result object. Assert the result is not a success-shaped string and does not claim recoverable output.
+Define `make_large_output_tool(tmp_path, size)` in the new test module using the existing `make_tool()` helper and a Python command that writes `size` bytes to stdout. Pin `SANDBOX_BACKEND=soft` and `max_output_kb=100`; use `size=1_000_000`, which exceeds the resulting 819,200-byte capture ceiling. The command must emit more than `max_output_bytes * 8`, not merely mock a result object. Assert the result is not a success-shaped string and does not claim recoverable output.
 
 - [ ] **Step 2: Run the test red.**
 
