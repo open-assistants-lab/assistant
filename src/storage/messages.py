@@ -115,6 +115,15 @@ class MessageStore:
         except Exception:
             pass
 
+        # The completion idempotency constraint is required for correctness;
+        # do not silently continue if SQLite cannot install it.
+        with self._core.db._connect() as cur:
+            cur.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_session_delivery_key "
+                "ON messages(session_id, json_extract(metadata, '$.delivery_key')) "
+                "WHERE json_extract(metadata, '$.delivery_key') IS NOT NULL"
+            )
+
         # Audit P1: VIRTUAL generated columns + indexes for the common
         # json_extract probes (run_id on persist, workspace_id on deletes).
         # Runs AFTER MemoryCore so the messages table exists, and BEFORE
@@ -460,6 +469,53 @@ class MessageStore:
     ) -> str:
         result = self._core.ingest(role, content or "(empty)", session_id=session_id, metadata=metadata)
         return self._resolve_message_id(result, session_id) or result or ""
+
+    def add_message_once(
+        self,
+        delivery_key: str,
+        role: str,
+        content: str,
+        metadata: dict[str, Any],
+        session_id: str,
+    ) -> bool:
+        """Append once per session using an indexed metadata delivery key."""
+        if not delivery_key.strip():
+            raise ValueError("delivery_key must be nonempty")
+        session_id = self._require_session_id(session_id)
+        message_metadata = {**metadata, "delivery_key": delivery_key}
+        try:
+            self.add_message(role, content, metadata=message_metadata, session_id=session_id)
+        except Exception as exc:
+            if not self._is_sqlite_integrity_error(exc):
+                raise
+            try:
+                if self._has_delivery_key(session_id, delivery_key):
+                    return False
+            except Exception as lookup_error:
+                raise exc from lookup_error
+            raise
+        return True
+
+    @staticmethod
+    def _is_sqlite_integrity_error(error: BaseException) -> bool:
+        """Find a SQLite integrity failure through CoreMem exception wrappers."""
+        current: BaseException | None = error
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            if isinstance(current, sqlite3.IntegrityError):
+                return True
+            seen.add(id(current))
+            current = current.__cause__ or current.__context__
+        return False
+
+    def _has_delivery_key(self, session_id: str, delivery_key: str) -> bool:
+        with self._core.db._connect() as cur:
+            return cur.execute(
+                "SELECT 1 FROM messages "
+                "WHERE session_id = ? AND json_extract(metadata, '$.delivery_key') = ? "
+                "LIMIT 1",
+                (session_id, delivery_key),
+            ).fetchone() is not None
 
     def add_message_with_embedding(
         self,

@@ -141,30 +141,70 @@ async def test_coordinator_replays_event_and_acknowledges_only_with_subscriber(
     coordinator._db = db
     received = []
     try:
-        task_id = await db.insert_task(
-            "worker", "review", AgentProfile(name="worker"), parent_session_id="session-1"
-        )
-        await db.set_completed(
-            task_id,
-            SubagentResult(name="worker", task="review", success=True, output="done"),
-        )
+        task_ids = []
+        for workspace_id in ("sales", "research"):
+            task_id = await db.insert_task(
+                "worker",
+                f"review {workspace_id}",
+                AgentProfile(name="worker"),
+                parent_session_id="session-shared",
+                launch_plan={"requested_workspace_id": workspace_id},
+            )
+            task_ids.append(task_id)
+            await db.set_completed(
+                task_id,
+                SubagentResult(name="worker", task=f"review {workspace_id}", success=True, output="done"),
+            )
         assert await coordinator.drain_completion_events() == 0
-        assert len(await db.list_undelivered_completion_events()) == 1
+        assert len(await db.list_undelivered_completion_events()) == 2
         await db.close()
 
         # A fresh connection/coordinator models process restart and replays persisted rows.
         restarted_db = SubagentWorkQueueDB("user")
         coordinator = SubagentCoordinator("user")
         coordinator._db = restarted_db
-        unsubscribe = completion_bus.subscribe("user", "session-1", received.append)
-        assert await coordinator.drain_completion_events(session_id="session-1") == 1
-        assert received[0].task_id == task_id
-        assert await coordinator.drain_completion_events(session_id="session-1") == 0
+        unsubscribe = completion_bus.subscribe("user", None, received.append)
+        assert await coordinator.drain_completion_events() == 2
+        assert {event.task_id for event in received} == set(task_ids)
+        assert {event.workspace_id for event in received} == {"sales", "research"}
+        assert await coordinator.drain_completion_events() == 0
         unsubscribe()
     finally:
         await db.close()
         if coordinator._db is not db:
             await coordinator._db.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_event_without_parent_is_acknowledged_but_result_remains_queryable(
+    tmp_path, monkeypatch
+) -> None:
+    from src.sdk.coordinator import SubagentCoordinator
+    from src.storage.paths import DataPaths
+
+    paths = DataPaths(data_path=tmp_path, data_root=tmp_path, user_id="user")
+    monkeypatch.setattr("src.sdk.subagent_work_queue.get_paths", lambda _user_id: paths)
+    monkeypatch.setattr("src.sdk.coordinator.get_paths", lambda **_kwargs: paths)
+    db = SubagentWorkQueueDB("user")
+    coordinator = SubagentCoordinator("user")
+    coordinator._db = db
+    try:
+        task_id = await db.insert_task(
+            "worker", "work", AgentProfile(name="worker"), launch_plan={"plan_id": "no-parent"}
+        )
+        assert await db.set_completed(
+            task_id,
+            SubagentResult(name="worker", task="work", success=True, output="durable result"),
+        )
+
+        assert await coordinator.drain_completion_events() == 1
+        assert await db.list_undelivered_completion_events() == []
+        row = await db.get_task(task_id)
+        result = await db.get_result(task_id)
+        assert row is not None and row["status"] == TaskStatus.COMPLETED.value
+        assert result is not None and result.output == "durable result"
+    finally:
+        await db.close()
 
 
 @pytest.mark.asyncio
@@ -199,8 +239,7 @@ async def test_stale_recovery_preserves_requested_cancellation_and_emits_event(
 
 
 @pytest.mark.asyncio
-@pytest.mark.asyncio
-async def test_run_service_completion_consumer_deduplicates_replayed_task(monkeypatch) -> None:
+async def test_run_service_replay_is_idempotent_after_message_commit_before_ack(monkeypatch) -> None:
     from types import SimpleNamespace
 
     from src.sdk import run_service
@@ -212,16 +251,25 @@ async def test_run_service_completion_consumer_deduplicates_replayed_task(monkey
             self.rows = []
             self.fail_after_append_once = True
 
-        def get_messages_by_session_id(self, _session_id, limit):
-            return self.rows[-limit:]
+        def get_messages_by_session_id(self, *_args, **_kwargs):
+            raise AssertionError("completion consumer must not scan conversation history")
 
-        def add_message(self, role, content, metadata=None, session_id=None):
+        def add_message_once(self, delivery_key, role, content, metadata, session_id):
+            if any(row.metadata["delivery_key"] == delivery_key for row in self.rows):
+                return False
+            message_metadata = {**metadata, "delivery_key": delivery_key}
             self.rows.append(
-                SimpleNamespace(role=role, content=content, metadata=metadata, session_id=session_id)
+                SimpleNamespace(
+                    role=role,
+                    content=content,
+                    metadata=message_metadata,
+                    session_id=session_id,
+                )
             )
             if self.fail_after_append_once:
                 self.fail_after_append_once = False
                 raise RuntimeError("simulated process interruption after message commit")
+            return True
 
     store = FakeStore()
     monkeypatch.setattr(run_service, "aget_message_store", lambda *_args: _async_value(store))
@@ -240,12 +288,139 @@ async def test_run_service_completion_consumer_deduplicates_replayed_task(monkey
         await run_service.handle_subagent_completion(event)
     assert len(store.rows) == 1
 
-    # The outbox retries after the interrupted callback; current history scan
-    # deduplicates the already-persisted parent message.
+    # The outbox retries after the interrupted callback. Its storage-level key
+    # recognizes the already committed message without reading conversation history.
     await run_service.handle_subagent_completion(event)
 
     assert len(store.rows) == 1
     assert store.rows[0].metadata["task_id"] == "task-1"
+    assert store.rows[0].metadata["delivery_key"] == "subagent-completion:task-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "terminal_reason", "success"),
+    [
+        ("completed", "completed", True),
+        ("failed", "failed", False),
+        ("timed_out", "timed_out", False),
+        ("cancelled", "cancelled", False),
+        ("failed", "blocked", False),
+    ],
+)
+async def test_each_routable_terminal_outcome_adds_one_parent_message(
+    monkeypatch, status, terminal_reason, success
+):
+    from types import SimpleNamespace
+
+    from src.sdk import run_service
+    from src.sdk.subagent_completion import SubagentCompletion
+    from src.sdk.subagent_models import SubagentResult
+
+    class FakeStore:
+        def __init__(self):
+            self.rows = []
+
+        def add_message_once(self, delivery_key, role, content, metadata, session_id):
+            if any(row.metadata["delivery_key"] == delivery_key for row in self.rows):
+                return False
+            self.rows.append(
+                SimpleNamespace(
+                    role=role,
+                    content=content,
+                    metadata={**metadata, "delivery_key": delivery_key},
+                    session_id=session_id,
+                )
+            )
+            return True
+
+        def get_messages_by_session_id(self, *_args, **_kwargs):
+            raise AssertionError("completion consumer must not scan conversation history")
+
+    store = FakeStore()
+    monkeypatch.setattr(run_service, "aget_message_store", lambda *_args: _async_value(store))
+    monkeypatch.setattr(run_service, "get_user_loop", lambda *_args: None)
+    result = SubagentResult(
+        name="worker",
+        task="work",
+        success=success,
+        output="done" if success else "terminal outcome",
+        terminal_reason=terminal_reason,
+    )
+    event = SubagentCompletion(
+        user_id="user",
+        workspace_id="workspace-a",
+        session_id="session-a",
+        task_id=f"task-{terminal_reason}",
+        agent_name="worker",
+        status=status,
+        result=result,
+    )
+
+    await run_service.handle_subagent_completion(event)
+    await run_service.handle_subagent_completion(event)
+
+    assert len(store.rows) == 1
+    assert store.rows[0].session_id == "session-a"
+    assert store.rows[0].metadata["delivery_key"] == f"subagent-completion:task-{terminal_reason}"
+
+
+@pytest.mark.asyncio
+async def test_active_loop_steer_and_durable_append_share_idempotency_key(monkeypatch):
+    from src.sdk import run_service
+    from src.sdk.subagent_completion import SubagentCompletion
+    from src.sdk.subagent_models import SubagentResult
+
+    class FakeStore:
+        def __init__(self):
+            self.rows = []
+
+        def add_message_once(self, delivery_key, role, content, metadata, session_id):
+            if any(row["metadata"]["delivery_key"] == delivery_key for row in self.rows):
+                return False
+            self.rows.append(
+                {
+                    "role": role,
+                    "content": content,
+                    "metadata": {**metadata, "delivery_key": delivery_key},
+                    "session_id": session_id,
+                }
+            )
+            return True
+
+    class ActiveLoop:
+        def __init__(self):
+            self.steer_sink = None
+            self.steers = []
+
+        def set_steer_sink(self, sink):
+            self.steer_sink = sink
+
+        def steer(self, message):
+            self.steers.append(message)
+
+    store = FakeStore()
+    loop = ActiveLoop()
+    monkeypatch.setattr(run_service, "aget_message_store", lambda *_args: _async_value(store))
+    monkeypatch.setattr(run_service, "get_user_loop", lambda *_args: loop)
+    event = SubagentCompletion(
+        user_id="user",
+        workspace_id="workspace-a",
+        session_id="session-a",
+        task_id="task-active",
+        agent_name="worker",
+        status="completed",
+        result=SubagentResult(name="worker", task="work", success=True, output="done"),
+    )
+
+    await run_service.handle_subagent_completion(event)
+    assert loop.steer_sink is not None
+    loop.steer_sink(event.message())
+    await run_service.handle_subagent_completion(event)
+
+    assert len(store.rows) == 1
+    assert store.rows[0]["role"] == "user"
+    assert store.rows[0]["metadata"]["delivery_key"] == "subagent-completion:task-active"
 
 
 async def _async_value(value):

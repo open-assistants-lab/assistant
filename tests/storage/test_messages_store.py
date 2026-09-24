@@ -74,6 +74,47 @@ def test_message_session_id_is_preserved() -> None:
     assert messages[0].session_id == "session-a"
 
 
+def test_add_message_once_is_idempotent_per_session_and_keeps_delivery_key() -> None:
+    store = _store()
+
+    assert store.add_message_once(
+        "subagent-completion:task-1",
+        "assistant",
+        "Finished.",
+        {"task_id": "task-1", "delivery_key": "caller-value"},
+        "session-a",
+    )
+    assert not store.add_message_once(
+        "subagent-completion:task-1",
+        "assistant",
+        "Finished again.",
+        {"task_id": "task-1"},
+        "session-a",
+    )
+    assert store.add_message_once(
+        "subagent-completion:task-1", "assistant", "Other session.", {}, "session-b"
+    )
+
+    session_a = store.get_messages_by_session_id("session-a")
+    assert len(session_a) == 1
+    assert session_a[0].metadata == {
+        "task_id": "task-1",
+        "delivery_key": "subagent-completion:task-1",
+    }
+    assert len(store.get_messages_by_session_id("session-b")) == 1
+    with store._core.db._connect() as cur:
+        indexes = {row[1] for row in cur.execute("PRAGMA index_list('messages')")}
+    assert "idx_messages_session_delivery_key" in indexes
+
+
+def test_add_message_once_reraises_unrelated_integrity_error() -> None:
+    store = _store()
+    store._core.ingest = mock.Mock(side_effect=sqlite3.IntegrityError("unrelated constraint"))
+
+    with pytest.raises(sqlite3.IntegrityError, match="unrelated constraint"):
+        store.add_message_once("delivery-1", "assistant", "text", {}, "session-a")
+
+
 def test_get_session_title_returns_stored_title_only() -> None:
     store = _store()
     _insert_raw_messages(

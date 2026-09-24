@@ -246,13 +246,34 @@ class SubagentCoordinator:
         delivered_count = 0
         for row in await db.list_undelivered_completion_events():
             parent_session_id = row.get("parent_session_id")
-            if not parent_session_id or (session_id and session_id != parent_session_id):
+            if not parent_session_id:
+                if await db.mark_completion_event_delivered(row["task_id"]):
+                    delivered_count += 1
+                continue
+            if session_id and session_id != parent_session_id:
                 continue
             try:
                 raw_result = row.get("result")
+                launch_plan = row.get("launch_plan") or {}
+                workspace_candidates = (
+                    launch_plan.get("requested_workspace_id"),
+                    launch_plan.get("workspace_id"),
+                    row.get("task_workspace_id"),
+                    row.get("workspace_id"),
+                )
+                requested_workspace_id = next(
+                    (
+                        value
+                        for value in workspace_candidates
+                        if isinstance(value, str)
+                        and value
+                        and value != USER_LEVEL_WORKSPACE_ID
+                    ),
+                    self.requested_workspace_id,
+                )
                 event = SubagentCompletion(
                     user_id=self.user_id,
-                    workspace_id=row.get("workspace_id") or self.workspace_id,
+                    workspace_id=requested_workspace_id,
                     session_id=parent_session_id,
                     task_id=row["task_id"],
                     agent_name=row.get("agent_name") or "unknown",

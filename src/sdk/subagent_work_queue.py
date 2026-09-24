@@ -286,15 +286,24 @@ class SubagentWorkQueueDB:
     async def list_undelivered_completion_events(self) -> list[dict[str, Any]]:
         db = await self._get_db()
         cursor = await db.execute(
-            """SELECT task_id, parent_session_id, agent_name, workspace_id,
-            status, result, error, attempts, created_at
-            FROM completion_events WHERE delivered_at IS NULL ORDER BY created_at"""
+            """SELECT ce.task_id, ce.parent_session_id, ce.agent_name, ce.workspace_id,
+            ce.status, ce.result, ce.error, ce.attempts, ce.created_at,
+            wq.launch_plan, wq.workspace_id AS task_workspace_id
+            FROM completion_events AS ce
+            LEFT JOIN work_queue AS wq
+                ON wq.id = ce.task_id AND wq.user_id = ?
+            WHERE ce.delivered_at IS NULL ORDER BY ce.created_at""",
+            (self.user_id,),
         )
         rows = await cursor.fetchall()
         events: list[dict[str, Any]] = []
         for row in rows:
             event = dict(row)
             event["result"] = json.loads(event["result"]) if event["result"] else None
+            try:
+                event["launch_plan"] = json.loads(event.get("launch_plan") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                event["launch_plan"] = {}
             events.append(event)
         return events
 
