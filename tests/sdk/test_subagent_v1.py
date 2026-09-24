@@ -2037,17 +2037,53 @@ name: {name}
         assert "enabled-skill" in prompt
         assert "disabled-skill" not in prompt
 
-    def test_get_coordinator_is_cached_by_user_id_only(self, mock_paths):
+    def test_get_coordinator_cache_preserves_requested_workspace_in_both_orders(
+        self, mock_paths, monkeypatch
+    ):
+        from agentprofile.models import AgentProfile
+
         from src.sdk import coordinator as coordinator_module
+        from src.sdk.subagent_capabilities import ToolSelectionMode
 
-        coordinator_module._coordinators.clear()
+        profile = AgentProfile(name="worker", tools=["files_read"])
+        recorded_workspaces: list[str] = []
 
-        sales = coordinator_module.get_coordinator("test_user", workspace_id="sales")
-        support = coordinator_module.get_coordinator("test_user", workspace_id="support")
+        def fake_build_plan(profile, user_id, workspace_id, mode):
+            recorded_workspaces.append(workspace_id)
+            return object()
 
-        assert sales is support
-        assert sales.workspace_id == "user"
-        assert support.workspace_id == "user"
+        monkeypatch.setattr(
+            "src.sdk.subagent_capabilities.build_launch_plan", fake_build_plan
+        )
+        for first_workspace, second_workspace in (("sales", "support"), ("support", "sales")):
+            coordinator_module._coordinators.clear()
+            first = coordinator_module.get_coordinator(
+                "test_user", workspace_id=first_workspace
+            )
+            second = coordinator_module.get_coordinator(
+                "test_user", workspace_id=second_workspace
+            )
+            monkeypatch.setattr(first, "load_def", lambda _name: profile)
+            monkeypatch.setattr(second, "load_def", lambda _name: profile)
+            monkeypatch.setattr(
+                first,
+                "load_tool_selection_mode",
+                lambda _name: ToolSelectionMode.ALLOWLIST,
+            )
+            monkeypatch.setattr(
+                second,
+                "load_tool_selection_mode",
+                lambda _name: ToolSelectionMode.ALLOWLIST,
+            )
+
+            assert first is not second
+            assert first.workspace_id == second.workspace_id == "user"
+            assert first.requested_workspace_id == first_workspace
+            assert second.requested_workspace_id == second_workspace
+            first.preflight("worker")
+            second.preflight("worker")
+
+        assert recorded_workspaces == ["sales", "support", "support", "sales"]
 
     @pytest.mark.asyncio
     async def test_work_queue_is_user_level_across_workspace_ids(self, mock_paths):

@@ -1328,11 +1328,12 @@ class SubagentCoordinator:
         return self.load_def(name) is not None
 
 
-_coordinators: dict[str, SubagentCoordinator] = {}
+_coordinators: dict[tuple[str, str], SubagentCoordinator] = {}
 
 
 def get_coordinator(user_id: str, workspace_id: str = "personal") -> SubagentCoordinator:
-    key = user_id
+    """Cache request-scoped coordinators without changing user-level storage."""
+    key = (user_id, workspace_id)
     if key not in _coordinators:
         _coordinators[key] = SubagentCoordinator(user_id, workspace_id)
     return _coordinators[key]
