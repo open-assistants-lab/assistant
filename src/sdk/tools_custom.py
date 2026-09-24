@@ -43,7 +43,8 @@ def run_custom_command(
     user_id: str = DEFAULT_USER_ID,
     workspace_id: str = "personal",
     timeout_seconds: float | None = None,
-) -> str:
+    pipefail: bool = False,
+) -> str | ToolResult:
     """Execute a rendered TOOL.md command through the sandbox seam (issue #34).
 
     TOOL.md commands are shell strings, so the single argv invocation
@@ -74,8 +75,9 @@ def run_custom_command(
 
     command = " ".join(rendered.split())
     started = time.monotonic()
+    argv = ["bash", "-o", "pipefail", "-c", rendered] if pipefail else ["sh", "-c", rendered]
     result = get_sandbox_backend().run(
-        ["sh", "-c", rendered], root_path, limits, user_id=user_id
+        argv, root_path, limits, user_id=user_id
     )
     elapsed = time.monotonic() - started
 
@@ -92,7 +94,19 @@ def run_custom_command(
 
     output = result.stdout + result.stderr
     if result.exit_code != 0:
-        return f"Command failed (exit {result.exit_code}):\n{output[:2000]}"
+        message = f"Command failed (exit {result.exit_code}):\n{output[:2000]}"
+        if pipefail:
+            return ToolResult(
+                content=message,
+                structured_content={
+                    "executed": False,
+                    "error": "command_failed",
+                    "exit_code": result.exit_code,
+                    "outcome": "failed",
+                },
+                is_error=True,
+            )
+        return message
     return format_output(output, user_id, workspace_id)
 
 
@@ -148,6 +162,7 @@ def _parse_tool_file(
         open_world=annotations_raw.get("open_world", False) if annotations_raw else False,
         requires_approval=annotations_raw.get("requires_approval", False) if annotations_raw else False,
         execution_mode=annotations_raw.get("execution_mode", "sync") if annotations_raw else "sync",
+        pipefail=annotations_raw.get("pipefail", False) if annotations_raw else False,
         executor=annotations_raw.get("executor") if annotations_raw else None,
     )
 
@@ -201,7 +216,13 @@ def _parse_tool_file(
                 return f"Tool '{tool_name}' not found on PATH."
 
             try:
-                return run_custom_command(rendered, user_id, workspace_id, command_timeout)
+                return run_custom_command(
+                    rendered,
+                    user_id,
+                    workspace_id,
+                    command_timeout,
+                    pipefail=annotations.pipefail,
+                )
             except (_subprocess.TimeoutExpired, CommandKilledError):
                 # A cap-killed or signal-killed command must propagate: the
                 # catch-all below would turn it back into a string and

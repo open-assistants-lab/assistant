@@ -177,7 +177,13 @@ def _rebuild_custom_function(
         try:
             from src.sdk.tools_custom import run_custom_command
 
-            return run_custom_command(rendered, user_id, workspace_id, command_timeout)
+            return run_custom_command(
+                rendered,
+                user_id,
+                workspace_id,
+                command_timeout,
+                pipefail=getattr(td.annotations, "pipefail", False),
+            )
         except (subprocess.TimeoutExpired, CommandKilledError):
             # A cap-killed or signal-killed command must propagate: the
             # catch-all below would turn it back into a string and governance

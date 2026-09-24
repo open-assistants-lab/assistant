@@ -490,6 +490,7 @@ git commit -m "feat: expose loop iteration limits"
 **Files:**
 - Modify: `src/sdk/tools.py`
 - Modify: `src/sdk/tools_custom.py`
+- Modify: `src/sdk/tool_index.py`
 - Modify: `seeds/skills/cli-toolkit/SKILL.md`
 - Test: `tests/sdk/test_custom_tool_results.py`
 - Test: `tests/sdk/test_pipeline_signal_death.py`
@@ -543,7 +544,7 @@ uv run ruff check src/sdk/tools.py src/sdk/tools_custom.py tests/sdk/test_custom
 Commit:
 
 ```bash
-git add src/sdk/tools.py src/sdk/tools_custom.py seeds/skills/cli-toolkit/SKILL.md tests/sdk/test_custom_tool_pipefail.py tests/sdk/test_custom_tool_results.py tests/sdk/test_pipeline_signal_death.py
+git add src/sdk/tools.py src/sdk/tools_custom.py src/sdk/tool_index.py seeds/skills/cli-toolkit/SKILL.md tests/sdk/test_custom_tool_pipefail.py tests/sdk/test_custom_tool_results.py tests/sdk/test_pipeline_signal_death.py
 git commit -m "feat: expose custom pipeline failure semantics"
 ```
 

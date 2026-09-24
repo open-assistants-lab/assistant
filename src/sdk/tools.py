@@ -65,6 +65,7 @@ class ToolAnnotations(BaseModel):
     # Issue #21: async execution is opt-in; existing tools retain synchronous
     # approval/execution behavior.
     execution_mode: Literal["sync", "async"] = "sync"
+    pipefail: bool = False
     executor: ExternalHTTPExecutor | None = None
     # Issue #23: per-tool command budget. Custom TOOL.md tools may declare
     # `timeout_seconds` in their annotations block; any positive value is
