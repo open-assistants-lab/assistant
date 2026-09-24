@@ -1,7 +1,7 @@
 # Subagent Architecture Simplification and Component Review
 
 **Status:** Decision record; implementation, verification, and read-only review complete on `feat/subagent-capability-reliability`
-**Date:** 2026-09-24  
+**Date:** 2026-09-24
 **Scope:** Subagent execution and its boundaries with the SDK loop, middleware, tools, skills, and persistence
 
 ## 1. Purpose
