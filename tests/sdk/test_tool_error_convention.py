@@ -109,6 +109,11 @@ def test_tool_result_carries_explicit_outcome():
     assert result.outcome is Outcome.TIMED_OUT
 
 
+def test_tool_result_rejects_success_outcome_with_error_flag():
+    with pytest.raises(ValueError, match="successful outcome"):
+        ToolResult(content="contradictory", is_error=True, outcome=Outcome.SUCCEEDED)
+
+
 def test_tool_result_from_plain_string_is_successful():
     result = ToolResult.from_raw("ok")
 
