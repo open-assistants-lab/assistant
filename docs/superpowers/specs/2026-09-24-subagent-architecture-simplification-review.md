@@ -1,6 +1,6 @@
 # Subagent Architecture Simplification and Component Review
 
-**Status:** Proposal for review; no implementation authorization implied  
+**Status:** Decision record; implementation, verification, and read-only review complete on `feat/subagent-capability-reliability`
 **Date:** 2026-09-24  
 **Scope:** Subagent execution and its boundaries with the SDK loop, middleware, tools, skills, and persistence
 
@@ -8,7 +8,7 @@
 
 Assess whether the subagent reliability work has added more architecture than the product needs, and define a conservative simplification direction. The goal is not to remove safety or durability. It is to make each safety property have one clear owner and avoid maintaining multiple representations of the same state.
 
-This review is based on the current `feat/subagent-capability-reliability` implementation and the stated deployment assumptions: SQLite per user, one process per user store, and local-first desktop as a primary target. The codebase also supports HTTP deployments, so background-task and notification behavior cannot be dismissed solely as desktop concerns.
+This review and its approved decisions were implemented incrementally in Tasks 1–7, including final verification and a read-only follow-up review. Deployment assumptions remain SQLite per user, one process per user store, and local-first desktop as a primary target; HTTP background completion behavior is preserved.
 
 ## 2. Executive Assessment
 
@@ -21,9 +21,9 @@ The safety model is justified; the implementation has some avoidable representat
 5. a second durable completion-event record, and
 6. parent-session message deduplication.
 
-Each has a defensible purpose, but the contract between them is not yet as small or explicit as it could be. In particular, the plan ID is not a content hash of the resolved plan, result/status data is duplicated, and parent-message idempotency currently scans conversation history.
+Each has a defensible purpose. The implementation now makes the manifest ID content-derived and parent-message application indexed/idempotent. Result/status and outbox payload fields still overlap; they remain until consumers, retention, and replay reconstruction support a safe reduction.
 
-**Recommendation:** Do not perform a broad rewrite. Preserve strict preflight, the run-scoped capability ceiling, authoritative SQLite task state, and durable outbox delivery where background completion notifications are required. Simplify incrementally, starting with representation ownership and idempotency. Require evidence before removing a layer or changing compatibility behavior.
+**Outcome:** No broad rewrite was performed. Strict preflight, immutable run-scoped capabilities, authoritative SQLite task state, and durable outbox delivery remain. Tasks 2–6 implemented explicit migration, child runtime-ask termination, idempotent parent-message application, canonical manifests, and workspace/file-tool scope. `invoke`, outbox payload copies, and general loop/middleware integration were retained where removal or consolidation lacked compatibility or parity evidence.
 
 ## 3. Requirements That Must Remain True
 
@@ -39,35 +39,36 @@ Each has a defensible purpose, but the contract between them is not yet as small
 
 | Component | Current responsibility | Assessment | Simplification direction |
 |---|---|---|---|
-| `AgentLoop` | General ReAct execution plus subagent cancellation checks, skill allowlist enforcement, progress hooks, and doom-loop handling | The common dispatch guard is the right place to stop a cancelled child before a tool runs. However, direct `subagent_ctx` knowledge in the general loop increases coupling. | Keep the common pre-dispatch cancellation and skill-boundary checks. Avoid further subagent-specific branches. In a later, separately tested change, assess whether one optional run-control interface can own these hooks without adding a general framework. Do not move them blindly: streaming and non-streaming paths must retain identical behavior. |
-| Middleware / HITL | `HITLMiddleware` evaluates actual tool arguments and can deny, allow, or create an approval proposal | Runtime argument checks are important; launch preflight cannot replace them. The child approval behavior needs a precise contract: an argument-specific `ask` can still occur after launch even if tool-level preflight passed. | Keep main-loop middleware behavior unchanged. Specify and test what a child does when runtime governance returns `ask`: fail/stop with a typed outcome, pause/resume, or another explicit policy. Do not claim preflight guarantees no child-level ask unless that is proven for argument-sensitive policies. |
-| Capability planner | Resolves declared tools/skills, enablement, permissions, and diagnostics | Valuable fail-closed boundary. `CapabilityDecision` is diagnostic data; the loop only needs the effective manifest. The current `plan_id` hashes profile name, identity, mode, and declared names, but not the resolved effective set, decisions, or policy versions. | Retain one launch-manifest concept. Make its ID identify the canonical serialized effective manifest and relevant policy/version inputs, or rename it so it is not mistaken for a content identity. Keep detailed rejection diagnostics at the boundary; avoid persisting duplicated diagnostic detail unless audit requirements need it. |
-| Tool registry / tools | Native registry plus profile-level tool selection; the subagent builder must not add hidden tools | Exact tool execution is a sound invariant. The current annotation-derived `SAFE_DEFAULT` is broader than the approved local/workspace scope, and some read-only tools expose user/workspace identifiers or user-level data. | Measure actual breadth and compatibility, then use a small curated local, workspace-scoped read-only set. Bind identity/workspace in the child tool wrapper and confine paths/symlinks before enabling file tools. Custom/MCP tools remain unsupported in this simplification. |
-| Skills | Skill catalog plus `skills_load`; child context now restricts loads to the launch manifest | The separate skill allowlist is necessary because `skills_load` is a generic tool capable of loading many names. Skills are knowledge, but can still affect behavior and expose context. | Keep the name-level runtime restriction. Ensure `skills_reload` cannot widen a running child's already-frozen allowlist. Define whether skill contents are snapshotted or may change between preflight and load; if they can change, record a content/version hash only if reproducibility is a real requirement. |
-| Profile policy | `AgentProfile` plus versioned `runtime-policy.json` distinguishes omitted tools, empty tools, and allowlists | The sidecar is justified while the upstream profile schema cannot represent omission distinctly. A permanent `LEGACY` branch adds ongoing complexity. | Keep the sidecar as the compatibility adapter for now. Add telemetry/diagnostics and a documented migration rule, then decide whether to migrate old profiles or extend the profile schema. Do not move the field into undocumented tags. Remove legacy handling only after inventory and compatibility evidence. |
-| Coordinator / launch APIs | `start`, synchronous `delegate`, and deprecated `invoke` each validate, preflight, snapshot, and run | Multiple paths multiply safety review and tests. `invoke` is deprecated but still a callable launch path. | Keep `start` and `delegate` as the supported contract. Audit repository and external callers before removal or delegation. Factor only genuinely shared validation/snapshot logic; avoid a generic launch framework. |
-| Work queue | SQLite task state, frozen config/manifest, terminal result, timeout/cancel recovery | Appropriate source of truth for asynchronous work and durable status. There is duplication between status/terminal columns and `SubagentResult`, but the authoritative field is not always obvious. | Declare `work_queue.status` authoritative for lifecycle. Keep result payload for output/usage. Retain terminal reason only if it captures distinctions not expressible by status. Avoid adding more mirrored fields without a consumer. |
-| Completion outbox / bus | Durable notification, replay, callback acknowledgement, then parent-message deduplication | Justified if restart-safe parent notification is required. Exactly-once effects across the queue DB and conversation DB cannot be achieved by one SQLite transaction; delivery is effectively at-least-once plus an idempotent consumer. | Preserve outbox semantics, but make the consumer idempotency key explicit and indexed. Replace the broad history scan with a small inbox/delivery ledger or a storage-level uniqueness mechanism. Prefer an outbox row containing task/event identity and routing over duplicating task result data if retention guarantees keep the referenced task available. |
+| `AgentLoop` | General ReAct execution plus subagent cancellation checks, skill allowlist enforcement, progress hooks, and doom-loop handling | Streaming and non-streaming pre-dispatch cancellation and skill-boundary contracts are covered by parity tests. No safe duplicate-hook consolidation was demonstrated. | Retain the existing integration; do not introduce a run-control framework without new evidence. Main-agent behavior is unchanged. |
+| Middleware / HITL | `HITLMiddleware` evaluates actual tool arguments and can deny, allow, or create an approval proposal | Runtime argument checks remain authoritative. A child argument-specific `ask` can occur after launch even when tool-level preflight passed. | Child `ask` terminates with `blocked`/`approval_required` and no child-owned pending proposal. Main-loop proposal behavior is unchanged and regression-tested. |
+| Capability planner | Resolves declared tools/skills, enablement, permissions, and diagnostics | Fail-closed boundary. `plan_id` is now the full SHA-256 of canonical resolved content: user/workspace/agent identity, selection mode, requested/effective names, and deterministic decision fields. | Retain one canonical launch-manifest concept. Transient exception text is excluded from identity; rejected plans are not persisted as launchable tasks. |
+| Tool registry / tools | Native registry plus profile-level tool selection; the subagent builder must not add hidden tools | Child `SAFE_DEFAULT` is exactly `files_list`, `files_read`, `files_glob_search`, and `files_grep_search`. Child file/skill tool schemas hide identity inputs and bind user/workspace; file paths and outside-root symlinks are confined. | Keep broader tools behind explicit allowlists and normal governance. Custom/MCP child-manifest support remains out of scope. |
+| Skills | Skill catalog plus `skills_load`; child context restricts loads to the launch manifest | The per-run allowlist remains frozen across `skills_reload`; child skill tools receive bound identity. Skill contents themselves are not snapshotted. | Keep name-level restriction. Content/version hashing remains open only if reproducibility becomes a product requirement. |
+| Profile policy | `AgentProfile` plus versioned `runtime-policy.json` distinguishes omitted tools, empty tools, and allowlists | The sidecar preserves omission-vs-empty semantics. Legacy interpretation is migration-only and fails closed on malformed/unknown policy. | Keep the sidecar until the upstream profile schema can represent field presence. Preserve visible per-profile migration diagnostics. |
+| Coordinator / launch APIs | `start`, synchronous `delegate`, and deprecated `invoke` validate, preflight, snapshot, and run | No in-repository production caller of `SubagentCoordinator.invoke` was found, but external consumers are unknown. | Keep `invoke` deprecated with its historical task-ID return contract pending explicit compatibility evidence. Do not remove based only on repository search. |
+| Work queue | SQLite task state, frozen config/manifest, terminal result, timeout/cancel recovery | Appropriate source of truth for asynchronous work and durable status. | `work_queue.status` owns lifecycle; `result` owns output/usage/result-level reason; `launch_plan` owns the frozen capability/workspace snapshot. Keep mirrored terminal fields until all API/recovery consumers are proven unnecessary. |
+| Completion outbox / bus | Durable notification, replay, callback acknowledgement, then parent-message deduplication | Conversation-message application is idempotent by indexed `subagent-completion:{task_id}` key. Concurrent recovery drains can still publish duplicate live WebSocket events; delivery is at-least-once, not socket-level exactly-once. | Preserve the outbox and payload copies until replay-from-task reconstruction and a retention policy are proven. No conversation-history scan remains. Treat live notifications as at-least-once; consider delivery claims/deduplication only if client behavior requires stronger semantics. |
 | `SubagentContext` | Cancellation, instructions, progress, doom-loop state, and allowed skills | Useful per-run state, but it combines control-plane signals and execution policy. | Keep one per-run context for now. Do not add separate state stores for each signal. If the loop integration is redesigned, move as a whole with parity tests rather than splitting ownership. |
 
-## 5. Current Contract Gaps to Verify Before Simplifying
+## 5. Contracts Verified by Tasks 1–7
 
-These are implementation questions, not reasons for an immediate rewrite:
+- Legacy policy is migrated once: explicit non-empty tools -> `ALLOWLIST`; explicit empty -> `NONE`; omitted/ambiguous -> `SAFE_DEFAULT`; malformed/unknown policy fails closed with a diagnostic.
+- A runtime argument-specific child `ask` can occur after launch. It now terminates with result-level `blocked` and `approval_required`, without creating a child-owned pending proposal. Main-agent HITL semantics remain unchanged.
+- The launch ID is a full content-derived SHA-256 over canonical resolved manifest fields; task execution and replay consume the stored manifest. A malformed/legacy task lacking frozen tool and skill lists is failed closed.
+- Queue status owns lifecycle; result owns output/usage/result-level reason; launch plan owns frozen execution capabilities and requested workspace; outbox owns delivery state. Duplicated event payload fields remain pending proven task-row replay and an explicit retention contract.
+- Conversation completion application is at-least-once plus a unique indexed message delivery key; the old history scan has been removed.
+- SAFE_DEFAULT is the four workspace file tools, whose user/workspace identity is coordinator-bound. Child paths are workspace-relative and symlinks escaping that workspace are excluded.
+- Coordinator instances are cached by `(user_id, requested_workspace_id)` so reuse cannot retain another request's workspace. Profile and work-queue storage remain user-level; both cache insertion orders are regression-tested through launch preflight.
 
-- The current `LEGACY` planner path uses the profile's declared tool list as its selected set. An empty list historically meant all native tools in the old tool builder, but now resolves to an empty effective manifest. Approved migration is one-time: explicit non-empty list -> `ALLOWLIST`; explicit empty -> `NONE`; omitted or ambiguous -> `SAFE_DEFAULT`, with a visible diagnostic and no all-native fallback.
-- Generic `skills_load` preflight checks empty arguments, while `HITLMiddleware` evaluates the actual skill name. An item-level runtime `ask` can therefore arise after launch. The approved child behavior is a typed terminal `blocked`/approval-required result without a non-resumable child proposal; main-agent HITL is unchanged.
-- The current plan ID is derived from declarations and mode rather than the fully resolved effective plan. It should not be treated as a unique audit fingerprint until canonicalization is implemented.
-- The queue's terminal status, terminal-reason columns, serialized result, and outbox copy have overlapping information. Confirm which fields are consumed by APIs, receipts, and replay before consolidating.
-
-## 6. Target Architecture
+## 6. Implemented Architecture Contract
 
 ### 6.1 Profile configuration
 
-A profile expresses requested capabilities and a versioned selection mode. The runtime policy file remains the compatibility adapter until profile-schema support and old-profile migration are proven. New profiles must preserve the semantic difference between omitted tools and an explicit empty tool list.
+A profile expresses requested capabilities; the versioned `runtime-policy.json` sidecar preserves omitted-vs-empty selection semantics. Migration is one-time and visible: explicit non-empty tools -> `ALLOWLIST`, explicit empty -> `NONE`, omitted/ambiguous -> `SAFE_DEFAULT`; malformed or unknown policy fails closed.
 
 ### 6.2 Launch boundary
 
-All launch entry points must obey one launch contract and shared resolution semantics. Use a common helper for validation, preflight, and snapshot construction only if it removes real duplication; a new orchestration layer is not a goal by itself. The contract is:
+All launch entry points (`start`, `delegate`, and deprecated `invoke`) perform enablement/definition validation and strict preflight before queue/provider/LLM work. The contract is:
 
 1. profile and subagent enablement validation,
 2. strict tool/skill resolution against current registries and capability policy,
@@ -76,41 +77,33 @@ All launch entry points must obey one launch contract and shared resolution sema
 5. rejection before queue/provider/LLM side effects if any required capability is unavailable,
 6. persistence of an execution-profile snapshot plus the effective manifest and enough requested-profile metadata to explain resolution. The current implementation copies effective tools/skills into the stored profile, so it should not be described as an unchanged copy of the user's original profile.
 
-The plan ID must be based on the resolved manifest (including effective names and the policy context needed to explain it), not only the profile's declared names. Whether policy-version changes invalidate an already-running manifest is an explicit policy decision; they must not silently mutate the recorded manifest.
+The implementation hashes canonical resolved content with SHA-256, including user/requested-workspace/agent identity, selection mode, requested/effective names, and deterministic capability decisions. The frozen manifest stored at insertion is authoritative for execution and replay; a task missing effective tool/skill snapshots fails closed. Policy changes do not mutate an already-stored manifest, while actual tool calls still pass runtime governance.
 
 ### 6.3 Runtime enforcement
 
-The child receives exactly the manifest stored with its task. Tool discovery and execution consume that manifest; they do not infer defaults from an empty list. Skill loading checks the same frozen skill set. Governance still evaluates the actual tool call and arguments. If runtime governance returns `ask`, child behavior must produce a typed, truthful outcome rather than claim task success while work remains pending.
+The child receives exactly the stored manifest. Skill loads are restricted to its frozen names, including after `skills_reload`. Child file and skill tools hide model-visible identity fields and bind user/workspace from the coordinator. The four SAFE_DEFAULT file tools reject absolute and parent-traversing paths; list/glob/grep exclude symlinks resolving outside the requested workspace. Governance still evaluates actual arguments; runtime `ask` yields a typed blocked result rather than task success.
 
 ### 6.4 Lifecycle and delivery
 
-SQLite task state remains authoritative. Terminal transition and outbox insertion are atomic. Outbox publication may retry, so the parent-session consumer must be idempotent on a stable event/task ID. Avoid a second source of truth for result/status when a task-row reference is sufficient and task retention supports it.
+SQLite task state remains authoritative. Terminal transition and outbox insertion are atomic. Outbox publication is at-least-once; the parent consumer applies messages idempotently using `subagent-completion:{task_id}` and a unique indexed key in the conversation store. This is not cross-database exactly-once. Completion payload copies are retained because there is no retention policy and reduced-payload replay has not been proven.
 
-## 7. Proposed Simplification Work, in Order
+## 7. Implementation Record
 
-### Phase A — Contract map, no runtime changes
+### Task 1 — Contract map and decisions
 
-- Document every persisted field and who owns it.
-- Search repository and packaging boundaries for callers of `invoke` and legacy profile modes.
-- Measure SAFE_DEFAULT tool count, schema cost, actual subagent use, and workspace/user scope guarantees.
-- Trace the child `ask` path for argument-sensitive policy from tool call through task terminal status.
-- Apply the approved restart-notification contract: replay every routable terminal outcome; retain durable status only when no parent session exists.
+- Persisted field authority, caller evidence, policy migration, SAFE_DEFAULT breadth, workspace scope, and outbox/message-idempotency behavior are recorded in `docs/audits/2026-09-24-subagent-simplification-inventory.md`.
 
-### Phase B — Low-risk consistency fixes
+### Tasks 2–5 — Reliability contracts
 
-- Define canonical launch-manifest serialization and stable identity.
-- Make lifecycle authority explicit in code/docs: queue status is authoritative; result data is payload.
-- Replace parent-message history scanning with indexed idempotency keyed by task/event ID.
-- Add tests proving no hidden tool additions, no out-of-manifest skill load (including after reload), and typed runtime-ask outcomes.
+- Explicit legacy policy migration, typed child runtime-ask termination, canonical manifests, workspace routing, and indexed idempotent parent-message application are implemented and covered by deterministic tests.
 
-### Phase C — Compatibility reduction, only with evidence
+### Task 6 — Evidence-based scope reduction
 
-- Keep `invoke` unless repository and external caller evidence supports a separately approved removal.
-- Migrate each legacy profile once: explicit non-empty tools -> `ALLOWLIST`; explicit empty -> `NONE`; omitted/ambiguous -> `SAFE_DEFAULT`; malformed/unknown policy fails closed.
-- Replace annotation-derived SAFE_DEFAULT with the measured, tested local/workspace-scoped read-only set; identity and path/symlink confinement are prerequisites.
-- Consolidate task/outbox payload fields only if task retention and recovery semantics remain clear.
+- `invoke` remains deprecated because external callers are unknown; old `SubagentManager.invoke`/scheduler callers belong to a distinct legacy path.
+- SAFE_DEFAULT is exactly the four tested workspace file tools; user/workspace fields are coordinator-bound and outside-root paths/symlinks are rejected or omitted.
+- No general loop/middleware consolidation or custom/MCP support was justified. Outbox payload copies remain until retention and replay reconstruction are proven.
 
-No broad loop or middleware refactor is proposed until Phase A demonstrates a concrete reduction in complexity without weakening cancellation, governance, streaming parity, or auditability.
+Tasks 1–6 found no safe loop/middleware hook consolidation and made none. Streaming/non-streaming cancellation, skill-boundary, and unchanged main-agent HITL behavior remain covered by parity/regression tests.
 
 ## 8. Acceptance Criteria
 
@@ -130,7 +123,7 @@ No broad loop or middleware refactor is proposed until Phase A demonstrates a co
 ### Approved decisions
 
 1. **Completion replay:** replay every routable terminal outcome (success, failure, timeout, cancellation, or blocked) into the parent conversation after restart. Without a parent session, retain durable task status without a conversation message.
-2. **SAFE_DEFAULT:** curate a small local, workspace-scoped read-only set. The audit identifies `files_list`, `files_read`, `files_glob_search`, and `files_grep_search` as candidates only after runtime identity binding and path/symlink confinement pass regression tests. Broader tools require explicit allowlisting.
+2. **SAFE_DEFAULT:** implemented as exactly `files_list`, `files_read`, `files_glob_search`, and `files_grep_search`; runtime identity binding and path/symlink confinement have deterministic regression tests. Broader tools require explicit allowlisting.
 3. **Child runtime ask:** terminate the child with typed `blocked`/approval-required result and no non-resumable child-owned proposal; main-agent HITL remains unchanged.
 4. **Custom/MCP:** keep unsupported in subagent manifests for this simplification; do not add another discovery/authorization path.
 5. **Retention:** no task/outbox deletion path was found. Preserve task rows and current event payload until replay-from-task tests prove a smaller reference-only event safe.
@@ -140,3 +133,5 @@ No broad loop or middleware refactor is proposed until Phase A demonstrates a co
 
 - Is deprecated `SubagentCoordinator.invoke` used by supported external consumers? Retain it until caller/deprecation evidence supports removal.
 - What task/outbox retention policy should replace indefinite retention, if any? No retention changes are included in this pass.
+- Skill file contents are not snapshotted; only skill names and authorization decisions are frozen. Add content hashes only if reproducibility requirements justify the additional lifecycle.
+- Task 7 verification: focused reliability suites -> 468 passed, final full suite -> 3269 passed and 27 skipped, Ruff passed over `src/` and the changed test, scoped mypy passed for all 14 touched source modules, and both working-tree and committed-range `git diff --check` passed. The read-only reviewer confirmed the workspace-cache fix and found no duplicate task execution; concurrent outbox drains may duplicate live WebSocket notifications, an accepted at-least-once delivery note.

@@ -1,15 +1,14 @@
-# Subagent Architecture Research
+# Subagent Architecture Research and Historical V1 Design
 
-**Status**: V1 design complete, pending implementation  
-**Date**: 2026-04-22 (updated, simplified V1)  
-**Original**: 2026-04-21  
-**Context**: Before redesigning our subagent system, comparing approaches from Claude Code, OpenAI Swarm, Google ADK, Pydantic AI, and CrewAI. Updated with decisions on coordination mechanism, supervision, dynamic creation, and scheduling. Simplified V1 to essentials after scope review.
+**Status**: Historical research plus implemented reliability contract (updated 2026-09-24)
+**Original research**: 2026-04-21
+**Context**: Framework comparisons and the original V1 proposal are retained for history. The current implementation contract below supersedes conflicting proposal text; see `docs/superpowers/specs/2026-09-24-subagent-architecture-simplification-review.md` for the decision record.
 
 ---
 
-## Our Current System
+## Original System Snapshot (2026-04; historical)
 
-We have **two** subagent mechanisms that don't talk to each other:
+At the time of the original research, there were **two** subagent mechanisms that did not talk to each other:
 
 ### 1. `Handoff` (in `src/sdk/handoffs.py`)
 - **Pattern**: Transfer/handoff (like OpenAI Swarm)
@@ -168,21 +167,23 @@ No framework in our comparison uses a database-backed work queue for inter-agent
 
 ---
 
-## Current Reliability Contract (2026-09)
+## Current Reliability Contract (2026-09-24)
 
-The implementation now keeps the work queue and its SQLite completion outbox authoritative:
+This section describes implemented behavior; the V1 proposal below is historical where it differs.
 
-- Tool selection is explicit: omitted profile tools use `safe_default`, `tools=[]` means `none`, and named tools are an exact `allowlist`. Legacy profiles are identified through `runtime-policy.json` migration behavior.
-- Every launch path (`start`, synchronous `delegate`, and legacy `invoke`) performs capability preflight before queue insertion or provider construction. A declared capability that is missing, disabled, denied, or requires `ask` rejects the launch.
-- The launch plan is immutable for the run. The effective tool and skill manifest is frozen into the profile snapshot and the launch-plan JSON is stored with the task.
-- Child approval is a preflight boundary: the child does not create a stranded interactive approval proposal. `ask` returns approval-required before start; administrator `deny` remains a hard rejection.
-- Terminal task transition and completion-outbox insertion are atomic and idempotent. Events retain parent-session routing and are acknowledged only after a matching completion-bus subscriber succeeds. Undelivered events remain available for restart replay.
-- Terminal outcomes distinguish `completed`, `failed`, `timed_out`, and `cancelled`; `blocked` and `uncertain` remain separate result-level concepts. Empty final output is not success.
-- A repeated identical tool-call sequence receives one corrective nudge; persistence after that nudge is a failure, not a cancellation.
+- **Selection policy:** omitted/ambiguous legacy tool selection migrates visibly to `SAFE_DEFAULT`; explicit `tools=[]` means `NONE`; named tools mean exact `ALLOWLIST`. The runtime default is exactly `files_list`, `files_read`, `files_glob_search`, and `files_grep_search`. Custom and MCP tools are not admitted to child manifests by this change.
+- **Launch preflight:** `start`, synchronous `delegate`, and deprecated compatibility `invoke` reject missing, disabled, forbidden, `ask`, or `deny` declarations before queue/provider/LLM work. `invoke` remains because external consumers are unknown; no in-repository production caller of `SubagentCoordinator.invoke` was found.
+- **Manifest authority:** a successful launch stores a canonical manifest and full SHA-256 `plan_id`. Identity includes user, requested execution workspace, agent, selection mode, requested/effective tool and skill names, and deterministic resolved decision fields. Task execution and outbox replay prefer the frozen manifest; rows missing a frozen tool/skill snapshot fail closed rather than recomputing access. The coordinator cache is keyed by `(user_id, requested_workspace_id)`; user-level profile and queue storage remains separate from the requested execution workspace.
+- **Child tool scope:** the four default file tools and skill tools hide model-visible identity fields and bind user/workspace from the coordinator. Curated file paths must be workspace-relative; absolute and parent-traversing paths fail. List/glob/grep skip symlinks resolving outside the workspace. Broader tools require explicit allowlists and normal preflight/governance checks.
+- **Runtime governance:** actual arguments are still checked by child governance. A runtime `ask` stops the child with result-level `terminal_reason="blocked"` and `error_code="approval_required"`, without a child-owned pending proposal. Administrator `deny` remains authoritative. Main-agent HITL behavior is unchanged.
+- **Skills:** the child can load only preflighted skill names. `skills_reload` does not expand that run-scoped allowlist; identity is bound for child skill tools.
+- **Lifecycle and delivery:** `work_queue.status` owns task lifecycle. `result` owns output, usage, and result-level reason; `launch_plan` owns the execution capability snapshot; the completion outbox owns delivery state. Terminal transitions and outbox insertion are atomic. Delivery is at-least-once; the parent consumer uses `subagent-completion:{task_id}` and an indexed message-store key for idempotent conversation-message application, not cross-database or WebSocket exactly-once. Concurrent recovery drains may emit duplicate live WebSocket events; task claiming remains atomic, so this does not duplicate task execution. Every routable terminal outcome is replayed; a task without a parent session is acknowledged without a conversation message, while its durable result remains queryable. Completion payload copies are retained because no task/outbox retention policy or proven reduced-payload replay contract exists.
+- **Terminal outcomes:** task status remains `completed`, `failed`, `timed_out`, or `cancelled`; `blocked` and `uncertain` are result-level distinctions. Empty final output is not success.
+- **Loop integration:** cancellation before dispatch and after a model response is covered in streaming and non-streaming tests. Existing loop/middleware paths were retained because no safe duplicate-hook consolidation was demonstrated. Main-agent HITL regression tests remain in place.
 
-We adopted selected Pi orchestration patterns—explicit allowlists, strict preflight, immutable launch snapshots, durable lifecycle artifacts, replay, and verification-aware outcomes. Assistant remains distinct in its SQLite queue, execution kernel, per-user permission policy, governance approvals, and receipt authority; Pi does not replace those systems.
+We adopted selected Pi orchestration patterns—strict allowlists and preflight, immutable launch snapshots, lifecycle artifacts, replay, and verification-aware outcomes—without replacing Assistant's SQLite queue, per-user permission policy, governance approvals, or receipt authority.
 
-## V1 Design
+## Original V1 Proposal (Historical; superseded where it conflicts with the contract above)
 
 ### Core Principle
 
