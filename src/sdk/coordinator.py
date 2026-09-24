@@ -71,13 +71,15 @@ def _build_tools_for_subagent(
         if effective_tool_names is not None
         else set(profile.tools) if profile.tools else set(tool_map.keys())
     )
-    final = {
-        name
-        for name in allowed
-        if not name.startswith("subagent_")
-        and not _is_denied_memory_tool(name)
-        and name not in DENIED_SKILL_MANAGEMENT_TOOLS
-    }
+    final = set(allowed)
+    if effective_tool_names is None:
+        final = {
+            name
+            for name in final
+            if not name.startswith("subagent_")
+            and not _is_denied_memory_tool(name)
+            and name not in DENIED_SKILL_MANAGEMENT_TOOLS
+        }
     if effective_tool_names is None and profile.skills:
         final.add(OPTIONAL_SKILL_LOAD_TOOL)
 
@@ -372,6 +374,9 @@ class SubagentCoordinator:
         profile = self.load_def(agent_name)
         if profile is None:
             raise ValueError(f"Subagent '{agent_name}' not found. Create it first with subagent_create.")
+        errors = validate_agent_def(profile, user_id=self.user_id, workspace_id=self.workspace_id)
+        if errors:
+            raise ValueError("Invalid subagent definition: " + "; ".join(errors))
         plan = self.preflight(agent_name)
         if not plan.ready:
             raise SubagentLaunchRejected(plan)
@@ -825,6 +830,8 @@ class SubagentCoordinator:
             workspace_id=self.workspace_id,
         )
         loop.subagent_ctx = ctx or SubagentContext()
+        if effective_tool_names is not None:
+            loop.subagent_ctx.allowed_skill_names = frozenset(profile.skills)
 
         messages = [Message.user(task)]
         cost_tracker = CostTracker(

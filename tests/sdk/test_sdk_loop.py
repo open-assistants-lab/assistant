@@ -294,6 +294,26 @@ class TestAgentLoopBasic:
             await loop._execute_tool(ToolCall(id="call", name="side_effect", arguments={"value": "x"}))
         assert calls == []
 
+    async def test_subagent_cannot_load_skill_outside_frozen_manifest(self):
+        from src.sdk.subagent_context import SubagentContext
+
+        calls = []
+        skill_loader = ToolDefinition(
+            name="skills_load",
+            description="Load skill",
+            parameters={"type": "object", "properties": {"name": {"type": "string"}}},
+            function=lambda name: calls.append(name) or f"loaded {name}",
+        )
+        loop = AgentLoop(provider=MockProvider(), tools=[skill_loader])
+        loop.subagent_ctx = SubagentContext(allowed_skill_names=frozenset({"approved"}))
+
+        result = await loop._execute_tool(
+            ToolCall(id="skill", name="skills_load", arguments={"name": "other"})
+        )
+
+        assert result.is_error is True
+        assert calls == []
+
     async def test_subagent_doom_loop_gets_one_nudge_then_fails(self):
         from src.sdk.subagent_context import SubagentContext, SubagentDoomLoopError
 

@@ -39,6 +39,7 @@ class SubagentContext:
     _step: int = 0
     _doom_track: list[tuple[str, str]] = field(default_factory=list)
     _doom_nudge_sent: bool = False
+    allowed_skill_names: frozenset[str] | None = None
     _task_id: str = ""
 
     def record_tool_call(self, name: str, args_json: str) -> int:

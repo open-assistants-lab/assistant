@@ -740,6 +740,16 @@ class AgentLoop:
         """Execute a tool call, returning a ToolResult with structured content."""
         if self.subagent_ctx and self.subagent_ctx.cancel_event.is_set():
             raise SubagentCancelledError(self.subagent_ctx._task_id)
+        if (
+            self.subagent_ctx
+            and tc.name == "skills_load"
+            and self.subagent_ctx.allowed_skill_names is not None
+            and tc.arguments.get("name") not in self.subagent_ctx.allowed_skill_names
+        ):
+            return ToolResult(
+                content="Skill is outside this subagent's preflighted skill manifest.",
+                is_error=True,
+            )
         tool_def = self._registry.get(tc.name)
         if tool_def is None:
             result = await self._try_lazy_load(tc)
