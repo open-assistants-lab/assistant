@@ -276,6 +276,22 @@ def stateful_action(action: str = "") -> str:
 class TestAgentLoopBasic:
     """Basic agent loop behavior."""
 
+    async def test_subagent_doom_loop_gets_one_nudge_then_fails(self):
+        from src.sdk.subagent_context import SubagentContext, SubagentDoomLoopError
+
+        loop = AgentLoop(provider=MockProvider(), tools=[])
+        loop.subagent_ctx = SubagentContext()
+        for _ in range(3):
+            loop.subagent_ctx.record_tool_call("files_read", '{"path":"x"}')
+        state = AgentState()
+
+        await loop._check_subagent_before_llm(state)
+        assert loop.subagent_ctx._doom_nudge_sent is True
+        assert "Do not repeat it" in state.messages[-1].content
+
+        with pytest.raises(SubagentDoomLoopError):
+            await loop._check_subagent_before_llm(state)
+
     async def test_simple_response_no_tools(self):
         """Agent returns final message when LLM responds without tool calls."""
         provider = MockProvider(responses=[Message.assistant(content="Hello!")])

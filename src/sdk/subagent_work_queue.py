@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS work_queue (
     config TEXT DEFAULT '{}',
     launch_plan TEXT NOT NULL DEFAULT '{}',
     terminal_reason TEXT,
+    error_code TEXT,
     cancel_requested INTEGER DEFAULT 0,
     claimed_by TEXT,
     claimed_at TEXT,
@@ -116,6 +117,7 @@ class SubagentWorkQueueDB:
             "parent_session_id": "TEXT",
             "launch_plan": "TEXT NOT NULL DEFAULT '{}'",
             "terminal_reason": "TEXT",
+            "error_code": "TEXT",
         }
         for name, ddl in columns.items():
             if name not in existing:
@@ -346,6 +348,7 @@ class SubagentWorkQueueDB:
         task_id: str,
         error: str,
         terminal_status: TaskStatus = TaskStatus.FAILED,
+        error_code: str | None = None,
     ) -> bool:
         if terminal_status not in {TaskStatus.FAILED, TaskStatus.TIMED_OUT}:
             raise ValueError("terminal_status must be failed or timed_out")
@@ -358,16 +361,19 @@ class SubagentWorkQueueDB:
             output="",
             error=error,
             terminal_reason=terminal_status.value,
+            error_code=error_code,
         )
         cursor = await db.execute(
             """UPDATE work_queue
-            SET status = ?, result = ?, error = ?, terminal_reason = ?, completed_at = ?, updated_at = ?
+            SET status = ?, result = ?, error = ?, terminal_reason = ?, error_code = ?,
+                completed_at = ?, updated_at = ?
             WHERE id = ? AND user_id = ? AND status IN (?, ?) AND cancel_requested = 0""",
             (
                 terminal_status.value,
                 result.model_dump_json(),
                 error,
                 result.terminal_reason,
+                error_code,
                 now,
                 now,
                 task_id,
@@ -398,7 +404,7 @@ class SubagentWorkQueueDB:
             """UPDATE work_queue
             SET status = ?, result = ?, terminal_reason = ?, cancel_requested = 1,
                 completed_at = ?, updated_at = ?
-            WHERE id = ? AND user_id = ?""",
+            WHERE id = ? AND user_id = ? AND status IN (?, ?, ?)""",
             (
                 TaskStatus.CANCELLED.value,
                 result.model_dump_json(),
@@ -407,6 +413,9 @@ class SubagentWorkQueueDB:
                 now,
                 task_id,
                 self.user_id,
+                TaskStatus.PENDING.value,
+                TaskStatus.RUNNING.value,
+                TaskStatus.CANCELLING.value,
             ),
         )
         if cursor.rowcount > 0:

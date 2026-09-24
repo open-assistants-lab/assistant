@@ -398,6 +398,7 @@ class SubagentCoordinator:
                 task_id,
                 f"timeout after {profile.timeout_seconds}s",
                 terminal_status=TaskStatus.TIMED_OUT,
+                error_code="timeout",
             )
             if not failed:
                 await self._set_cancelled_if_requested(task_id, db)
@@ -679,7 +680,7 @@ class SubagentCoordinator:
             )
             if failed:
                 await self._publish_completion(
-                    task_id, profile.name, TaskStatus.FAILED.value, None, error, parent_session_id
+                    task_id, profile.name, TaskStatus.TIMED_OUT.value, None, error, parent_session_id
                 )
             elif await self._set_cancelled_if_requested(task_id, db):
                 await self._publish_completion(
@@ -687,7 +688,9 @@ class SubagentCoordinator:
                 )
         except Exception as e:
             error = f"{type(e).__name__}: {e}"
-            failed = await db.set_failed(task_id, error)
+            failed = await db.set_failed(
+                task_id, error, error_code=type(e).__name__.lower()
+            )
             if failed:
                 await self._publish_completion(
                     task_id, profile.name, TaskStatus.FAILED.value, None, error, parent_session_id
@@ -837,6 +840,8 @@ class SubagentCoordinator:
             truncated = False
         else:
             output, truncated = _extract_output(result_messages)
+        if not output.strip():
+            raise ValueError("subagent produced no final assistant output")
 
         return SubagentResult(
             name=profile.name,

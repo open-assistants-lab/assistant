@@ -13,6 +13,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 
+class SubagentDoomLoopError(RuntimeError):
+    """Raised when repeated identical tool calls persist after one correction."""
+
+
 class SubagentCancelledError(Exception):
     """Raised inside AgentLoop when subagent_ctx.cancel_event is set."""
     def __init__(self, task_id: str, reason: str = "cancelled by supervisor"):
@@ -34,6 +38,7 @@ class SubagentContext:
 
     _step: int = 0
     _doom_track: list[tuple[str, str]] = field(default_factory=list)
+    _doom_nudge_sent: bool = False
     _task_id: str = ""
 
     def record_tool_call(self, name: str, args_json: str) -> int:
@@ -53,4 +58,4 @@ class SubagentContext:
         )
 
 
-__all__ = ["SubagentContext", "SubagentCancelledError"]
+__all__ = ["SubagentContext", "SubagentCancelledError", "SubagentDoomLoopError"]

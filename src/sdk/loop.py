@@ -1601,7 +1601,17 @@ class AgentLoop:
             msg = await ctx.instructions.get()
             state.add_message(Message.system(f"[Supervisor Update] {msg}"))
         if ctx.doom_detected:
-            raise SubagentCancelledError(ctx._task_id, "doom loop detected")
+            if ctx._doom_nudge_sent:
+                from src.sdk.subagent_context import SubagentDoomLoopError
+
+                raise SubagentDoomLoopError("repeated identical tool calls after correction")
+            ctx._doom_nudge_sent = True
+            state.add_message(
+                Message.system(
+                    "The same tool call was repeated three times. Reassess the arguments, "
+                    "report the blocker, or finish with a concise explanation. Do not repeat it."
+                )
+            )
         if ctx.on_progress:
             await ctx.on_progress(ctx._step, "thinking", "generating response")
 

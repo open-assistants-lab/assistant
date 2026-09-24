@@ -34,6 +34,9 @@ async def test_completion_transition_writes_one_durable_outbox_event(tmp_path, m
             task_id,
             SubagentResult(name="worker", task="review", success=True, output="second"),
         )
+        assert not await db.set_cancelled(task_id)
+        task_state = await db.get_task(task_id)
+        assert task_state is not None and task_state["status"] == "completed"
 
         events = await db.list_undelivered_completion_events()
         assert len(events) == 1
@@ -116,6 +119,9 @@ async def test_failure_and_cancellation_write_one_durable_outbox_event(
         assert len(events) == 1
         assert events[0]["task_id"] == task_id
         assert events[0]["status"] == expected_status
+        task_row = await db.get_task(task_id)
+        assert task_row is not None
+        assert task_row["terminal_reason"] == expected_status
         assert events[0]["error"] in {"provider error", "cancelled by supervisor", "timeout"}
     finally:
         await db.close()
