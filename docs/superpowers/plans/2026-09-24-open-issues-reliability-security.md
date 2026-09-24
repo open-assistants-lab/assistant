@@ -368,6 +368,7 @@ git commit -m "fix: make execution outcomes authoritative"
 - Test: `tests/sdk/test_session_worker.py`
 - Test: `tests/api/test_stream_cancel_race.py`
 - Test: `tests/api/test_conversation.py`
+- Test: `tests/config/test_settings_resolution.py`
 
 **Interfaces:**
 - `SessionLock.touch()` refreshes activity.
@@ -419,7 +420,7 @@ uv run ruff check src/sdk/session_worker.py src/sdk/run_service.py src/config/se
 Commit:
 
 ```bash
-git add src/sdk/session_worker.py src/sdk/run_service.py src/config/settings.py src/http/routers/conversation.py tests/sdk/test_session_worker.py tests/api/test_stream_cancel_race.py tests/api/test_conversation.py
+git add src/sdk/session_worker.py src/sdk/run_service.py src/config/settings.py src/http/routers/conversation.py tests/sdk/test_session_worker.py tests/api/test_stream_cancel_race.py tests/api/test_conversation.py tests/config/test_settings_resolution.py
 git commit -m "fix: recover dropped session runs"
 ```
 

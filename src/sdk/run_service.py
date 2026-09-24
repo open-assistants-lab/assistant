@@ -492,6 +492,7 @@ class RunService:
         # users sharing a session id (e.g. both using "chat-1") must not
         # block each other.
         lock = await self._registry.acquire(session_key(self._user_id, session_id))
+        await self._registry.touch(session_key(self._user_id, session_id))
         try:
             # Run-level trace root: the loop's agent_run span and the rubric
             # grader both nest under it (no-op when Langfuse is disabled).
@@ -523,6 +524,7 @@ class RunService:
         # users sharing a session id (e.g. both using "chat-1") must not
         # block each other.
         lock = await self._registry.acquire(session_key(self._user_id, session_id))
+        await self._registry.touch(session_key(self._user_id, session_id))
         try:
             # Run-level trace root covering the whole stream (agent + grader).
             with LangfuseTracer.trace_run(self._user_id, session_id):
@@ -555,6 +557,7 @@ class RunService:
                             break
                         if isinstance(item, Exception):
                             raise item
+                        await self._registry.touch(session_key(self._user_id, session_id))
                         yield item
                 finally:
                     pump.cancel()

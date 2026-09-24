@@ -35,6 +35,12 @@ class DeploymentConfig(_BaseSettings):
         default="",
         description="Root for user data directory. Empty string means Path.home() / 'Assistant'.",
     )
+    session_lease_timeout_seconds: int = Field(
+        default=300,
+        ge=30,
+        le=3600,
+        description="Idle time after which an active session run receives a cancellation request.",
+    )
 
     model_config = SettingsConfigDict(env_prefix="DEPLOYMENT_")
 

@@ -6,6 +6,7 @@ Serializes same-session runs. Different sessions run concurrently.
 from __future__ import annotations
 
 import asyncio
+from time import monotonic
 
 
 def session_key(user_id: str, session_id: str | None) -> str:
@@ -31,7 +32,13 @@ def get_session_registry() -> SessionWorkerRegistry:
     """
     global _registry
     if _registry is None:
-        _registry = SessionWorkerRegistry()
+        try:
+            from src.config import get_settings
+
+            timeout = get_settings().deployment.session_lease_timeout_seconds
+        except Exception:
+            timeout = 300
+        _registry = SessionWorkerRegistry(lease_timeout_seconds=timeout)
     return _registry
 
 
@@ -40,6 +47,14 @@ class SessionLock:
 
     def __init__(self) -> None:
         self._cancel_event = asyncio.Event()
+        self._last_activity = monotonic()
+
+    def touch(self) -> None:
+        self._last_activity = monotonic()
+
+    @property
+    def idle_seconds(self) -> float:
+        return max(0.0, monotonic() - self._last_activity)
 
     def request_cancel(self) -> None:
         self._cancel_event.set()
@@ -56,18 +71,48 @@ class SessionBusyError(Exception):
 class SessionWorkerRegistry:
     """One async worker per active session. Serializes same-session runs."""
 
-    def __init__(self) -> None:
+    def __init__(self, lease_timeout_seconds: float = 300.0) -> None:
         self._locks: dict[str, SessionLock] = {}
         self._mutex = asyncio.Lock()
+        self._lease_timeout_seconds = max(1.0, float(lease_timeout_seconds))
+        self._stale_requested: set[str] = set()
 
     async def acquire(self, session_id: str) -> SessionLock:
         """Acquire exclusive session lock. Raises SessionBusy if held."""
+        await self.reap_stale(self._lease_timeout_seconds)
         async with self._mutex:
             if session_id in self._locks:
                 raise SessionBusyError(f"Session {session_id} already has an active run")
             lock = SessionLock()
             self._locks[session_id] = lock
+            self._stale_requested.discard(session_id)
             return lock
+
+    async def reap_stale(self, max_idle_seconds: float) -> list[str]:
+        """Request cancellation for idle locks without releasing ownership."""
+        threshold = max(0.0, float(max_idle_seconds))
+        async with self._mutex:
+            stale = [
+                session_id
+                for session_id, lock in self._locks.items()
+                if session_id not in self._stale_requested
+                and lock.idle_seconds > threshold
+            ]
+            for session_id in stale:
+                self._stale_requested.add(session_id)
+        for session_id in stale:
+            async with self._mutex:
+                lock = self._locks.get(session_id)
+            if lock is not None:
+                lock.request_cancel()
+        return stale
+
+    async def touch(self, session_id: str) -> None:
+        async with self._mutex:
+            lock = self._locks.get(session_id)
+            if lock is not None:
+                lock.touch()
+                self._stale_requested.discard(session_id)
 
     def holds(self, session_id: str) -> bool:
         """Synchronous advisory check: is a lock currently held for this key?
@@ -83,6 +128,7 @@ class SessionWorkerRegistry:
         """Release session lock."""
         async with self._mutex:
             self._locks.pop(session_id, None)
+            self._stale_requested.discard(session_id)
 
     async def stop(self, session_id: str) -> None:
         """Request cancellation of the active run in this session."""

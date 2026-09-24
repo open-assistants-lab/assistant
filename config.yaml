@@ -1,3 +1,5 @@
+deployment:
+  session_lease_timeout_seconds: 300
 agent:
   # No pinned model ships in the repo (D0-5): each deployment supplies its
   # own via PROFILE.md, per-user settings, or AGENT_MODEL / this file. Empty

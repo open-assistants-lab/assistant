@@ -73,6 +73,16 @@ class TestSessionWorkerRegistry:
         assert "chat-1" not in registry.active_sessions
 
     @pytest.mark.asyncio
+    async def test_stale_lock_is_cancelled_without_concurrent_release(self) -> None:
+        registry = SessionWorkerRegistry()
+        lock = await registry.acquire("chat-1")
+        lock._last_activity = 0.0
+
+        assert await registry.reap_stale(max_idle_seconds=1) == ["chat-1"]
+        assert lock.cancelled
+        assert "chat-1" in registry.active_sessions
+
+    @pytest.mark.asyncio
     async def test_active_sessions_reflects_current_locks(self) -> None:
         registry = SessionWorkerRegistry()
         assert registry.active_sessions == frozenset()
