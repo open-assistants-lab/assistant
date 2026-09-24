@@ -29,6 +29,9 @@ import pathlib
 
 import pytest
 
+from src.sdk.execution_models import Outcome
+from src.sdk.tools import ToolResult
+
 TOOLS_CORE = pathlib.Path(__file__).resolve().parents[2] / "src" / "sdk" / "tools_core"
 
 #: (file name, function name) -> why this broad handler returns text on success
@@ -98,6 +101,24 @@ def _violations():
                         f"{path.name}:{value.lineno} in {fn.name}() -> {ast.unparse(value)}"
                     )
     return found
+
+
+def test_tool_result_carries_explicit_outcome():
+    result = ToolResult(content="timed out", is_error=True, outcome=Outcome.TIMED_OUT)
+
+    assert result.outcome is Outcome.TIMED_OUT
+
+
+def test_tool_result_from_plain_string_is_successful():
+    result = ToolResult.from_raw("ok")
+
+    assert result.outcome is Outcome.SUCCEEDED
+    assert result.is_error is False
+
+
+def test_shared_outcome_vocabulary_includes_refused_and_killed():
+    assert Outcome("refused") is Outcome.REFUSED
+    assert Outcome("killed") is Outcome.KILLED
 
 
 def test_every_tool_catch_all_reports_failure():

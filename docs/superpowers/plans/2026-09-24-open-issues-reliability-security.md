@@ -287,6 +287,7 @@ If the shell skill path does not exist, update the existing shell documentation 
 - Modify: `src/http/routers/governance.py`
 - Test: `tests/sdk/test_proposal_outcome.py`
 - Test: `tests/sdk/test_tool_error_convention.py`
+- Test: `tests/sdk/test_governance.py`
 - Test: `tests/api/test_governance_api.py`
 
 **Interfaces:**
@@ -351,7 +352,7 @@ uv run ruff check src/sdk/execution_models.py src/sdk/tools.py src/sdk/tool_resu
 Commit:
 
 ```bash
-git add src/sdk/execution_models.py src/sdk/tools.py src/sdk/tool_results.py src/sdk/loop.py src/sdk/governance.py src/http/routers/governance.py tests/sdk/test_proposal_outcome.py tests/sdk/test_tool_error_convention.py tests/api/test_governance_api.py
+git add src/sdk/execution_models.py src/sdk/tools.py src/sdk/tool_results.py src/sdk/loop.py src/sdk/governance.py src/http/routers/governance.py tests/sdk/test_proposal_outcome.py tests/sdk/test_tool_error_convention.py tests/sdk/test_governance.py tests/api/test_governance_api.py
 git commit -m "fix: make execution outcomes authoritative"
 ```
 

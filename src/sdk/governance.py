@@ -63,9 +63,19 @@ def outcome_for(result: dict[str, Any]) -> str:
     Kept deliberately small so a consumer can switch on it: a clean run, a
     refusal (the tool never ran), a timeout, a signal kill, or a failure.
     """
+    structured = result.get("structured_content") or {}
+    explicit = str(structured.get("outcome") or "")
+    if explicit in {
+        OUTCOME_SUCCEEDED,
+        OUTCOME_REFUSED,
+        OUTCOME_FAILED,
+        OUTCOME_TIMED_OUT,
+        OUTCOME_KILLED,
+    }:
+        return explicit
     if not result.get("is_error"):
         return OUTCOME_SUCCEEDED
-    error = str((result.get("structured_content") or {}).get("error") or "")
+    error = str(structured.get("error") or "")
     if error in _REFUSAL_ERRORS:
         return OUTCOME_REFUSED
     if error in (OUTCOME_TIMED_OUT, OUTCOME_KILLED):
@@ -622,13 +632,18 @@ class GovernanceService:
                             **(out.structured_content or {}),
                             "executed": True,
                             "tool": tool,
+                            "outcome": out.outcome.value if out.outcome else OUTCOME_SUCCEEDED,
                         },
                         "is_error": out.is_error,
                     }
                 else:
                     result = {
                         "content": out if isinstance(out, str) else json.dumps(out, default=str),
-                        "structured_content": {"executed": True, "tool": tool},
+                        "structured_content": {
+                            "executed": True,
+                            "tool": tool,
+                            "outcome": OUTCOME_SUCCEEDED,
+                        },
                         "is_error": False,
                     }
         except Exception as exc:  # receipt the failure, never raise

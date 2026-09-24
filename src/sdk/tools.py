@@ -19,7 +19,9 @@ import math
 from collections.abc import Callable
 from typing import Any, Literal, get_type_hints
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from src.sdk.execution_models import Outcome
 
 
 class ExternalHTTPExecutor(BaseModel):
@@ -125,7 +127,14 @@ class ToolResult(BaseModel):
     content: str
     structured_content: dict[str, Any] | None = None
     is_error: bool = False
+    outcome: Outcome | None = None
     audience: list[str] = Field(default_factory=lambda: ["assistant"])
+
+    @model_validator(mode="after")
+    def _infer_default_outcome(self) -> ToolResult:
+        if self.outcome is None:
+            self.outcome = Outcome.FAILED if self.is_error else Outcome.SUCCEEDED
+        return self
 
     @classmethod
     def from_raw(cls, result: Any) -> ToolResult:

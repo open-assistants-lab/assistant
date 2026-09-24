@@ -16,8 +16,10 @@ class Outcome(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"
+    KILLED = "killed"
     UNCERTAIN = "uncertain"
     INCOMPLETE = "incomplete"
+    REFUSED = "refused"
     REJECTED = "rejected"
 
 

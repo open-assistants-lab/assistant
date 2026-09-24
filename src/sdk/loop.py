@@ -829,11 +829,12 @@ class AgentLoop:
             raw_result = await tool_def.ainvoke(request.arguments)
             result = ToolResult.from_raw(raw_result)
             return ExecutionCompletion(
-                outcome=Outcome.FAILED if result.is_error else Outcome.SUCCEEDED,
+                outcome=result.outcome or (Outcome.FAILED if result.is_error else Outcome.SUCCEEDED),
                 content={
                     "content": result.content,
                     "structured_content": result.structured_content,
                     "is_error": result.is_error,
+                    "outcome": result.outcome.value if result.outcome else None,
                 },
             )
 
@@ -848,6 +849,11 @@ class AgentLoop:
                 content=str(content["content"]),
                 structured_content=content.get("structured_content"),
                 is_error=bool(content.get("is_error", False)),
+                outcome=(
+                    Outcome(content["outcome"])
+                    if content.get("outcome")
+                    else None
+                ),
             )
         else:
             outcome = receipt.outcome.value if receipt.outcome is not None else "running"

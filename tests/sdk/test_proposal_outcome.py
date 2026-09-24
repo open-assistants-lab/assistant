@@ -48,6 +48,17 @@ def _tool(name: str = "probe", fn=None) -> ToolDefinition:
     return ToolDefinition(name=name, description="d", function=fn)
 
 
+def test_explicit_tool_outcome_wins_over_legacy_is_error_shape():
+    from src.sdk.governance import outcome_for
+
+    result = {
+        "is_error": True,
+        "structured_content": {"outcome": "timed_out", "error": "generic"},
+    }
+
+    assert outcome_for(result) == "timed_out"
+
+
 def test_successful_run_is_marked_succeeded(svc):
     proposal_id, result = _run(svc, _tool(fn=lambda **_: "fine"))
 
