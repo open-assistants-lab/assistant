@@ -557,6 +557,7 @@ git commit -m "feat: expose custom pipeline failure semantics"
 - Modify: `src/sdk/sandbox.py`
 - Modify: `src/sdk/tool_results.py`
 - Test: `tests/sdk/test_custom_tool_results.py`
+- Test: `tests/sdk/test_custom_tool_output_ceiling.py`
 - Create: `tests/sdk/test_custom_tool_output_ceiling.py`
 
 **Interfaces:**

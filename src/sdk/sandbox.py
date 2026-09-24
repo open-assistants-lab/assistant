@@ -379,7 +379,7 @@ class SoftSandboxBackend:
                     proc.stdout[:capture_cap],
                     proc.stderr[: lim.max_output_bytes],
                     signalled=proc.returncode < 0,
-                    stdout_truncated=len(proc.stdout) > lim.max_output_bytes,
+                    stdout_truncated=len(proc.stdout) > capture_cap,
                 )
             except subprocess.TimeoutExpired as e:
                 out = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
@@ -563,7 +563,7 @@ class BwrapSandboxBackend:
                     proc.stdout[:capture_cap],
                     proc.stderr[: lim.max_output_bytes],
                     signalled=proc.returncode < 0,
-                    stdout_truncated=len(proc.stdout) > lim.max_output_bytes,
+                    stdout_truncated=len(proc.stdout) > capture_cap,
                 )
             except subprocess.TimeoutExpired:
                 if span is not None:

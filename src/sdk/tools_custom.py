@@ -92,6 +92,23 @@ def run_custom_command(
         # the shell as 128+n (positive), which the signalled flag misses.
         raise_command_killed(command, result.exit_code - 128, elapsed)
 
+    if result.stdout_truncated:
+        capture_limit = limits.max_output_bytes * 8
+        return ToolResult(
+            content=(
+                "Command output exceeded the sandbox capture ceiling. "
+                "The full output was not captured and recovery is unavailable; "
+                "do not rerun the command automatically."
+            ),
+            structured_content={
+                "executed": True,
+                "truncated": True,
+                "capture_limit_bytes": capture_limit,
+                "outcome": "incomplete",
+            },
+            is_error=True,
+        )
+
     output = result.stdout + result.stderr
     if result.exit_code != 0:
         message = f"Command failed (exit {result.exit_code}):\n{output[:2000]}"

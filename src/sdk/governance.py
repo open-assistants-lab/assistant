@@ -71,6 +71,7 @@ def outcome_for(result: dict[str, Any]) -> str:
         OUTCOME_FAILED,
         OUTCOME_TIMED_OUT,
         OUTCOME_KILLED,
+        "incomplete",
     }:
         return explicit
     if not result.get("is_error"):
