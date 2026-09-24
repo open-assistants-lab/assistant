@@ -971,6 +971,14 @@ class AgentLoop:
         re-dispatch it. Emit-only on middleware errors (parity with the
         previous inline blocks).
         """
+        if self.subagent_ctx and self.subagent_ctx.runtime_block is not None:
+            return _PreparedToolCall(
+                blocked_result=ToolResult(
+                    content="Subagent halted after a runtime approval requirement.",
+                    is_error=True,
+                ),
+                blocked_by="governance",
+            )
         try:
             await self._check_tool_guardrails(tc, "input", tc.arguments)
         except GuardrailTripwire as e:
@@ -2036,6 +2044,10 @@ class AgentLoop:
                 self.timings.add(
                     "tool_exec", (time.monotonic() - _t_tool) * 1000.0
                 )
+                # A runtime approval requirement is terminal for child runs;
+                # don't dispatch sequential calls or make another model request.
+                if self.subagent_ctx and self.subagent_ctx.runtime_block is not None:
+                    break
                 # Issue #19: recording moved into the executor (permitted
                 # calls only — blocked calls must never be recorded).
                 # A steer delivered after the batch cancels remaining tools
@@ -2059,6 +2071,22 @@ class AgentLoop:
                 self.timings.add(
                     "tool_exec", (time.monotonic() - _t_tool) * 1000.0
                 )
+                if self.subagent_ctx and self.subagent_ctx.runtime_block is not None:
+                    for remaining in sequential[idx + 1 :]:
+                        state.add_message(
+                            Message.tool_result(
+                                tool_call_id=remaining.id,
+                                content=json.dumps(
+                                    {
+                                        "cancelled": True,
+                                        "reason": "runtime_approval_required",
+                                        "tool": remaining.name,
+                                    }
+                                ),
+                                name=remaining.name,
+                            )
+                        )
+                    break
                 if self._drain_steer(state):
                     # Cancel remaining tools in this batch
                     for remaining in sequential[idx + 1 :]:
@@ -2072,6 +2100,8 @@ class AgentLoop:
                             )
                         )
                     break
+            if self.subagent_ctx and self.subagent_ctx.runtime_block is not None:
+                break
 
     async def run_stream(self, messages: list[Message]) -> AsyncIterator[StreamChunk]:
         """Run the agent loop, yielding StreamChunk events in real-time.

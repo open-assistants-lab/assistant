@@ -10,7 +10,7 @@ import asyncio
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 import aiosqlite
 from agentprofile.models import AgentProfile
@@ -349,12 +349,16 @@ class SubagentWorkQueueDB:
         error: str,
         terminal_status: TaskStatus = TaskStatus.FAILED,
         error_code: str | None = None,
+        terminal_reason: Literal["blocked"] | None = None,
+        result: SubagentResult | None = None,
     ) -> bool:
         if terminal_status not in {TaskStatus.FAILED, TaskStatus.TIMED_OUT}:
             raise ValueError("terminal_status must be failed or timed_out")
+        if terminal_reason is not None and terminal_status is not TaskStatus.FAILED:
+            raise ValueError("only failed tasks may carry a result-level blocked reason")
         db = await self._get_db()
         now = _now()
-        result = SubagentResult(
+        failure_result = result or SubagentResult(
             name="",
             task="",
             success=False,
@@ -363,6 +367,20 @@ class SubagentWorkQueueDB:
             terminal_reason=terminal_status.value,
             error_code=error_code,
         )
+        failure_result = failure_result.model_copy(
+            update={
+                "success": False,
+                "error": error,
+                "error_code": error_code,
+                "terminal_reason": terminal_reason or terminal_status.value,
+            }
+        )
+        task_row = await self.get_task(task_id)
+        if task_row and task_row.get("launch_plan"):
+            plan = json.loads(task_row["launch_plan"] or "{}")
+            failure_result = failure_result.model_copy(
+                update={"launch_plan_id": plan.get("plan_id")}
+            )
         cursor = await db.execute(
             """UPDATE work_queue
             SET status = ?, result = ?, error = ?, terminal_reason = ?, error_code = ?,
@@ -370,9 +388,9 @@ class SubagentWorkQueueDB:
             WHERE id = ? AND user_id = ? AND status IN (?, ?) AND cancel_requested = 0""",
             (
                 terminal_status.value,
-                result.model_dump_json(),
+                failure_result.model_dump_json(),
                 error,
-                result.terminal_reason,
+                failure_result.terminal_reason,
                 error_code,
                 now,
                 now,
@@ -384,7 +402,7 @@ class SubagentWorkQueueDB:
         )
         if cursor.rowcount > 0:
             await self._insert_completion_event(
-                task_id, terminal_status, result, error, now
+                task_id, terminal_status, failure_result, error, now
             )
         await db.commit()
         return cursor.rowcount > 0

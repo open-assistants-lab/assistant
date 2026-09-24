@@ -431,9 +431,20 @@ class SubagentCoordinator:
                 ),
                 timeout=profile.timeout_seconds,
             )
-            completed = await db.set_completed(task_id, result)
-            if not completed:
-                await self._set_cancelled_if_requested(task_id, db)
+            if result.terminal_reason == "blocked":
+                failed = await db.set_failed(
+                    task_id,
+                    result.error or "Runtime approval required.",
+                    error_code=result.error_code or "approval_required",
+                    terminal_reason="blocked",
+                    result=result,
+                )
+                if not failed:
+                    await self._set_cancelled_if_requested(task_id, db)
+            else:
+                completed = await db.set_completed(task_id, result)
+                if not completed:
+                    await self._set_cancelled_if_requested(task_id, db)
         except TaskCancelledError:
             await db.set_cancelled(task_id)
         except SubagentCancelledError:
@@ -563,6 +574,35 @@ class SubagentCoordinator:
                 ),
                 timeout=effective_timeout,
             )
+            if getattr(result, "terminal_reason", "completed") == "blocked":
+                failed = await db.set_failed(
+                    task_id,
+                    result.error or "Runtime approval required.",
+                    error_code=result.error_code or "approval_required",
+                    terminal_reason="blocked",
+                    result=result,
+                )
+                if not failed:
+                    await self._set_cancelled_if_requested(task_id, db)
+                    return ToolResult(
+                        content="Cancelled: subagent was cancelled during execution.",
+                        is_error=True,
+                    )
+                return ToolResult(
+                    content=result.error or "Runtime approval required.",
+                    structured_content={
+                        "status": "blocked",
+                        "terminal_reason": "blocked",
+                        "error_code": result.error_code or "approval_required",
+                        "task_id": task_id,
+                        "effective_tools": result.effective_tools,
+                        "effective_skills": result.effective_skills,
+                        "llm_calls": result.llm_calls,
+                        "cost_usd": result.cost_usd,
+                    },
+                    is_error=True,
+                )
+
             completed = await db.set_completed(task_id, result)
             if not completed:
                 # The row was cancelled (or is no longer running) while the run
@@ -717,6 +757,33 @@ class SubagentCoordinator:
                     "cancelled",
                     parent_session_id,
                 )
+            elif result.terminal_reason == "blocked":
+                error = result.error or "Runtime approval required."
+                failed = await db.set_failed(
+                    task_id,
+                    error,
+                    error_code=result.error_code or "approval_required",
+                    terminal_reason="blocked",
+                    result=result,
+                )
+                if failed:
+                    await self._publish_completion(
+                        task_id,
+                        profile.name,
+                        TaskStatus.FAILED.value,
+                        result,
+                        error,
+                        parent_session_id,
+                    )
+                elif await self._set_cancelled_if_requested(task_id, db):
+                    await self._publish_completion(
+                        task_id,
+                        profile.name,
+                        TaskStatus.CANCELLED.value,
+                        None,
+                        "cancelled",
+                        parent_session_id,
+                    )
             else:
                 completed = await db.set_completed(task_id, result)
                 if completed:
@@ -834,6 +901,7 @@ class SubagentCoordinator:
             ),
         )
 
+        run_context = ctx or SubagentContext()
         summarization_mw = SummarizationMiddleware(model=model_str)
         middlewares: list[Any] = [summarization_mw]
         # Bug-hunt P1: permissions must hold on delegated loops too —
@@ -842,7 +910,9 @@ class SubagentCoordinator:
         from src.sdk.middleware_hitl import HITLMiddleware
 
         if governance_enabled():
-            middlewares.append(HITLMiddleware(user_id=self.user_id))
+            middlewares.append(
+                HITLMiddleware(user_id=self.user_id, subagent_context=run_context)
+            )
 
         # Roadmap P0-T3 follow-up: loops built directly (bypassing
         # create_sdk_loop) must still wire the per-user audit store.
@@ -859,9 +929,9 @@ class SubagentCoordinator:
             user_id=self.user_id,
             workspace_id=self.workspace_id,
         )
-        loop.subagent_ctx = ctx or SubagentContext()
+        loop.subagent_ctx = run_context
         if effective_tool_names is not None:
-            loop.subagent_ctx.allowed_skill_names = frozenset(profile.skills)
+            run_context.allowed_skill_names = frozenset(profile.skills)
 
         messages = [Message.user(task)]
         cost_tracker = CostTracker(
@@ -869,7 +939,7 @@ class SubagentCoordinator:
         )
         result_messages = await loop.run(messages, cost_tracker=cost_tracker)
         structured_output: Any | None = None
-        if profile.output_schema_def:
+        if profile.output_schema_def and run_context.runtime_block is None:
             output = _extract_final_output(result_messages)
             try:
                 structured_output = _parse_and_validate_output(output, profile.output_schema_def)
@@ -902,6 +972,22 @@ class SubagentCoordinator:
 
         cost_usd = cost_tracker.total_cost_usd
 
+        if run_context.runtime_block is not None:
+            block = run_context.runtime_block
+            return SubagentResult(
+                name=profile.name,
+                task=task,
+                success=False,
+                output=f"Blocked: {block.message}",
+                error=block.message,
+                error_code=block.error_code,
+                terminal_reason=block.terminal_reason,
+                cost_usd=cost_usd,
+                llm_calls=llm_calls,
+                effective_tools=list(effective_tool_names or profile.tools),
+                effective_skills=list(profile.skills),
+            )
+
         if profile.output_schema_def:
             output = _extract_final_output(result_messages)
             truncated = False
@@ -919,6 +1005,8 @@ class SubagentCoordinator:
             cost_usd=cost_usd,
             llm_calls=llm_calls,
             structured_output=structured_output,
+            effective_tools=list(effective_tool_names or profile.tools),
+            effective_skills=list(profile.skills),
         )
 
     def _make_progress_cb(self, task_id: str) -> Callable[..., Any]:

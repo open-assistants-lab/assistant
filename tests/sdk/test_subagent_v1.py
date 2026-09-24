@@ -1370,6 +1370,49 @@ class TestSubagentCoordinator:
         assert result["output"] == f"completed {task_id}"
 
     @pytest.mark.asyncio
+    async def test_run_job_persists_runtime_approval_as_blocked_failure(
+        self, mock_paths, profile, monkeypatch
+    ):
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.subagent_models import SubagentResult
+
+        coordinator = SubagentCoordinator("test_user")
+        db = await coordinator._get_db()
+        task_id = await db.insert_task(
+            "test_agent",
+            "do work",
+            profile,
+            launch_plan={"plan_id": "blocked-plan", "effective_tools": ["time_get"]},
+        )
+
+        async def blocked(_task_id, frozen_agent_def, task, _db, ctx=None, **kwargs):
+            return SubagentResult(
+                name=frozen_agent_def.name,
+                task=task,
+                success=False,
+                output="Blocked: approval required.",
+                error="Runtime approval is required.",
+                error_code="approval_required",
+                terminal_reason="blocked",
+                cost_usd=0.02,
+                llm_calls=1,
+                effective_tools=["time_get"],
+            )
+
+        monkeypatch.setattr(coordinator, "_run_loop", blocked)
+        await coordinator._run_job(task_id)
+
+        row = await db.get_task(task_id)
+        assert row is not None and row["status"] == "failed"
+        assert row["terminal_reason"] == "blocked"
+        assert row["error_code"] == "approval_required"
+        stored = await db.get_result(task_id)
+        assert stored is not None
+        assert stored.launch_plan_id == "blocked-plan"
+        assert stored.effective_tools == ["time_get"]
+        assert stored.llm_calls == 1 and stored.cost_usd == 0.02
+
+    @pytest.mark.asyncio
     async def test_run_job_preserves_cancel_racing_with_completion(
         self, mock_paths, profile, monkeypatch
     ):
@@ -2146,6 +2189,71 @@ class TestDelegateFailureContract:
     the tool returned a plain string and governance receipted the run as
     executed with is_error false.
     """
+
+    @pytest.mark.asyncio
+    async def test_runtime_approval_block_is_failed_and_not_reported_as_success(
+        self, monkeypatch, db, profile
+    ):
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.subagent_capabilities import SubagentLaunchPlan, ToolSelectionMode
+        from src.sdk.subagent_models import SubagentResult
+        from src.sdk.tools import ToolResult
+
+        coord = SubagentCoordinator("test_user", "personal")
+        monkeypatch.setattr(coord, "load_def", lambda _name: profile)
+        monkeypatch.setattr("src.sdk.coordinator._subagent_enabled", lambda *a, **k: True)
+        plan = SubagentLaunchPlan(
+            plan_id="plan-approval",
+            agent_name=profile.name,
+            user_id="test_user",
+            workspace_id="personal",
+            tool_selection_mode=ToolSelectionMode.ALLOWLIST,
+            requested_tools=("time_get",),
+            effective_tools=("time_get",),
+            ready=True,
+        )
+        monkeypatch.setattr(coord, "preflight", lambda _name: plan)
+
+        async def fake_db():
+            return db
+
+        async def noop(*_args, **_kwargs):
+            return None
+
+        async def blocked(*_args, **_kwargs):
+            return SubagentResult(
+                name=profile.name,
+                task="task",
+                success=False,
+                output="Blocked: approval required.",
+                error="Runtime approval is required.",
+                error_code="approval_required",
+                terminal_reason="blocked",
+                cost_usd=0.02,
+                llm_calls=1,
+                effective_tools=["time_get"],
+            )
+
+        monkeypatch.setattr(coord, "_get_db", fake_db)
+        monkeypatch.setattr(coord, "_register_active_context", noop)
+        monkeypatch.setattr(coord, "_run_loop", blocked)
+
+        response = await coord.delegate("test_agent", "task")
+
+        assert isinstance(response, ToolResult)
+        assert response.is_error is True
+        assert response.structured_content["terminal_reason"] == "blocked"
+        assert response.structured_content["error_code"] == "approval_required"
+        tasks = await db.check_progress()
+        assert len(tasks) == 1
+        row = await db.get_task(tasks[0]["id"])
+        assert row is not None and row["status"] == "failed"
+        assert row["terminal_reason"] == "blocked"
+        stored = await db.get_result(tasks[0]["id"])
+        assert stored is not None and stored.terminal_reason == "blocked"
+        assert stored.launch_plan_id == "plan-approval"
+        assert stored.effective_tools == ["time_get"]
+        assert stored.llm_calls == 1 and stored.cost_usd == 0.02
 
     @pytest.mark.asyncio
     async def test_timeout_returns_an_error_result(self, monkeypatch, db, profile):

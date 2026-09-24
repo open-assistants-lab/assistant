@@ -57,6 +57,70 @@ async def test_completion_transition_writes_one_durable_outbox_event(tmp_path, m
 
 
 @pytest.mark.asyncio
+async def test_blocked_terminal_result_is_durable_and_writes_completion_event(
+    tmp_path, monkeypatch
+) -> None:
+    from src.storage.paths import DataPaths
+
+    paths = DataPaths(data_path=tmp_path, data_root=tmp_path, user_id="user")
+    monkeypatch.setattr("src.sdk.subagent_work_queue.get_paths", lambda _user_id: paths)
+    db = SubagentWorkQueueDB("user")
+    try:
+        profile = AgentProfile(name="worker")
+        task_id = await db.insert_task(
+            "worker",
+            "review",
+            profile,
+            parent_session_id="session-1",
+            launch_plan={
+                "plan_id": "plan-blocked",
+                "effective_tools": ["skills_load"],
+                "effective_skills": ["deployment"],
+            },
+        )
+        result = SubagentResult(
+            name="worker",
+            task="review",
+            success=False,
+            output="Blocked: approval required for skills_load.",
+            error="Runtime approval is required.",
+            error_code="approval_required",
+            terminal_reason="blocked",
+            cost_usd=0.02,
+            llm_calls=1,
+            effective_tools=["skills_load"],
+            effective_skills=["deployment"],
+        )
+
+        assert await db.set_failed(
+            task_id,
+            result.error,
+            error_code="approval_required",
+            terminal_reason="blocked",
+            result=result,
+        )
+        row = await db.get_task(task_id)
+        assert row is not None
+        assert row["status"] == TaskStatus.FAILED.value
+        assert row["terminal_reason"] == "blocked"
+        assert row["error_code"] == "approval_required"
+        stored = await db.get_result(task_id)
+        assert stored is not None
+        assert stored.terminal_reason == "blocked"
+        assert stored.error_code == "approval_required"
+        assert stored.launch_plan_id == "plan-blocked"
+        assert stored.effective_tools == ["skills_load"]
+        assert stored.effective_skills == ["deployment"]
+        assert stored.llm_calls == 1 and stored.cost_usd == 0.02
+        events = await db.list_undelivered_completion_events()
+        assert len(events) == 1
+        assert events[0]["status"] == TaskStatus.FAILED.value
+        assert events[0]["result"]["terminal_reason"] == "blocked"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_coordinator_replays_event_and_acknowledges_only_with_subscriber(
     tmp_path, monkeypatch
 ) -> None:

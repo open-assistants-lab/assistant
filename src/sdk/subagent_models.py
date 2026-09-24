@@ -10,7 +10,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 DEFAULT_DISALLOWED_TOOLS = [
     "subagent_create",
@@ -70,6 +70,8 @@ class SubagentResult(BaseModel):
     ] = "completed"
     verified: bool | None = None
     launch_plan_id: str | None = None
+    effective_tools: list[str] = Field(default_factory=list)
+    effective_skills: list[str] = Field(default_factory=list)
 
 
 class TaskCancelledError(Exception):
