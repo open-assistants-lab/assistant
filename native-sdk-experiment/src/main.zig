@@ -29,19 +29,20 @@ const connector_disconnect_key: u64 = 23;
 const auth_poll_key: u64 = 24;
 const connector_connect_key: u64 = 25;
 const first_run_key: u64 = 26;
+const credential_store_key: u64 = 27;
+const credential_load_key: u64 = 28;
+const credential_key_name = "active-provider-credential";
 
 /// OAuth poll budget: 2s timer × 60 ticks = 120s before the authorization
 /// is declared timed out.
 const max_oauth_poll_ticks: u16 = 60;
 
 /// Captured from `std.process.Init.io` in main() — the app's real I/O
-/// instance, needed to spawn child processes (openSystemBrowser). Zig
-/// 0.16's std.process.run requires an Io argument; the SDK's own
-/// app_assets.zig uses std.testing.io, which is test-build-only, so the
-/// production code carries the process Io here instead.
+/// instance, needed to spawn the system browser. Zig 0.16's std.process.run
+/// requires an Io argument; the SDK's own app_assets.zig uses std.testing.io,
+/// which is test-build-only, so production carries the process Io here.
 var g_process_io: std.Io = undefined;
-/// Tests never capture a process Io (it is undefined in the test build), so
-/// keychain spawns are skipped there and the caller takes its failure path.
+/// Tests never capture a process Io (it is undefined in the test build).
 var g_process_io_ready = false;
 
 const max_providers = 128;
@@ -73,7 +74,9 @@ const SettingsSection = enum { providers_models, general, tools };
 const ToolsSection = enum { builtin, connections };
 
 pub const LaunchState = enum { starting, first_run, connected, unavailable };
+pub const WorkspacePage = enum { chat, skills, subagents };
 const FirstRunMode = enum { key, custom_endpoint, local_models };
+const CredentialPendingKind = enum { none, settings, first_run };
 
 const ToolRow = struct {
     name: []const u8,
@@ -211,7 +214,11 @@ pub const composer_bar_clearance: f32 = 140;
 /// event was genuinely lost — never a legitimate long run.
 pub const stream_watchdog_ms: i64 = 130_000;
 
-const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
+const app_permissions = [_][]const u8{
+    native_sdk.security.permission_command,
+    native_sdk.security.permission_view,
+    native_sdk.security.permission_credentials,
+};
 const shell_views = [_]native_sdk.ShellView{
     .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .role = "Chat canvas", .accessibility_label = "Chat", .gpu_backend = .metal, .gpu_pixel_format = .bgra8_unorm, .gpu_present_mode = .timer, .gpu_alpha_mode = .@"opaque", .gpu_color_space = .srgb, .gpu_vsync = true },
 };
@@ -241,6 +248,7 @@ pub const ChatMessage = struct {
     tool_status: []const u8 = "",
     tool_result: []const u8 = "",
     collapsed: bool = false,
+    context_flash: bool = false,
     timestamp: []const u8 = "",
 
     pub fn isUser(self: *const ChatMessage) bool {
@@ -378,6 +386,8 @@ pub const Msg = union(enum) {
     quick_action_browse,
     quick_action_files,
     quick_action_research,
+    open_skills,
+    open_subagents,
     sidebar_resized: f32,
     history_loaded: native_sdk.EffectResponse,
     chat_history_loaded: native_sdk.EffectResponse,
@@ -406,11 +416,15 @@ pub const Msg = union(enum) {
     auth_poll: native_sdk.EffectTimer,
     cancel_connect,
     first_run_key_input: canvas.TextInputEvent,
+    first_run_choose_provider: []const u8,
     first_run_submit,
     first_run_scan_local,
     first_run_custom_endpoint,
     first_run_checked: native_sdk.EffectResponse,
     first_run_discovery: native_sdk.EffectResponse,
+    credential_saved: native_sdk.EffectCredentialsResult,
+    credential_loaded: native_sdk.EffectCredentialsResult,
+    credential_deleted: native_sdk.EffectCredentialsResult,
     first_run_select_model: usize,
     reconnect,
     settings_providers_models,
@@ -453,6 +467,9 @@ pub const Msg = union(enum) {
         "history_loaded",
         "chat_history_loaded",
         "sessions_loaded",
+        "credential_saved",
+        "credential_loaded",
+        "credential_deleted",
         "reached_bottom",
         "delete_chat",
         "delete_chat_done",
@@ -496,6 +513,7 @@ pub const Model = struct {
     model_menu_search_selection: canvas.TextSelection = .{ .anchor = 0, .focus = 0 },
     settings: SettingsState = .{},
     tools: ToolsState = .{},
+    workspace_page: WorkspacePage = .chat,
     launch_state: LaunchState = .connected,
     api_base_url: []const u8 = "http://assistant.invalid",
     launch_token: []const u8 = "",
@@ -505,12 +523,18 @@ pub const Model = struct {
     first_run_key_selection: canvas.TextSelection = .{ .anchor = 0, .focus = 0 },
     first_run_status: []const u8 = "",
     first_run_mode: FirstRunMode = .key,
+    first_run_provider: []const u8 = "",
     first_run_model_picker: bool = false,
     // D3 credential ownership: the active provider key lives in the macOS
     // keychain (loaded at startup) and is injected per request; the sidecar
     // never persists it.
     active_provider: []const u8 = "",
     active_provider_key: []const u8 = "",
+    credential_pending_kind: CredentialPendingKind = .none,
+    credential_pending_provider: []const u8 = "",
+    credential_pending_key: []const u8 = "",
+    credential_pending_fetch_key: u64 = 0,
+    skip_first_run: bool = false,
     allocator: std.mem.Allocator = undefined,
 
     pub const view_unbound = .{
@@ -533,18 +557,18 @@ pub const Model = struct {
     }
 
     pub fn selectedModel(self: *const Model) []const u8 {
-        if (self.available_model_count == 0) return "ollama-cloud:deepseek-v4-flash:0731";
+        if (self.available_model_count == 0) return "";
         return self.available_models[self.selected_model_idx].id;
     }
 
     pub fn selectedModelLabel(self: *const Model, allocator: std.mem.Allocator) []const u8 {
-        if (self.available_model_count == 0) return "Ollama Cloud · DeepSeek V4 Flash 0731";
+        if (self.available_model_count == 0) return "No model selected";
         const m = self.available_models[self.selected_model_idx];
         return std.fmt.allocPrint(allocator, "{s} · {s}", .{ m.provider_display, m.name }) catch m.name;
     }
 
     pub fn selectedModelIsHosted(self: *const Model) bool {
-        if (self.available_model_count == 0) return true;
+        if (self.available_model_count == 0) return false;
         return std.mem.eql(u8, self.available_models[self.selected_model_idx].key_source, "hosted");
     }
 
@@ -880,7 +904,8 @@ fn processSSEEvent(model: *Model, chat: *Chat, sse_body: []const u8, fx: *Effect
         if (contextCompressedLabel(model.allocator, data)) |label| {
             chat.compression_animation_ticks = 8;
             removeTrailingEmptyAssistant(chat);
-            addMessage(chat, model.allocator, "system", label);
+            addMessage(chat, model.allocator, "context", label);
+            chat._messages[chat.msg_count - 1].context_flash = true;
         }
     } else if (std.mem.eql(u8, event_type, "usage")) {
         const usage_data = jsonObject(data.get("usage") orelse return) orelse return;
@@ -1054,6 +1079,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             };
         },
         .new_chat => {
+            model.workspace_page = .chat;
             cancelOAuthPoll(model, fx);
             model.settings.visible = false;
             model.tools.visible = false;
@@ -1087,6 +1113,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
         },
         .switch_chat => |chat_id| {
+            model.workspace_page = .chat;
             cancelOAuthPoll(model, fx);
             model.settings.visible = false;
             model.tools.visible = false;
@@ -1097,15 +1124,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     model.active_chat_id = model.chats[i].id;
                     model.chats[i].unread_count = 0;
                     recalcTextareaHeight(&model.chats[i]);
-                    // Empty state entrance when switching to an empty chat
-                    if (model.chats[i].msg_count == 0 and !model.chats[i].history_loading) {
-                        if (model.settings.reduced_motion) {
-                            model.empty_entrance = 1;
-                        } else {
-                            model.empty_entrance = 0;
-                            fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
-                        }
-                    }
+                    // Chat switching is a state change, not an entrance
+                    // transition. Keep the empty-state animation reserved for
+                    // newly created chats.
+                    model.empty_entrance = 1;
                     // Load history for this chat if not yet loaded
                     if (!model.chats[i].history_loaded and model.chats[i].msg_count == 0) {
                         model.chats[i].history_loaded = true;
@@ -1297,6 +1319,16 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .quick_action_research => {
             model.activeChat().draft_text = "Run a research job on the topic of local-first AI infrastructure";
             doSend(model, fx);
+        },
+        .open_skills => {
+            model.workspace_page = .skills;
+            model.settings.visible = false;
+            model.tools.visible = false;
+        },
+        .open_subagents => {
+            model.workspace_page = .subagents;
+            model.settings.visible = false;
+            model.tools.visible = false;
         },
         .sidebar_resized => |frac| {
             model.sidebar_split = frac;
@@ -1513,6 +1545,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             for (0..model.chat_count) |i| {
                 if (model.chats[i].compression_animation_ticks > 0) {
                     model.chats[i].compression_animation_ticks -= 1;
+                    if (model.chats[i].compression_animation_ticks == 0 and model.chats[i].msg_count > 0) {
+                        const last = &model.chats[i]._messages[model.chats[i].msg_count - 1];
+                        if (std.mem.eql(u8, last.role, "context")) last.context_flash = false;
+                    }
                 }
             }
             // Stream watchdog: force-finalize when the stream has been
@@ -2378,9 +2414,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 },
                 .key => {
                     const key = std.mem.trim(u8, model.first_run_key_value, " \n\r\t");
-                    const provider = classifyFirstRunProvider(key);
+                    const classified_provider = classifyFirstRunProvider(key);
+                    const provider = if (classified_provider.len > 0) classified_provider else model.first_run_provider;
                     if (provider.len == 0) {
-                        model.first_run_status = "This key needs a provider-specific prefix. Use Settings to choose a provider.";
+                        model.first_run_status = "Choose the provider before verifying this key.";
                         return;
                     }
                     const escaped_provider = escapeJsonString(model.allocator, provider) catch return;
@@ -2404,6 +2441,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .local_models => return,
             }
         },
+        .first_run_choose_provider => |provider| {
+            model.first_run_provider = provider;
+            model.first_run_status = "Provider selected. Verify the key to continue.";
+        },
         .first_run_scan_local => {
             model.first_run_mode = .local_models;
             model.first_run_model_picker = false;
@@ -2419,10 +2460,49 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .first_run_custom_endpoint => {
             model.first_run_mode = .custom_endpoint;
+            model.first_run_provider = "";
             model.first_run_model_picker = false;
             model.first_run_key_value = "";
             model.first_run_key_selection = .{ .anchor = 0, .focus = 0 };
             model.first_run_status = "Enter a custom http(s) endpoint, then press Validate endpoint.";
+        },
+        .credential_saved => |result| {
+            if (result.outcome != .ok) {
+                if (model.credential_pending_kind == .first_run) {
+                    model.first_run_status = "The key could not be stored in Keychain.";
+                } else {
+                    update(model, .{ .key_saved = .{ .key = model.credential_pending_fetch_key, .outcome = .rejected, .body = "" } }, fx);
+                }
+                model.credential_pending_kind = .none;
+                return;
+            }
+            const pending_kind = model.credential_pending_kind;
+            model.active_provider = model.allocator.dupe(u8, model.credential_pending_provider) catch "";
+            model.active_provider_key = model.allocator.dupe(u8, model.credential_pending_key) catch "";
+            model.credential_pending_kind = .none;
+            if (pending_kind == .first_run) {
+                model.first_run_model_picker = false;
+                model.first_run_status = "Key verified. Loading available models…";
+                fetchSettingsCatalog(model, fx);
+            } else if (pending_kind == .settings) {
+                update(model, .{ .key_saved = .{ .key = model.credential_pending_fetch_key, .outcome = .ok, .body = "" } }, fx);
+            }
+        },
+        .credential_deleted => |result| {
+            update(model, .{ .key_deleted = .{ .key = result.key, .outcome = if (result.outcome == .ok) .ok else .rejected, .body = "" } }, fx);
+        },
+        .credential_loaded => |result| {
+            if (result.outcome == .ok) {
+                if (decodeActiveCredential(model, result.bytes)) |credential| {
+                    model.active_provider = credential.provider;
+                    model.active_provider_key = credential.key;
+                    model.launch_state = .connected;
+                    startBackendSessions(model, fx);
+                    return;
+                }
+            }
+            model.launch_state = if (model.skip_first_run) .connected else .first_run;
+            if (model.skip_first_run) startBackendSessions(model, fx);
         },
         .first_run_checked => |response| {
             if (response.outcome != .ok) {
@@ -2445,13 +2525,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 return;
             }
             const provider = if (root.object.get("provider")) |v| jsonString(v) orelse "" else "";
-            if (provider.len == 0 or !storeFirstRunCredential(model, provider, model.first_run_key_value)) {
-                model.first_run_status = "The key could not be stored in Keychain.";
+            if (provider.len == 0) {
+                model.first_run_status = "The provider did not identify itself.";
                 return;
             }
-            model.first_run_model_picker = false;
-            model.first_run_status = "Key verified. Loading available models…";
-            fetchSettingsCatalog(model, fx);
+            requestCredentialStore(model, fx, provider, model.first_run_key_value, .first_run, 0);
         },
         .first_run_discovery => |response| {
             if (response.outcome != .ok) {
@@ -2664,7 +2742,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     }
                 }
                 sortSettingsProviders(&model.settings);
-                if (model.launch_state == .first_run and model.active_provider_key.len > 0) {
+                if (model.active_provider_key.len > 0) {
                     for (0..model.settings.provider_count) |pi| {
                         if (std.mem.eql(u8, model.settings.providers[pi].id, model.active_provider)) {
                             model.settings.providers[pi].has_key = true;
@@ -2677,8 +2755,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                             }
                         }
                     }
-                    model.first_run_model_picker = model.available_model_count > 0;
-                    model.first_run_status = if (model.first_run_model_picker) "Choose a model to continue." else "No models are available for this provider.";
+                    if (model.launch_state == .first_run) {
+                        model.first_run_model_picker = model.available_model_count > 0;
+                        model.first_run_status = if (model.first_run_model_picker) "Choose a model to continue." else "No models are available for this provider.";
+                    }
                 }
             }
         },
@@ -2906,11 +2986,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (model.settings.key_modal_visible and model.settings.key_testing) {
                 model.settings.key_testing = false;
                 if (valid) {
-                    saveProviderKeyLocally(
+                    requestCredentialStore(
                         model,
                         fx,
                         model.settings.pending_provider_id,
                         model.settings.key_input,
+                        .settings,
                         model.allocFetchKey(),
                     );
                 } else {
@@ -2923,7 +3004,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     const p = &model.settings.providers[i];
                     p.testing = false;
                     if (valid) {
-                        saveProviderKeyLocally(model, fx, p.id, p.key_input, model.allocFetchKey());
+                        requestCredentialStore(model, fx, p.id, p.key_input, .settings, model.allocFetchKey());
                     } else {
                         p.test_error = model.allocator.dupe(u8, error_msg) catch "Invalid key";
                     }
@@ -3003,8 +3084,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             // D3: the key lives in the keychain, not the sidecar's store
             // (desktop mode refuses /settings/api-keys). Delete locally and
             // drive the existing handler; the pending entry correlates it.
-            keychainDeleteKey(model, provider_id);
-            update(model, .{ .key_deleted = .{ .key = fetch_key, .outcome = .ok, .body = "" } }, fx);
+            fx.credentialsDelete(.{
+                .key = fetch_key,
+                .credential_key = credential_key_name,
+                .on_result = Effects.credentialsMsg(.credential_deleted),
+            });
         },
         .key_deleted => |response| {
             if (response.outcome != .ok) return;
@@ -3581,10 +3665,29 @@ const ChatApp = native_sdk.UiApp(Model, Msg);
 
 // ── View builders (Zig view replacing markup) ──────────────────────────────
 
+fn buildWorkspacePage(ui: *AppUi, page: WorkspacePage) AppUi.Node {
+    const title = switch (page) {
+        .skills => "Skills",
+        .subagents => "Subagents",
+        .chat => "Chat",
+    };
+    const copy = switch (page) {
+        .skills => "Skills are available to the assistant from the configured skills directory. Ask the assistant to load a skill or manage skill files.",
+        .subagents => "Subagents are configured by the assistant from the configured subagents directory. Ask the assistant to inspect or update an agent profile.",
+        .chat => "",
+    };
+    return ui.column(.{ .grow = 1, .main = .center, .cross = .center, .padding = 32, .gap = 12 }, .{
+        ui.text(.{ .size = .heading }, title),
+        ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, copy),
+    });
+}
+
 pub fn buildView(ui: *AppUi, model: *const Model) AppUi.Node {
     if (model.launch_state != .connected) return buildLaunchPanel(ui, model);
 
-    const right_panel: AppUi.Node = if (model.tools.visible)
+    const right_panel: AppUi.Node = if (model.workspace_page != .chat)
+        buildWorkspacePage(ui, model.workspace_page)
+    else if (model.tools.visible)
         buildToolsPage(ui, model)
     else if (model.settings.visible)
         buildSettingsPanel(ui, model)
@@ -3665,6 +3768,15 @@ fn buildLaunchPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                     .style_tokens = .{ .background = .surface_subtle, .border_color = .border },
                 }, .{});
                 count += 1;
+                if (model.first_run_mode == .key and classifyFirstRunProvider(model.first_run_key_value).len == 0) {
+                    nodes[count] = ui.row(.{ .gap = 6, .cross = .center }, .{
+                        ui.button(.{ .on_press = .{ .first_run_choose_provider = "openai" }, .variant = if (std.mem.eql(u8, model.first_run_provider, "openai")) .primary else .ghost }, "OpenAI"),
+                        ui.button(.{ .on_press = .{ .first_run_choose_provider = "anthropic" }, .variant = if (std.mem.eql(u8, model.first_run_provider, "anthropic")) .primary else .ghost }, "Anthropic"),
+                        ui.button(.{ .on_press = .{ .first_run_choose_provider = "gemini" }, .variant = if (std.mem.eql(u8, model.first_run_provider, "gemini")) .primary else .ghost }, "Gemini"),
+                        ui.button(.{ .on_press = .{ .first_run_choose_provider = "openrouter" }, .variant = if (std.mem.eql(u8, model.first_run_provider, "openrouter")) .primary else .ghost }, "OpenRouter"),
+                    });
+                    count += 1;
+                }
                 const submit_label = if (model.first_run_mode == .custom_endpoint) "Validate endpoint" else "Verify key";
                 nodes[count] = ui.row(.{ .gap = 8, .cross = .center }, .{
                     ui.button(.{ .on_press = .first_run_submit, .variant = .primary, .min_width = 132 }, submit_label),
@@ -3853,13 +3965,13 @@ fn buildSidebar(ui: *AppUi, model: *const Model) AppUi.Node {
             ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "wrench"),
             ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = if (model.tools.visible) .text else .text_muted } }, "Tools"),
         }),
-        ui.row(.{ .gap = 8, .padding = 8, .cross = .center, .style_tokens = .{ .radius = .md } }, .{
+        ui.row(.{ .gap = 8, .padding = 8, .cross = .center, .on_press = .open_skills, .style_tokens = .{ .radius = .md } }, .{
             ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "folder"),
-            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Skills"),
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = if (model.workspace_page == .skills) .text else .text_muted } }, "Skills"),
         }),
-        ui.row(.{ .gap = 8, .padding = 8, .cross = .center, .style_tokens = .{ .radius = .md } }, .{
+        ui.row(.{ .gap = 8, .padding = 8, .cross = .center, .on_press = .open_subagents, .style_tokens = .{ .radius = .md } }, .{
             ui.icon(.{ .style_tokens = .{ .foreground = .text_muted } }, "git-branch"),
-            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Subagents"),
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = if (model.workspace_page == .subagents) .text else .text_muted } }, "Subagents"),
         }),
     });
     sidebar_count += 1;
@@ -3997,7 +4109,7 @@ pub fn computeGroupExtents(chat: *Chat) void {
     var i: usize = 0;
     while (i < count) {
         const msg = &chat._messages[i];
-        if (msg.isUser() or std.mem.eql(u8, msg.role, "system")) {
+        if (msg.isUser() or std.mem.eql(u8, msg.role, "system") or std.mem.eql(u8, msg.role, "context")) {
             const lines = estimatedWrappedLines(msg.content);
             chat._group_extents[group_idx] = bubble_padding + lines * line_height + timestamp_height + group_gap;
             group_idx += 1;
@@ -4006,7 +4118,7 @@ pub fn computeGroupExtents(chat: *Chat) void {
             const label_height: f32 = 16.25;
             const label_gap: f32 = 6;
             var group_height: f32 = label_height + label_gap;
-            while (i < count and !chat._messages[i].isUser() and !std.mem.eql(u8, chat._messages[i].role, "system")) : (i += 1) {
+            while (i < count and !chat._messages[i].isUser() and !std.mem.eql(u8, chat._messages[i].role, "system") and !std.mem.eql(u8, chat._messages[i].role, "context")) : (i += 1) {
                 const m = &chat._messages[i];
                 if (m.isTool()) {
                     const tool_lines = estimatedWrappedLines(m.content);
@@ -4128,7 +4240,7 @@ pub fn addHistoryMessage(chat: *Chat, allocator: std.mem.Allocator, item: std.js
             const event_type = jsonString(metadata.object.get("event_type") orelse metadata.object.get("type") orelse return) orelse return;
             if (std.mem.eql(u8, event_type, "context_compressed")) {
                 if (contextCompressedLabel(allocator, metadata.object)) |label| {
-                    addMessage(chat, allocator, "system", label);
+                    addMessage(chat, allocator, "context", label);
                     chat._messages[chat.msg_count - 1].timestamp = extractTimestamp(item, allocator);
                 }
             }
@@ -4274,50 +4386,6 @@ fn openSystemBrowser(url: []const u8) !void {
     if (result.term != .exited or result.term.exited != 0) return error.OpenFailed;
 }
 
-
-/// Keychain (D3 task 2). The native app owns provider credentials: a pasted key
-/// is stored in the macOS login keychain, never under ~/Assistant and never
-/// POSTed to the sidecar (desktop mode refuses /settings/api-keys). `security`
-/// is the supported path for a non-sandboxed app; the secret is passed as an
-/// argument because Zig 0.16's std.process.run has no stdin pipe and `security`
-/// retype-prompts when -w is omitted.
-const keychain_service = "dev.native-sdk.assistant.provider";
-const keychain_active_service = "dev.native-sdk.assistant.active-provider";
-
-fn keychainRun(model: *Model, argv: []const []const u8) ?[]const u8 {
-    if (!g_process_io_ready) return null;
-    const result = std.process.run(model.allocator, g_process_io, .{ .argv = argv }) catch return null;
-    if (result.term != .exited or result.term.exited != 0) {
-        model.allocator.free(result.stdout);
-        model.allocator.free(result.stderr);
-        return null;
-    }
-    model.allocator.free(result.stderr);
-    return result.stdout;
-}
-
-fn keychainStoreKey(model: *Model, provider: []const u8, key: []const u8) bool {
-    if (keychainRun(model, &.{ "security", "add-generic-password", "-U", "-a", provider, "-s", keychain_service, "-w", key }) == null) return false;
-    if (keychainRun(model, &.{ "security", "add-generic-password", "-U", "-a", "active", "-s", keychain_active_service, "-w", provider }) == null) return false;
-    return true;
-}
-
-fn keychainDeleteKey(model: *Model, provider: []const u8) void {
-    _ = keychainRun(model, &.{ "security", "delete-generic-password", "-a", provider, "-s", keychain_service });
-    _ = keychainRun(model, &.{ "security", "delete-generic-password", "-a", "active", "-s", keychain_active_service });
-}
-
-/// Restore the active provider credential at launch (Keychain -> memory).
-pub fn keychainLoadActive(model: *Model) void {
-    const provider_raw = keychainRun(model, &.{ "security", "find-generic-password", "-a", "active", "-s", keychain_active_service, "-w" }) orelse return;
-    const provider = std.mem.trim(u8, provider_raw, " \n\r\t");
-    if (provider.len == 0) return;
-    const key_raw = keychainRun(model, &.{ "security", "find-generic-password", "-a", provider, "-s", keychain_service, "-w" }) orelse return;
-    const key = std.mem.trim(u8, key_raw, " \n\r\t");
-    model.active_provider = model.allocator.dupe(u8, provider) catch return;
-    model.active_provider_key = model.allocator.dupe(u8, key) catch return;
-}
-
 fn classifyFirstRunProvider(key: []const u8) []const u8 {
     if (std.mem.startsWith(u8, key, "sk-ant-")) return "anthropic";
     if (std.mem.startsWith(u8, key, "sk-or-")) return "openrouter";
@@ -4327,25 +4395,73 @@ fn classifyFirstRunProvider(key: []const u8) []const u8 {
     return "";
 }
 
-fn storeFirstRunCredential(model: *Model, provider: []const u8, key: []const u8) bool {
-    // In production this must succeed in Keychain. Unit tests do not have a
-    // process Io and therefore exercise the same memory handoff without a
-    // real `security` subprocess or touching the user's login keychain.
-    if (g_process_io_ready and !keychainStoreKey(model, provider, key)) return false;
-    model.active_provider = model.allocator.dupe(u8, provider) catch return false;
-    model.active_provider_key = model.allocator.dupe(u8, key) catch return false;
-    return true;
+const ActiveCredential = struct {
+    provider: []const u8,
+    key: []const u8,
+};
+
+fn encodeActiveCredential(allocator: std.mem.Allocator, provider: []const u8, key: []const u8) ?[]const u8 {
+    return std.fmt.allocPrint(allocator, "{d}:{s}{s}", .{ provider.len, provider, key }) catch null;
 }
 
-/// Store the key locally and drive the existing `.key_saved` success path.
-fn saveProviderKeyLocally(model: *Model, fx: *Effects, provider_id: []const u8, api_key: []const u8, fetch_key: u64) void {
-    if (keychainStoreKey(model, provider_id, api_key)) {
-        model.active_provider = model.allocator.dupe(u8, provider_id) catch "";
-        model.active_provider_key = model.allocator.dupe(u8, api_key) catch "";
-        update(model, .{ .key_saved = .{ .key = fetch_key, .outcome = .ok, .body = "" } }, fx);
-    } else {
-        update(model, .{ .key_saved = .{ .key = fetch_key, .outcome = .rejected, .body = "" } }, fx);
+fn decodeActiveCredential(model: *Model, encoded: []const u8) ?ActiveCredential {
+    const separator = std.mem.indexOfScalar(u8, encoded, ':') orelse return null;
+    const provider_len = std.fmt.parseInt(usize, encoded[0..separator], 10) catch return null;
+    const provider_start = separator + 1;
+    if (provider_start + provider_len > encoded.len) return null;
+    const provider = model.allocator.dupe(u8, encoded[provider_start .. provider_start + provider_len]) catch return null;
+    const key = model.allocator.dupe(u8, encoded[provider_start + provider_len ..]) catch return null;
+    if (provider.len == 0 or key.len == 0) return null;
+    return .{ .provider = provider, .key = key };
+}
+
+/// Store the active provider credential through the Native SDK credential
+/// effect. The secret never appears in a process argv or sidecar request.
+fn requestCredentialStore(
+    model: *Model,
+    fx: *Effects,
+    provider: []const u8,
+    api_key: []const u8,
+    kind: CredentialPendingKind,
+    fetch_key: u64,
+) void {
+    const secret = encodeActiveCredential(model.allocator, provider, api_key) orelse {
+        if (kind == .first_run) model.first_run_status = "The key could not be prepared for Keychain storage.";
+        return;
+    };
+    model.credential_pending_kind = kind;
+    model.credential_pending_provider = provider;
+    model.credential_pending_key = api_key;
+    model.credential_pending_fetch_key = fetch_key;
+    if (!g_process_io_ready) {
+        // Unit tests have no host runtime. Preserve the memory-only test seam;
+        // production always takes the credential effect path below.
+        update(model, .{ .credential_saved = .{
+            .key = credential_store_key,
+            .operation = .set,
+            .outcome = .ok,
+            .bytes = "",
+        } }, fx);
+        return;
     }
+    fx.credentialsSet(.{
+        .key = credential_store_key,
+        .credential_key = credential_key_name,
+        .secret = secret,
+        .on_result = Effects.credentialsMsg(.credential_saved),
+    });
+}
+
+/// Start the sidecar session bootstrap after credential restoration completes.
+fn startBackendSessions(model: *Model, fx: *Effects) void {
+    fx.fetch(.{
+        .key = sessions_key,
+        .url = apiUrl(model, model.allocator, "/conversation/sessions"),
+        .method = .GET,
+        .headers = acceptJsonHeaders(model, model.allocator),
+        .response = .buffered,
+        .on_response = Effects.responseMsg(.sessions_loaded),
+    });
 }
 
 /// The `provider_keys` fragment for run bodies; empty when no key is active
@@ -5272,12 +5388,12 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         var i: usize = 0;
         while (i < count) {
             const msg = &chat._messages[i];
-            if (msg.isUser() or std.mem.eql(u8, msg.role, "system")) {
+            if (msg.isUser() or std.mem.eql(u8, msg.role, "system") or std.mem.eql(u8, msg.role, "context")) {
                 group_count += 1;
                 i += 1;
             } else {
                 group_count += 1;
-                while (i < count and !chat._messages[i].isUser() and !std.mem.eql(u8, chat._messages[i].role, "system")) {
+                while (i < count and !chat._messages[i].isUser() and !std.mem.eql(u8, chat._messages[i].role, "system") and !std.mem.eql(u8, chat._messages[i].role, "context")) {
                     i += 1;
                 }
             }
@@ -5320,7 +5436,7 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
         i = 0;
         while (i < count and node_count < max_visible) {
             const msg = &chat._messages[i];
-            if (msg.isUser() or std.mem.eql(u8, msg.role, "system")) {
+            if (msg.isUser() or std.mem.eql(u8, msg.role, "system") or std.mem.eql(u8, msg.role, "context")) {
                 if (group_idx >= window.start_index and group_idx < window.end_index) {
                     msg_nodes[node_count] = buildMessageBubble(ui, msg);
                     node_count += 1;
@@ -5330,7 +5446,7 @@ fn buildChatPanel(ui: *AppUi, model: *const Model) AppUi.Node {
                 i += 1;
             } else {
                 msg_start = i;
-                while (i < count and !chat._messages[i].isUser() and !std.mem.eql(u8, chat._messages[i].role, "system")) {
+                while (i < count and !chat._messages[i].isUser() and !std.mem.eql(u8, chat._messages[i].role, "system") and !std.mem.eql(u8, chat._messages[i].role, "context")) {
                     i += 1;
                 }
                 const msg_end = i;
@@ -5634,6 +5750,25 @@ fn buildMessageBubble(ui: *AppUi, msg: *const ChatMessage) AppUi.Node {
                 }),
             }),
         });
+    } else if (std.mem.eql(u8, msg.role, "context")) {
+        // Context compression is a first-class timeline event. During the
+        // short post-compression window, the accent border makes the durable
+        // context update visibly distinct instead of silently appearing.
+        return ui.row(.{ .cross = .center }, .{
+            ui.el(.card, .{
+                .padding = 10,
+                .style_tokens = .{
+                    .background = if (msg.context_flash) .surface_pressed else .surface_subtle,
+                    .border_color = if (msg.context_flash) .accent else .border,
+                    .radius = .md,
+                },
+            }, .{
+                ui.row(.{ .gap = 8, .cross = .center }, .{
+                    ui.icon(.{ .style_tokens = .{ .foreground = .accent } }, "circle-dot"),
+                    ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted }, .wrap = true }, msg.content),
+                }),
+            }),
+        });
     } else if (std.mem.eql(u8, msg.role, "system")) {
         // System/error: muted, no card, no role label, padded to align with messages
         const is_stream_error = std.mem.startsWith(u8, msg.content, "Stream error");
@@ -5675,17 +5810,18 @@ fn initFx(model: *Model, fx: *Effects) void {
     // fires the first tick at a quiet startup, so without this the chat
     // panel would stay at entrance opacity 0 (blank).
     fx.startTimer(.{ .key = 1, .interval_ms = 60, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick) });
-    // Fetch sessions first; models and history are chained from the
-    // response handlers (see fetchModels / fetchActiveChatHistory) so the
-    // startup never fires concurrent connects to the same host — the Zig
-    // std threaded Io can panic with ISCONN on that race.
-    fx.fetch(.{
-        .key = sessions_key,
-        .url = apiUrl(model, model.allocator, "/conversation/sessions"),
-        .method = .GET,
-        .headers = acceptJsonHeaders(model, model.allocator),
-        .response = .buffered,
-        .on_response = Effects.responseMsg(.sessions_loaded),
+    // Native unit tests have no host credential runtime; preserve their
+    // deterministic session bootstrap without touching a real keychain.
+    if (!g_process_io_ready) {
+        startBackendSessions(model, fx);
+        return;
+    }
+    // Restore the app-owned credential before opening sidecar sessions. The
+    // credential effect keeps the secret out of argv and sidecar traffic.
+    fx.credentialsGet(.{
+        .key = credential_load_key,
+        .credential_key = credential_key_name,
+        .on_result = Effects.credentialsMsg(.credential_loaded),
     });
 }
 
@@ -5776,12 +5912,10 @@ pub fn main(init: std.process.Init) !void {
             app_state.model.launch_error = "Could not read Assistant connection settings";
         };
     }
-    // D3 task 2: restore the credential the native app owns (Keychain); it is
-    // injected per request and never persisted by the sidecar.
-    keychainLoadActive(&app_state.model);
-    if (app_state.model.active_provider_key.len == 0 and init.environ_map.get("NATIVE_ASSISTANT_SKIP_FIRST_RUN") == null) {
-        app_state.model.launch_state = .first_run;
-    }
+    // D3 task 2: credential restoration is issued by initFx through the
+    // Native SDK credential effect. The sidecar never receives the secret.
+    app_state.model.skip_first_run = init.environ_map.get("NATIVE_ASSISTANT_SKIP_FIRST_RUN") != null;
+    app_state.model.launch_state = .starting;
 
     // Stress-test mode: seed a synthetic transcript of N messages so the
     // virtual list can be exercised at scale without a backend.

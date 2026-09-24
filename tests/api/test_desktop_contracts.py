@@ -483,6 +483,28 @@ def test_failed_compression_never_appears_as_success(tmp_path, monkeypatch):
     assert not any("Context updated" in m.content for m in projected)
 
 
+def test_context_replay_inserts_missing_run_in_event_order(monkeypatch):
+    from src.http.routers.conversation import _replay_context_events
+    from src.sdk import session_events as se
+
+    monkeypatch.setattr(se, "_session_stores", {})
+    monkeypatch.setattr(se, "session_log_enabled", lambda: True)
+    user_id = "turns_context_order_user"
+    store = se.get_session_event_store(user_id)
+    _append_event(
+        store, 1, "ordered-session", "context_compressed", _compressed_data(46_000, 9_000), run_id="run-1"
+    )
+
+    turns = [{
+        "run_id": "run-2",
+        "metadata": {},
+        "messages": [{"role": "user", "content": "later", "timestamp": "2999-01-01T00:00:00+00:00"}],
+    }]
+    replayed = _replay_context_events(turns, "ordered-session", user_id)
+
+    assert [turn["run_id"] for turn in replayed] == ["run-1", "run-2"]
+
+
 def test_turns_replay_context_compression_with_typed_metadata(client, monkeypatch):
     from src.sdk import session_events as se
 
