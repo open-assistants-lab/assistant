@@ -268,6 +268,46 @@ class TestFilesGlobSearch:
         assert "no files" in result.lower() or result.strip() == ""
 
 
+class TestWorkspaceSymlinkContainment:
+    def test_files_list_does_not_report_symlinks_outside_workspace(self, user_workspace):
+        from src.sdk.tools_core.filesystem import files_list
+
+        outside = user_workspace.parent / "private.txt"
+        outside.write_text("private content")
+        (user_workspace / "outside-link.txt").symlink_to(outside)
+
+        result = files_list.invoke({"path": ".", "user_id": TEST_USER_ID})
+
+        assert "outside-link.txt" not in result
+
+    def test_glob_search_does_not_report_symlinks_outside_workspace(self, user_workspace):
+        from src.sdk.tools_core.file_search import files_glob_search
+
+        outside = user_workspace.parent / "private.txt"
+        outside.write_text("private content")
+        (user_workspace / "outside-link.txt").symlink_to(outside)
+
+        result = files_glob_search.invoke(
+            {"pattern": "**/*", "path": ".", "user_id": TEST_USER_ID}
+        )
+
+        assert "outside-link.txt" not in result
+
+    def test_grep_search_does_not_read_symlinks_outside_workspace(self, user_workspace):
+        from src.sdk.tools_core.file_search import files_grep_search
+
+        outside = user_workspace.parent / "private.txt"
+        outside.write_text("OUTSIDE_SECRET_SENTINEL")
+        (user_workspace / "outside-link.txt").symlink_to(outside)
+
+        result = files_grep_search.invoke(
+            {"pattern": "OUTSIDE_SECRET_SENTINEL", "path": ".", "user_id": TEST_USER_ID}
+        )
+
+        assert result.startswith("No matches")
+        assert "outside-link.txt" not in result
+
+
 class TestFilesGrepSearch:
     """Tests for files_grep_search tool."""
 

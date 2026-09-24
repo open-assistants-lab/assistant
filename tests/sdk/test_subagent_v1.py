@@ -841,6 +841,100 @@ class TestSubagentCoordinator:
         assert "message_search" in names
         assert "skill_delete" not in names
 
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "files_list",
+            "files_read",
+            "files_glob_search",
+            "files_grep_search",
+            "skills_load",
+            "skills_reload",
+        ],
+    )
+    def test_child_scoped_tools_hide_and_bind_identity(self, tool_name, mock_paths):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import _build_tools_for_subagent
+        from src.sdk.tools import ToolDefinition
+
+        captured: dict[str, object] = {}
+        properties = {
+            "user_id": {"type": "string"},
+            "workspace_id": {"type": "string"},
+        }
+        if tool_name in {"skills_load", "skills_reload"}:
+            if tool_name == "skills_load":
+                properties["name"] = {"type": "string", "default": "approved"}
+        else:
+            properties["path"] = {"type": "string", "default": "."}
+            if tool_name in {"files_glob_search", "files_grep_search"}:
+                properties["pattern"] = {"type": "string", "default": "*"}
+        tool_def = ToolDefinition(
+            name=tool_name,
+            description="scoped test tool",
+            parameters={"type": "object", "properties": properties},
+            function=lambda **kwargs: captured.update(kwargs) or "ok",
+        )
+        with patch("src.sdk.native_tools.get_native_tools", return_value=[tool_def]):
+            [scoped] = _build_tools_for_subagent(
+                AgentProfile(name="child", tools=[tool_name]),
+                user_id="bound-user",
+                effective_tool_names=[tool_name],
+                workspace_id="bound-workspace",
+            )
+
+        assert "user_id" not in scoped.parameters["properties"]
+        assert "workspace_id" not in scoped.parameters["properties"]
+        supplied = {
+            "user_id": "attacker-user",
+            "workspace_id": "attacker-workspace",
+            "name": "approved",
+            "path": ".",
+            "pattern": "*",
+        }
+        assert scoped.invoke(supplied) == "ok"
+        assert captured["user_id"] == "bound-user"
+        assert captured["workspace_id"] == "bound-workspace"
+
+    @pytest.mark.parametrize(
+        ("tool_name", "path"),
+        [
+            ("files_list", "../secret.txt"),
+            ("files_list", "/tmp/secret.txt"),
+            ("files_read", "../secret.txt"),
+            ("files_read", "/tmp/secret.txt"),
+            ("files_glob_search", "../outside"),
+            ("files_glob_search", "/tmp"),
+            ("files_grep_search", "../outside"),
+            ("files_grep_search", "/tmp"),
+        ],
+    )
+    def test_child_scoped_file_tools_reject_parent_and_absolute_paths(
+        self, tool_name, path, mock_paths
+    ):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import _build_tools_for_subagent
+        from src.sdk.tools import ToolDefinition
+
+        tool_def = ToolDefinition(
+            name=tool_name,
+            description="scoped test tool",
+            parameters={"type": "object", "properties": {"path": {"type": "string"}}},
+            function=lambda **_kwargs: "must not run",
+        )
+        with patch("src.sdk.native_tools.get_native_tools", return_value=[tool_def]):
+            [scoped] = _build_tools_for_subagent(
+                AgentProfile(name="child", tools=[tool_name]),
+                user_id="test_user",
+                effective_tool_names=[tool_name],
+                workspace_id="sales",
+            )
+
+        with pytest.raises(ValueError, match="workspace-relative"):
+            scoped.invoke({"path": path})
+
     def test_build_tools_filters_user_disabled_tools(self, mock_paths, monkeypatch):
         from agentprofile.models import AgentProfile
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import os
 import shutil
@@ -45,6 +46,70 @@ _active: dict[str, SubagentContext] = {}
 # Skill loading is included only when no precomputed launch manifest was supplied.
 OPTIONAL_SKILL_LOAD_TOOL = "skills_load"
 DENIED_SKILL_MANAGEMENT_TOOLS = {"skill_delete", "skill_update"}
+CHILD_SCOPED_FILE_TOOLS = frozenset(
+    {"files_list", "files_read", "files_glob_search", "files_grep_search"}
+)
+CHILD_SCOPED_IDENTITY_TOOLS = CHILD_SCOPED_FILE_TOOLS | {"skills_load", "skills_reload"}
+
+
+def _validate_child_file_path(
+    tool_name: str,
+    arguments: dict[str, Any],
+    user_id: str,
+    workspace_id: str,
+) -> None:
+    """Keep curated child file access relative to its frozen workspace."""
+    path_value = arguments.get("path", ".")
+    path = Path(path_value) if path_value is not None else Path(".")
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError("Child file tools accept workspace-relative paths only")
+
+    root = get_paths(user_id=user_id, workspace_id=workspace_id).workspace_files_dir().resolve()
+    if not (root / path).resolve().is_relative_to(root):
+        raise ValueError("Child file path resolves outside its requested workspace")
+
+    if tool_name == "files_glob_search":
+        pattern = Path(str(arguments.get("pattern", "**/*")))
+        if pattern.is_absolute() or ".." in pattern.parts:
+            raise ValueError("Child file tools accept workspace-relative paths only")
+
+
+def _bind_child_tool_identity(
+    tool_def: Any,
+    user_id: str,
+    workspace_id: str,
+) -> Any:
+    """Hide model-visible identity inputs and bind the coordinator's scope."""
+    parameters = copy.deepcopy(tool_def.parameters)
+    properties = parameters.get("properties", {})
+    bound_fields = {key for key in ("user_id", "workspace_id") if key in properties}
+    for key in bound_fields:
+        properties.pop(key, None)
+    if "required" in parameters:
+        parameters["required"] = [
+            key for key in parameters["required"] if key not in bound_fields
+        ]
+    function = tool_def.function
+    if function is None:
+        return tool_def.model_copy(update={"parameters": parameters})
+
+    def call(arguments: dict[str, Any]) -> Any:
+        for key in ("user_id", "workspace_id"):
+            arguments.pop(key, None)
+        if tool_def.name in CHILD_SCOPED_FILE_TOOLS:
+            _validate_child_file_path(tool_def.name, arguments, user_id, workspace_id)
+        if "user_id" in bound_fields:
+            arguments["user_id"] = user_id
+        if "workspace_id" in bound_fields:
+            arguments["workspace_id"] = workspace_id
+        return function(**arguments)
+
+    def scoped_function(**arguments: Any) -> Any:
+        return call(arguments)
+
+    return tool_def.model_copy(
+        update={"parameters": parameters, "function": scoped_function}
+    )
 
 
 def _load_user_caps(user_id: str) -> dict[str, Any]:
@@ -81,6 +146,7 @@ def _build_tools_for_subagent(
     profile: AgentProfile,
     user_id: str | None = None,
     effective_tool_names: list[str] | tuple[str, ...] | None = None,
+    workspace_id: str | None = None,
 ) -> list[Any]:
     """Build the filtered tool list for a subagent."""
     from src.sdk.native_tools import get_native_tools
@@ -112,7 +178,18 @@ def _build_tools_for_subagent(
         }
         final.difference_update(disabled_tools)
 
-    return [tool_map[n] for n in sorted(final) if n in tool_map]
+    resolved_tools = [tool_map[name] for name in sorted(final) if name in tool_map]
+    if user_id and workspace_id:
+        resolved_tools = [
+            _bind_child_tool_identity(tool_def, user_id, workspace_id)
+            if tool_def.name in CHILD_SCOPED_IDENTITY_TOOLS
+            or {"user_id", "workspace_id"}.intersection(
+                tool_def.parameters.get("properties", {})
+            )
+            else tool_def
+            for tool_def in resolved_tools
+        ]
+    return resolved_tools
 
 
 def _build_system_prompt(
@@ -414,11 +491,11 @@ class SubagentCoordinator:
         task: str,
         parent_id: str | None = None,
     ) -> str:
-        """DEPRECATED: Use delegate() instead.
+        """Deprecated compatibility API; use ``delegate()`` for new callers.
 
-        This method skips validate_agent_def() and returns task_id instead of
-        result output. Kept for backward compatibility but delegates should use
-        delegate() for new code.
+        No in-repository production callers remain, but external consumers are
+        unknown, so removal is deferred pending an explicit compatibility review.
+        This method retains its historical task-ID return contract.
         """
         if not _subagent_enabled(self.user_id, agent_name):
             raise ValueError(f"Subagent '{agent_name}' is disabled.")
@@ -931,7 +1008,10 @@ class SubagentCoordinator:
 
         execution_workspace_id = workspace_id or self.requested_workspace_id
         tools = _build_tools_for_subagent(
-            profile, user_id=self.user_id, effective_tool_names=effective_tool_names
+            profile,
+            user_id=self.user_id,
+            effective_tool_names=effective_tool_names,
+            workspace_id=execution_workspace_id,
         )
         system_prompt = _build_system_prompt(
             profile,

@@ -14,6 +14,10 @@ from src.sdk.capabilities import load_user_capabilities, resource_enabled
 from src.sdk.native_tools import get_native_tools
 from src.skills.registry import get_skill_registry
 
+SAFE_DEFAULT_TOOL_NAMES = frozenset(
+    {"files_list", "files_read", "files_glob_search", "files_grep_search"}
+)
+
 
 class ToolSelectionMode(StrEnum):
     """How a subagent profile selects its available tools."""
@@ -201,14 +205,7 @@ def build_launch_plan(
 
     if tool_selection_mode is ToolSelectionMode.SAFE_DEFAULT:
         selected_tools = tuple(
-            name
-            for name, definition in sorted(tool_map.items())
-            if definition.annotations.read_only
-            and not definition.annotations.requires_approval
-            and not definition.annotations.open_world
-            and not name.startswith("subagent_")
-            and not name.startswith("memory_")
-            and name not in {"skill_delete", "skill_update"}
+            name for name in sorted(SAFE_DEFAULT_TOOL_NAMES) if name in tool_map
         )
     elif tool_selection_mode is ToolSelectionMode.NONE:
         selected_tools = ()

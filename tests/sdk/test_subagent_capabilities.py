@@ -33,6 +33,24 @@ def _build_plan(
     from src.sdk.tools import ToolAnnotations, ToolDefinition
 
     tools = {
+        "files_list": ToolDefinition(
+            name="files_list",
+            description="List files",
+            function=lambda: None,
+            annotations=ToolAnnotations(read_only=True, idempotent=True),
+        ),
+        "files_glob_search": ToolDefinition(
+            name="files_glob_search",
+            description="Search file names",
+            function=lambda: None,
+            annotations=ToolAnnotations(read_only=True, idempotent=True),
+        ),
+        "files_grep_search": ToolDefinition(
+            name="files_grep_search",
+            description="Search file contents",
+            function=lambda: None,
+            annotations=ToolAnnotations(read_only=True, idempotent=True),
+        ),
         "files_read": ToolDefinition(
             name="files_read",
             description="Read a file",
@@ -227,8 +245,35 @@ def test_safe_default_excludes_mutating_tools(monkeypatch) -> None:
     plan = _build_plan(monkeypatch, _profile(), ToolSelectionMode.SAFE_DEFAULT)
 
     assert plan.ready is True
-    assert plan.effective_tools == ("files_read", "skills_load")
+    assert set(plan.effective_tools) == {
+        "files_list",
+        "files_read",
+        "files_glob_search",
+        "files_grep_search",
+    }
     assert "files_write" not in plan.effective_tools
+    assert "skills_load" not in plan.effective_tools
+
+
+def test_curated_safe_default_is_exactly_the_workspace_file_set() -> None:
+    from src.sdk.subagent_capabilities import SAFE_DEFAULT_TOOL_NAMES
+
+    assert SAFE_DEFAULT_TOOL_NAMES == frozenset(
+        {"files_list", "files_read", "files_glob_search", "files_grep_search"}
+    )
+
+
+def test_curated_safe_default_rejects_network_cross_session_and_private_data_tools(monkeypatch) -> None:
+    from src.sdk.subagent_capabilities import ToolSelectionMode
+
+    for tool_name in ("web_fetch", "message_history", "files_write"):
+        plan = _build_plan(
+            monkeypatch,
+            _profile(tools=[tool_name]),
+            ToolSelectionMode.SAFE_DEFAULT,
+        )
+        assert plan.ready is False
+        assert tool_name not in plan.effective_tools
 
 
 def test_legacy_empty_profile_currently_resolves_to_empty_manifest(monkeypatch) -> None:
@@ -346,9 +391,9 @@ def test_generic_skills_load_preflight_can_miss_item_level_runtime_ask(monkeypat
 
     plan = _build_plan(
         monkeypatch,
-        _profile(),
-        ToolSelectionMode.SAFE_DEFAULT,
-        permissions={"skills_load:deployment": "ask"},
+        _profile(tools=["skills_load"]),
+        ToolSelectionMode.ALLOWLIST,
+        permissions={"skills_load:deployment": "ask"}
     )
 
     assert plan.ready is True
