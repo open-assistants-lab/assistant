@@ -1,7 +1,7 @@
 # Open-Issue Reliability and Security Remediation Design
 
-**Date:** 2026-09-24  
-**Status:** Self-reviewed; ready for implementation planning  
+**Date:** 2026-09-24
+**Status:** Self-reviewed; ready for implementation planning
 **Scope:** GitHub issues #35–#42, excluding deferred #7
 
 ## Goal
