@@ -102,7 +102,7 @@ async def subagent_create(
         workspace_id: Workspace ID (defaults to current workspace)
         description: What this subagent does (shown to LLM for routing)
         model: Model to use (e.g., 'anthropic:claude-sonnet-4-20250514')
-        tools: List of tool names to allow (None = all native tools)
+        tools: Tool names to allow (None = curated safe defaults; [] = no tools)
         system_prompt: Custom system prompt
         skills: List of skill names to inject
         max_llm_calls: Per-task LLM call limit (default 50)

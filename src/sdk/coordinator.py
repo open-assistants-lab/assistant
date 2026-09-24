@@ -10,8 +10,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import shutil
+import tempfile
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from agentprofile.models import AgentProfile
@@ -53,6 +56,25 @@ def _load_user_caps(user_id: str) -> dict[str, Any]:
 
 def _subagent_enabled(user_id: str, name: str) -> bool:
     return resource_enabled(_load_user_caps(user_id), "subagents", name)
+
+
+def _infer_tool_selection_mode(profile: AgentProfile) -> Any:
+    """Preserve omitted, explicit-empty, and named tool selections."""
+    from src.sdk.subagent_capabilities import ToolSelectionMode
+
+    if "tools" not in getattr(profile, "model_fields_set", set()):
+        return ToolSelectionMode.SAFE_DEFAULT
+    return ToolSelectionMode.ALLOWLIST if profile.tools else ToolSelectionMode.NONE
+
+
+def _coerce_tool_selection_mode(value: Any) -> Any:
+    """Reject the legacy sentinel outside the one-time migration reader."""
+    from src.sdk.subagent_capabilities import ToolSelectionMode
+
+    mode = ToolSelectionMode(value)
+    if mode is ToolSelectionMode.LEGACY:
+        raise ValueError("legacy tool selection is migration-only")
+    return mode
 
 
 def _build_tools_for_subagent(
@@ -264,6 +286,11 @@ class SubagentCoordinator:
         profile: AgentProfile,
         tool_selection_mode: Any | None = None,
     ) -> AgentProfile:
+        selection_mode = (
+            _coerce_tool_selection_mode(tool_selection_mode)
+            if tool_selection_mode is not None
+            else _infer_tool_selection_mode(profile)
+        )
         agent_path = self.base_path / profile.name
         agent_path.mkdir(parents=True, exist_ok=True)
 
@@ -282,14 +309,10 @@ class SubagentCoordinator:
         except Exception:
             pass
 
-        # Write PROFILE.md (frontmatter + body)
+        # Persist restrictive policy first: a crash cannot expose a profile whose
+        # explicit empty tool list was serialized as an omitted default.
+        self._write_runtime_policy(agent_path / "runtime-policy.json", selection_mode)
         (agent_path / "PROFILE.md").write_text(dumps_profile(profile))
-        (agent_path / "runtime-policy.json").write_text(
-            json.dumps(
-                {"version": 1, "tool_selection": getattr(tool_selection_mode, "value", "legacy")},
-                indent=2,
-            )
-        )
 
         # Write companion files
         provider_path = agent_path / "provider.json"
@@ -325,16 +348,23 @@ class SubagentCoordinator:
 
         agent_path = self.base_path / name
 
-        # Write PROFILE.md
-        (agent_path / "PROFILE.md").write_text(dumps_profile(updated))
+        from src.sdk.subagent_capabilities import ToolSelectionMode
 
-        if tool_selection_mode is not None:
-            (agent_path / "runtime-policy.json").write_text(
-                json.dumps(
-                    {"version": 1, "tool_selection": getattr(tool_selection_mode, "value", "legacy")},
-                    indent=2,
-                )
-            )
+        if tool_selection_mode is None:
+            if "tools" in update_data:
+                selection_mode = _infer_tool_selection_mode(updated)
+            else:
+                selection_mode = self.load_tool_selection_mode(name)
+        else:
+            selection_mode = _coerce_tool_selection_mode(tool_selection_mode)
+
+        # Resolve legacy fields before serialization can omit default values.
+        # An explicit empty list must take effect before its frontmatter vanishes.
+        if selection_mode is ToolSelectionMode.NONE:
+            self._write_runtime_policy(agent_path / "runtime-policy.json", selection_mode)
+        (agent_path / "PROFILE.md").write_text(dumps_profile(updated))
+        if selection_mode is not ToolSelectionMode.NONE:
+            self._write_runtime_policy(agent_path / "runtime-policy.json", selection_mode)
 
         # Write companion files
         provider_path = agent_path / "provider.json"
@@ -960,18 +990,84 @@ class SubagentCoordinator:
 
         return scoped
 
+    @staticmethod
+    def _write_runtime_policy(
+        path: Path, mode: Any, migrated_from: str | None = None
+    ) -> None:
+        """Atomically persist a versioned, explicit tool-selection policy."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict[str, Any] = {"version": 1, "tool_selection": mode.value}
+        if migrated_from is not None:
+            payload["migrated_from"] = migrated_from
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            Path(temporary_path).replace(path)
+        except Exception:
+            Path(temporary_path).unlink(missing_ok=True)
+            raise
+
+    def _migrate_legacy_tool_selection_mode(self, name: str) -> Any:
+        """Migrate one old profile without restoring implicit all-native access."""
+        from src.sdk.subagent_capabilities import ToolSelectionMode
+
+        profile = self.load_def(name)
+        if profile is None:
+            raise ValueError(f"Cannot migrate runtime policy for missing profile '{name}'")
+        fields_set: set[str] = getattr(profile, "model_fields_set", set())
+        if "tools" not in fields_set:
+            mode = ToolSelectionMode.SAFE_DEFAULT
+        elif profile.tools:
+            mode = ToolSelectionMode.ALLOWLIST
+        else:
+            mode = ToolSelectionMode.NONE
+
+        self._write_runtime_policy(
+            self.base_path / name / "runtime-policy.json", mode, migrated_from="legacy"
+        )
+        logger.info(
+            "subagent.runtime_policy_migrated",
+            {"agent": name, "tool_selection": mode.value, "source": "legacy"},
+            user_id=self.user_id,
+        )
+        return mode
+
     def load_tool_selection_mode(self, name: str) -> Any:
-        """Load the explicit profile policy; old profiles remain legacy."""
+        """Load or one-time migrate a profile's explicit capability selection."""
         from src.sdk.subagent_capabilities import ToolSelectionMode
 
         policy_path = self.base_path / name / "runtime-policy.json"
         if not policy_path.exists():
-            return ToolSelectionMode.LEGACY
+            return self._migrate_legacy_tool_selection_mode(name)
         try:
-            value = json.loads(policy_path.read_text()).get("tool_selection")
-            return ToolSelectionMode(value)
-        except (OSError, ValueError, json.JSONDecodeError, TypeError):
-            return ToolSelectionMode.LEGACY
+            payload = json.loads(policy_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or type(payload.get("version")) is not int:
+                raise ValueError("missing version")
+            if payload["version"] != 1:
+                raise ValueError(f"unsupported version {payload['version']!r}")
+            value = payload.get("tool_selection")
+            if value == ToolSelectionMode.LEGACY.value:
+                return self._migrate_legacy_tool_selection_mode(name)
+            if not isinstance(value, str):
+                raise ValueError("tool_selection must be a string")
+            mode = ToolSelectionMode(value)
+            if mode is ToolSelectionMode.LEGACY:
+                return self._migrate_legacy_tool_selection_mode(name)
+            return mode
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            logger.error(
+                "subagent.runtime_policy_invalid",
+                {"agent": name, "error": str(exc)},
+                user_id=self.user_id,
+            )
+            raise ValueError(
+                f"Invalid runtime policy for subagent '{name}': {exc}"
+            ) from exc
 
     def load_def(self, name: str) -> AgentProfile | None:
         profile_path = self.base_path / name / "PROFILE.md"

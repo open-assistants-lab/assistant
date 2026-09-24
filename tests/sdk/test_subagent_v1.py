@@ -1520,6 +1520,120 @@ class TestSubagentCoordinator:
         assert coord.load_tool_selection_mode("policy") is ToolSelectionMode.NONE
 
     @pytest.mark.asyncio
+    async def test_legacy_profile_policy_migrates_omitted_empty_and_allowlist_once(self, mock_paths):
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.subagent_capabilities import ToolSelectionMode
+
+        definitions = {
+            "omitted": """---
+name: omitted
+---
+worker body
+""",
+            "empty": """---
+name: empty
+tools: []
+---
+worker body
+""",
+            "allowlist": """---
+name: allowlist
+tools:
+  - files_read
+---
+worker body
+""",
+        }
+        expected = {
+            "omitted": ToolSelectionMode.SAFE_DEFAULT,
+            "empty": ToolSelectionMode.NONE,
+            "allowlist": ToolSelectionMode.ALLOWLIST,
+        }
+        coordinator = SubagentCoordinator("test_user")
+        for name, body in definitions.items():
+            agent_dir = mock_paths.user_subagents_dir() / name
+            agent_dir.mkdir(parents=True)
+            (agent_dir / "PROFILE.md").write_text(body)
+
+            assert coordinator.load_tool_selection_mode(name) is expected[name]
+            policy_path = agent_dir / "runtime-policy.json"
+            policy = json.loads(policy_path.read_text())
+            assert policy["version"] == 1
+            assert policy["tool_selection"] == expected[name].value
+            assert policy["migrated_from"] == "legacy"
+            first_write = policy_path.read_text()
+            assert coordinator.load_tool_selection_mode(name) is expected[name]
+            assert policy_path.read_text() == first_write
+
+        legacy_dir = mock_paths.user_subagents_dir() / "legacy-sentinel"
+        legacy_dir.mkdir(parents=True)
+        legacy_profile = """---
+name: legacy-sentinel
+tools: []
+---
+legacy body
+"""
+        (legacy_dir / "PROFILE.md").write_text(legacy_profile)
+        (legacy_dir / "runtime-policy.json").write_text(
+            json.dumps({"version": 1, "tool_selection": "legacy"})
+        )
+        assert coordinator.load_tool_selection_mode("legacy-sentinel") is ToolSelectionMode.NONE
+        assert (legacy_dir / "PROFILE.md").read_text() == legacy_profile
+        assert (
+            json.loads((legacy_dir / "runtime-policy.json").read_text())["migrated_from"]
+            == "legacy"
+        )
+
+    @pytest.mark.asyncio
+    async def test_corrupt_or_unknown_runtime_policy_fails_closed(self, mock_paths):
+        from src.sdk.coordinator import SubagentCoordinator
+
+        coordinator = SubagentCoordinator("test_user")
+        for name, payload in (
+            ("bad-version", {"version": 2, "tool_selection": "safe_default"}),
+            ("bad-mode", {"version": 1, "tool_selection": "all_tools"}),
+        ):
+            agent_dir = mock_paths.user_subagents_dir() / name
+            agent_dir.mkdir(parents=True)
+            (agent_dir / "PROFILE.md").write_text(f"""---
+name: {name}
+---
+""")
+            (agent_dir / "runtime-policy.json").write_text(json.dumps(payload))
+
+            with pytest.raises(ValueError, match="runtime policy"):
+                coordinator.load_tool_selection_mode(name)
+
+        malformed_dir = mock_paths.user_subagents_dir() / "malformed-json"
+        malformed_dir.mkdir(parents=True)
+        (malformed_dir / "PROFILE.md").write_text("---\nname: malformed-json\n---\n")
+        (malformed_dir / "runtime-policy.json").write_text("{broken")
+        with pytest.raises(ValueError, match="runtime policy"):
+            coordinator.load_tool_selection_mode("malformed-json")
+
+    @pytest.mark.asyncio
+    async def test_create_and_update_infer_omitted_empty_and_named_tool_modes(self, mock_paths):
+        from agentprofile.models import AgentProfile
+
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.subagent_capabilities import ToolSelectionMode
+
+        coordinator = SubagentCoordinator("test_user")
+        await coordinator.create(AgentProfile(name="omitted"))
+        await coordinator.create(AgentProfile(name="empty", tools=[]))
+        await coordinator.create(AgentProfile(name="allowlist", tools=["files_read"]))
+        assert coordinator.load_tool_selection_mode("omitted") is ToolSelectionMode.SAFE_DEFAULT
+        assert coordinator.load_tool_selection_mode("empty") is ToolSelectionMode.NONE
+        assert coordinator.load_tool_selection_mode("allowlist") is ToolSelectionMode.ALLOWLIST
+
+        await coordinator.update("allowlist", description="changed", tools=None)
+        assert coordinator.load_tool_selection_mode("allowlist") is ToolSelectionMode.ALLOWLIST
+        await coordinator.update("allowlist", tools=[])
+        assert coordinator.load_tool_selection_mode("allowlist") is ToolSelectionMode.NONE
+        await coordinator.update("allowlist", tools=["files_list"])
+        assert coordinator.load_tool_selection_mode("allowlist") is ToolSelectionMode.ALLOWLIST
+
+    @pytest.mark.asyncio
     async def test_definitions_are_user_level_across_workspace_ids(self, mock_paths):
         from agentprofile.models import AgentProfile
 
