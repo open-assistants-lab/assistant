@@ -38,6 +38,17 @@ def _build_plan(
             function=lambda: None,
             annotations=ToolAnnotations(destructive=True),
         ),
+        "memory_profile": ToolDefinition(
+            name="memory_profile",
+            description="Memory access",
+            function=lambda: None,
+            annotations=ToolAnnotations(read_only=True),
+        ),
+        "subagent_delegate": ToolDefinition(
+            name="subagent_delegate",
+            description="Recursive delegation",
+            function=lambda: None,
+        ),
         "skills_load": ToolDefinition(
             name="skills_load",
             description="Load a skill",
@@ -156,6 +167,50 @@ def test_preflight_rejects_ask_and_deny_permissions(monkeypatch) -> None:
     assert {(item.name, item.status) for item in plan.rejected_decisions} == {
         ("files_read", "permission_ask"),
         ("skills_load", "permission_deny"),
+    }
+
+
+def test_safe_default_rejects_declared_tool_outside_default_manifest(monkeypatch) -> None:
+    from src.sdk.subagent_capabilities import ToolSelectionMode
+
+    plan = _build_plan(
+        monkeypatch,
+        _profile(tools=["files_write"]),
+        ToolSelectionMode.SAFE_DEFAULT,
+    )
+    assert plan.ready is False
+    assert [(item.name, item.status) for item in plan.rejected_decisions] == [
+        ("files_write", "not_in_safe_default")
+    ]
+
+
+def test_safe_default_rejects_declared_forbidden_tools(monkeypatch) -> None:
+    from src.sdk.subagent_capabilities import ToolSelectionMode
+
+    plan = _build_plan(
+        monkeypatch,
+        _profile(tools=["memory_profile"]),
+        ToolSelectionMode.SAFE_DEFAULT,
+    )
+    assert plan.ready is False
+    assert [(item.name, item.status) for item in plan.rejected_decisions] == [
+        ("memory_profile", "forbidden")
+    ]
+
+
+def test_preflight_rejects_forbidden_tool_instead_of_silently_filtering(monkeypatch) -> None:
+    from src.sdk.subagent_capabilities import ToolSelectionMode
+
+    plan = _build_plan(
+        monkeypatch,
+        _profile(tools=["memory_profile", "subagent_delegate"]),
+        ToolSelectionMode.ALLOWLIST,
+    )
+
+    assert plan.ready is False
+    assert {(item.name, item.status) for item in plan.rejected_decisions} == {
+        ("memory_profile", "forbidden"),
+        ("subagent_delegate", "forbidden"),
     }
 
 

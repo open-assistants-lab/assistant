@@ -105,6 +105,17 @@ def _tool_decision(name: str, tool_map: dict[str, Any], caps: dict[str, Any], us
     definition = tool_map.get(name)
     if definition is None:
         return CapabilityDecision(kind="tool", name=name, status="missing", reason="not registered")
+    if (
+        name.startswith("subagent_")
+        or name.startswith("memory_")
+        or name in {"skill_delete", "skill_update"}
+    ):
+        return CapabilityDecision(
+            kind="tool",
+            name=name,
+            status="forbidden",
+            reason="tool is forbidden for subagents",
+        )
     annotations = definition.annotations
     metadata = {
         "read_only": annotations.read_only,
@@ -167,6 +178,8 @@ def build_launch_plan(
             and not definition.annotations.requires_approval
             and not definition.annotations.open_world
             and not name.startswith("subagent_")
+            and not name.startswith("memory_")
+            and name not in {"skill_delete", "skill_update"}
         )
     elif tool_selection_mode is ToolSelectionMode.NONE:
         selected_tools = ()
@@ -174,6 +187,20 @@ def build_launch_plan(
         selected_tools = requested_tools
 
     decisions: list[CapabilityDecision] = []
+    if tool_selection_mode is ToolSelectionMode.SAFE_DEFAULT:
+        selected_set = set(selected_tools)
+        for name in requested_tools:
+            if name in selected_set:
+                continue
+            decision = _tool_decision(name, tool_map, caps, user_id)
+            if decision.accepted:
+                decision = decision.model_copy(
+                    update={
+                        "status": "not_in_safe_default",
+                        "reason": "declared tool is outside the safe-default manifest",
+                    }
+                )
+            decisions.append(decision)
     effective_tools: list[str] = []
     for name in selected_tools:
         decision = _tool_decision(name, tool_map, caps, user_id)

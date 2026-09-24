@@ -446,6 +446,7 @@ class SubagentWorkQueueDB:
             ),
         )
         stale_rows = list(await cursor.fetchall())
+        recovered_count = 0
         for stale in stale_rows:
             task_id = stale["id"]
             cancelled = bool(stale["cancel_requested"])
@@ -462,7 +463,8 @@ class SubagentWorkQueueDB:
             changed = await db.execute(
                 """UPDATE work_queue
                 SET status = ?, result = ?, error = ?, terminal_reason = ?, completed_at = ?, updated_at = ?
-                WHERE id = ? AND user_id = ? AND status IN (?, ?)""",
+                WHERE id = ? AND user_id = ? AND status IN (?, ?)
+                AND cancel_requested = ?""",
                 (
                     status.value,
                     terminal_result.model_dump_json(),
@@ -474,14 +476,16 @@ class SubagentWorkQueueDB:
                     self.user_id,
                     TaskStatus.RUNNING.value,
                     TaskStatus.CANCELLING.value,
+                    int(cancelled),
                 ),
             )
             if changed.rowcount:
+                recovered_count += 1
                 await self._insert_completion_event(
                     task_id, status, terminal_result, terminal_error, now
                 )
         await db.commit()
-        return len(stale_rows)
+        return recovered_count
 
     async def get_task(self, task_id: str) -> dict[str, Any] | None:
         db = await self._get_db()
@@ -527,8 +531,17 @@ class SubagentWorkQueueDB:
             SET cancel_requested = 1,
                 status = CASE WHEN status = ? THEN ? ELSE status END,
                 updated_at = ?
-            WHERE id = ? AND user_id = ?""",
-            (TaskStatus.RUNNING.value, TaskStatus.CANCELLING.value, now, task_id, self.user_id),
+            WHERE id = ? AND user_id = ? AND status IN (?, ?, ?)""",
+            (
+                TaskStatus.RUNNING.value,
+                TaskStatus.CANCELLING.value,
+                now,
+                task_id,
+                self.user_id,
+                TaskStatus.PENDING.value,
+                TaskStatus.RUNNING.value,
+                TaskStatus.CANCELLING.value,
+            ),
         )
         await db.commit()
         return cursor.rowcount > 0
