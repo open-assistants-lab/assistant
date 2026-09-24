@@ -8,6 +8,7 @@ Routers do not write conversation records directly.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import time
 import uuid
@@ -477,6 +478,14 @@ class RunService:
         """
         return self._registry.holds(session_key(self._user_id, session_id))
 
+    async def _touch_session(self, session_id: str) -> None:
+        touch = getattr(self._registry, "touch", None)
+        if not callable(touch):
+            return
+        result = touch(session_key(self._user_id, session_id))
+        if inspect.isawaitable(result):
+            await result
+
     async def execute(
         self,
         session_id: str,
@@ -492,7 +501,7 @@ class RunService:
         # users sharing a session id (e.g. both using "chat-1") must not
         # block each other.
         lock = await self._registry.acquire(session_key(self._user_id, session_id))
-        await self._registry.touch(session_key(self._user_id, session_id))
+        await self._touch_session(session_id)
         try:
             # Run-level trace root: the loop's agent_run span and the rubric
             # grader both nest under it (no-op when Langfuse is disabled).
@@ -524,7 +533,7 @@ class RunService:
         # users sharing a session id (e.g. both using "chat-1") must not
         # block each other.
         lock = await self._registry.acquire(session_key(self._user_id, session_id))
-        await self._registry.touch(session_key(self._user_id, session_id))
+        await self._touch_session(session_id)
         try:
             # Run-level trace root covering the whole stream (agent + grader).
             with LangfuseTracer.trace_run(self._user_id, session_id):
@@ -557,7 +566,7 @@ class RunService:
                             break
                         if isinstance(item, Exception):
                             raise item
-                        await self._registry.touch(session_key(self._user_id, session_id))
+                        await self._touch_session(session_id)
                         yield item
                 finally:
                     pump.cancel()

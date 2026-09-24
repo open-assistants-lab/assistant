@@ -438,6 +438,8 @@ git commit -m "fix: recover dropped session runs"
 - Test: `tests/sdk/test_sdk_loop.py`
 - Test: `tests/sdk/test_run_service.py`
 - Test: `tests/fixtures/run_contracts/run_result.json`
+- Test: `tests/fixtures/run_contracts/turns_response.json`
+- Test: `tests/fixtures/run_contracts/run_events.json`
 - Test: `tests/config/test_settings_resolution.py`
 
 **Interfaces:**
@@ -479,7 +481,7 @@ uv run ruff check src/config/settings.py src/sdk/profile_loader.py src/sdk/loop.
 Commit:
 
 ```bash
-git add src/config/settings.py config.yaml src/sdk/profile_loader.py src/sdk/loop.py src/sdk/run_models.py src/sdk/run_service.py tests/sdk/test_sdk_loop.py tests/sdk/test_run_service.py tests/fixtures/run_contracts/run_result.json tests/config/test_settings_resolution.py
+git add src/config/settings.py config.yaml src/sdk/profile_loader.py src/sdk/loop.py src/sdk/run_models.py src/sdk/run_service.py tests/sdk/test_sdk_loop.py tests/sdk/test_run_service.py tests/fixtures/run_contracts/run_result.json tests/fixtures/run_contracts/turns_response.json tests/fixtures/run_contracts/run_events.json tests/config/test_settings_resolution.py
 git commit -m "feat: expose loop iteration limits"
 ```
 
