@@ -290,6 +290,35 @@ class TestSubagentWorkQueueDB:
         assert await db.is_cancel_requested(task_id)
 
     @pytest.mark.asyncio
+    async def test_request_cancel_pending_task_finishes_before_claim(self, db, profile):
+        task_id = await db.insert_task("test_agent", "t", profile)
+
+        assert await db.request_cancel(task_id)
+
+        row = await db.get_task(task_id)
+        assert row["status"] == "cancelled"
+        assert row["error"] == "cancelled before start"
+        assert row["completed_at"] is not None
+        assert not await db.claim_task(task_id, worker_id="worker-a")
+
+    @pytest.mark.asyncio
+    async def test_request_cancel_terminal_task_is_rejected(self, db, profile):
+        from src.sdk.subagent_models import SubagentResult
+
+        task_id = await db.insert_task("test_agent", "t", profile)
+        await db.set_running(task_id)
+        await db.set_completed(
+            task_id,
+            SubagentResult(name="test_agent", task="t", success=True, output="done"),
+        )
+
+        assert not await db.request_cancel(task_id)
+
+        row = await db.get_task(task_id)
+        assert row["status"] == "completed"
+        assert row["cancel_requested"] == 0
+
+    @pytest.mark.asyncio
     async def test_claim_pending_task_once(self, db, profile):
         task_id = await db.insert_task("test_agent", "t", profile)
 

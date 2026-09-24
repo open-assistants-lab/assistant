@@ -28,6 +28,34 @@ class TestSubagentsEndpoints:
         data = r.json()
         assert "jobs" in data
 
+    def test_subagent_job_routes_recover_stale_rows(self, client, test_user_id, monkeypatch):
+        calls: list[int] = []
+
+        class FakeDB:
+            async def mark_stale_running_failed(self, max_age_seconds=300):
+                calls.append(max_age_seconds)
+                return 1
+
+            async def check_progress(self, status=None):
+                return []
+
+            async def get_task(self, task_id):
+                return {"id": task_id}
+
+        async def fake_get_work_queue(user_id, workspace_id):
+            assert user_id == test_user_id
+            assert workspace_id == "personal"
+            return FakeDB()
+
+        monkeypatch.setattr(
+            "src.sdk.subagent_work_queue.get_work_queue", fake_get_work_queue
+        )
+        params = {"user_id": test_user_id, "workspace_id": "personal"}
+
+        assert client.get("/subagents/jobs", params=params).status_code == 200
+        assert client.get("/subagents/jobs/job-1", params=params).status_code == 200
+        assert calls == [300, 300]
+
     def test_get_subagent_job_not_found(self, client):
         r = client.get(
             "/subagents/jobs/nonexistent_job_id",

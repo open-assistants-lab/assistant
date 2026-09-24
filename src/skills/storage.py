@@ -103,8 +103,12 @@ class SkillStorage:
         if not _is_valid_skill_name(skill_name):
             return None
 
+        ignore_matcher = _IgnoreMatcher(self.base_dir)
+
         # Fast path: directory named after the skill
         skill_dir = self.base_dir / skill_name
+        if ignore_matcher.ignores(f"{skill_name}/"):
+            return None
         skill_file = skill_dir / "SKILL.md"
 
         base_dir = self.base_dir.resolve()
@@ -119,7 +123,7 @@ class SkillStorage:
         if not self.base_dir.exists():
             return None
         for item in self.base_dir.iterdir():
-            if not item.is_dir():
+            if not item.is_dir() or ignore_matcher.ignores(f"{item.name}/"):
                 continue
             candidate, _ = parse_skill_file_with_diagnostics(item / "SKILL.md")
             if candidate and candidate["name"] == skill_name:

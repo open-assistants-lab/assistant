@@ -211,7 +211,7 @@ class SubagentWorkQueueDB:
             """UPDATE work_queue
             SET status = ?, claimed_by = ?, claimed_at = ?, heartbeat_at = ?,
                 started_at = COALESCE(started_at, ?), updated_at = ?
-            WHERE id = ? AND user_id = ? AND status = ?""",
+            WHERE id = ? AND user_id = ? AND status = ? AND cancel_requested = 0""",
             (
                 TaskStatus.RUNNING.value,
                 worker_id,
@@ -422,7 +422,9 @@ class SubagentWorkQueueDB:
         await db.commit()
         return cursor.rowcount > 0
 
-    async def set_cancelled(self, task_id: str) -> bool:
+    async def set_cancelled(
+        self, task_id: str, error: str = "cancelled by supervisor"
+    ) -> bool:
         db = await self._get_db()
         now = _now()
         result = SubagentResult(
@@ -430,17 +432,18 @@ class SubagentWorkQueueDB:
             task="",
             success=False,
             output="",
-            error="cancelled by supervisor",
+            error=error,
             terminal_reason="cancelled",
         )
         cursor = await db.execute(
             """UPDATE work_queue
-            SET status = ?, result = ?, terminal_reason = ?, cancel_requested = 1,
+            SET status = ?, result = ?, error = ?, terminal_reason = ?, cancel_requested = 1,
                 completed_at = ?, updated_at = ?
             WHERE id = ? AND user_id = ? AND status IN (?, ?, ?)""",
             (
                 TaskStatus.CANCELLED.value,
                 result.model_dump_json(),
+                error,
                 result.terminal_reason,
                 now,
                 now,
@@ -456,7 +459,7 @@ class SubagentWorkQueueDB:
                 task_id,
                 TaskStatus.CANCELLED,
                 result,
-                "cancelled by supervisor",
+                error,
                 now,
             )
         await db.commit()
@@ -557,21 +560,35 @@ class SubagentWorkQueueDB:
         return cursor.rowcount > 0
 
     async def request_cancel(self, task_id: str) -> bool:
+        """Request cancellation without mutating terminal task state.
+
+        Pending tasks are completed as cancelled immediately so a background
+        worker cannot claim them after the cancellation request. Running tasks
+        transition to CANCELLING and are finalized by the worker.
+        """
+        row = await self.get_task(task_id)
+        if row is None:
+            return False
+
+        status = row.get("status")
+        if status == TaskStatus.PENDING.value:
+            return await self.set_cancelled(task_id, error="cancelled before start")
+        if status not in {TaskStatus.RUNNING.value, TaskStatus.CANCELLING.value}:
+            return False
+
         db = await self._get_db()
         now = _now()
         cursor = await db.execute(
             """UPDATE work_queue
             SET cancel_requested = 1,
-                status = CASE WHEN status = ? THEN ? ELSE status END,
+                status = ?,
                 updated_at = ?
-            WHERE id = ? AND user_id = ? AND status IN (?, ?, ?)""",
+            WHERE id = ? AND user_id = ? AND status IN (?, ?)""",
             (
-                TaskStatus.RUNNING.value,
                 TaskStatus.CANCELLING.value,
                 now,
                 task_id,
                 self.user_id,
-                TaskStatus.PENDING.value,
                 TaskStatus.RUNNING.value,
                 TaskStatus.CANCELLING.value,
             ),

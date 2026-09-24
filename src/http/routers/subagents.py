@@ -213,6 +213,7 @@ async def list_subagent_jobs(
 
     _validate_context_ids(user_id, workspace_id)
     db = await get_work_queue(user_id, workspace_id)
+    await db.mark_stale_running_failed()
     jobs = await db.check_progress(status=status)
     return {"jobs": [_serialize_job(job) for job in jobs]}
 
@@ -230,6 +231,7 @@ async def get_subagent_job(
 
     _validate_context_ids(user_id, workspace_id)
     db = await get_work_queue(user_id, workspace_id)
+    await db.mark_stale_running_failed()
     row = await db.get_task(job_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Job not found")

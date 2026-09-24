@@ -116,6 +116,15 @@ def test_ignore_negation():
         assert names == ["keep-skill"]
 
 
+def test_direct_load_respects_ignore_files():
+    with tempfile.TemporaryDirectory() as d:
+        base = Path(d)
+        _write_skill(base, "hidden-skill", "name: hidden-skill\ndescription: Hidden\n")
+        (base / ".gitignore").write_text("hidden-skill/\n", encoding="utf-8")
+
+        assert SkillStorage(base).load_skill("hidden-skill") is None
+
+
 def test_fdignore_respected():
     with tempfile.TemporaryDirectory() as d:
         base = Path(d)
