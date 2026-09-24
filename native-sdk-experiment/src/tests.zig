@@ -142,7 +142,7 @@ test "D3 successful context compression renders token reduction and failed compr
     const chat = model.activeChat();
 
     main.update(&model, .{ .stream_line = .{ .key = fk, .line = "data: {\"type\":\"context_compressed\",\"data\":{\"status\":\"succeeded\",\"before\":{\"estimated_tokens\":46000},\"after\":{\"estimated_tokens\":9000}}}" } }, &fx);
-    try testing.expectEqualStrings("system", chat._messages[chat.msg_count - 1].role);
+    try testing.expectEqualStrings("context", chat._messages[chat.msg_count - 1].role);
     try testing.expectEqualStrings("Context updated · 46k → 9k tokens", chat._messages[chat.msg_count - 1].content);
 
     const before_count = chat.msg_count;
@@ -213,6 +213,28 @@ test "D3 first-run API key submit validates the selected provider without sendin
     try testing.expect(std.mem.indexOf(u8, request.body, "sk-ant-test") != null);
     try testing.expect(std.mem.indexOf(u8, request.url, "classify-key") == null);
     try expectHeader(request.headers, "Authorization", "Bearer launch-token");
+}
+
+test "D3 unknown key requires an explicit provider selection" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = main.initialModel();
+    model.allocator = arena;
+    try main.configureBackend(&model, arena, "http://127.0.0.1:49152", "launch-token");
+    model.launch_state = .first_run;
+    var fx = noopFx(arena);
+
+    main.update(&model, .{ .first_run_key_input = .{ .insert_text = "generic-key" } }, &fx);
+    main.update(&model, .first_run_submit, &fx);
+    try testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
+    try testing.expect(std.mem.indexOf(u8, model.first_run_status, "provider") != null);
+
+    main.update(&model, .{ .first_run_choose_provider = "openai" }, &fx);
+    main.update(&model, .first_run_submit, &fx);
+    const request = fx.pendingFetchAt(0).?;
+    try testing.expect(std.mem.indexOf(u8, request.body, "\"provider\":\"openai\"") != null);
 }
 
 test "D3 first-run validation stores the credential and requests the model catalog" {
@@ -412,13 +434,15 @@ test "send message adds user message and starts streaming" {
     try testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
     const request = fx.pendingFetchAt(0).?;
     try testing.expectEqualStrings("http://assistant.invalid/v1/message/stream", request.url);
-    try testing.expect(std.mem.indexOf(u8, request.body, "ollama-cloud:deepseek-v4-flash:0731") != null);
+    try testing.expect(std.mem.indexOf(u8, request.body, "\"model\":\"\"") != null);
 }
 
-test "default model falls back to Ollama Cloud DeepSeek V4 Flash 0731" {
+test "empty model catalog has no implicit development-model fallback" {
     var model = main.initialModel();
 
-    try testing.expectEqualStrings("ollama-cloud:deepseek-v4-flash:0731", model.selectedModel());
+    try testing.expectEqualStrings("", model.selectedModel());
+    try testing.expectEqualStrings("No model selected", model.selectedModelLabel(testing.allocator));
+    try testing.expect(!model.selectedModelIsHosted());
 }
 
 test "models response labels selected model without credential source" {
@@ -1789,6 +1813,33 @@ test "composer model cycling skips locked catalog models" {
     try testing.expectEqualStrings("agnes:agnes-2.0-flash", model.selectedModel());
 }
 
+test "switching chats does not animate the empty state" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var model = main.initialModel();
+    model.allocator = arena;
+    var fx = noopFx(arena);
+    main.update(&model, .new_chat, &fx);
+    model.empty_entrance = 1;
+    const empty_chat_id = model.activeChat().id;
+
+    main.update(&model, .{ .switch_chat = empty_chat_id }, &fx);
+
+    try testing.expectEqual(@as(f32, 1), model.empty_entrance);
+}
+
+test "skills and subagents sidebar destinations are actionable" {
+    var model = main.initialModel();
+    model.workspace_page = .chat;
+    var fx = noopFx(testing.allocator);
+
+    main.update(&model, .open_skills, &fx);
+    try testing.expectEqual(main.WorkspacePage.skills, model.workspace_page);
+    main.update(&model, .open_subagents, &fx);
+    try testing.expectEqual(main.WorkspacePage.subagents, model.workspace_page);
+}
+
 test "settings toggle closes visible settings panel" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -1929,10 +1980,12 @@ test "remove key clears the targeted provider not the first keyed one" {
 
     main.update(&model, .{ .remove_key = 1 }, &fx);
 
-    // D3: the credential lives in the keychain, not the sidecar's settings
-    // store (desktop mode refuses /settings/api-keys), so removal is local and
-    // synchronous — no fetch is queued.
+    // Credential deletion is asynchronous; the UI must not claim success
+    // until the native credential effect completes.
     try testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
+    try testing.expect(model.settings.providers[1].has_key);
+    const delete_key = model.settings.pending_key_deletes[0].key;
+    main.update(&model, .{ .credential_deleted = .{ .key = delete_key, .operation = .delete, .outcome = .ok, .bytes = "" } }, &fx);
     try testing.expect(!model.settings.providers[1].has_key);
     try testing.expect(model.settings.providers[0].has_key);
     try testing.expectEqual(@as(usize, 1), model.settings.providers[0].model_count);

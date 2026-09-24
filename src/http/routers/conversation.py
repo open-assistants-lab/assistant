@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 from collections.abc import AsyncGenerator, AsyncIterator
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -395,7 +396,19 @@ def _replay_context_events(
         message = _context_event_message(event)
         matching = next((turn for turn in turns if turn["run_id"] == event.run_id), None)
         if matching is None:
-            turns.append({"run_id": event.run_id, "metadata": {}, "messages": [message]})
+            insert_at = len(turns)
+            for index, turn in enumerate(turns):
+                first_message = turn.get("messages", [{}])[0]
+                timestamp = first_message.get("timestamp") if isinstance(first_message, dict) else None
+                if not timestamp:
+                    continue
+                try:
+                    if datetime.fromisoformat(timestamp) > event.timestamp:
+                        insert_at = index
+                        break
+                except (TypeError, ValueError):
+                    continue
+            turns.insert(insert_at, {"run_id": event.run_id, "metadata": {}, "messages": [message]})
             continue
         messages = matching["messages"]
         insert_at = len(messages)
