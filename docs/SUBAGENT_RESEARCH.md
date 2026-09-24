@@ -168,6 +168,20 @@ No framework in our comparison uses a database-backed work queue for inter-agent
 
 ---
 
+## Current Reliability Contract (2026-09)
+
+The implementation now keeps the work queue and its SQLite completion outbox authoritative:
+
+- Tool selection is explicit: omitted profile tools use `safe_default`, `tools=[]` means `none`, and named tools are an exact `allowlist`. Legacy profiles are identified through `runtime-policy.json` migration behavior.
+- Every launch path (`start`, synchronous `delegate`, and legacy `invoke`) performs capability preflight before queue insertion or provider construction. A declared capability that is missing, disabled, denied, or requires `ask` rejects the launch.
+- The launch plan is immutable for the run. The effective tool and skill manifest is frozen into the profile snapshot and the launch-plan JSON is stored with the task.
+- Child approval is a preflight boundary: the child does not create a stranded interactive approval proposal. `ask` returns approval-required before start; administrator `deny` remains a hard rejection.
+- Terminal task transition and completion-outbox insertion are atomic and idempotent. Events retain parent-session routing and are acknowledged only after a matching completion-bus subscriber succeeds. Undelivered events remain available for restart replay.
+- Terminal outcomes distinguish `completed`, `failed`, `timed_out`, and `cancelled`; `blocked` and `uncertain` remain separate result-level concepts. Empty final output is not success.
+- A repeated identical tool-call sequence receives one corrective nudge; persistence after that nudge is a failure, not a cancellation.
+
+We adopted selected Pi orchestration patterns—explicit allowlists, strict preflight, immutable launch snapshots, durable lifecycle artifacts, replay, and verification-aware outcomes. Assistant remains distinct in its SQLite queue, execution kernel, per-user permission policy, governance approvals, and receipt authority; Pi does not replace those systems.
+
 ## V1 Design
 
 ### Core Principle
