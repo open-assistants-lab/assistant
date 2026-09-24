@@ -474,7 +474,7 @@ class ShellToolConfig(_BaseSettings):
 
     enabled: bool = True
     allowed_commands: list[str] = Field(
-        default_factory=lambda: ["python3", "node", "echo", "date", "whoami", "pwd"]
+        default_factory=lambda: ["echo", "date", "whoami", "pwd"]
     )
     timeout_seconds: int = 30
     max_output_kb: int = 100

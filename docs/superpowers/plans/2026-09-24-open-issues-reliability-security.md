@@ -209,6 +209,7 @@ git commit -m "fix: bound summary recovery context"
 - Modify: `seeds/skills/cli-toolkit/SKILL.md`
 - Test: `tests/sdk/test_permission_policy.py`
 - Test: `tests/api/test_governance_api.py`
+- Test: `tests/config/test_settings_resolution.py`
 
 **Interfaces:**
 - `GovernanceService._default_permission("shell_execute")` returns `ask` when no stronger administrator/user rule applies.
@@ -267,7 +268,7 @@ uv run ruff check src/sdk/governance.py src/sdk/permission_policy.py src/config/
 Commit:
 
 ```bash
-git add src/sdk/governance.py src/sdk/permission_policy.py src/config/settings.py config.yaml seeds/skills/cli-toolkit/SKILL.md tests/sdk/test_permission_policy.py tests/api/test_governance_api.py
+git add src/sdk/governance.py src/sdk/permission_policy.py src/config/settings.py config.yaml seeds/skills/cli-toolkit/SKILL.md tests/sdk/test_permission_policy.py tests/api/test_governance_api.py tests/config/test_settings_resolution.py
 git commit -m "fix: require approval for shell capability"
 ```
 

@@ -215,6 +215,8 @@ class GovernanceService:
 
     @staticmethod
     def _default_permission(tool_name: str) -> str:
+        if tool_name == "shell_execute":
+            return "ask"
         try:
             from src.sdk.native_tools import get_native_tools
 

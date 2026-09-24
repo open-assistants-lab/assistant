@@ -27,6 +27,13 @@ def test_yaml_loaded_from_repo_root_regardless_of_cwd(tmp_path, monkeypatch, fre
     assert "agent-browser" in cfg.shell_tool.allowed_commands
 
 
+def test_shell_interpreters_are_not_enabled_by_default(fresh_settings):
+    cfg = settings_module.get_settings()
+
+    assert "python3" not in cfg.shell_tool.allowed_commands
+    assert "node" not in cfg.shell_tool.allowed_commands
+
+
 def test_env_api_port_beats_yaml(monkeypatch, fresh_settings):
     """Deployment (compose API_PORT=8000) must win over yaml api.port."""
     monkeypatch.setenv("API_PORT", "8123")

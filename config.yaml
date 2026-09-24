@@ -61,9 +61,9 @@ observability:
     json_dir: data/logs
     level: info
 shell_tool:
+  # shell_execute is approval-required when governance is enabled.
+  # Add interpreters or other broad capabilities only as explicit deployment opt-ins.
   allowed_commands:
-  - python3
-  - node
   - echo
   - date
   - whoami

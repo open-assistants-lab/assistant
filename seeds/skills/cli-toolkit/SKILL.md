@@ -45,6 +45,8 @@ Run `<tool> --help` (or `<tool> <subcommand> --help`) to understand flags, subco
 5. On failure: adjust flags and retry (up to 3 attempts)
 6. If all 3 attempts fail, surface the error and try an alternative tool
 
+`shell_execute` defaults to approval-required (`ask`) when governance is enabled. `python3`, `node`, and other interpreters are not in the safe default command set; enabling them is an explicit deployment capability escalation. The soft sandbox scrubs secret-like environment variables but does not provide kernel-enforced network isolation.
+
 ### Phase 5 — Register (for reusable tools)
 
 If the tool is generally useful (not a one-off task), register it as a custom tool:

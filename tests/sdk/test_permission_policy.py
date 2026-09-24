@@ -30,6 +30,25 @@ def test_user_allow_cannot_weaken_existing_restriction() -> None:
     assert policy.resolve("files_delete", {}, fallback="ask") == "ask"
 
 
+def test_shell_defaults_to_ask(tmp_path) -> None:
+    service = GovernanceService(data_root=tmp_path)
+
+    assert service._default_permission("shell_execute") == "ask"
+
+
+def test_user_allow_cannot_weaken_shell_ask(monkeypatch, tmp_path) -> None:
+    import src.sdk.capabilities as capabilities
+
+    monkeypatch.setattr(
+        capabilities,
+        "load_capabilities",
+        lambda _root: {"permissions": {"tools": {"shell_execute": "allow"}}},
+    )
+    service = GovernanceService(data_root=tmp_path)
+
+    assert service.resolve_permission_for_call("user", "shell_execute", {}) == "ask"
+
+
 def test_skill_and_subagent_rules_match_call_arguments() -> None:
     policy = PermissionPolicy(
         user={
