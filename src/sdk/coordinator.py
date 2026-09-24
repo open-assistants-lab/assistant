@@ -255,7 +255,9 @@ class SubagentCoordinator:
             try:
                 raw_result = row.get("result")
                 launch_plan = row.get("launch_plan") or {}
+                canonical_manifest = launch_plan.get("canonical_manifest") or launch_plan
                 workspace_candidates = (
+                    canonical_manifest.get("requested_workspace_id"),
                     launch_plan.get("requested_workspace_id"),
                     launch_plan.get("workspace_id"),
                     row.get("task_workspace_id"),
@@ -425,7 +427,9 @@ class SubagentCoordinator:
         profile = self.load_def(agent_name)
         if profile is None:
             raise ValueError(f"Subagent '{agent_name}' not found. Create it first with subagent_create.")
-        errors = validate_agent_def(profile, user_id=self.user_id, workspace_id=self.workspace_id)
+        errors = validate_agent_def(
+            profile, user_id=self.user_id, workspace_id=self.requested_workspace_id
+        )
         if errors:
             raise ValueError("Invalid subagent definition: " + "; ".join(errors))
         plan = self.preflight(agent_name)
@@ -437,7 +441,7 @@ class SubagentCoordinator:
 
         db = await self._get_db()
         task_id = await db.insert_task(
-            agent_name, task, profile, parent_id, launch_plan=plan.model_dump(mode="json")
+            agent_name, task, profile, parent_id, launch_plan=plan.to_persisted_dict()
         )
         await db.set_running(task_id)
 
@@ -449,6 +453,8 @@ class SubagentCoordinator:
                 self._run_loop(
                     task_id, profile, task, db, ctx,
                     effective_tool_names=plan.effective_tools,
+                    effective_skill_names=plan.effective_skills,
+                    workspace_id=plan.resolved_workspace_id,
                 ),
                 timeout=profile.timeout_seconds,
             )
@@ -511,7 +517,7 @@ class SubagentCoordinator:
         return build_launch_plan(
             profile,
             self.user_id,
-            self.workspace_id,
+            self.requested_workspace_id,
             self.load_tool_selection_mode(agent_name),
         )
 
@@ -544,7 +550,9 @@ class SubagentCoordinator:
                 f"Create it first with subagent_create."
             )
 
-        errors = validate_agent_def(profile, user_id=self.user_id, workspace_id=self.workspace_id)
+        errors = validate_agent_def(
+            profile, user_id=self.user_id, workspace_id=self.requested_workspace_id
+        )
         if errors:
             raise ValueError("Invalid subagent definition: " + "; ".join(errors))
 
@@ -581,7 +589,7 @@ class SubagentCoordinator:
 
         db = await self._get_db()
         task_id = await db.insert_task(
-            agent_name, task, profile, parent_id, launch_plan=plan.model_dump(mode="json")
+            agent_name, task, profile, parent_id, launch_plan=plan.to_persisted_dict()
         )
 
         ctx = SubagentContext(on_progress=self._make_progress_cb(task_id))
@@ -592,6 +600,8 @@ class SubagentCoordinator:
                 self._run_loop(
                     task_id, profile, task, db, ctx,
                     effective_tool_names=plan.effective_tools,
+                    effective_skill_names=plan.effective_skills,
+                    workspace_id=plan.resolved_workspace_id,
                 ),
                 timeout=effective_timeout,
             )
@@ -682,7 +692,9 @@ class SubagentCoordinator:
         if profile is None:
             raise ValueError(f"Subagent '{agent_name}' not found. Create it first with subagent_create.")
 
-        errors = validate_agent_def(profile, user_id=self.user_id, workspace_id=self.workspace_id)
+        errors = validate_agent_def(
+            profile, user_id=self.user_id, workspace_id=self.requested_workspace_id
+        )
         if errors:
             raise ValueError("Invalid subagent definition: " + "; ".join(errors))
         plan = self.preflight(agent_name)
@@ -699,7 +711,7 @@ class SubagentCoordinator:
             profile,
             parent_id,
             parent_session_id=parent_session_id,
-            launch_plan=plan.model_dump(mode="json"),
+            launch_plan=plan.to_persisted_dict(),
         )
 
         ctx = SubagentContext(on_progress=self._make_progress_cb(task_id))
@@ -751,9 +763,30 @@ class SubagentCoordinator:
 
         profile = AgentProfile(**json.loads(row.get("config") or "{}"))
         task = row["task"]
+        launch_plan = json.loads(row.get("launch_plan") or "{}")
+        canonical_manifest = launch_plan.get("canonical_manifest") or launch_plan
+        workspace_candidates = (
+            canonical_manifest.get("requested_workspace_id"),
+            launch_plan.get("requested_workspace_id"),
+            launch_plan.get("workspace_id"),
+        )
+        launch_workspace_id = next(
+            (
+                value
+                for value in workspace_candidates
+                if isinstance(value, str)
+                and value
+                and value != USER_LEVEL_WORKSPACE_ID
+            ),
+            self.requested_workspace_id,
+        )
         heartbeat_task = asyncio.create_task(self._heartbeat_loop(task_id, worker_id, db))
 
         try:
+            if not isinstance(canonical_manifest.get("effective_tools"), list) or not isinstance(
+                canonical_manifest.get("effective_skills"), list
+            ):
+                raise ValueError("task is missing its frozen subagent capability manifest")
             result = await asyncio.wait_for(
                 self._run_loop(
                     task_id,
@@ -761,9 +794,9 @@ class SubagentCoordinator:
                     task,
                     db,
                     ctx or SubagentContext(),
-                    effective_tool_names=json.loads(row.get("launch_plan") or "{}").get(
-                        "effective_tools"
-                    ),
+                    effective_tool_names=canonical_manifest.get("effective_tools"),
+                    effective_skill_names=canonical_manifest.get("effective_skills"),
+                    workspace_id=launch_workspace_id,
                 ),
                 timeout=profile.timeout_seconds,
             )
@@ -886,6 +919,8 @@ class SubagentCoordinator:
         db: SubagentWorkQueueDB,
         ctx: SubagentContext | None = None,
         effective_tool_names: list[str] | tuple[str, ...] | None = None,
+        effective_skill_names: list[str] | tuple[str, ...] | None = None,
+        workspace_id: str | None = None,
     ) -> SubagentResult:
         from src.sdk.loop import AgentLoop, CostTracker, RunConfig
         from src.sdk.middleware_summarization import SummarizationMiddleware
@@ -894,14 +929,19 @@ class SubagentCoordinator:
         model_str = profile.model or self.settings.agent.model
         provider = create_model_from_config(model_str, user_id=self.user_id)
 
+        execution_workspace_id = workspace_id or self.requested_workspace_id
         tools = _build_tools_for_subagent(
             profile, user_id=self.user_id, effective_tool_names=effective_tool_names
         )
         system_prompt = _build_system_prompt(
             profile,
             self.user_id,
-            self.workspace_id,
-            effective_skill_names=profile.skills if effective_tool_names is not None else None,
+            execution_workspace_id,
+            effective_skill_names=(
+                effective_skill_names
+                if effective_skill_names is not None
+                else profile.skills if effective_tool_names is not None else None
+            ),
         )
         try:
             from src.sdk.registry import get_model_info
@@ -948,7 +988,7 @@ class SubagentCoordinator:
             middlewares=middlewares,
             run_config=run_config,
             user_id=self.user_id,
-            workspace_id=self.workspace_id,
+            workspace_id=execution_workspace_id,
         )
         loop.subagent_ctx = run_context
         if effective_tool_names is not None:

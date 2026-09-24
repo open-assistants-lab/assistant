@@ -5,9 +5,14 @@ from __future__ import annotations
 from agentprofile.models import AgentProfile
 
 
-def _profile(*, tools: list[str] | None = None, skills: list[str] | None = None) -> AgentProfile:
+def _profile(
+    *,
+    name: str = "worker",
+    tools: list[str] | None = None,
+    skills: list[str] | None = None,
+) -> AgentProfile:
     return AgentProfile(
-        name="worker",
+        name=name,
         tools=[] if tools is None else tools,
         skills=[] if skills is None else skills,
     )
@@ -21,6 +26,8 @@ def _build_plan(
     known_skills: set[str] | None = None,
     caps: dict[str, object] | None = None,
     permissions: dict[str, str] | None = None,
+    user_id: str = "user",
+    workspace_id: str = "personal",
 ):
     from src.sdk import subagent_capabilities as capabilities
     from src.sdk.tools import ToolAnnotations, ToolDefinition
@@ -77,7 +84,7 @@ def _build_plan(
             f"{tool_name}:{tool_input.get('name')}", permissions.get(tool_name, "allow")
         ),
     )
-    return capabilities.build_launch_plan(profile, "user", "personal", mode)
+    return capabilities.build_launch_plan(profile, user_id, workspace_id, mode)
 
 
 def test_allowlist_preflight_resolves_declared_read_tool_and_skill(monkeypatch) -> None:
@@ -231,6 +238,106 @@ def test_legacy_empty_profile_currently_resolves_to_empty_manifest(monkeypatch) 
 
     assert plan.ready is True
     assert plan.effective_tools == ()
+
+
+def test_canonical_manifest_is_stable_across_mapping_and_name_order(monkeypatch) -> None:
+    from src.sdk.subagent_capabilities import ToolSelectionMode
+
+    first = _build_plan(
+        monkeypatch,
+        _profile(tools=["files_read", "skills_load"], skills=["research"]),
+        ToolSelectionMode.ALLOWLIST,
+        permissions={"files_read": "allow", "skills_load:research": "allow"},
+    )
+    second = _build_plan(
+        monkeypatch,
+        _profile(tools=["skills_load", "files_read"], skills=["research"]),
+        ToolSelectionMode.ALLOWLIST,
+        permissions={"skills_load:research": "allow", "files_read": "allow"},
+    )
+
+    assert first.plan_id == second.plan_id
+    assert first.canonical_manifest_json == second.canonical_manifest_json
+
+
+def test_canonical_manifest_id_changes_with_effective_capabilities_and_identity(monkeypatch) -> None:
+    from src.sdk.subagent_capabilities import ToolSelectionMode
+
+    baseline = _build_plan(
+        monkeypatch,
+        _profile(tools=["files_read"], skills=["research"]),
+        ToolSelectionMode.ALLOWLIST,
+    )
+    variants = [
+        _build_plan(monkeypatch, _profile(), ToolSelectionMode.NONE),
+        _build_plan(
+            monkeypatch,
+            _profile(tools=["files_read"]),
+            ToolSelectionMode.ALLOWLIST,
+        ),
+        _build_plan(
+            monkeypatch,
+            _profile(tools=["files_read"], skills=["research"]),
+            ToolSelectionMode.LEGACY,
+        ),
+        _build_plan(
+            monkeypatch,
+            _profile(name="another-agent", tools=["files_read"], skills=["research"]),
+            ToolSelectionMode.ALLOWLIST,
+        ),
+        _build_plan(
+            monkeypatch,
+            _profile(tools=["files_read"], skills=["research"]),
+            ToolSelectionMode.ALLOWLIST,
+            user_id="another-user",
+        ),
+        _build_plan(
+            monkeypatch,
+            _profile(tools=["files_read"], skills=["research"]),
+            ToolSelectionMode.ALLOWLIST,
+            workspace_id="another-workspace",
+        ),
+        _build_plan(
+            monkeypatch,
+            _profile(tools=["files_read"], skills=["research"]),
+            ToolSelectionMode.ALLOWLIST,
+            permissions={"files_read": "ask"},
+        ),
+    ]
+
+    assert all(plan.plan_id != baseline.plan_id for plan in variants)
+    assert variants[-1].ready is False
+
+
+def test_canonical_manifest_contains_only_deterministic_decision_fields(monkeypatch) -> None:
+    import hashlib
+    import json
+
+    from src.sdk.subagent_capabilities import ToolSelectionMode
+
+    plan = _build_plan(
+        monkeypatch,
+        _profile(tools=["files_read"]),
+        ToolSelectionMode.ALLOWLIST,
+    )
+
+    manifest = json.loads(plan.canonical_manifest_json)
+    assert manifest["requested_workspace_id"] == "personal"
+    assert manifest["effective_tools"] == ["files_read"]
+    assert manifest["decisions"] == [
+        {
+            "destructive": False,
+            "kind": "tool",
+            "name": "files_read",
+            "read_only": True,
+            "status": "allowed",
+        }
+    ]
+    assert "reason" not in manifest["decisions"][0]
+    persisted = plan.to_persisted_dict()
+    assert persisted["canonical_manifest"] == manifest
+    assert plan.plan_id == hashlib.sha256(plan.canonical_manifest_json.encode()).hexdigest()
+    assert len(plan.plan_id) == 64
 
 
 def test_generic_skills_load_preflight_can_miss_item_level_runtime_ask(monkeypatch) -> None:

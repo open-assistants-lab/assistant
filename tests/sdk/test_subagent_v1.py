@@ -15,6 +15,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -81,6 +82,22 @@ def profile():
 async def _wait_for_no_background_tasks(coordinator):
     while coordinator._background_tasks:
         await asyncio.sleep(0)
+
+
+async def _insert_runnable_task(
+    db: Any,
+    agent_name: str,
+    task: str,
+    profile: Any,
+    parent_id: str | None = None,
+) -> str:
+    return await db.insert_task(
+        agent_name,
+        task,
+        profile,
+        parent_id,
+        launch_plan={"effective_tools": ["time_get"], "effective_skills": []},
+    )
 
 
 # -- Model Tests --
@@ -922,7 +939,7 @@ class TestSubagentCoordinator:
         assert "SECRET FULL SKILL CONTENT" not in prompt
 
     @pytest.mark.asyncio
-    async def test_run_loop_passes_provider_options_and_user_workspace_to_agent_loop(self, mock_paths):
+    async def test_run_loop_passes_provider_options_and_requested_workspace_to_agent_loop(self, mock_paths):
         from agentprofile.models import AgentProfile
 
         from src.sdk.coordinator import SubagentCoordinator
@@ -958,7 +975,7 @@ class TestSubagentCoordinator:
 
         assert captured_run_config is not None
         assert captured_run_config.provider_options == provider_options
-        assert captured_workspace_id == "user"
+        assert captured_workspace_id == "sales"
         assert captured_provider_args is not None
         assert captured_provider_args[1] == {"user_id": "test_user"}
 
@@ -1089,7 +1106,7 @@ class TestSubagentCoordinator:
         coordinator = SubagentCoordinator("test_user")
         await coordinator.create(profile)
         db = await coordinator._get_db()
-        task_id = await db.insert_task("test_agent", "do work", profile, None)
+        task_id = await _insert_runnable_task(db, "test_agent", "do work", profile)
         published = []
 
         async def fake_run_loop(task_id_, frozen_agent_def, task, db_, ctx=None, **kwargs):
@@ -1116,7 +1133,7 @@ class TestSubagentCoordinator:
         coordinator = SubagentCoordinator("test_user")
         await coordinator.create(profile)
         db = await coordinator._get_db()
-        task_id = await db.insert_task("test_agent", "do work", profile, None)
+        task_id = await _insert_runnable_task(db, "test_agent", "do work", profile)
         published = []
 
         async def fake_run_loop(*args, **kwargs):
@@ -1341,6 +1358,69 @@ class TestSubagentCoordinator:
         assert config["model"] == profile.model
 
     @pytest.mark.asyncio
+    async def test_run_job_uses_workspace_and_capabilities_from_frozen_manifest(
+        self, mock_paths, profile, monkeypatch
+    ):
+        from src.sdk.coordinator import SubagentCoordinator
+        from src.sdk.subagent_models import SubagentResult
+
+        coordinator = SubagentCoordinator("test_user", workspace_id="restart-default")
+        db = await coordinator._get_db()
+        task_id = await db.insert_task(
+            "test_agent",
+            "do work",
+            profile,
+            launch_plan={
+                "plan_id": "frozen-plan",
+                "requested_workspace_id": "stale-mirror",
+                "effective_tools": ["files_read"],
+                "effective_skills": [],
+                "canonical_manifest": {
+                    "requested_workspace_id": "original-workspace",
+                    "effective_tools": ["time_get"],
+                    "effective_skills": ["frozen-skill"],
+                },
+            },
+        )
+        captured: dict[str, object] = {}
+
+        async def fake_run_loop(task_id_, frozen_agent_def, task, _db, ctx=None, **kwargs):
+            captured.update(kwargs)
+            return SubagentResult(
+                name=frozen_agent_def.name,
+                task=task,
+                success=True,
+                output=f"completed {task_id_}",
+            )
+
+        monkeypatch.setattr(coordinator, "_run_loop", fake_run_loop)
+        await coordinator._run_job(task_id)
+
+        assert captured["workspace_id"] == "original-workspace"
+        assert captured["effective_tool_names"] == ["time_get"]
+        assert captured["effective_skill_names"] == ["frozen-skill"]
+
+    @pytest.mark.asyncio
+    async def test_run_job_fails_closed_when_frozen_manifest_is_missing(
+        self, mock_paths, profile, monkeypatch
+    ):
+        from src.sdk.coordinator import SubagentCoordinator
+
+        coordinator = SubagentCoordinator("test_user")
+        db = await coordinator._get_db()
+        task_id = await db.insert_task("test_agent", "do work", profile)
+
+        async def should_not_run(*_args, **_kwargs):
+            raise AssertionError("LLM loop must not run without a frozen manifest")
+
+        monkeypatch.setattr(coordinator, "_run_loop", should_not_run)
+        await coordinator._run_job(task_id)
+
+        row = await db.get_task(task_id)
+        assert row is not None and row["status"] == "failed"
+        assert "missing its frozen subagent capability manifest" in row["error"]
+
+    @pytest.mark.asyncio
     async def test_run_job_claims_pending_task_and_marks_completed(
         self, mock_paths, profile, monkeypatch
     ):
@@ -1349,7 +1429,7 @@ class TestSubagentCoordinator:
 
         coordinator = SubagentCoordinator("test_user")
         db = await coordinator._get_db()
-        task_id = await db.insert_task("test_agent", "do work", profile)
+        task_id = await _insert_runnable_task(db, "test_agent", "do work", profile)
 
         async def fake_run_loop(task_id_: str, frozen_agent_def, task: str, db, ctx=None, **kwargs):
             return SubagentResult(
@@ -1382,7 +1462,11 @@ class TestSubagentCoordinator:
             "test_agent",
             "do work",
             profile,
-            launch_plan={"plan_id": "blocked-plan", "effective_tools": ["time_get"]},
+            launch_plan={
+                "plan_id": "blocked-plan",
+                "effective_tools": ["time_get"],
+                "effective_skills": [],
+            },
         )
 
         async def blocked(_task_id, frozen_agent_def, task, _db, ctx=None, **kwargs):
@@ -1421,7 +1505,7 @@ class TestSubagentCoordinator:
 
         coordinator = SubagentCoordinator("test_user")
         db = await coordinator._get_db()
-        task_id = await db.insert_task("test_agent", "do work", profile)
+        task_id = await _insert_runnable_task(db, "test_agent", "do work", profile)
 
         async def fake_run_loop(task_id_: str, frozen_agent_def, task: str, db, ctx=None, **kwargs):
             return SubagentResult(
@@ -1456,7 +1540,7 @@ class TestSubagentCoordinator:
 
         coordinator = SubagentCoordinator("test_user")
         db = await coordinator._get_db()
-        task_id = await db.insert_task("test_agent", "do work", profile)
+        task_id = await _insert_runnable_task(db, "test_agent", "do work", profile)
 
         async def fake_run_loop(task_id_: str, frozen_agent_def, task: str, db, ctx=None, **kwargs):
             raise RuntimeError("boom")
@@ -1486,7 +1570,7 @@ class TestSubagentCoordinator:
 
         coordinator = SubagentCoordinator("test_user")
         db = await coordinator._get_db()
-        task_id = await db.insert_task("test_agent", "do work", profile)
+        task_id = await _insert_runnable_task(db, "test_agent", "do work", profile)
 
         async def fake_run_loop(task_id_: str, frozen_agent_def, task: str, db, ctx=None, **kwargs):
             raise TimeoutError

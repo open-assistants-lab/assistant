@@ -23,6 +23,11 @@ logger = get_logger()
 
 USER_LEVEL_WORKSPACE_ID = "user"
 
+# Persisted authority boundaries: work_queue.status owns lifecycle; result owns
+# output/usage/result-level reason; launch_plan owns the frozen execution
+# capabilities and requested workspace. completion_events is the transactional
+# delivery outbox. Its terminal payload remains duplicated until replay has a
+# proven task-row reconstruction path and an explicit retention policy.
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS work_queue (
     id TEXT PRIMARY KEY,

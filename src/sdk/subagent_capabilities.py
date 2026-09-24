@@ -50,6 +50,7 @@ class SubagentLaunchPlan(BaseModel):
     agent_name: str
     user_id: str
     workspace_id: str
+    requested_workspace_id: str | None = None
     tool_selection_mode: ToolSelectionMode
     requested_tools: tuple[str, ...] = ()
     effective_tools: tuple[str, ...] = ()
@@ -57,6 +58,47 @@ class SubagentLaunchPlan(BaseModel):
     effective_skills: tuple[str, ...] = ()
     decisions: tuple[CapabilityDecision, ...] = ()
     ready: bool = False
+
+    @property
+    def resolved_workspace_id(self) -> str:
+        """Execution workspace, falling back for plans created before this field existed."""
+        return self.requested_workspace_id or self.workspace_id
+
+    @property
+    def canonical_manifest(self) -> dict[str, Any]:
+        decision_fields = ("kind", "name", "status", "read_only", "destructive")
+        decisions = [
+            {key: getattr(decision, key) for key in decision_fields}
+            for decision in self.decisions
+        ]
+        unique_decisions = {
+            json.dumps(decision, sort_keys=True, separators=(",", ":")): decision
+            for decision in decisions
+        }
+        return {
+            "version": 1,
+            "user_id": self.user_id,
+            "requested_workspace_id": self.resolved_workspace_id,
+            "agent_name": self.agent_name,
+            "selection_mode": self.tool_selection_mode.value,
+            "requested_tools": sorted(set(self.requested_tools)),
+            "effective_tools": sorted(set(self.effective_tools)),
+            "requested_skills": sorted(set(self.requested_skills)),
+            "effective_skills": sorted(set(self.effective_skills)),
+            "decisions": [unique_decisions[key] for key in sorted(unique_decisions)],
+        }
+
+    @property
+    def canonical_manifest_json(self) -> str:
+        return json.dumps(self.canonical_manifest, sort_keys=True, separators=(",", ":"))
+
+    def to_persisted_dict(self) -> dict[str, Any]:
+        """Serialize the launch snapshot and its canonical, content-addressed manifest."""
+        return {
+            **self.model_dump(mode="json"),
+            "requested_workspace_id": self.resolved_workspace_id,
+            "canonical_manifest": self.canonical_manifest,
+        }
 
     @property
     def rejected_decisions(self) -> tuple[CapabilityDecision, ...]:
@@ -83,22 +125,9 @@ def resolve_permission(user_id: str, tool_name: str, tool_input: dict[str, Any])
     return get_governance_service(user_id).resolve_permission_for_call(user_id, tool_name, tool_input)
 
 
-def _plan_id(
-    profile: AgentProfile,
-    user_id: str,
-    workspace_id: str,
-    mode: ToolSelectionMode,
-) -> str:
-    payload = {
-        "agent": profile.name,
-        "user": user_id,
-        "workspace": workspace_id,
-        "mode": mode.value,
-        "tools": list(profile.tools),
-        "skills": list(profile.skills),
-    }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()[:24]
+def _plan_id(canonical_manifest_json: str) -> str:
+    """Return the full SHA-256 identity of a canonical resolved manifest."""
+    return hashlib.sha256(canonical_manifest_json.encode()).hexdigest()
 
 
 def _tool_decision(name: str, tool_map: dict[str, Any], caps: dict[str, Any], user_id: str) -> CapabilityDecision:
@@ -236,11 +265,12 @@ def build_launch_plan(
         if skill_loader.accepted and "skills_load" not in effective_tools:
             effective_tools.append("skills_load")
 
-    return SubagentLaunchPlan(
-        plan_id=_plan_id(profile, user_id, workspace_id, tool_selection_mode),
+    plan = SubagentLaunchPlan(
+        plan_id="",
         agent_name=profile.name,
         user_id=user_id,
         workspace_id=workspace_id,
+        requested_workspace_id=workspace_id,
         tool_selection_mode=tool_selection_mode,
         requested_tools=requested_tools,
         effective_tools=tuple(effective_tools),
@@ -249,3 +279,4 @@ def build_launch_plan(
         decisions=tuple(decisions),
         ready=all(decision.accepted for decision in decisions),
     )
+    return plan.model_copy(update={"plan_id": _plan_id(plan.canonical_manifest_json)})
