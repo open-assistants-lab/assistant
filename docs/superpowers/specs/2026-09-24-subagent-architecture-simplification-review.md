@@ -31,7 +31,7 @@ Each has a defensible purpose, but the contract between them is not yet as small
 2. The child receives only the immutable effective tool and skill manifest recorded for that run; no hidden mandatory tools or post-preflight silent narrowing.
 3. The main agent's governance semantics do not change.
 4. Argument-sensitive permissions and administrator `deny` remain authoritative at tool-call time. A profile declaration or launch manifest is not a blanket approval for arbitrary arguments.
-5. Task status is durable and authoritative; timeout, cancellation, failure, blocked, and uncertainty remain distinguishable.
+5. Task lifecycle status is durable and authoritative. Result-level reasons such as `blocked` and `uncertain` remain distinguishable without implying every rejected launch creates a task row.
 6. If background completion is part of the product contract, completion survives a process restart and is applied idempotently to the parent conversation.
 7. Existing profiles remain loadable through a bounded, observable migration path.
 
@@ -54,35 +54,35 @@ Each has a defensible purpose, but the contract between them is not yet as small
 
 These are implementation questions, not reasons for an immediate rewrite:
 
-- The `LEGACY` planner path uses the profile's declared tool list as its selected set. Since old profiles may have an empty list that historically meant all native tools, verify whether current migration behavior intentionally means no tools or accidentally changes legacy behavior. Do not restore broad access without an explicit migration decision.
+- The current `LEGACY` planner path uses the profile's declared tool list as its selected set. An empty list historically meant all native tools in the old tool builder, but now resolves to an empty effective manifest. This appears to change legacy behavior. Decide and test migration explicitly; do not restore broad access without an explicit security decision.
 - Preflight resolves tool permissions using empty arguments, while `HITLMiddleware` evaluates actual arguments. Therefore a runtime `ask` remains possible for argument-sensitive policies. Record this as a supported terminal/pause outcome; do not market launch preflight as a guarantee that all approvals are resolved.
 - The current plan ID is derived from declarations and mode rather than the fully resolved effective plan. It should not be treated as a unique audit fingerprint until canonicalization is implemented.
 - The queue's terminal status, terminal-reason columns, serialized result, and outbox copy have overlapping information. Confirm which fields are consumed by APIs, receipts, and replay before consolidating.
 
 ## 6. Target Architecture
 
-### 5.1 Profile configuration
+### 6.1 Profile configuration
 
 A profile expresses requested capabilities and a versioned selection mode. The runtime policy file remains the compatibility adapter until profile-schema support and old-profile migration are proven. New profiles must preserve the semantic difference between omitted tools and an explicit empty tool list.
 
-### 5.2 Launch boundary
+### 6.2 Launch boundary
 
-One launch function performs:
+All launch entry points must obey one launch contract and shared resolution semantics. Use a common helper for validation, preflight, and snapshot construction only if it removes real duplication; a new orchestration layer is not a goal by itself. The contract is:
 
 1. profile and subagent enablement validation,
 2. strict tool/skill resolution against current registries and capability policy,
 3. permission preflight without weakening administrator deny,
 4. construction of a frozen effective manifest,
 5. rejection before queue/provider/LLM side effects if any required capability is unavailable,
-6. persistence of the original profile snapshot plus effective manifest before execution.
+6. persistence of an execution-profile snapshot plus the effective manifest and enough requested-profile metadata to explain resolution. The current implementation copies effective tools/skills into the stored profile, so it should not be described as an unchanged copy of the user's original profile.
 
 The plan ID must be based on the resolved manifest (including effective names and the policy context needed to explain it), not only the profile's declared names. Whether policy-version changes invalidate an already-running manifest is an explicit policy decision; they must not silently mutate the recorded manifest.
 
-### 5.3 Runtime enforcement
+### 6.3 Runtime enforcement
 
 The child receives exactly the manifest stored with its task. Tool discovery and execution consume that manifest; they do not infer defaults from an empty list. Skill loading checks the same frozen skill set. Governance still evaluates the actual tool call and arguments. If runtime governance returns `ask`, child behavior must produce a typed, truthful outcome rather than claim task success while work remains pending.
 
-### 5.4 Lifecycle and delivery
+### 6.4 Lifecycle and delivery
 
 SQLite task state remains authoritative. Terminal transition and outbox insertion are atomic. Outbox publication may retry, so the parent-session consumer must be idempotent on a stable event/task ID. Avoid a second source of truth for result/status when a task-row reference is sufficient and task retention supports it.
 
@@ -117,7 +117,7 @@ No broad loop or middleware refactor is proposed until Phase A demonstrates a co
 - Each safety property has one documented enforcement owner and at least one regression test.
 - The persisted launch manifest exactly matches runtime tool and skill access.
 - `ask`/`deny` outcomes remain truthful and do not become false success or bypass approvals.
-- Task status is unambiguous and terminal transitions cannot be overwritten.
+- Task lifecycle status is unambiguous and terminal transitions cannot be overwritten; result-level reasons (`blocked`, `uncertain`) are represented truthfully without implying every launch rejection has a task row.
 - Completion retries do not duplicate parent-visible messages; idempotency uses an indexed key rather than unbounded conversation scanning.
 - Profile migrations are observable, bounded, and backwards-compatible until explicitly retired.
 - Any removed layer has a demonstrated replacement and tests; no safety behavior is removed merely to reduce line count.
