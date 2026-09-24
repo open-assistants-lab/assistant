@@ -48,6 +48,7 @@ def loop_factory(monkeypatch):
     settings.memory.summarization.trim_tokens_to_summarize = 4000
     settings.memory.summarization.max_summary_chars = 24_000
     settings.memory.summarization.prompt_file = None
+    settings.agent.max_iterations = 25
     settings.verification.enabled = False
     settings.langfuse.enabled = False
     monkeypatch.setattr(runner, "get_settings", lambda: settings)
@@ -527,6 +528,7 @@ async def test_run_sdk_agent_stream_triggers_summarization():
         settings.memory.summarization.trim_tokens_to_summarize = 4000
         settings.memory.summarization.max_summary_chars = 24_000
         settings.memory.summarization.trigger_tokens = None
+        settings.agent.max_iterations = 25
         settings.memory.summarization.keep_tokens = None
         settings.agent.model = "ollama:test-model"
 
@@ -1131,6 +1133,7 @@ async def test_create_sdk_loop_uses_saved_summarization_model(monkeypatch):
     settings.memory.summarization.trim_tokens_to_summarize = 4000
     settings.memory.summarization.max_summary_chars = 24_000
     settings.memory.summarization.prompt_file = None
+    settings.agent.max_iterations = 25
     settings.verification.enabled = False
     settings.langfuse.enabled = False
     monkeypatch.setattr(runner, "get_settings", lambda: settings)

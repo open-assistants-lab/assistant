@@ -471,6 +471,7 @@ class TestAgentLoopBasic:
 
         assistant_msgs = [m for m in result if m.role == "assistant"]
         assert len(assistant_msgs) <= 3
+        assert loop.state.extra["_termination_reason"] == "iteration_limit"
 
     async def test_no_tool_calls_exits_immediately(self):
         """Agent exits on first response with no tool calls."""

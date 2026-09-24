@@ -63,6 +63,7 @@ class RunStatus(StrEnum):
     COMPLETED = "completed"
     CANCELLED = "cancelled"
     FAILED = "failed"
+    INCOMPLETE = "incomplete"
 
 
 class RubricAvailability(StrEnum):
@@ -298,6 +299,7 @@ class RunResult(ContractModel):
     attempt: int = Field(ge=1)
     model: CanonicalModel
     response: str
+    termination_reason: str | None = None
     reasoning: str | None = None
     final_message_id: str | None = None
     usage: RunUsage

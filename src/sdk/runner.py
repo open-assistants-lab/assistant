@@ -534,6 +534,8 @@ async def create_sdk_loop(
     except _profile_loader.ProfileError as exc:
         raise RuntimeError(f"PROFILE.md bootstrap failed: {exc}") from exc
 
+    run_config_kwargs.setdefault("max_iterations", int(settings.agent.max_iterations))
+
     provider = await asyncio.to_thread(
         get_cached_model_provider, model, provider_keys=provider_keys, user_id=user_id
     )

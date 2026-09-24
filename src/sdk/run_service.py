@@ -857,6 +857,9 @@ class RunService:
                     rubric_availability = RubricAvailability.ON
                     rubric_status = TerminalRubricStatus.CANCELLED
 
+            if getattr(loop, "state", None) is not None and loop.state.extra.get("_termination_reason") == "iteration_limit":
+                run_status = RunStatus.INCOMPLETE
+
             if rubric_status == TerminalRubricStatus.NOT_RUN and rubric_availability == RubricAvailability.ON:
                 # The verification loop ended without a terminal verdict. Only
                 # claim satisfaction when the agent run itself completed; a
@@ -939,6 +942,12 @@ class RunService:
                 attempt=final_attempt,
                 model=loop.model_id,
                 response=final_response,
+                termination_reason=(
+                    str(loop.state.extra.get("_termination_reason"))
+                    if getattr(loop, "state", None) is not None
+                    and loop.state.extra.get("_termination_reason")
+                    else None
+                ),
                 final_message_id=persisted_id,
                 usage=RunUsage(agent=agent_usage, grader=grader_usage),
                 verification=VerificationOutcome(
@@ -1134,6 +1143,9 @@ class RunService:
                                 cache_creation_tokens=agent_usage.cache_creation_tokens + (msg.usage.cache_creation_tokens or 0),
                             )
 
+        if loop.state is not None and loop.state.extra.get("_termination_reason") == "iteration_limit":
+            run_status = RunStatus.INCOMPLETE
+
         if rubric_status == TerminalRubricStatus.NOT_RUN and rubric_availability == RubricAvailability.ON:
             # Only claim satisfaction when the agent run completed (see the
             # matching fallback in _run_stream).
@@ -1150,6 +1162,11 @@ class RunService:
             attempt=final_attempt,
             model=loop.model_id,
             response=final_response,
+            termination_reason=(
+                str(loop.state.extra.get("_termination_reason"))
+                if loop.state is not None and loop.state.extra.get("_termination_reason")
+                else None
+            ),
             usage=RunUsage(agent=agent_usage, grader=grader_usage),
             verification=VerificationOutcome(
                 availability=rubric_availability,

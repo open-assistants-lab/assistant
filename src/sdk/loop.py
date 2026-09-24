@@ -2108,6 +2108,8 @@ class AgentLoop:
                     break
             if self.subagent_ctx and self.subagent_ctx.runtime_block is not None:
                 break
+        else:
+            state.extra["_termination_reason"] = "iteration_limit"
 
     async def run_stream(self, messages: list[Message]) -> AsyncIterator[StreamChunk]:
         """Run the agent loop, yielding StreamChunk events in real-time.
@@ -2667,6 +2669,9 @@ class AgentLoop:
 
                 overflow_retries = 0
                 iteration += 1
+
+            if iteration >= self.run_config.max_iterations:
+                state.extra["_termination_reason"] = "iteration_limit"
 
         except SubagentCancelledError:
             await self._run_hooks("aafter_agent", state)

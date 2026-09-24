@@ -27,6 +27,12 @@ def test_yaml_loaded_from_repo_root_regardless_of_cwd(tmp_path, monkeypatch, fre
     assert "agent-browser" in cfg.shell_tool.allowed_commands
 
 
+def test_agent_max_iterations_setting_wires_to_run_config(fresh_settings):
+    cfg = settings_module.get_settings()
+
+    assert cfg.agent.max_iterations == 25
+
+
 def test_session_lease_timeout_is_bounded_and_configurable(fresh_settings):
     cfg = settings_module.get_settings()
 

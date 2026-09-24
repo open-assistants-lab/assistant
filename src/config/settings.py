@@ -62,6 +62,7 @@ class AgentConfig(_BaseSettings):
     )
     system_prompt: str = Field(default="You are a helpful assistant.")
     pool_size: int = Field(default=3)
+    max_iterations: int = Field(default=25, ge=1, le=100)
 
     model_config = SettingsConfigDict(env_prefix="AGENT_")
 
