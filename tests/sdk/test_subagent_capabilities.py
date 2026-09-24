@@ -222,3 +222,33 @@ def test_safe_default_excludes_mutating_tools(monkeypatch) -> None:
     assert plan.ready is True
     assert plan.effective_tools == ("files_read", "skills_load")
     assert "files_write" not in plan.effective_tools
+
+
+def test_legacy_empty_profile_currently_resolves_to_empty_manifest(monkeypatch) -> None:
+    from src.sdk.subagent_capabilities import ToolSelectionMode
+
+    plan = _build_plan(monkeypatch, _profile(), ToolSelectionMode.LEGACY)
+
+    assert plan.ready is True
+    assert plan.effective_tools == ()
+
+
+def test_generic_skills_load_preflight_can_miss_item_level_runtime_ask(monkeypatch) -> None:
+    from src.sdk.permission_policy import PermissionPolicy
+    from src.sdk.subagent_capabilities import ToolSelectionMode
+
+    plan = _build_plan(
+        monkeypatch,
+        _profile(),
+        ToolSelectionMode.SAFE_DEFAULT,
+        permissions={"skills_load:deployment": "ask"},
+    )
+
+    assert plan.ready is True
+    assert "skills_load" in plan.effective_tools
+
+    policy = PermissionPolicy(user={"skills": {"deployment": "ask"}})
+    assert policy.resolve("skills_load", {}, fallback="allow") == "allow"
+    assert policy.resolve(
+        "skills_load", {"name": "deployment"}, fallback="allow"
+    ) == "ask"

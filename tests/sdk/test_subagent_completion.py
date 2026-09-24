@@ -146,6 +146,7 @@ async def test_run_service_completion_consumer_deduplicates_replayed_task(monkey
     class FakeStore:
         def __init__(self):
             self.rows = []
+            self.fail_after_append_once = True
 
         def get_messages_by_session_id(self, _session_id, limit):
             return self.rows[-limit:]
@@ -154,6 +155,9 @@ async def test_run_service_completion_consumer_deduplicates_replayed_task(monkey
             self.rows.append(
                 SimpleNamespace(role=role, content=content, metadata=metadata, session_id=session_id)
             )
+            if self.fail_after_append_once:
+                self.fail_after_append_once = False
+                raise RuntimeError("simulated process interruption after message commit")
 
     store = FakeStore()
     monkeypatch.setattr(run_service, "aget_message_store", lambda *_args: _async_value(store))
@@ -168,7 +172,12 @@ async def test_run_service_completion_consumer_deduplicates_replayed_task(monkey
         result=SubagentResult(name="worker", task="work", success=True, output="done"),
     )
 
-    await run_service.handle_subagent_completion(event)
+    with pytest.raises(RuntimeError, match="after message commit"):
+        await run_service.handle_subagent_completion(event)
+    assert len(store.rows) == 1
+
+    # The outbox retries after the interrupted callback; current history scan
+    # deduplicates the already-persisted parent message.
     await run_service.handle_subagent_completion(event)
 
     assert len(store.rows) == 1
