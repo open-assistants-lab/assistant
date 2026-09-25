@@ -552,26 +552,34 @@ async def create_sdk_loop(
     t1 = time.monotonic()
 
     caps = _load_user_capabilities(user_id)
+    exposure = settings.mcp.exposure
     native_tools = filter_denied_native_tools(list(get_native_tools()), settings)
+    if exposure == "direct":
+        native_tools = [td for td in native_tools if td.name != "mcp_proxy"]
     tools = [td for td in native_tools if _resource_enabled(caps, "tools", td.name)]
 
     t2 = time.monotonic()
     mcp_tools: list[Any] = []
     mcp_bridge = None
-    try:
-        from src.sdk.tools_core.mcp_bridge import MCPToolBridge
+    if exposure != "proxy":
+        try:
+            from src.sdk.tools_core.mcp_bridge import MCPToolBridge
 
-        mcp_bridge = MCPToolBridge(user_id=user_id)
-        mcp_count = await mcp_bridge.discover()
-        if mcp_count > 0:
-            mcp_tools = [
-                td
-                for td in mcp_bridge.get_tool_definitions()
-                if _resource_enabled(caps, "tools", td.name)
-            ]
-            logger.info("sdk_runner.mcp_tools", {"count": mcp_count}, user_id=user_id)
-    except Exception as e:
-        logger.warning("sdk_runner.mcp_failed", {"error": str(e)}, user_id=user_id)
+            mcp_bridge = MCPToolBridge(user_id=user_id)
+            mcp_count = await mcp_bridge.discover()
+            if mcp_count > 0:
+                definitions = mcp_bridge.get_tool_definitions()
+                if exposure == "hybrid":
+                    allowed = set(settings.mcp.direct_tools)
+                    definitions = [td for td in definitions if td.name in allowed]
+                mcp_tools = [
+                    td
+                    for td in definitions
+                    if _resource_enabled(caps, "tools", td.name)
+                ]
+                logger.info("sdk_runner.mcp_tools", {"count": mcp_count}, user_id=user_id)
+        except Exception as e:
+            logger.warning("sdk_runner.mcp_failed", {"error": str(e)}, user_id=user_id)
 
     all_tools = tools + mcp_tools
     t3 = time.monotonic()

@@ -469,6 +469,22 @@ class MCPManager:
         async with self._lock:
             return self._connections.get(server_name)
 
+    def cached_metadata(self) -> list[dict[str, Any]]:
+        """Return secret-free cached metadata without opening MCP connections."""
+        return self._cache.records()
+
+    async def call_tool(
+        self,
+        server_name: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> Any:
+        """Dispatch one tool call through a live, lifecycle-checked connection."""
+        connection = await self.ensure_connection(server_name)
+        if connection is None:
+            raise ConnectionError(f"MCP server '{server_name}' is reconnecting")
+        return await connection.session.call_tool(tool_name, arguments)
+
     async def get_tools(self, server_name: str | None = None) -> list[Any]:
         """Get tools from MCP servers (lazy start on first call)."""
         if not self._is_enabled():

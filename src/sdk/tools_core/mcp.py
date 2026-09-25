@@ -6,10 +6,190 @@ All tools are now native async — no thread hack needed.
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 from src.app_logging import get_logger
+from src.config import get_settings
 from src.sdk.tools import ToolAnnotations, ToolDefinition, ToolResult
+from src.sdk.tools_core.mcp_results import mcp_error_result, mcp_result_to_tool_result
 
 logger = get_logger()
+
+
+def _cached_records(manager: Any) -> list[dict[str, Any]]:
+    getter = getattr(manager, "cached_metadata", None)
+    if callable(getter):
+        return list(getter())
+    return []
+
+
+def _annotation_value(annotations: Any, name: str) -> bool:
+    if annotations is None:
+        return False
+    if isinstance(annotations, dict):
+        return bool(annotations.get(name, False))
+    return bool(getattr(annotations, name, False))
+
+
+async def _mcp_proxy(
+    user_id: str = "",
+    action: str = "search",
+    server: str = "",
+    tool: str = "",
+    arguments: dict[str, Any] | None = None,
+    query: str = "",
+) -> ToolResult:
+    if not user_id:
+        return mcp_error_result("user_id is required", server_name=server, tool_name=tool, outcome="failed")
+
+    from src.sdk.tools_core.mcp_manager import get_mcp_manager
+
+    manager = get_mcp_manager(user_id)
+    action = action.strip().lower()
+    if action in {"search", "list"}:
+        records = _cached_records(manager)
+        if query:
+            needle = query.casefold()
+            records = [
+                record
+                for record in records
+                if needle in json.dumps(record, ensure_ascii=False).casefold()
+            ]
+        lines = [
+            f"{record.get('server_name', '')}: "
+            f"{len(record.get('tools', []) or [])} cached tools "
+            f"({record.get('source_type', 'unknown')})"
+            for record in records
+        ]
+        return ToolResult(
+            content="\n".join(lines) or "No cached MCP servers.",
+            structured_content={"outcome": "succeeded", "servers": records},
+        )
+
+    if action == "refresh":
+        await manager.rediscover()
+        return ToolResult(
+            content="MCP metadata refreshed.",
+            structured_content={"outcome": "succeeded", "receipt_class": "mcp_proxy"},
+        )
+
+    if not server or not tool:
+        return mcp_error_result(
+            "server and tool are required for this action",
+            server_name=server,
+            tool_name=tool,
+            outcome="failed",
+        )
+
+    if action == "describe":
+        for record in _cached_records(manager):
+            if record.get("server_name") != server:
+                continue
+            for metadata in record.get("tools", []) or []:
+                if metadata.get("name") == tool:
+                    return ToolResult(
+                        content=json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                        structured_content={
+                            "outcome": "succeeded",
+                            "server": server,
+                            "tool": tool,
+                            "source_path": record.get("source_path"),
+                            "source_type": record.get("source_type"),
+                        },
+                    )
+        return mcp_error_result(
+            f"MCP tool '{server}/{tool}' is not in the metadata cache",
+            server_name=server,
+            tool_name=tool,
+            outcome="failed",
+        )
+
+    if action != "call":
+        return mcp_error_result(
+            f"Unsupported MCP proxy action: {action}",
+            server_name=server,
+            tool_name=tool,
+            outcome="failed",
+        )
+
+    try:
+        tools = await manager.get_tools(server)
+    except Exception as exc:
+        return mcp_error_result(exc, server_name=server, tool_name=tool)
+    selected = next((item for item in tools if getattr(item, "name", None) == tool), None)
+    if selected is None:
+        return mcp_error_result(
+            f"MCP tool '{server}/{tool}' is not available",
+            server_name=server,
+            tool_name=tool,
+            outcome="failed",
+        )
+
+    annotations = getattr(selected, "annotations", None)
+    read_only = _annotation_value(annotations, "readOnlyHint")
+    idempotent = _annotation_value(annotations, "idempotentHint")
+    call_args = dict(arguments or {})
+
+    async def call_once(force_reconnect: bool = False) -> Any:
+        connection = await manager.ensure_connection(server, force_reconnect=force_reconnect)
+        if connection is None:
+            raise ConnectionError(f"MCP server '{server}' is reconnecting")
+        caller = getattr(manager, "call_tool", None)
+        if callable(caller):
+            return await caller(server, tool, call_args)
+        return await connection.session.call_tool(tool, call_args)
+
+    try:
+        result = await call_once()
+    except Exception as first_error:
+        if not (read_only or idempotent):
+            return mcp_error_result(first_error, server_name=server, tool_name=tool)
+        try:
+            result = await call_once(force_reconnect=True)
+        except Exception as retry_error:
+            return mcp_error_result(retry_error, server_name=server, tool_name=tool)
+
+    return mcp_result_to_tool_result(
+        result,
+        server_name=server,
+        tool_name=tool,
+        max_chars=get_settings().mcp.max_result_chars,
+    )
+
+
+mcp_proxy = ToolDefinition(
+    name="mcp_proxy",
+    description=(
+        "Use the governed MCP proxy to search cached metadata, describe a tool, "
+        "refresh metadata, or call one configured MCP tool. Calls are audited and "
+        "may require approval."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "user_id": {"type": "string", "default": "", "title": "User Id"},
+            "action": {
+                "type": "string",
+                "enum": ["search", "describe", "refresh", "call"],
+                "default": "search",
+                "title": "Action",
+            },
+            "server": {"type": "string", "default": "", "title": "Server Name"},
+            "tool": {"type": "string", "default": "", "title": "Tool Name"},
+            "arguments": {"type": "object", "default": {}, "title": "Tool Arguments"},
+            "query": {"type": "string", "default": "", "title": "Search Query"},
+        },
+        "required": ["user_id", "action"],
+    },
+    annotations=ToolAnnotations(
+        title="MCP Proxy",
+        read_only=False,
+        destructive=True,
+        open_world=True,
+    ),
+    function=_mcp_proxy,
+)
 
 
 async def _mcp_list(user_id: str = "") -> str:
