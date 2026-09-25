@@ -54,6 +54,32 @@ class TestMCPConfig:
             result = load_mcp_config("test_user")
             assert result is None
 
+    def test_config_state_distinguishes_invalid_and_records_provenance(self, tmp_path):
+        from src.sdk.tools_core.mcp_config import load_mcp_config_state
+        from src.storage.paths import DataPaths
+
+        with patch("src.sdk.tools_core.mcp_config.get_paths") as mock_get_paths:
+            dp = DataPaths(data_root=str(tmp_path), user_id="test_user")
+            config_path = dp.user_mcp_config()
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            mock_get_paths.return_value = dp
+
+            config_path.write_text("not json", encoding="utf-8")
+            config, state, source = load_mcp_config_state("test_user")
+            assert config is None
+            assert state == "invalid"
+            assert source == str(config_path)
+
+            config_path.write_text(
+                '{"mcpServers": {"demo": {"command": "python"}}}', encoding="utf-8"
+            )
+            config, state, source = load_mcp_config_state("test_user")
+            assert state == "valid"
+            assert config is not None
+            assert config.source_path == str(config_path)
+            assert config.mcpServers["demo"].source_type == "user"
+            assert config.mcpServers["demo"].disabled is False
+
     def test_config_mtime_missing(self, tmp_path):
         """Test mtime when config doesn't exist."""
         from src.sdk.tools_core.mcp_config import get_config_mtime

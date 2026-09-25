@@ -75,7 +75,7 @@ async def test_proxy_call_returns_structured_governed_result(monkeypatch) -> Non
             "action": "call",
             "server": "demo",
             "tool": "read",
-            "arguments": {"id": "42"},
+            "args": {"id": "42"},
         }
     )
 
@@ -97,6 +97,28 @@ def test_proxy_result_is_bounded_and_truthful() -> None:
     assert result.structured_content["outcome"] == "succeeded"
     assert result.structured_content["truncated"] is True
     assert len(result.content) < 40
+
+
+@pytest.mark.asyncio
+async def test_proxy_revalidates_policy_before_dispatch(monkeypatch) -> None:
+    manager = _Manager()
+    governance = SimpleNamespace(
+        resolve_permission_for_call=lambda *_args, **_kwargs: "deny"
+    )
+    monkeypatch.setattr("src.sdk.tools_core.mcp_manager.get_mcp_manager", lambda _user_id: manager)
+    monkeypatch.setattr("src.sdk.governance.get_governance_service", lambda _user_id: governance)
+    monkeypatch.setattr(
+        "src.sdk.capabilities.load_user_capabilities", lambda _user_id: {"tools": {}}
+    )
+
+    result = await mcp_module.mcp_proxy.ainvoke(
+        {"user_id": "alice", "action": "call", "server": "demo", "tool": "read"}
+    )
+
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+    assert "denied" in result.content.lower()
+    assert manager.calls == []
 
 
 @pytest.mark.asyncio

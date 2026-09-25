@@ -145,6 +145,21 @@ async def test_close_mcp_manager_invokes_cleanup(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_reap_stale_closes_only_idle_connections() -> None:
+    manager = MCPManager("reap-user")
+    fresh = MCPServerConnection("fresh", AsyncMock(), AsyncExitStack())
+    stale = MCPServerConnection("stale", AsyncMock(), AsyncExitStack())
+    stale.last_used -= 100
+    manager._connections = {"fresh": fresh, "stale": stale}
+
+    reaped = await manager.reap_stale(10)
+
+    assert reaped == ["stale"]
+    assert "fresh" in manager._connections
+    assert "stale" not in manager._connections
+
+
+@pytest.mark.asyncio
 async def test_health_reports_cached_metadata_without_starting_server(monkeypatch):
     manager = MCPManager("health-cache-user")
     monkeypatch.setattr(

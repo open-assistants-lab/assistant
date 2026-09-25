@@ -39,7 +39,10 @@ async def _mcp_proxy(
     server: str = "",
     tool: str = "",
     arguments: dict[str, Any] | None = None,
+    args: dict[str, Any] | None = None,
     query: str = "",
+    limit: int = 20,
+    offset: int = 0,
 ) -> ToolResult:
     if not user_id:
         return mcp_error_result("user_id is required", server_name=server, tool_name=tool, outcome="failed")
@@ -48,7 +51,7 @@ async def _mcp_proxy(
 
     manager = get_mcp_manager(user_id)
     action = action.strip().lower()
-    if action in {"search", "list"}:
+    if action in {"search", "list", "status"}:
         records = _cached_records(manager)
         if query:
             needle = query.casefold()
@@ -57,6 +60,9 @@ async def _mcp_proxy(
                 for record in records
                 if needle in json.dumps(record, ensure_ascii=False).casefold()
             ]
+        bounded_limit = max(1, min(int(limit), 200))
+        bounded_offset = max(0, int(offset))
+        records = records[bounded_offset : bounded_offset + bounded_limit]
         lines = [
             f"{record.get('server_name', '')}: "
             f"{len(record.get('tools', []) or [])} cached tools "
@@ -130,7 +136,32 @@ async def _mcp_proxy(
     annotations = getattr(selected, "annotations", None)
     read_only = _annotation_value(annotations, "readOnlyHint")
     idempotent = _annotation_value(annotations, "idempotentHint")
-    call_args = dict(arguments or {})
+    namespaced = f"mcp__{server}__{tool}"
+    from src.sdk.capabilities import load_user_capabilities, tool_enabled
+
+    capabilities = load_user_capabilities(user_id)
+    if not tool_enabled(capabilities, namespaced):
+        return mcp_error_result(
+            f"MCP tool '{namespaced}' is disabled by user capabilities",
+            server_name=server,
+            tool_name=tool,
+            outcome="failed",
+        )
+
+    from src.sdk.governance import get_governance_service
+
+    permission = get_governance_service(user_id).resolve_permission_for_call(
+        user_id, namespaced, dict(arguments or args or {})
+    )
+    if permission == "deny":
+        return mcp_error_result(
+            f"MCP tool '{namespaced}' is denied by policy",
+            server_name=server,
+            tool_name=tool,
+            outcome="failed",
+        )
+
+    call_args = dict(arguments if arguments is not None else args or {})
 
     async def call_once(force_reconnect: bool = False) -> Any:
         connection = await manager.ensure_connection(server, force_reconnect=force_reconnect)
@@ -172,14 +203,28 @@ mcp_proxy = ToolDefinition(
             "user_id": {"type": "string", "default": "", "title": "User Id"},
             "action": {
                 "type": "string",
-                "enum": ["search", "describe", "refresh", "call"],
+                "enum": ["search", "status", "describe", "refresh", "call"],
                 "default": "search",
                 "title": "Action",
             },
             "server": {"type": "string", "default": "", "title": "Server Name"},
             "tool": {"type": "string", "default": "", "title": "Tool Name"},
             "arguments": {"type": "object", "default": {}, "title": "Tool Arguments"},
+            "args": {"type": "object", "default": {}, "title": "Tool Arguments"},
             "query": {"type": "string", "default": "", "title": "Search Query"},
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 20,
+                "title": "Result Limit",
+            },
+            "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 0,
+                "title": "Result Offset",
+            },
         },
         "required": ["user_id", "action"],
     },
@@ -277,7 +322,7 @@ async def _mcp_reload(user_id: str = "", session_id: str = "") -> ToolResult | s
             # Proxy mode intentionally keeps the direct registry empty.
             return f"{result} (proxy exposure active; direct MCP tools remain hidden)"
         if exposure == "hybrid":
-            await bridge.discover_cached(set(get_settings().mcp.direct_tools))
+            await bridge.sync_direct_tools(set(get_settings().mcp.direct_tools))
         else:
             await bridge.discover()
         caps = load_user_capabilities(user_id)

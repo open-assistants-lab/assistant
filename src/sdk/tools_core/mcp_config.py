@@ -1,6 +1,7 @@
 """MCP configuration models."""
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -21,6 +22,9 @@ class MCPServerConfig(BaseModel):
         description="HTTP headers for remote servers (e.g. Authorization: Bearer ...)",
     )
     transport: str = Field(default="stdio", description="Transport type: 'stdio' or 'http'")
+    source_path: str = Field(default="", exclude=True)
+    source_type: Literal["user", "project", "runtime"] = Field(default="user", exclude=True)
+    disabled: bool = Field(default=False, exclude=True)
 
 
 class MCPConfig(BaseModel):
@@ -29,21 +33,35 @@ class MCPConfig(BaseModel):
     model_config = {"extra": "ignore", "populate_by_name": True}
 
     mcpServers: dict[str, MCPServerConfig] = Field(default_factory=dict)  # noqa: N815
+    source_path: str = Field(default="", exclude=True)
+    source_type: Literal["user", "project", "runtime"] = Field(default="user", exclude=True)
 
 
-def load_mcp_config(user_id: str) -> MCPConfig | None:
-    """Load MCP configuration from user's .mcp.json file."""
+def load_mcp_config_state(user_id: str) -> tuple[MCPConfig | None, str, str]:
+    """Return (config, state, source_path) distinguishing missing from invalid."""
     config_path = get_paths(user_id).user_mcp_config()
     if not config_path.exists():
-        return None
+        return None, "missing", str(config_path)
 
     import json
 
     try:
         data = json.loads(config_path.read_text())
-        return MCPConfig(**data)
+        config = MCPConfig(**data)
     except Exception:
-        return None
+        return None, "invalid", str(config_path)
+    config.source_path = str(config_path)
+    config.source_type = "user"
+    for server in config.mcpServers.values():
+        server.source_path = str(config_path)
+        server.source_type = "user"
+    return config, "valid", str(config_path)
+
+
+def load_mcp_config(user_id: str) -> MCPConfig | None:
+    """Load MCP configuration from user's .mcp.json file."""
+    config, _state, _source_path = load_mcp_config_state(user_id)
+    return config
 
 
 def get_config_path(user_id: str) -> Path:

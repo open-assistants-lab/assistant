@@ -22,6 +22,7 @@ from src.sdk.tools_core.mcp_config import (
     get_config_mtime,
     get_config_path,
     load_mcp_config,
+    load_mcp_config_state,
 )
 from src.storage.paths import get_paths
 
@@ -509,6 +510,18 @@ class MCPManager:
                 all_tools.extend(conn.tools)
             return all_tools
 
+    async def reap_stale(self, max_idle_seconds: int | None = None) -> list[str]:
+        """Close connections idle beyond the threshold and return their names."""
+        limit = self._get_idle_timeout() if max_idle_seconds is None else max_idle_seconds
+        now = time.time()
+        connections = await self.snapshot_connections()
+        stale = sorted(
+            name for name, conn in connections.items() if now - conn.last_used > limit
+        )
+        for name in stale:
+            await self._stop_server(name)
+        return stale
+
     async def list_servers(self) -> dict[str, Any]:
         """List configured MCP servers and their status."""
         config = load_mcp_config(self.user_id)
@@ -535,6 +548,7 @@ class MCPManager:
     async def health(self) -> dict[str, Any]:
         """Return configuration-aware per-server MCP session health."""
         config = load_mcp_config(self.user_id)
+        _loaded, config_state, config_source = load_mcp_config_state(self.user_id)
         configured = config.mcpServers if config else {}
         now = time.time()
         timeout = self._get_idle_timeout()
@@ -578,6 +592,8 @@ class MCPManager:
         return {
             "user_id": self.user_id,
             "exposure": get_settings().mcp.exposure,
+            "config_state": config_state,
+            "config_source": config_source,
             "servers": servers,
         }
 
