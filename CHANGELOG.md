@@ -1,8 +1,14 @@
 # Changelog
 
-## Unreleased
+## v0.6.18 — 2026-09-25
 
 ### Fixed
+- Summarization recovery now uses the corrected message-store import, bounds persisted summaries, and excludes unusable oversized summaries from model context while retaining history (#42).
+- `shell_execute` now defaults to approval-required when governance is active, and interpreter capabilities are no longer in the safe default shell allowlist (#40).
+- Tool and governance results now carry explicit machine-readable outcomes; contradictory success/error states are rejected, and proposal status retains its replay-compatible terminal meaning (#38, #41).
+- Dropped-session activity tracking, stale-run cancellation, opt-in pipeline failure semantics, truthful custom-output truncation, and configurable iteration exhaustion are now covered by regression tests (#35–#39).
+- The native desktop path resumes app-owned Keychain credentials, provider selection, Skills/Subagents workspace destinations, and context-compression timeline events.
+
 - Subagent launches now fail closed when declared tools or skills are missing, disabled, denied, or require approval. Each run uses a frozen capability manifest and requested workspace; child file access is confined to that workspace.
 - Subagent completion delivery now persists and replays terminal outcomes idempotently. A shared per-user drain lock prevents workspace coordinators from concurrently publishing the same in-process notification; replay remains at-least-once across a crash between publish and acknowledgement.
 - Custom `TOOL.md` commands now run through the sandbox seam (#34). Both wrappers (`_parse_tool_file` and the index-rebuilt twin) called `subprocess.run(..., shell=True)` directly, so a custom command received none of the caps every other command path honours: no `RLIMIT_FSIZE` (the write budget), no CPU or address-space limits, no uid drop, no scrubbed environment, and the server process's cwd rather than the workspace. Because the agent can author `TOOL.md` files with `files_write`, this was agent-reachable, not just author-reachable. Commands now execute as a single `sh -c` argv through `SandboxBackend.run()`, with the output and write budgets taken from `shell_tool.*` and the tool's declared `annotations.timeout_seconds` as the only wall-clock cap; signal kills and the `128+n` pipeline band still raise instead of returning a success string (#25, #32 part 2).

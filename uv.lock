@@ -173,7 +173,7 @@ wheels = [
 
 [[package]]
 name = "assistant"
-version = "0.3.0"
+version = "0.6.18"
 source = { editable = "." }
 dependencies = [
     { name = "agentprofile" },
