@@ -16,11 +16,14 @@ from typing import Any
 
 from src.app_logging import get_logger
 from src.config import get_settings
+from src.sdk.tools_core.mcp_cache import MCPToolMetadataCache
 from src.sdk.tools_core.mcp_config import (
     MCPServerConfig,
     get_config_mtime,
+    get_config_path,
     load_mcp_config,
 )
+from src.storage.paths import get_paths
 
 logger = get_logger()
 
@@ -50,6 +53,7 @@ class MCPManager:
         self._connections: dict[str, MCPServerConnection] = {}
         self._config_mtime: float = 0.0
         self._config_hash: str = ""
+        self._server_config_hashes: dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._last_used: float = time.time()
         self._idle_task: asyncio.Task[Any] | None = None
@@ -63,6 +67,9 @@ class MCPManager:
         self._lifecycle_generation: int = 0
         self._reload_lock = asyncio.Lock()
         self._closed = False
+        self._cache = MCPToolMetadataCache(
+            get_paths(self.user_id).user_dir / ".mcp-cache.json"
+        )
 
     _REDISCOVERY_COOLDOWN_SECONDS: float = 60.0
 
@@ -136,6 +143,8 @@ class MCPManager:
             await self._stop_all()
             self._config_mtime = current_mtime
             self._config_hash = current_hash
+            self._server_config_hashes = self._server_hashes(config) if config else {}
+            self._cache.invalidate_changed(self._server_config_hashes)
             if config is None:
                 logger.info("mcp.no_config", {"user_id": self.user_id})
 
@@ -150,6 +159,7 @@ class MCPManager:
 
         self._config_mtime = get_config_mtime(self.user_id)
         self._config_hash = self._compute_config_hash(config)
+        self._server_config_hashes = self._server_hashes(config)
 
         for server_name, server_config in config.mcpServers.items():
             await self._start_server(
@@ -168,6 +178,51 @@ class MCPManager:
                 sort_keys=True,
             )
         return hashlib.md5(data.encode()).hexdigest()
+
+    def _compute_server_hash(self, server_config: Any) -> str:
+        if hasattr(server_config, "model_dump_json"):
+            data = server_config.model_dump_json()
+        else:
+            data = json.dumps(
+                server_config,
+                default=lambda value: getattr(value, "__dict__", str(value)),
+                sort_keys=True,
+            )
+        return hashlib.md5(data.encode()).hexdigest()
+
+    def _server_hashes(self, config: Any) -> dict[str, str]:
+        return {
+            name: self._compute_server_hash(server_config)
+            for name, server_config in config.mcpServers.items()
+        }
+
+    def _cache_server_metadata(
+        self, server_name: str, conn: MCPServerConnection
+    ) -> None:
+        now = datetime.now(UTC).isoformat()
+        tools = []
+        for tool in conn.tools:
+            tools.append(
+                {
+                    "name": getattr(tool, "name", ""),
+                    "description": getattr(tool, "description", "") or "",
+                    "inputSchema": getattr(tool, "inputSchema", {}) or {},
+                    "annotations": getattr(tool, "annotations", None),
+                }
+            )
+        self._cache.put(
+            {
+                "server_name": server_name,
+                "source_path": str(get_config_path(self.user_id)),
+                "source_type": "user",
+                "config_hash": self._server_config_hashes.get(server_name, ""),
+                "connected_at": now,
+                "last_refresh": now,
+                "tools": tools,
+                "resources": [],
+                "cache_status": "cached",
+            }
+        )
 
     async def _start_server(
         self,
@@ -200,6 +255,7 @@ class MCPManager:
                 return
             self._last_errors[server_name] = None
             self._last_used = time.time()
+            self._cache_server_metadata(server_name, candidate)
             await self._notify_refreshed(server_name)
             logger.info("mcp.server_started", {"server": server_name, "tools": len(candidate.tools)})
         except Exception as e:
@@ -251,6 +307,7 @@ class MCPManager:
                 conn.last_refresh = time.time()
                 self._last_errors[server_name] = None
                 self._last_used = time.time()
+                self._cache_server_metadata(server_name, conn)
                 await self._notify_refreshed(server_name)
             except Exception as exc:
                 self._last_errors[server_name] = str(exc)
@@ -323,6 +380,7 @@ class MCPManager:
                         return None
                     self._last_errors[server_name] = None
                     self._last_used = time.time()
+                    self._cache_server_metadata(server_name, candidate)
                     await self._notify_refreshed(server_name)
                     return candidate
                 except Exception as exc:
@@ -502,6 +560,8 @@ class MCPManager:
             config = load_mcp_config(self.user_id)
             self._config_mtime = get_config_mtime(self.user_id)
             self._config_hash = self._compute_config_hash(config) if config is not None else ""
+            self._server_config_hashes = self._server_hashes(config) if config is not None else {}
+            self._cache.invalidate_changed(self._server_config_hashes)
             if config is not None:
                 for server_name, server_config in config.mcpServers.items():
                     await self._start_server(
