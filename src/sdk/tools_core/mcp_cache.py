@@ -62,6 +62,9 @@ class MCPToolMetadataCache:
         )
         temporary.replace(self.path)
 
+    def records(self) -> list[dict[str, Any]]:
+        return [copy.deepcopy(record) for record in self._read()["servers"].values() if isinstance(record, dict)]
+
     def get(self, server_name: str) -> dict[str, Any] | None:
         record = self._read()["servers"].get(server_name)
         return copy.deepcopy(record) if isinstance(record, dict) else None
