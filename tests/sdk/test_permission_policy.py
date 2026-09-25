@@ -49,6 +49,22 @@ def test_user_allow_cannot_weaken_shell_ask(monkeypatch, tmp_path) -> None:
     assert service.resolve_permission_for_call("user", "shell_execute", {}) == "ask"
 
 
+def test_custom_tool_requires_approval_falls_back_to_ask(monkeypatch, tmp_path) -> None:
+    import src.sdk.tools_custom as tools_custom
+    from src.sdk.tools import ToolAnnotations, ToolDefinition
+
+    custom = ToolDefinition(
+        name="custom_write",
+        description="A custom write",
+        annotations=ToolAnnotations(requires_approval=True),
+        function=lambda: "ok",
+    )
+    monkeypatch.setattr(tools_custom, "get_custom_tools", lambda *args, **kwargs: [custom])
+    service = GovernanceService(data_root=tmp_path)
+
+    assert service.resolve_permission_for_call("user", "custom_write", {}) == "ask"
+
+
 def test_skill_and_subagent_rules_match_call_arguments() -> None:
     policy = PermissionPolicy(
         user={

@@ -43,18 +43,21 @@ def _get_shell_config() -> Any:
     """Return shell tool configuration from settings."""
     settings = get_settings()
     shell_config = getattr(settings, "shell_tool", None)
+    sandbox_config = getattr(settings, "sandbox", None)
     if shell_config:
         return {
             "allowed_commands": set(shell_config.allowed_commands),
             "timeout_seconds": getattr(shell_config, "timeout_seconds", 30),
             "max_output_kb": getattr(shell_config, "max_output_kb", 100),
             "max_write_mb": getattr(shell_config, "max_write_mb", 64),
+            "env_allow": tuple(getattr(sandbox_config, "env_allow", ()) or ()),
         }
     return {
         "allowed_commands": DEFAULT_ALLOWED_COMMANDS,
         "timeout_seconds": 30,
         "max_output_kb": 100,
         "max_write_mb": 64,
+        "env_allow": tuple(getattr(get_settings().sandbox, "env_allow", ()) or ()),
     }
 
 
@@ -158,6 +161,7 @@ def shell_execute(command: str, user_id: str =  DEFAULT_USER_ID, workspace_id: s
                 timeout_seconds=float(config["timeout_seconds"]),
                 max_output_bytes=config["max_output_kb"] * 1024,
                 max_write_bytes=config["max_write_mb"] * 1024 * 1024,
+                env_allow=tuple(config.get("env_allow", ())),
             ),
             user_id=user_id,
         )

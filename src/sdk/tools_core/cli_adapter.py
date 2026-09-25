@@ -80,12 +80,17 @@ class CLIToolAdapter:
         # SB1-4: transport through the SandboxBackend seam (env scrubbed on
         # soft backends; cwd here is the process cwd — CLI agents are
         # workspace-agnostic).
+        from src.config import get_settings
         from src.sdk.sandbox import SandboxLimits, get_sandbox_backend
 
+        sandbox_cfg = getattr(get_settings(), "sandbox", None)
         result = get_sandbox_backend().run(
             cmd,
             Path.cwd(),
-            SandboxLimits(timeout_seconds=float(timeout)),
+            SandboxLimits(
+                timeout_seconds=float(timeout),
+                env_allow=tuple(getattr(sandbox_cfg, "env_allow", ()) or ()),
+            ),
         )
         if result.timed_out:
             # Issue #24: raise instead of returning -2 — a tuple return would

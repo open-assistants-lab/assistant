@@ -32,7 +32,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from pydantic import TypeAdapter
 
@@ -887,6 +887,42 @@ class AgentLoop:
                 store = SQLiteReceiptStore(path)
             self._execution_kernel = ExecutionKernel(store)
         return self._execution_kernel
+
+    def load_indexed_tool(self, tool_name: str) -> ToolDefinition | None:
+        """Load an indexed tool into this loop without executing it."""
+        if self._tool_index is None or not self._tool_allowed(tool_name):
+            return None
+        td = self._tool_index.get_definition(tool_name)
+        if td is None:
+            return None
+        reconstruct = self._tool_index.get_reconstruct(tool_name)
+        tool_type = self._tool_index.get_tool_type(tool_name) or "unknown"
+        if tool_type == "native":
+            deployment_disabled = getattr(self, "_native_tool_deployment_disabled", None)
+            if deployment_disabled is not None and deployment_disabled(tool_name):
+                return None
+            from src.sdk.native_tools import get_native_tools as _get_native_tools
+
+            td = next((native for native in _get_native_tools() if native.name == tool_name), None)
+        elif tool_type == "custom":
+            from src.sdk.tool_index import _rebuild_custom_function
+
+            td = _rebuild_custom_function(
+                td,
+                reconstruct,
+                self.user_id or DEFAULT_USER_ID,
+                self.workspace_id or "personal",
+            )
+        elif tool_type == "mcp":
+            mcp_bridge = getattr(self, "_mcp_bridge", None)
+            resolved = mcp_bridge.get_tool_definition(tool_name) if mcp_bridge else None
+            td = resolved
+        if td is None:
+            return None
+        resolved_definition = cast(ToolDefinition, td)
+        self._register_tool_definition(resolved_definition)
+        self._recently_used.add(tool_name)
+        return resolved_definition
 
     async def _try_lazy_load(self, tc: ToolCall) -> ToolResult | None:
         """Try to lazy-load a tool from the index and reconstruct its function."""

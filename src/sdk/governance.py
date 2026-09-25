@@ -35,7 +35,7 @@ from src.sdk.session_events import (
 )
 from src.sdk.tool_results import KILLED_MARKER, TIMEOUT_MARKER, CommandKilledError
 from src.sdk.tools import ToolResult
-from src.storage.paths import DataPaths
+from src.storage.paths import DEFAULT_USER_ID, DataPaths
 
 #: Outcomes a consumed proposal can carry. `status` stays 'executed' — it means
 #: "approved and consumed, terminal" and replay_resume depends on it — while
@@ -215,7 +215,8 @@ class GovernanceService:
 
         governance = getattr(get_settings(), "governance", None)
         admin_permissions = getattr(governance, "permissions", None) or {}
-        fallback = self._default_permission(tool_name)
+        workspace_id = str(tool_input.get("workspace_id") or "personal")
+        fallback = self._default_permission(tool_name, user_id=user_id, workspace_id=workspace_id)
         return PermissionPolicy(admin=admin_permissions, user=user_permissions).resolve(
             tool_name, tool_input, fallback=fallback
         )
@@ -225,7 +226,12 @@ class GovernanceService:
         return self.resolve_permission_for_call(user_id, tool_name, {})
 
     @staticmethod
-    def _default_permission(tool_name: str) -> str:
+    def _default_permission(
+        tool_name: str,
+        *,
+        user_id: str = DEFAULT_USER_ID,
+        workspace_id: str = "personal",
+    ) -> str:
         if tool_name == "shell_execute":
             return "ask"
         try:
@@ -235,6 +241,19 @@ class GovernanceService:
         except Exception:
             definition = None
         if definition is not None and getattr(definition.annotations, "requires_approval", False):
+            return "ask"
+        try:
+            from src.sdk.tools_custom import get_custom_tools
+
+            custom_definition = next(
+                (x for x in get_custom_tools(user_id, workspace_id) if x.name == tool_name),
+                None,
+            )
+        except Exception:
+            custom_definition = None
+        if custom_definition is not None and getattr(
+            custom_definition.annotations, "requires_approval", False
+        ):
             return "ask"
         return "allow"
 

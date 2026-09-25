@@ -28,6 +28,7 @@ def _workspace_root(user_id: str, workspace_id: str) -> Path:
 def _get_limits() -> SandboxLimits:
     settings = get_settings()
     shell_cfg = getattr(settings, "shell_tool", None)
+    sandbox_cfg = getattr(settings, "sandbox", None)
     timeout = getattr(shell_cfg, "timeout_seconds", 30) if shell_cfg else 30
     max_kb = getattr(shell_cfg, "max_output_kb", 100) if shell_cfg else 100
     max_write_mb = getattr(shell_cfg, "max_write_mb", 64) if shell_cfg else 64
@@ -35,6 +36,7 @@ def _get_limits() -> SandboxLimits:
         timeout_seconds=float(timeout),
         max_output_bytes=max_kb * 1024,
         max_write_bytes=max_write_mb * 1024 * 1024,
+        env_allow=tuple(getattr(sandbox_cfg, "env_allow", ()) or ()),
     )
 
 

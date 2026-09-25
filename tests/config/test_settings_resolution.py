@@ -46,6 +46,52 @@ def test_shell_interpreters_are_not_enabled_by_default(fresh_settings):
     assert "node" not in cfg.shell_tool.allowed_commands
 
 
+def test_legacy_governance_tiers_migrate_to_permissions(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+agent:
+  model: ollama-cloud:test
+governance:
+  enabled: true
+  tiers:
+    custom_write: explicit
+    custom_deny: hard_block
+    custom_allow: allow
+""".strip()
+    )
+    monkeypatch.setattr(settings_module, "validate_startup_model_references", lambda config: None)
+
+    config = settings_module.AppConfig.from_yaml(config_path)
+
+    assert config.governance.permissions["tools"] == {
+        "custom_write": "ask",
+        "custom_deny": "deny",
+        "custom_allow": "allow",
+    }
+    assert not hasattr(config.governance, "tiers")
+
+
+def test_conflicting_legacy_and_new_governance_permissions_fail_closed(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+agent:
+  model: ollama-cloud:test
+governance:
+  tiers:
+    custom_write: explicit
+  permissions:
+    tools:
+      custom_write: deny
+""".strip()
+    )
+    monkeypatch.setattr(settings_module, "validate_startup_model_references", lambda config: None)
+
+    with pytest.raises(ValueError, match="governance.*tiers.*permissions"):
+        settings_module.AppConfig.from_yaml(config_path)
+
+
 def test_env_api_port_beats_yaml(monkeypatch, fresh_settings):
     """Deployment (compose API_PORT=8000) must win over yaml api.port."""
     monkeypatch.setenv("API_PORT", "8123")

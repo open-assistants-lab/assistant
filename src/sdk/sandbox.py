@@ -128,6 +128,7 @@ class SandboxLimits:
     # max_output_bytes killed legitimate file work at ~800 KB.
     max_write_bytes: int = 64 * 1024 * 1024
     env_mode: str = "scrubbed"  # "scrubbed" | "inherit"
+    env_allow: tuple[str, ...] = ()
     memory_mb: int = 512  # SB1 review P1: RLIMIT_AS cap
 
 
@@ -206,12 +207,19 @@ class SandboxBackend(Protocol):
     def teardown(self) -> None: ...
 
 
-def scrub_env(mode: str = "scrubbed") -> dict[str, str]:
+def scrub_env(
+    mode: str = "scrubbed",
+    allowlist: tuple[str, ...] | list[str] = (),
+) -> dict[str, str]:
     """Build the child-process environment (audit-grade: no secrets leak)."""
     if mode == "inherit":
         return dict(os.environ)
+    explicit = {str(key) for key in allowlist}
     env: dict[str, str] = {}
     for key, value in os.environ.items():
+        if key in explicit:
+            env[key] = value
+            continue
         if _ENV_DENY_PATTERNS.search(key):
             continue
         if key in _ENV_ALLOWLIST or key.endswith(("_DIR", "_ROOT", "_HOST")):
@@ -301,7 +309,7 @@ class SoftSandboxBackend:
         user_id: str | None = None,
     ) -> SandboxResult:
         lim = limits or SandboxLimits()
-        env = scrub_env(lim.env_mode)
+        env = scrub_env(lim.env_mode, lim.env_allow)
         if env_extra:
             env.update(env_extra)
         # SB1-2 security rule: resolve the drop identity from settings (env
@@ -493,7 +501,7 @@ class BwrapSandboxBackend:
                 "idmapped workspace ownership is provisioned; use runc."
             )
         lim = limits or SandboxLimits()
-        env = scrub_env(lim.env_mode)
+        env = scrub_env(lim.env_mode, lim.env_allow)
         if env_extra:
             env.update(env_extra)
         # Never expose a host home/runtime path inside the sandbox.

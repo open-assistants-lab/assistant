@@ -63,6 +63,10 @@ observability:
     enabled: true
     json_dir: data/logs
     level: info
+sandbox:
+  # Explicit deployment-only variables available to sandboxed commands.
+  # Never add provider/API secrets unless a custom tool requires them.
+  env_allow: []
 shell_tool:
   # shell_execute is approval-required when governance is enabled.
   # Add interpreters or other broad capabilities only as explicit deployment opt-ins.

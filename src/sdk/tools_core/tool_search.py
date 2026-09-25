@@ -82,7 +82,13 @@ def tool_search(description: str, user_id: str =  DEFAULT_USER_ID) -> str:
     except Exception:
         caps = {}
     ranked = _eligible_results(idx, description, settings, caps)
-    results = [(name, desc) for name, desc, _ in ranked]
+    results: list[tuple[str, str]] = []
+    for name, desc, _ in ranked:
+        # A discovered tool must be present in the next model request's live
+        # registry; otherwise the provider rejects the call before lazy loading
+        # can occur and the model retries tool_search until the iteration cap.
+        if loop.load_indexed_tool(name) is not None:
+            results.append((name, desc))
     if not results:
         return f"No tools found matching '{description}'. Try different keywords."
 

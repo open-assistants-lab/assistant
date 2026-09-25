@@ -64,11 +64,14 @@ def run_custom_command(
     from src.sdk.tool_results import format_output, raise_command_killed, raise_timeout
     from src.storage.paths import get_paths
 
-    cfg = getattr(get_settings(), "shell_tool", None)
+    settings = get_settings()
+    cfg = getattr(settings, "shell_tool", None)
+    sandbox_cfg = getattr(settings, "sandbox", None)
     limits = SandboxLimits(
         timeout_seconds=timeout_seconds,
         max_output_bytes=int(getattr(cfg, "max_output_kb", 100)) * 1024,
         max_write_bytes=int(getattr(cfg, "max_write_mb", 64)) * 1024 * 1024,
+        env_allow=tuple(getattr(sandbox_cfg, "env_allow", ()) or ()),
     )
     root_path = get_paths(user_id, workspace_id=workspace_id).workspace_files_dir()
     root_path.mkdir(parents=True, exist_ok=True)

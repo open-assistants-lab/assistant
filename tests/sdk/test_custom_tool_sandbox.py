@@ -50,6 +50,25 @@ def scoped_paths(tmp_path, monkeypatch):
     return get_paths
 
 
+def test_custom_command_receives_explicit_sandbox_secret_allowlist(
+    tmp_path, scoped_paths, monkeypatch
+):
+    from src.sdk.tools_custom import run_custom_command
+
+    monkeypatch.setenv("JEN_BRIDGE_KEY", "bridge-secret")
+    monkeypatch.setattr(
+        "src.config.get_settings",
+        lambda: SimpleNamespace(
+            shell_tool=SimpleNamespace(max_output_kb=100, max_write_mb=64),
+            sandbox=SimpleNamespace(env_allow=["JEN_BRIDGE_KEY"]),
+        ),
+    )
+
+    result = run_custom_command('printf %s "$JEN_BRIDGE_KEY"', "alice")
+
+    assert result == "bridge-secret"
+
+
 def make_tool(tmp_path, mode, command, annotations=None):
     annotations = annotations or {}
     if mode == "reconstructed":

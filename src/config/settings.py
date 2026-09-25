@@ -472,6 +472,10 @@ class SandboxConfig(_BaseSettings):
     uid_range: int = Field(
         default=1000, description="Size of the per-user sandbox uid range"
     )
+    env_allow: list[str] = Field(
+        default_factory=list,
+        description="Explicit environment variable names allowed in sandboxed child processes.",
+    )
 
     model_config = SettingsConfigDict(env_prefix="SANDBOX_")
 
@@ -568,6 +572,51 @@ class PricingConfig(_BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PRICING_")
 
 
+_LEGACY_GOVERNANCE_TIER_MAP = {
+    "allow": "allow",
+    "autonomous": "allow",
+    "ask": "ask",
+    "explicit": "ask",
+    "deny": "deny",
+    "hard_block": "deny",
+}
+
+
+def _migrate_legacy_governance(data: dict[str, Any]) -> None:
+    """Migrate the pre-0.6.18 governance.tiers key before model parsing."""
+    governance = data.get("governance")
+    if not isinstance(governance, dict) or "tiers" not in governance:
+        return
+    legacy = governance.get("tiers")
+    if not isinstance(legacy, dict):
+        raise ValueError("governance.tiers must be a mapping of tool names to permissions")
+    permissions = governance.get("permissions")
+    if permissions is not None and not isinstance(permissions, dict):
+        raise ValueError("governance.permissions must be a mapping")
+    current = dict(permissions or {})
+    tools = dict(current.get("tools") or {})
+    for tool_name, tier in legacy.items():
+        if not isinstance(tool_name, str) or not isinstance(tier, str):
+            raise ValueError("governance.tiers entries must map tool names to permissions")
+        mapped = _LEGACY_GOVERNANCE_TIER_MAP.get(tier.strip().lower())
+        if mapped is None:
+            raise ValueError(
+                f"unknown legacy governance.tiers value for {tool_name!r}: {tier!r}"
+            )
+        existing = tools.get(tool_name)
+        if existing is not None and str(existing).strip().lower() != mapped:
+            raise ValueError(
+                f"conflicting governance.tiers and governance.permissions entries for {tool_name!r}"
+            )
+        tools[tool_name] = mapped
+    current["tools"] = tools
+    governance["permissions"] = current
+    governance.pop("tiers", None)
+    logging.getLogger(__name__).warning(
+        "Migrated deprecated governance.tiers to governance.permissions.tools"
+    )
+
+
 class AppConfig(_BaseSettings):
     """Main application configuration."""
 
@@ -634,6 +683,8 @@ class AppConfig(_BaseSettings):
                 loaded = yaml.safe_load(f)
             if loaded:
                 data = loaded
+
+        _migrate_legacy_governance(data)
 
         # Bare AGENT (set by opencode/agent runtimes) collides with the nested agent config field.
         _drop_colliding_env()

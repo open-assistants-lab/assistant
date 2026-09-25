@@ -68,6 +68,13 @@ class TestSoftBackend:
         assert "MY_SESSION_TOKEN" not in env
         assert env["PATH"] == "/usr/bin"
 
+    def test_explicit_secret_allowlist_is_visible_to_child(self, monkeypatch):
+        monkeypatch.setenv("JEN_BRIDGE_KEY", "bridge-secret")
+
+        env = scrub_env(allowlist=("JEN_BRIDGE_KEY",))
+
+        assert env["JEN_BRIDGE_KEY"] == "bridge-secret"
+
     def test_write_outside_workspace_rejected(self, tmp_path):
         b = SoftSandboxBackend()
         outside = tmp_path.parent / "outside.txt"
