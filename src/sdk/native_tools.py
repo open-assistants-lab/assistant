@@ -58,6 +58,7 @@ from src.sdk.tools_core.filesystem import (
 )
 from src.sdk.tools_core.mcp import (
     mcp_list,
+    mcp_proxy,
     mcp_reload,
     mcp_tools,
 )
@@ -269,6 +270,8 @@ def _register_all() -> None:
     if not _desktop_excluded("summarize_session"):
         registry.register(summarize_session)
 
+    if not _desktop_excluded("mcp_proxy"):
+        registry.register(mcp_proxy)
     if not _desktop_excluded("mcp_list"):
         registry.register(mcp_list)
     if not _desktop_excluded("mcp_reload"):

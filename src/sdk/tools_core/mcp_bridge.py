@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import inspect
 import logging
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 from src.sdk.tools import ToolAnnotations, ToolDefinition, ToolRegistry, ToolResult
 from src.sdk.tools_core.mcp_manager import MCPManager, get_mcp_manager
@@ -128,6 +129,91 @@ class MCPToolBridge:
         if ensure is not None and inspect.iscoroutinefunction(ensure):
             return await ensure(server_name, force_reconnect=force_reconnect)
         return await manager.get_connection(server_name)
+
+    def _resolve_direct_names(
+        self, configured: set[str]
+    ) -> tuple[set[str], set[str]]:
+        manager = self._get_manager()
+        cached_metadata = getattr(manager, "cached_metadata", None)
+        records: list[dict[str, Any]] = (
+            cast(list[dict[str, Any]], list(cached_metadata()))
+            if callable(cached_metadata)
+            else []
+        )
+        bare = {name for name in configured if "/" not in name and "__" not in name}
+        bare_counts: dict[str, int] = {}
+        for record in records:
+            for metadata in record.get("tools", []) or []:
+                name = str(metadata.get("name") or "")
+                if name in bare:
+                    bare_counts[name] = bare_counts.get(name, 0) + 1
+
+        selected: set[str] = set()
+        ambiguous: set[str] = set()
+        for record in records:
+            server_name = str(record.get("server_name") or "")
+            for metadata in record.get("tools", []) or []:
+                tool_name = str(metadata.get("name") or "")
+                namespaced = _mcp_tool_name(server_name, tool_name)
+                if (
+                    namespaced in configured
+                    or f"{server_name}/{tool_name}" in configured
+                    or f"{server_name}__{tool_name}" in configured
+                    or (tool_name in bare and bare_counts.get(tool_name) == 1)
+                ):
+                    selected.add(namespaced)
+                elif tool_name in bare and bare_counts.get(tool_name, 0) > 1:
+                    ambiguous.add(tool_name)
+        return selected, ambiguous
+
+    async def sync_direct_tools(self, direct_tools: set[str] | list[str]) -> dict[str, list[str]]:
+        """Promote configured direct tools and remove definitions that are stale."""
+        configured = set(direct_tools)
+        allowed, ambiguous = self._resolve_direct_names(configured)
+        old_names = set(self._tool_to_server)
+        for name in old_names - allowed:
+            self._registry.remove(name)
+            self._tool_to_server.pop(name, None)
+        await self.discover_cached(allowed)
+        new_names = set(self._tool_to_server)
+
+        from src.sdk.runner import refresh_user_tool_registries
+
+        refresh_user_tool_registries(self.user_id, old_names | new_names)
+        return {
+            "added": sorted(new_names - old_names),
+            "removed": sorted(old_names - new_names),
+            "ambiguous": sorted(ambiguous),
+        }
+
+    async def discover_cached(self, allowed_names: set[str] | None = None) -> int:
+        """Promote allowlisted tools from durable metadata without starting MCP."""
+        manager = self._get_manager()
+        cached_metadata = getattr(manager, "cached_metadata", None)
+        records: list[dict[str, Any]] = (
+            cast(list[dict[str, Any]], list(cached_metadata()))
+            if callable(cached_metadata)
+            else []
+        )
+        total = 0
+        for record in records:
+            server_name = str(record.get("server_name") or "")
+            for metadata in record.get("tools", []) or []:
+                namespaced = _mcp_tool_name(server_name, str(metadata.get("name") or ""))
+                if allowed_names is not None and namespaced not in allowed_names:
+                    continue
+                mcp_tool = SimpleNamespace(
+                    name=metadata.get("name", ""),
+                    description=metadata.get("description", "") or "",
+                    inputSchema=metadata.get("inputSchema", {}) or {"type": "object"},
+                    annotations=metadata.get("annotations"),
+                )
+                if self._registry.has(namespaced):
+                    self._registry.remove(namespaced)
+                self._registry.register(self._convert_mcp_tool(namespaced, mcp_tool, server_name))
+                self._tool_to_server[namespaced] = server_name
+                total += 1
+        return total
 
     async def discover(self) -> int:
         """Discover tools from all MCP servers and convert to ToolDefinitions.

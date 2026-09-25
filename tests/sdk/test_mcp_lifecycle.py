@@ -18,6 +18,10 @@ def _tool(name: str):
     )
 
 
+def _server_config():
+    return SimpleNamespace(command="demo", args=[], transport="stdio", url=None, headers={}, env={})
+
+
 @pytest.mark.asyncio
 async def test_tool_call_reconnects_and_rediscovers_changed_live_catalog(monkeypatch):
     manager = MCPManager("reconnect-user")
@@ -79,6 +83,113 @@ async def test_failed_reconnect_returns_clear_reconnecting_state(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_failed_tool_discovery_closes_candidate_without_publishing(monkeypatch):
+    manager = MCPManager("candidate-user")
+    stack = AsyncMock(spec=AsyncExitStack)
+    session = AsyncMock()
+    session.list_tools.side_effect = RuntimeError("discovery failed")
+    candidate = MCPServerConnection("demo", session, stack)
+    monkeypatch.setattr(manager, "_create_connection", AsyncMock(return_value=candidate))
+
+    await manager._start_server("demo", _server_config())
+
+    assert manager._connections == {}
+    stack.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_deleted_config_stops_existing_connection(monkeypatch):
+    manager = MCPManager("deleted-config-user")
+    connection = MCPServerConnection("demo", AsyncMock(), AsyncMock(spec=AsyncExitStack))
+    manager._connections["demo"] = connection
+    manager._config_mtime = 1.0
+    monkeypatch.setattr(
+        "src.sdk.tools_core.mcp_manager.get_config_mtime", lambda _user_id: 2.0
+    )
+    monkeypatch.setattr(
+        "src.sdk.tools_core.mcp_manager.load_mcp_config", lambda _user_id: None
+    )
+
+    await manager._ensure_current_config()
+
+    assert manager._connections == {}
+
+
+@pytest.mark.asyncio
+async def test_health_does_not_start_lazy_server(monkeypatch):
+    manager = MCPManager("health-side-effect-user")
+    ensure_started = AsyncMock()
+    monkeypatch.setattr(manager, "_ensure_started", ensure_started)
+    monkeypatch.setattr(
+        "src.sdk.tools_core.mcp_manager.load_mcp_config", lambda _user_id: None
+    )
+
+    await manager.health()
+
+    ensure_started.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_close_mcp_manager_invokes_cleanup(monkeypatch):
+    from src.sdk.tools_core import mcp_manager as module
+
+    manager = MCPManager("close-user")
+    cleanup = AsyncMock()
+    monkeypatch.setattr(manager, "cleanup", cleanup)
+    monkeypatch.setitem(module._MCP_MANAGERS, "close-user", manager)
+
+    await module.close_mcp_manager("close-user")
+
+    cleanup.assert_awaited_once()
+    assert "close-user" not in module._MCP_MANAGERS
+
+
+@pytest.mark.asyncio
+async def test_reap_stale_closes_only_idle_connections() -> None:
+    manager = MCPManager("reap-user")
+    fresh = MCPServerConnection("fresh", AsyncMock(), AsyncExitStack())
+    stale = MCPServerConnection("stale", AsyncMock(), AsyncExitStack())
+    stale.last_used -= 100
+    manager._connections = {"fresh": fresh, "stale": stale}
+
+    reaped = await manager.reap_stale(10)
+
+    assert reaped == ["stale"]
+    assert "fresh" in manager._connections
+    assert "stale" not in manager._connections
+
+
+@pytest.mark.asyncio
+async def test_health_reports_cached_metadata_without_starting_server(monkeypatch):
+    manager = MCPManager("health-cache-user")
+    monkeypatch.setattr(
+        "src.sdk.tools_core.mcp_manager.load_mcp_config",
+        lambda user_id: SimpleNamespace(mcpServers={"cached": SimpleNamespace()}),
+    )
+    monkeypatch.setattr(
+        manager,
+        "cached_metadata",
+        lambda: [
+            {
+                "server_name": "cached",
+                "source_path": "/project/.mcp.json",
+                "source_type": "project",
+                "last_refresh": "2026-09-25T12:00:00Z",
+                "tools": [{"name": "read"}],
+            }
+        ],
+    )
+    manager._ensure_started = AsyncMock(side_effect=AssertionError("must stay lazy"))
+
+    health = await manager.health()
+
+    assert health["exposure"] in {"direct", "hybrid", "proxy"}
+    assert health["servers"]["cached"]["cache_status"] == "cached"
+    assert health["servers"]["cached"]["tool_count"] == 1
+    manager._ensure_started.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_health_distinguishes_connected_stale_and_absent(monkeypatch):
     manager = MCPManager("health-user")
     healthy = MCPServerConnection("healthy", AsyncMock(), AsyncExitStack())
@@ -120,9 +231,15 @@ async def test_bootstrap_rediscovery_shows_new_server_tools_without_config_chang
     conn.tools = [_tool("old")]
     manager._connections["demo"] = conn
     monkeypatch.setattr(manager, "_ensure_started", AsyncMock())
+    config = SimpleNamespace(mcpServers={"demo": SimpleNamespace()})
     monkeypatch.setattr(
         "src.sdk.tools_core.mcp_manager.load_mcp_config",
-        lambda user_id: SimpleNamespace(mcpServers={"demo": SimpleNamespace()}),
+        lambda user_id: config,
+    )
+    manager._config_mtime = 1.0
+    manager._config_hash = manager._compute_config_hash(config)
+    monkeypatch.setattr(
+        "src.sdk.tools_core.mcp_manager.get_config_mtime", lambda _user_id: 1.0
     )
 
     bridge = MCPToolBridge("bootstrap-user")
@@ -147,6 +264,16 @@ async def test_bootstrap_rediscovery_rate_limited_per_user(monkeypatch):
     conn.tools = [_tool("old")]
     manager._connections["demo"] = conn
     monkeypatch.setattr(manager, "_ensure_started", AsyncMock())
+    config = SimpleNamespace(mcpServers={"demo": SimpleNamespace()})
+    monkeypatch.setattr(
+        "src.sdk.tools_core.mcp_manager.load_mcp_config",
+        lambda user_id: config,
+    )
+    manager._config_mtime = 1.0
+    manager._config_hash = manager._compute_config_hash(config)
+    monkeypatch.setattr(
+        "src.sdk.tools_core.mcp_manager.get_config_mtime", lambda _user_id: 1.0
+    )
 
     await manager.rediscover()
     assert session.list_tools.called

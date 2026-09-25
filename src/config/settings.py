@@ -514,6 +514,11 @@ class MCPConfig(_BaseSettings):
 
     enabled: bool = True
     idle_timeout_minutes: int = 30
+    exposure: Literal["direct", "hybrid", "proxy"] = "direct"
+    direct_tools: list[str] = Field(default_factory=list)
+    cache_ttl_seconds: int = Field(default=86_400, ge=60, le=2_592_000)
+    refresh_timeout_seconds: float = Field(default=5.0, gt=0, le=120)
+    max_result_chars: int = Field(default=20_000, ge=1_000, le=200_000)
 
     model_config = SettingsConfigDict(env_prefix="MCP_")
 
