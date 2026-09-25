@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.6.20 — 2026-09-25
+
+### Removed
+- Removed the runtime companion concept: proactive check-in scheduler, companion notifications/memory APIs, companion configuration, and companion storage aliases. The separate durable subagent scheduler remains available for the scheduled-subagent design.
+
 ## v0.6.19 — 2026-09-25
 
 ### Fixed

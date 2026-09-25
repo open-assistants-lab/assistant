@@ -89,6 +89,9 @@ class TestV1Message:
 
 
 class TestV1PrefixedRouters:
+    def test_scheduler_routes_are_not_mounted(self, client):
+        assert not any(path.startswith("/scheduler") for path in _paths(client.app))
+
     def test_v1_tools_equals_legacy(self, client):
         legacy = client.get("/tools")
         v1 = client.get("/v1/tools")

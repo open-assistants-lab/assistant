@@ -421,7 +421,7 @@ class SubagentCoordinator:
         self._write_runtime_policy(agent_path / "runtime-policy.json", selection_mode)
         (agent_path / "PROFILE.md").write_text(dumps_profile(profile))
 
-        # Write companion files
+        # Write profile metadata files
         provider_path = agent_path / "provider.json"
         schema_path = agent_path / "output-schema.json"
         if profile.provider_options:
@@ -473,7 +473,7 @@ class SubagentCoordinator:
         if selection_mode is not ToolSelectionMode.NONE:
             self._write_runtime_policy(agent_path / "runtime-policy.json", selection_mode)
 
-        # Write companion files
+        # Write profile metadata files
         provider_path = agent_path / "provider.json"
         schema_path = agent_path / "output-schema.json"
         if updated.provider_options:

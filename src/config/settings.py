@@ -509,14 +509,6 @@ class EmailSyncConfig(_BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EMAIL_SYNC_")
 
 
-class SchedulerConfig(_BaseSettings):
-    """Agent scheduler configuration."""
-
-    enabled: bool = False
-
-    model_config = SettingsConfigDict(env_prefix="COMPANION_")
-
-
 class MCPConfig(_BaseSettings):
     """MCP (Model Context Protocol) configuration."""
 
@@ -642,7 +634,6 @@ class AppConfig(_BaseSettings):
 
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     pricing: PricingConfig = Field(default_factory=PricingConfig)
-    companion: SchedulerConfig = Field(default_factory=SchedulerConfig)
     email: EmailConfig = Field(default_factory=EmailConfig)
     connectkit: ConnectKitConfig = Field(default_factory=ConnectKitConfig)
     auth: AuthConfig = Field(default_factory=AuthConfig)

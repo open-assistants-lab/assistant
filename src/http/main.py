@@ -27,7 +27,6 @@ from src.http.routers import (
     mcp_router,
     memories_router,
     profile_router,
-    scheduler_router,
     skills_router,
     subagents_router,
     tenancy_router,
@@ -92,14 +91,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             pass
 
-    # Start companion scheduler if enabled
     try:
         from src.app_logging import get_logger
-        settings = get_settings()
-        if getattr(settings.companion, "enabled", False):
-            pass  # Companion scheduler disabled
 
-        # Register default trigger handler for loop 3 (event-driven)
+        # Register default trigger handlers used by webhooks, reruns, and
+        # other event-driven execution paths.
         try:
             from src.sdk.loops.events import default_trigger_handler, get_trigger_registry
             registry = get_trigger_registry()
@@ -136,7 +132,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     print("HTTP server ready (SDK runtime)")
     yield
 
-    # Only companion cleanup: token refresh task
+    # Stop background token refresh and operation dispatch.
     try:
         from src.app_logging import get_logger
 
@@ -349,8 +345,6 @@ app.include_router(tenancy_router)
 app.include_router(auth_oidc_router)
 app.include_router(governance_router)
 app.include_router(mcp_router)
-if not desktop_mode_active():
-    app.include_router(scheduler_router)
 app.include_router(conversation_router)
 app.include_router(memories_router)
 app.include_router(user_prompt_router)

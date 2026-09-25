@@ -1140,7 +1140,7 @@ class TestSubagentCoordinator:
         assert loaded.output_schema_def == schema
 
     @pytest.mark.asyncio
-    async def test_update_can_clear_companion_schema_and_provider_options(self, mock_paths):
+    async def test_update_can_clear_output_schema_and_provider_options(self, mock_paths):
         from agentprofile.models import AgentProfile
 
         from src.sdk.coordinator import SubagentCoordinator
