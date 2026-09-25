@@ -6,6 +6,7 @@ Supports both stdio and streamable HTTP transports.
 
 import asyncio
 import hashlib
+import json
 import os
 import time
 from collections.abc import Awaitable, Callable
@@ -59,6 +60,9 @@ class MCPManager:
         # loop creation forces a live tools/list check, but a burst of new
         # sessions must not hammer every server 60x in a minute.
         self._last_rediscovery: float = 0.0
+        self._lifecycle_generation: int = 0
+        self._reload_lock = asyncio.Lock()
+        self._closed = False
 
     _REDISCOVERY_COOLDOWN_SECONDS: float = 60.0
 
@@ -102,11 +106,41 @@ class MCPManager:
 
         self._idle_task = asyncio.create_task(_monitor())
 
-    async def _ensure_started(self) -> None:
+    async def _ensure_current_config(self) -> None:
+        """Reconcile changed, missing, or invalid MCP configuration."""
+        current_mtime = get_config_mtime(self.user_id)
+        config = load_mcp_config(self.user_id)
+        current_hash = self._compute_config_hash(config) if config is not None else ""
+
+        if (
+            current_mtime == self._config_mtime
+            and current_hash == self._config_hash
+            and (config is not None or not self._connections)
+        ):
+            return
         if not self._is_enabled():
             return
 
-        if self._connections:
+        async with self._reload_lock:
+            current_mtime = get_config_mtime(self.user_id)
+            config = load_mcp_config(self.user_id)
+            current_hash = self._compute_config_hash(config) if config is not None else ""
+            if (
+                current_mtime == self._config_mtime
+                and current_hash == self._config_hash
+                and (config is not None or not self._connections)
+            ):
+                return
+
+            self._lifecycle_generation += 1
+            await self._stop_all()
+            self._config_mtime = current_mtime
+            self._config_hash = current_hash
+            if config is None:
+                logger.info("mcp.no_config", {"user_id": self.user_id})
+
+    async def _ensure_started(self) -> None:
+        if not self._is_enabled() or self._connections:
             return
 
         config = load_mcp_config(self.user_id)
@@ -118,29 +152,62 @@ class MCPManager:
         self._config_hash = self._compute_config_hash(config)
 
         for server_name, server_config in config.mcpServers.items():
-            await self._start_server(server_name, server_config)
+            await self._start_server(
+                server_name, server_config, generation=self._lifecycle_generation
+            )
 
         await self._start_idle_monitor()
 
     def _compute_config_hash(self, config: Any) -> str:
-        data = config.model_dump_json()
+        if hasattr(config, "model_dump_json"):
+            data = config.model_dump_json()
+        else:
+            data = json.dumps(
+                config,
+                default=lambda value: getattr(value, "__dict__", str(value)),
+                sort_keys=True,
+            )
         return hashlib.md5(data.encode()).hexdigest()
 
-    async def _start_server(self, server_name: str, server_config: MCPServerConfig) -> None:
+    async def _start_server(
+        self,
+        server_name: str,
+        server_config: MCPServerConfig,
+        *,
+        generation: int | None = None,
+    ) -> None:
+        candidate: MCPServerConnection | None = None
         try:
             logger.info(
                 "mcp.starting_server", {"server": server_name, "command": server_config.command}
             )
-            conn = await self._create_connection(server_name, server_config)
-            self._connections[server_name] = conn
-
-            result = await conn.session.list_tools()
-            conn.tools = result.tools
-            conn.last_refresh = time.time()
+            candidate = await self._create_connection(server_name, server_config)
+            result = await candidate.session.list_tools()
+            candidate.tools = result.tools
+            candidate.last_refresh = time.time()
+            candidate.last_used = candidate.last_refresh
+            if generation is not None and generation != self._lifecycle_generation:
+                await candidate.aclose()
+                return
+            async with self._lock:
+                if generation is not None and generation != self._lifecycle_generation:
+                    stale = True
+                else:
+                    stale = False
+                    self._connections[server_name] = candidate
+            if stale:
+                await candidate.aclose()
+                return
             self._last_errors[server_name] = None
-
-            logger.info("mcp.server_started", {"server": server_name, "tools": len(conn.tools)})
+            self._last_used = time.time()
+            await self._notify_refreshed(server_name)
+            logger.info("mcp.server_started", {"server": server_name, "tools": len(candidate.tools)})
         except Exception as e:
+            if candidate is not None:
+                try:
+                    await candidate.aclose()
+                except Exception:
+                    pass
             self._last_errors[server_name] = str(e)
             logger.error(
                 "mcp.server_error",
@@ -174,6 +241,7 @@ class MCPManager:
         if now - self._last_rediscovery < cooldown:
             return
         self._last_rediscovery = now
+        await self._ensure_current_config()
         await self._ensure_started()
         connections = await self.snapshot_connections()
         for server_name, conn in connections.items():
@@ -207,6 +275,7 @@ class MCPManager:
         self, server_name: str, *, force_reconnect: bool = False
     ) -> MCPServerConnection | None:
         """Return a live connection, transparently reconnecting with bounded backoff."""
+        await self._ensure_current_config()
         await self._ensure_started()
         conn = await self.get_connection(server_name)
         stale = conn is not None and time.time() - conn.last_used > self._get_idle_timeout()
@@ -218,6 +287,8 @@ class MCPManager:
         existing = self._reconnect_tasks.get(server_name)
         if existing is not None and not existing.done():
             return await existing
+
+        generation = self._lifecycle_generation
 
         async def _reconnect() -> MCPServerConnection | None:
             config = load_mcp_config(self.user_id)
@@ -242,7 +313,14 @@ class MCPManager:
                     candidate.last_refresh = time.time()
                     candidate.last_used = candidate.last_refresh
                     async with self._lock:
-                        self._connections[server_name] = candidate
+                        if generation != self._lifecycle_generation:
+                            stale = True
+                        else:
+                            stale = False
+                            self._connections[server_name] = candidate
+                    if stale:
+                        await candidate.aclose()
+                        return None
                     self._last_errors[server_name] = None
                     self._last_used = time.time()
                     await self._notify_refreshed(server_name)
@@ -338,12 +416,9 @@ class MCPManager:
         if not self._is_enabled():
             return []
 
+        await self._ensure_current_config()
         async with self._lock:
             await self._ensure_started()
-
-        # Release lock for config check + restart (prevents deadlock with _stop_all)
-        if self._config_changed():
-            await self._restart_all()
 
         self._last_used = time.time()
 
@@ -419,16 +494,19 @@ class MCPManager:
 
     async def _restart_all(self) -> None:
         """Stop all servers and restart from config."""
-        logger.info("mcp.reloading", {"user_id": self.user_id})
-        await self._stop_all()
+        async with self._reload_lock:
+            self._lifecycle_generation += 1
+            logger.info("mcp.reloading", {"user_id": self.user_id})
+            await self._stop_all()
 
-        config = load_mcp_config(self.user_id)
-        if config:
+            config = load_mcp_config(self.user_id)
             self._config_mtime = get_config_mtime(self.user_id)
-            self._config_hash = self._compute_config_hash(config)
-
-            for server_name, server_config in config.mcpServers.items():
-                await self._start_server(server_name, server_config)
+            self._config_hash = self._compute_config_hash(config) if config is not None else ""
+            if config is not None:
+                for server_name, server_config in config.mcpServers.items():
+                    await self._start_server(
+                        server_name, server_config, generation=self._lifecycle_generation
+                    )
 
     async def _stop_all(self) -> None:
         async with self._lock:
@@ -439,21 +517,32 @@ class MCPManager:
             self._connections.clear()
 
     async def _stop_server(self, server_name: str) -> None:
-        if server_name in self._connections:
+        async with self._lock:
+            connection = self._connections.pop(server_name, None)
+        if connection is not None:
             try:
-                await self._connections[server_name].aclose()
+                await connection.aclose()
             except Exception:
                 pass
-            del self._connections[server_name]
-
         logger.info("mcp.server_stopped", {"server": server_name})
 
     async def cleanup(self) -> None:
         """Clean up all MCP resources."""
+        if self._closed:
+            return
+        self._closed = True
+        self._lifecycle_generation += 1
         if self._idle_task:
             self._idle_task.cancel()
             self._idle_task = None
+        tasks = [task for task in self._reconnect_tasks.values() if not task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._reconnect_tasks.clear()
         await self._stop_all()
+        self._refresh_listeners.clear()
 
     async def initialize(self) -> None:
         """Public initialize method (compatibility with old API)."""
@@ -465,3 +554,10 @@ def get_mcp_manager(user_id: str) -> MCPManager:
     if user_id not in _MCP_MANAGERS:
         _MCP_MANAGERS[user_id] = MCPManager(user_id)
     return _MCP_MANAGERS[user_id]
+
+
+async def close_mcp_manager(user_id: str) -> None:
+    """Close and remove a user's MCP manager from the process cache."""
+    manager = _MCP_MANAGERS.pop(user_id, None)
+    if manager is not None:
+        await manager.cleanup()
