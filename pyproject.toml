@@ -1,6 +1,6 @@
 [project]
 name = "assistant"
-version = "0.6.18"
+version = "0.6.19"
 description = "AI assistant agent with custom SDK runtime"
 requires-python = ">=3.11,<3.14"
 dependencies = [

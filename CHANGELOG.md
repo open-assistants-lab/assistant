@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.6.19 — 2026-09-25
+
+### Fixed
+- Explicit sandbox environment allowlists restore deployment-owned secrets for custom commands without inheriting the full process environment (#43).
+- Deprecated `governance.tiers` configuration is migrated explicitly to `governance.permissions.tools`; custom tools declaring `requires_approval` now fall back to approval instead of silently resolving to allow (#44).
+- `tool_search` now loads discovered native/indexed tools into the live loop so the next model request can call them directly, instead of advertising tools that remain absent from the callable schema (#45).
+
 ## v0.6.18 — 2026-09-25
 
 ### Fixed
