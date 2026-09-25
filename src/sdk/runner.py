@@ -566,12 +566,12 @@ async def create_sdk_loop(
             from src.sdk.tools_core.mcp_bridge import MCPToolBridge
 
             mcp_bridge = MCPToolBridge(user_id=user_id)
-            mcp_count = await mcp_bridge.discover()
+            if exposure == "hybrid":
+                mcp_count = await mcp_bridge.discover_cached(set(settings.mcp.direct_tools))
+            else:
+                mcp_count = await mcp_bridge.discover()
             if mcp_count > 0:
                 definitions = mcp_bridge.get_tool_definitions()
-                if exposure == "hybrid":
-                    allowed = set(settings.mcp.direct_tools)
-                    definitions = [td for td in definitions if td.name in allowed]
                 mcp_tools = [
                     td
                     for td in definitions
