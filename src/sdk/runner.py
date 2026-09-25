@@ -569,7 +569,8 @@ async def create_sdk_loop(
 
             mcp_bridge = MCPToolBridge(user_id=user_id)
             if exposure == "hybrid":
-                mcp_count = await mcp_bridge.discover_cached(direct_tools)
+                direct_result = await mcp_bridge.sync_direct_tools(direct_tools)
+                mcp_count = len(direct_result["added"])
             else:
                 mcp_count = await mcp_bridge.discover()
             if mcp_count > 0:
