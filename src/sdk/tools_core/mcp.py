@@ -7,6 +7,7 @@ All tools are now native async — no thread hack needed.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 from src.app_logging import get_logger
@@ -199,6 +200,16 @@ async def _mcp_list(user_id: str = "") -> str:
     from src.sdk.tools_core.mcp_manager import get_mcp_manager
 
     manager = get_mcp_manager(user_id)
+    if get_settings().mcp.exposure == "proxy":
+        records = _cached_records(manager)
+        lines = [
+            f"  - {record.get('server_name', '')}: cached "
+            f"({len(record.get('tools', []) or [])} tools)"
+            for record in records
+        ]
+        return "\n".join(["MCP Servers (cached):", *lines]) if lines else (
+            "No cached MCP servers. Run mcp_proxy(action='refresh') to connect."
+        )
     await manager.initialize()
     servers = await manager.list_servers()
 
@@ -261,7 +272,14 @@ async def _mcp_reload(user_id: str = "", session_id: str = "") -> ToolResult | s
             loop.unregister_tool(name)
         bridge._tool_to_server = {}
 
-        await bridge.discover()
+        exposure = get_settings().mcp.exposure
+        if exposure == "proxy":
+            # Proxy mode intentionally keeps the direct registry empty.
+            return f"{result} (proxy exposure active; direct MCP tools remain hidden)"
+        if exposure == "hybrid":
+            await bridge.discover_cached(set(get_settings().mcp.direct_tools))
+        else:
+            await bridge.discover()
         caps = load_user_capabilities(user_id)
         new_names: set[str] = set()
         for td in bridge.get_tool_definitions():
@@ -314,6 +332,25 @@ async def _mcp_tools(user_id: str = "", server_name: str = "") -> str:
     from src.sdk.tools_core.mcp_manager import get_mcp_manager
 
     manager = get_mcp_manager(user_id)
+    if get_settings().mcp.exposure in {"proxy", "hybrid"}:
+        tools = []
+        for record in _cached_records(manager):
+            if server_name and record.get("server_name") != server_name:
+                continue
+            for metadata in record.get("tools", []) or []:
+                tools.append(SimpleNamespace(**metadata))
+        if not tools:
+            return "No cached MCP tools available. Run mcp_proxy(action='refresh') first."
+        return "\n".join(
+            [
+                "Available MCP Tools (cached):",
+                *[
+                    f"  - {tool.name}: {(tool.description or 'No description')[:80]}"
+                    for tool in tools
+                ],
+            ]
+        )
+
     await manager.initialize()
     tools = await manager.get_tools(server_name if server_name else None)
 

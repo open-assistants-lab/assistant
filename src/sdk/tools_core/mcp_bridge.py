@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import inspect
 import logging
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 from src.sdk.tools import ToolAnnotations, ToolDefinition, ToolRegistry, ToolResult
 from src.sdk.tools_core.mcp_manager import MCPManager, get_mcp_manager
@@ -128,6 +129,35 @@ class MCPToolBridge:
         if ensure is not None and inspect.iscoroutinefunction(ensure):
             return await ensure(server_name, force_reconnect=force_reconnect)
         return await manager.get_connection(server_name)
+
+    async def discover_cached(self, allowed_names: set[str] | None = None) -> int:
+        """Promote allowlisted tools from durable metadata without starting MCP."""
+        manager = self._get_manager()
+        cached_metadata = getattr(manager, "cached_metadata", None)
+        records: list[dict[str, Any]] = (
+            cast(list[dict[str, Any]], list(cached_metadata()))
+            if callable(cached_metadata)
+            else []
+        )
+        total = 0
+        for record in records:
+            server_name = str(record.get("server_name") or "")
+            for metadata in record.get("tools", []) or []:
+                namespaced = _mcp_tool_name(server_name, str(metadata.get("name") or ""))
+                if allowed_names is not None and namespaced not in allowed_names:
+                    continue
+                mcp_tool = SimpleNamespace(
+                    name=metadata.get("name", ""),
+                    description=metadata.get("description", "") or "",
+                    inputSchema=metadata.get("inputSchema", {}) or {"type": "object"},
+                    annotations=metadata.get("annotations"),
+                )
+                if self._registry.has(namespaced):
+                    self._registry.remove(namespaced)
+                self._registry.register(self._convert_mcp_tool(namespaced, mcp_tool, server_name))
+                self._tool_to_server[namespaced] = server_name
+                total += 1
+        return total
 
     async def discover(self) -> int:
         """Discover tools from all MCP servers and convert to ToolDefinitions.

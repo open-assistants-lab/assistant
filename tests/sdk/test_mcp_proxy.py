@@ -9,6 +9,7 @@ import pytest
 
 from src.sdk.tools import ToolResult
 from src.sdk.tools_core import mcp as mcp_module
+from src.sdk.tools_core.mcp_results import mcp_result_to_tool_result
 
 
 class _Manager:
@@ -83,6 +84,19 @@ async def test_proxy_call_returns_structured_governed_result(monkeypatch) -> Non
     assert result.structured_content["outcome"] == "succeeded"
     assert result.structured_content["receipt_class"] == "mcp_proxy"
     assert manager.calls == [("demo", "read", {"id": "42"})]
+
+
+def test_proxy_result_is_bounded_and_truthful() -> None:
+    result = mcp_result_to_tool_result(
+        SimpleNamespace(content=[SimpleNamespace(text="x" * 20)], isError=False),
+        server_name="demo",
+        tool_name="read",
+        max_chars=10,
+    )
+
+    assert result.structured_content["outcome"] == "succeeded"
+    assert result.structured_content["truncated"] is True
+    assert len(result.content) < 40
 
 
 @pytest.mark.asyncio

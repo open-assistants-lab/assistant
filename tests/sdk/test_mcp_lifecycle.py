@@ -145,6 +145,36 @@ async def test_close_mcp_manager_invokes_cleanup(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_health_reports_cached_metadata_without_starting_server(monkeypatch):
+    manager = MCPManager("health-cache-user")
+    monkeypatch.setattr(
+        "src.sdk.tools_core.mcp_manager.load_mcp_config",
+        lambda user_id: SimpleNamespace(mcpServers={"cached": SimpleNamespace()}),
+    )
+    monkeypatch.setattr(
+        manager,
+        "cached_metadata",
+        lambda: [
+            {
+                "server_name": "cached",
+                "source_path": "/project/.mcp.json",
+                "source_type": "project",
+                "last_refresh": "2026-09-25T12:00:00Z",
+                "tools": [{"name": "read"}],
+            }
+        ],
+    )
+    manager._ensure_started = AsyncMock(side_effect=AssertionError("must stay lazy"))
+
+    health = await manager.health()
+
+    assert health["exposure"] in {"direct", "hybrid", "proxy"}
+    assert health["servers"]["cached"]["cache_status"] == "cached"
+    assert health["servers"]["cached"]["tool_count"] == 1
+    manager._ensure_started.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_health_distinguishes_connected_stale_and_absent(monkeypatch):
     manager = MCPManager("health-user")
     healthy = MCPServerConnection("healthy", AsyncMock(), AsyncExitStack())

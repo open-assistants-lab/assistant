@@ -36,6 +36,13 @@ filesystem:
 mcp:
   enabled: true
   idle_timeout_minutes: 30
+  # direct: current behavior; hybrid: proxy plus allowlisted direct tools;
+  # proxy: only the governed mcp_proxy tool is exposed.
+  exposure: direct
+  direct_tools: []
+  cache_ttl_seconds: 86400
+  refresh_timeout_seconds: 5.0
+  max_result_chars: 20000
 memory:
   checkpointer:
     enabled: false

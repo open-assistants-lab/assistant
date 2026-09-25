@@ -512,17 +512,22 @@ class MCPManager:
     async def list_servers(self) -> dict[str, Any]:
         """List configured MCP servers and their status."""
         config = load_mcp_config(self.user_id)
+        cached = {record.get("server_name"): record for record in self.cached_metadata()}
         servers = {}
 
         if config:
             for name, cfg in config.mcpServers.items():
                 conn = self._connections.get(name)
+                record = cached.get(name, {})
                 servers[name] = {
                     "command": cfg.command,
                     "args": cfg.args,
                     "transport": cfg.transport,
                     "running": conn is not None,
-                    "tool_count": len(conn.tools) if conn else 0,
+                    "tool_count": len(conn.tools) if conn else len(record.get("tools", []) or []),
+                    "cache_status": "cached" if record else "missing",
+                    "source_path": record.get("source_path"),
+                    "source_type": record.get("source_type"),
                 }
 
         return servers
@@ -534,10 +539,12 @@ class MCPManager:
         now = time.time()
         timeout = self._get_idle_timeout()
         connections = await self.snapshot_connections()
+        cached = {record.get("server_name"): record for record in self.cached_metadata()}
         names = set(configured) | set(connections) | set(self._last_errors)
         servers: dict[str, Any] = {}
         for name in sorted(names):
             conn = connections.get(name)
+            record = cached.get(name, {})
             configured_server = name in configured
             stale = conn is not None and now - conn.last_used > timeout
             connected = conn is not None
@@ -554,12 +561,25 @@ class MCPManager:
                 "connected": connected,
                 "degraded": status in {"stale", "degraded", "absent"},
                 "last_refresh": (
-                    datetime.fromtimestamp(conn.last_refresh, UTC).isoformat() if conn else None
+                    datetime.fromtimestamp(conn.last_refresh, UTC).isoformat()
+                    if conn
+                    else record.get("last_refresh")
                 ),
-                "tool_count": len(conn.tools) if conn else 0,
+                "tool_count": (
+                    len(conn.tools)
+                    if conn
+                    else len(record.get("tools", []) or [])
+                ),
+                "cache_status": "cached" if record else "missing",
+                "source_path": record.get("source_path"),
+                "source_type": record.get("source_type"),
                 "last_error": self._last_errors.get(name),
             }
-        return {"user_id": self.user_id, "servers": servers}
+        return {
+            "user_id": self.user_id,
+            "exposure": get_settings().mcp.exposure,
+            "servers": servers,
+        }
 
     async def reload(self) -> str:
         """Reload all MCP servers."""
