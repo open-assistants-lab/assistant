@@ -552,7 +552,9 @@ async def create_sdk_loop(
     t1 = time.monotonic()
 
     caps = _load_user_capabilities(user_id)
-    exposure = settings.mcp.exposure
+    mcp_settings = getattr(settings, "mcp", None)
+    exposure = str(getattr(mcp_settings, "exposure", "direct"))
+    direct_tools = set(getattr(mcp_settings, "direct_tools", []) or [])
     native_tools = filter_denied_native_tools(list(get_native_tools()), settings)
     if exposure == "direct":
         native_tools = [td for td in native_tools if td.name != "mcp_proxy"]
@@ -567,7 +569,7 @@ async def create_sdk_loop(
 
             mcp_bridge = MCPToolBridge(user_id=user_id)
             if exposure == "hybrid":
-                mcp_count = await mcp_bridge.discover_cached(set(settings.mcp.direct_tools))
+                mcp_count = await mcp_bridge.discover_cached(direct_tools)
             else:
                 mcp_count = await mcp_bridge.discover()
             if mcp_count > 0:
