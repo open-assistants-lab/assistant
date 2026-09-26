@@ -68,6 +68,10 @@ class MCPManager:
         self._lifecycle_generation: int = 0
         self._reload_lock = asyncio.Lock()
         self._closed = False
+        # Firewall I4: the last resolved exposure decision, reported by
+        # health() so an operator can answer "what can this model reach now?"
+        # even when the policy chose automatically rather than by config.
+        self._exposure_decision: dict[str, Any] | None = None
         self._cache = MCPToolMetadataCache(
             get_paths(self.user_id).user_dir / ".mcp-cache.json"
         )
@@ -502,6 +506,10 @@ class MCPManager:
         async with self._lock:
             return self._connections.get(server_name)
 
+    def record_exposure_decision(self, decision: dict[str, Any]) -> None:
+        """Record the most recent exposure resolution for health reporting."""
+        self._exposure_decision = dict(decision)
+
     def cached_metadata(self) -> list[dict[str, Any]]:
         """Return secret-free cached metadata without opening MCP connections."""
         return self._cache.records()
@@ -611,6 +619,7 @@ class MCPManager:
             servers[name] = {
                 "status": status,
                 "connected": connected,
+                "enabled": enabled,
                 "degraded": status in {"stale", "degraded", "absent", "disabled"},
                 "last_refresh": (
                     datetime.fromtimestamp(conn.last_refresh, UTC).isoformat()
@@ -627,13 +636,16 @@ class MCPManager:
                 "source_type": record.get("source_type"),
                 "last_error": self._last_errors.get(name),
             }
-        return {
+        health: dict[str, Any] = {
             "user_id": self.user_id,
             "exposure": get_settings().mcp.exposure,
             "config_state": config_state,
             "config_source": config_source,
             "servers": servers,
         }
+        if self._exposure_decision is not None:
+            health["exposure_decision"] = self._exposure_decision
+        return health
 
     async def reload(self) -> str:
         """Reload all MCP servers."""

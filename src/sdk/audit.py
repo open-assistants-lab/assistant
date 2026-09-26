@@ -23,7 +23,17 @@ from pydantic import BaseModel, Field
 from src.storage.paths import DataPaths
 
 AuditKind = Literal[
-    "tool_call", "tool_result", "approve", "interrupt", "error", "usage"
+    "tool_call",
+    "tool_result",
+    "approve",
+    "interrupt",
+    "error",
+    "usage",
+    # An automatic change to the set of tools the model can reach. Needed
+    # because the exposure policy can now decide visibility from measurement
+    # rather than operator configuration, so "what can this model reach right
+    # now" must have an answer (firewall I4).
+    "exposure_decision",
 ]
 
 AuditSink = Callable[["AuditEvent"], None]
