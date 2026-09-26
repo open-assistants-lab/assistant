@@ -36,10 +36,22 @@ filesystem:
 mcp:
   enabled: true
   idle_timeout_minutes: 30
-  # direct: current behavior; hybrid: proxy plus allowlisted direct tools;
-  # proxy: only the governed mcp_proxy tool is exposed.
-  exposure: direct
-  direct_tools: []
+  # Axis B — which MCP tools may be direct:
+  #   always  every surviving tool is directly callable
+  #   search  tools are indexed and findable via tool_search, not callable
+  #   never   only the governed mcp_proxy tool reaches the model
+  # v0.6.21 values direct|hybrid|proxy are accepted one release and deprecated.
+  # `auto` arrives with the measured layer and becomes the default then.
+  exposure: always
+  # Global globs; exclude is applied after include, so a name in both is
+  # excluded. `*` and `?` are supported.
+  include_tools: []
+  exclude_tools: []
+  # Tools exempt from deferral. Server-supplied meta.alwaysLoad is ignored
+  # unless trust_server_exemptions is enabled for that server.
+  always_load: []
+  trust_server_exemptions: false
+  defer_with_missing_metadata: true
   cache_ttl_seconds: 86400
   refresh_timeout_seconds: 5.0
   max_result_chars: 20000
@@ -98,6 +110,9 @@ tools:
   native:
     mode: all  # all | selected | none
     enabled: []  # exact/glob names when mode is selected
+  # Coarse family-level disable, applied to every tool family. Narrows only:
+  # it can never re-admit a capability-disabled or governance-denied tool.
+  disabled: []  # globs, e.g. ["mcp__github*"]
   max_retries: 3
   timeout: 30
 verification:

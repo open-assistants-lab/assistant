@@ -553,34 +553,83 @@ async def create_sdk_loop(
 
     caps = _load_user_capabilities(user_id)
     mcp_settings = getattr(settings, "mcp", None)
-    exposure = str(getattr(mcp_settings, "exposure", "direct"))
-    direct_tools = set(getattr(mcp_settings, "direct_tools", []) or [])
-    native_tools = filter_denied_native_tools(list(get_native_tools()), settings)
-    if exposure == "direct":
-        native_tools = [td for td in native_tools if td.name != "mcp_proxy"]
+    tools_settings = getattr(settings, "tools", None)
+    exposure_setting = str(getattr(mcp_settings, "exposure", "always"))
+    disabled_globs = tuple(getattr(tools_settings, "disabled", []) or [])
+    native_tools = list(get_native_tools())
+
+    # The coarse tools-layer gate applies to every tool family, not just MCP:
+    # it is a deployment-level narrowing, so it must hold for native tools too.
+    if disabled_globs:
+        from src.sdk.mcp_exposure import matches_any
+
+        native_tools = [td for td in native_tools if not matches_any(td.name, disabled_globs)]
+
+    native_tools = filter_denied_native_tools(native_tools, settings)
+    # I5: mcp_proxy is the governed surface, not an MCP tool. It stays available
+    # in every mode (including `never`) so the model can always search, describe
+    # and call through the audited path.
     tools = [td for td in native_tools if _resource_enabled(caps, "tools", td.name)]
 
     t2 = time.monotonic()
     mcp_tools: list[Any] = []
+    mcp_search_only: list[Any] = []
     mcp_bridge = None
-    if exposure != "proxy":
+    from src.sdk.mcp_exposure import ExposureDecision, resolve_exposure
+
+    # Resolved against an empty catalogue first: we need the *mode* before we
+    # know which servers to connect. `never` skips discovery entirely.
+    mode_only = resolve_exposure(
+        setting=exposure_setting,
+        tools=(),
+        include=(),
+        exclude=(),
+        disabled_globs=(),
+        caps=caps,
+        operator_always_load=getattr(mcp_settings, "always_load", []) or [],
+        server_trust=bool(getattr(mcp_settings, "trust_server_exemptions", False)),
+    )
+    if mode_only.error:
+        logger.warning(
+            "sdk_runner.mcp_exposure_config", {"error": mode_only.error}, user_id=user_id
+        )
+
+    if mode_only.mode != "never":
         try:
             from src.sdk.tools_core.mcp_bridge import MCPToolBridge
 
             mcp_bridge = MCPToolBridge(user_id=user_id)
-            if exposure == "hybrid":
-                direct_result = await mcp_bridge.sync_direct_tools(direct_tools)
-                mcp_count = len(direct_result["added"])
-            else:
-                mcp_count = await mcp_bridge.discover()
-            if mcp_count > 0:
-                definitions = mcp_bridge.get_tool_definitions()
-                mcp_tools = [
-                    td
-                    for td in definitions
-                    if _resource_enabled(caps, "tools", td.name)
-                ]
-                logger.info("sdk_runner.mcp_tools", {"count": mcp_count}, user_id=user_id)
+            catalogue = await mcp_bridge.catalogue()
+            decision: ExposureDecision = resolve_exposure(
+                setting=exposure_setting,
+                tools=catalogue,
+                include=getattr(mcp_settings, "include_tools", []) or [],
+                exclude=getattr(mcp_settings, "exclude_tools", []) or [],
+                disabled_globs=disabled_globs,
+                caps=caps,
+                operator_always_load=getattr(mcp_settings, "always_load", []) or [],
+                server_trust=bool(getattr(mcp_settings, "trust_server_exemptions", False)),
+            )
+            if decision.error:
+                logger.warning(
+                    "sdk_runner.mcp_exposure_decision",
+                    {"error": decision.error},
+                    user_id=user_id,
+                )
+            if decision.mode != "never":
+                callable_tools, search_only = await mcp_bridge.promote(decision)
+                mcp_tools = callable_tools
+                mcp_search_only = search_only
+                logger.info(
+                    "sdk_runner.mcp_tools",
+                    {
+                        "mode": decision.mode,
+                        "callable": len(mcp_tools),
+                        "search_only": len(mcp_search_only),
+                        "excluded": len(decision.excluded),
+                    },
+                    user_id=user_id,
+                )
         except Exception as e:
             logger.warning("sdk_runner.mcp_failed", {"error": str(e)}, user_id=user_id)
 
@@ -645,7 +694,10 @@ async def create_sdk_loop(
     index_row_set = desired_index_rows(
         native_tools=tools,
         custom_tools=custom_tools,
-        mcp_tools=mcp_tools,
+        # Search-only MCP tools carry their real schema and belong in the index
+        # so tool_search can match them — but they are deliberately absent from
+        # the loop's callable set. Indexing and exposure are separate concerns.
+        mcp_tools=mcp_tools + mcp_search_only,
         caps=caps,
         user_id=user_id,
         workspace_id=runtime_workspace_id,

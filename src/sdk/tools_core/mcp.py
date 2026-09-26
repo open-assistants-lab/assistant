@@ -304,17 +304,27 @@ async def reload_for_loop(
             loop.unregister_tool(name)
         bridge._tool_to_server = {}
 
-        exposure = get_settings().mcp.exposure
-        if exposure == "proxy":
-            return f"{result} (proxy exposure active; direct MCP tools remain hidden)"
-        if exposure == "hybrid":
-            await bridge.sync_direct_tools(set(get_settings().mcp.direct_tools))
-        else:
-            await bridge.discover()
+        mcp_cfg = get_settings().mcp
+        from src.sdk.mcp_exposure import resolve_exposure
+
+        decision = resolve_exposure(
+            setting=str(mcp_cfg.exposure),
+            tools=await bridge.catalogue(),
+            include=list(mcp_cfg.include_tools or []),
+            exclude=list(mcp_cfg.exclude_tools or []),
+            disabled_globs=tuple(getattr(get_settings().tools, "disabled", []) or ()),
+            caps=load_user_capabilities(user_id),
+            operator_always_load=list(mcp_cfg.always_load or []),
+            server_trust=bool(getattr(mcp_cfg, "trust_server_exemptions", False)),
+        )
+        if decision.mode == "never":
+            return f"{result} ({mcp_cfg.exposure} exposure active; direct MCP tools remain hidden)"
+
+        callable_tools, _search_only = await bridge.promote(decision)
 
         caps = load_user_capabilities(user_id)
         new_names: set[str] = set()
-        for td in bridge.get_tool_definitions():
+        for td in callable_tools:
             if not resource_enabled(caps, "tools", td.name):
                 continue
             loop.register_tool(td)
