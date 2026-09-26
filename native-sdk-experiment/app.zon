@@ -3,7 +3,7 @@
     .name = "assistant",
     .display_name = "Assistant",
     .description = "AI assistant with Linear-like design.",
-    .version = "0.6.20",
+    .version = "0.6.21",
     .icons = .{"assets/icon.png"},
     .platforms = .{"macos"},
     .permissions = .{ "view", "command", "credentials" },

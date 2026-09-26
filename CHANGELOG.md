@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.6.21 — 2026-09-26
+
+### Added
+- Durable subagent schedule definitions now have a real store (`data/subagent_schedules.db`), the first step toward exposing the existing APScheduler subagent scheduler, which is built, durable, and restored on boot but unreachable because nothing creates a job (#46). Schedule definitions live in their own database so APScheduler keeps sole ownership of the `jobs.db` schema, and every read and write is scoped by `user_id`.
+
+  Not yet reachable through an API or tool: this release only adds the persistence layer. Exposing it over `/subagents/schedules` and `subagent_schedule` is tracked in `docs/superpowers/plans/2026-09-25-subagent-scheduler.md`.
+
+- MCP proxy-first architecture, available behind `mcp.exposure` (`direct` | `hybrid` | `proxy`, default `direct`). A governed `mcp_proxy` tool provides cache-backed `search`/`describe` plus `call`, revalidating capabilities and current `allow`/`ask`/`deny` policy before every dispatch. Search and describe read a secret-free durable metadata cache without opening a server connection; `hybrid` promotes only explicitly allowlisted tools via `sync_direct_tools()` with stale removal. Transport host allowlists and OAuth remain out of scope.
+
+- MCP lifecycle reliability: a failed tool discovery now closes its candidate connection instead of leaking it, config changes and deletions are reconciled centrally, reconnects from a superseded generation are rejected, `close_mcp_manager()` releases a user's connections and listeners, and stale connections can be reaped. Health and cache reads no longer start a lazy server.
+
+### Fixed
+- Schedule writes are transactional and serialized. A cancelled or failed `create()` used to leave its row pending on the shared aiosqlite connection, where the *next* writer's commit made it durable — a schedule the caller never received an ID for, which startup restore would then fire unattended. Writes are now serialized so at most one write transaction is open and every failure path rolls back.
+- A schedule that records a stop decision (cancelled/rejected/expired/invalid) can no longer be silently re-armed back to `scheduled`. Outcome states (`completed`/`failed`) stay re-drivable so a recurring schedule still fires again after them.
+- Cancelling a schedule no longer overwrites an in-flight run's status; the row keeps saying `running` so the live run stays observable, since the work queue remains the authority on it.
+- Corrupt schedule-database recovery now also removes the `-wal`/`-shm` sidecars. A stale WAL is a self-contained log that SQLite replays over the fresh file, which resurrected the old rows *and* the old schema, silently turning schema creation into a no-op. Earlier quarantined files are no longer overwritten.
+
 ## v0.6.20 — 2026-09-25
 
 ### Removed
