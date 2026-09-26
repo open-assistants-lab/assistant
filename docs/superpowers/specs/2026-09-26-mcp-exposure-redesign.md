@@ -94,6 +94,71 @@ sandbox, not on speculation.
 
 ---
 
+## Self-review corrections (2026-09-26)
+
+Three defects found reviewing this spec against the code. All are corrected below.
+
+### C1 — `auto` as specified would make loop startup *worse* (Critical)
+
+Layer 3 measures "deferrable MCP definitions", which implies obtaining them. In
+`direct` mode the runner calls `MCPToolBridge.discover()`
+(`src/sdk/runner.py:575`), which calls `manager._ensure_started()` — so **every
+loop build connects to every configured MCP server**. Measuring a live catalog
+to decide whether to defer it is circular and expensive: it spends the
+connection cost at session start even for a session that never touches MCP,
+contradicting P1 and the lazy lifecycle shipped in v0.6.21.
+
+**Correction:** `auto` measures the **durable metadata cache**, never a live
+connection. The cache already exists (`MCPToolMetadataCache`, v0.6.21) and
+`MCPToolBridge.discover_cached()` already rebuilds `ToolDefinition`s from it
+without connecting. `auto` therefore *improves* startup: zero connections when
+the cache is warm, where `always` makes N.
+
+### C2 — cold cache had no defined behaviour (Critical)
+
+`auto` on a fresh deployment, or after a server's catalog changes, has no
+definitions to measure. Undefined behaviour here is a correctness hole.
+
+**Correction, deliberately diverging from Pi:** Pi's
+`deferWithMissingMetadata` defaults to `false` (load upfront when metadata is
+missing). We take the opposite — **cold or invalid cache ⇒ `search`** — because
+a catalog we have never costed against should not be injected whole. The first
+session gets proxy/search access and the cache warms on first connect.
+Configurable via `defer_with_missing_metadata`. Recorded here so it is not later
+"corrected" by someone assuming Pi is the reference.
+
+### C3 — honouring server-supplied `_meta.alwaysLoad` is a governance hole (Major)
+
+The first draft proposed honouring `alwaysLoad` from a server's `tools/list`
+response (the SDK does expose it: `mcp.types.Tool` has a `meta` field). But a
+server dictating the client's context policy is exactly what a governed platform
+must not permit: a compromised or careless third-party server could mark every
+tool `alwaysLoad` and force itself permanently into every context window,
+defeating `auto` entirely.
+
+**Correction:** `always_load` is **operator configuration only**. Server-
+supplied `meta.alwaysLoad` is ignored by default; an operator may enable it per
+server with an explicit `trust_server_exemptions: true`, itself surfaced in
+`/mcp/health`. The mechanism is kept because it is useful; the ability for a
+third party to grant it to themselves is removed.
+
+### Also corrected
+
+- **The firewall is smaller than stated.** I1 (exposure never widens
+  permission), I2 (permission re-checked on invocation), and I5 (capability
+  floor before exposure) **already hold today** for the proxy and direct paths.
+  The genuinely new protections are permission checks on *search-activated*
+  tools and audit of an *automatic* surface change. The same-release sequencing
+  rule is retained as a guard, but the mitigated risk is smaller than the first
+  draft implied.
+- **`mcp_reload` is a core tool name.** It appears in `CORE_TOOL_NAMES`
+  (`src/sdk/tools_custom.py:34`), and all three removed tools are registered in
+  `src/sdk/native_tools.py:60-63`. Layer 1 must update both, or custom-tool
+  classification and capability scoping will reference a name that no longer
+  exists.
+
+---
+
 ## Root cause of the current design
 
 `exposure: direct | hybrid | proxy` is **one axis carrying two concerns**:
@@ -139,6 +204,13 @@ re-registration path moves to a non-tool entry point
 (`await mcp_bridge.reload_for_loop(loop, user_id)`) called by the HTTP route and
 by `mcp_proxy(action="refresh")`.
 
+**Migration surface for Layer 1:** all three tools are registered in
+`src/sdk/native_tools.py:60-63`, and `mcp_reload` is additionally a member of
+`CORE_TOOL_NAMES` (`src/sdk/tools_custom.py:34`). That list must drop
+`mcp_reload` in the same change, or custom-tool classification and capability
+scoping will reference a name with no definition. `mcp_proxy` must be added to
+`CORE_TOOL_NAMES` so it is always loaded and never deferred itself.
+
 ### Layer 2 — Axis B: which tools may be direct
 
 Per-server, borrowed from Pi and OpenCode. This replaces the global
@@ -150,7 +222,9 @@ mcp:
   include_tools: ["get_*"]                  # Pi globs, applied first
   exclude_tools: ["read_figjam"]            # Pi globs, applied second
   enabled: true                             # OpenCode server switch
-  always_load: ["health"]                   # Claude Code per-tool exemption
+  always_load: ["health"]                   # operator-only exemption (C3)
+  trust_server_exemptions: false            # opt in to server _meta.alwaysLoad
+  defer_with_missing_metadata: true         # C2; Pi's default is false
 ```
 
 Layered at the `tools` map, per OpenCode, for a coarse deployment-level gate:
@@ -190,12 +264,25 @@ Add two values to the same ladder, so it stays one axis:
 dynamically. The algorithm, at loop build and on compaction only:
 
 ```
-deferrable = surviving MCP tools whose names are not in always_load
+cache     = MCPToolMetadataCache(user)         # NEVER a live connection (C1)
+survivors = surviving MCP tools from cache, after include/exclude/enabled
+deferrable = survivors whose names are not in operator-configured always_load
 cost       = estimate_prepared_tokens(messages=[], tools=deferrable)
 window     = resolve_context_window(model)
-if cost / window * 100 >= N:  treat as "search"
+if cache cold or invalid:      treat as "search"      # C2
+elif cost / window * 100 >= N: treat as "search"
 else:                          treat as "always"
 ```
+
+**Never connect to measure** (C1). `auto` reads the durable cache and, when
+warm, makes **zero** connections at loop build — where `always` makes one per
+configured server. This inverts the usual intuition: the more aggressive the
+context policy, the cheaper the startup.
+
+**Cold cache** (C2) resolves to `search`, not `always` — deliberately the
+opposite of Pi's `deferWithMissingMetadata: false` default, because a catalog
+we have never costed against should not be injected whole. Override with
+`mcp.defer_with_missing_metadata: false`.
 
 **Why loop-build and compaction only** (P4): measuring per LLM call makes the
 surface oscillate as the conversation grows — tools appear, appear in every
@@ -255,9 +342,10 @@ Not part of the exposure model; do them regardless.
    which is currently unused for this; wire it to `list_tools()`.
 3. **Org defaults disabled by default** (OpenCode's `.well-known` model) for
    team deployments.
-4. **Honour `_meta.alwaysLoad`** in the bridge, so a server can pin its critical
-   tools out of deferral (Claude Code's exemption, at our end since we own the
-   bridge).
+4. **Honour `_meta.alwaysLoad` only under explicit operator trust** (C3). The
+   mechanism is useful and the SDK exposes the field, but a third-party server
+   must not be able to grant itself a permanent slot in every context window.
+   Default off, per-server opt-in, surfaced in `/mcp/health`.
 
 ---
 
@@ -272,6 +360,8 @@ class MCPConfig(_BaseSettings):
     include_tools: list[str] = []
     exclude_tools: list[str] = []
     always_load: list[str] = []
+    trust_server_exemptions: bool = False
+    defer_with_missing_metadata: bool = True
     # direct_tools: removed — superseded by include/exclude + exposure
     cache_ttl_seconds: int = 86_400
     refresh_timeout_seconds: float = 5.0
@@ -284,6 +374,7 @@ class MCPServerConfig(BaseModel):
     enabled: bool = True            # replaces the dead `disabled` field
     include_tools: list[str] = []
     exclude_tools: list[str] = []
+    trust_server_exemptions: bool = False
 ```
 
 ```python
@@ -334,9 +425,11 @@ be explicit — this is exactly where #44 went wrong.
   `tests/sdk/test_tool_schema_budget.py`).
 - **Layer 2:** table-driven tests for include/exclude precedence, glob
   matching, the `tools`-map gate, and per-agent override.
-- **Layer 3:** `auto:N` at, below, and exactly at the threshold; per-model
-  window differences; re-evaluation only on `context_compressed` (assert the
-  decision is stable across many LLM calls within one window).
+- **Layer 3:** `auto:N` at, below, and exactly at the threshold; **per-model
+  window differences**; **a warm cache must produce zero connections** (C1);
+  **a cold cache resolves to `search`** (C2); re-evaluation only on
+  `context_compressed` (assert the decision is stable across many LLM calls
+  within one window).
 - **Layer 4:** one test per invariant I1–I5, including the negative case for I5
   (a `scope=none` MCP tool must not reappear in context under any exposure
   value) and for I2 (a `deny` on a search-activated tool blocks invocation).
@@ -369,7 +462,13 @@ it must carry the firewall with it.
 ## Acceptance criteria
 
 - One always-present MCP tool, and a token budget test that fails if it grows.
-- Context cost of MCP is ~zero when no server is configured.
+- Context cost of MCP is ~zero when no server is configured, and **zero
+  connections are made to measure it**.
+- `auto` with a warm cache starts no MCP server; `always` starts one per
+  configured server.
+- Cold cache resolves to `search`, not `always`.
+- Server-supplied `alwaysLoad` is ignored unless the operator opts in per
+  server.
 - `auto:N` makes the exposure decision from measurement, is stable within a
   context window, and re-evaluates only on compaction.
 - Every one of I1–I5 has a test, and a `scope=none` tool can never re-enter
