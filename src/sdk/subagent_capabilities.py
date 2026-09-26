@@ -107,15 +107,23 @@ class SubagentLaunchPlan(BaseModel):
 
     @classmethod
     def from_persisted(cls, data: Mapping[str, Any]) -> SubagentLaunchPlan:
-        """Rehydrate a frozen plan, failing closed if the row was tampered with.
+        """Rehydrate a frozen plan, failing closed if the row is inconsistent.
 
-        The stored ``plan_id`` is the SHA-256 of the canonical manifest, so
-        recomputing it detects any capability that was added to the row after it
-        was written. A schedule row is unattended authority: it must never load
-        a manifest broader than the one that was approved.
+        Integrity scope, stated precisely: this detects *corrupt or partially
+        written* rows — a field edited without its hash, or a nested
+        ``canonical_manifest`` that disagrees with the row's own top-level
+        fields. It is content-addressing, not authentication, so it is not a
+        defence against a determined writer who can recompute the hash. The
+        backstop against running unapproved authority is the fresh-preflight
+        drift re-check in ``SubagentCoordinator.start_with_plan()``.
+
+        The nested ``canonical_manifest`` is compared explicitly because that is
+        the dict ``_run_job`` actually executes from; rebuilding it only from the
+        top-level fields would leave a nested-only edit invisible.
         """
         payload = dict(data)
-        if not isinstance(payload.get("canonical_manifest"), dict):
+        stored_manifest = payload.get("canonical_manifest")
+        if not isinstance(stored_manifest, dict):
             raise ValueError("persisted launch plan is missing its canonical manifest")
         decisions = payload.get("decisions") or ()
         if not isinstance(decisions, list | tuple):
@@ -136,11 +144,17 @@ class SubagentLaunchPlan(BaseModel):
             decisions=tuple(CapabilityDecision(**dict(item)) for item in decisions),
             ready=bool(payload.get("ready", False)),
         )
-        recomputed = _plan_id(plan.canonical_manifest_json)
-        if plan.plan_id and plan.plan_id != recomputed:
+        recomputed = plan.canonical_manifest
+        recomputed_id = _plan_id(plan.canonical_manifest_json)
+        # An absent hash is not a verified hash: require one explicitly.
+        if not plan.plan_id or plan.plan_id != recomputed_id:
             raise SubagentLaunchPlanTampered(
-                f"frozen manifest hash {plan.plan_id[:12]} does not match its content "
-                f"({recomputed[:12]})"
+                f"frozen manifest hash {plan.plan_id[:12] or '<missing>'} does not match "
+                f"its content ({recomputed_id[:12]})"
+            )
+        if stored_manifest != recomputed:
+            raise SubagentLaunchPlanTampered(
+                "stored canonical_manifest disagrees with the row's own fields"
             )
         return plan
 
@@ -153,6 +167,10 @@ class SubagentLaunchRejected(ValueError):  # noqa: N818 - public contract name
     """Preflight rejected a launch before any queue or LLM side effect."""
 
     code = "capability_unavailable"
+
+    #: The rejected plan, or ``None`` when nothing validated (tampered row).
+    #: Catch sites rely on this attribute always existing.
+    plan: SubagentLaunchPlan | None
 
     def __init__(self, plan: SubagentLaunchPlan):
         self.plan = plan
@@ -179,10 +197,13 @@ class SubagentManifestDrift(SubagentLaunchRejected):  # noqa: N818 - public cont
         frozen: SubagentLaunchPlan | None = None,
         fresh: SubagentLaunchPlan | None = None,
     ) -> None:
+        # `plan` must always exist: catch sites (e.g. the subagent_start tool)
+        # do `exc.plan.rejected_decisions` on this whole exception family, so a
+        # missing attribute would turn a clean refusal into a crash.
+        self.plan = frozen
         self.frozen = frozen
         self.fresh = fresh
         ValueError.__init__(self, f"Subagent launch rejected: {reason} ({self.code})")
-
 
 class SubagentLaunchPlanTampered(SubagentLaunchRejected):  # noqa: N818 - public contract name
     """A persisted launch plan's content does not match its own manifest hash."""
@@ -190,6 +211,8 @@ class SubagentLaunchPlanTampered(SubagentLaunchRejected):  # noqa: N818 - public
     code = "manifest_tampered"
 
     def __init__(self, reason: str) -> None:
+        # No valid plan exists to attach — the row failed its integrity check.
+        self.plan = None
         ValueError.__init__(self, f"Subagent launch rejected: {reason} ({self.code})")
 
 
@@ -210,10 +233,18 @@ def manifest_drift_reason(
 ) -> str | None:
     """Describe how a frozen manifest differs from the freshly resolved one.
 
-    Compares the authority-bearing fields rather than the raw plan hash so the
-    operator gets an actionable reason. Returns ``None`` when the two agree.
+    ``plan_id`` is the authoritative gate: it is the SHA-256 of the whole
+    canonical manifest, so comparing it catches *every* differing field
+    automatically. The field-by-field breakdown below is only the
+    human-readable explanation — it is deliberately not the security boundary,
+    because a hand-maintained field list would silently stop covering anything
+    later added to ``canonical_manifest``.
     """
     differences: list[str] = []
+    if frozen.plan_id != fresh.plan_id:
+        differences.append(f"manifest {frozen.plan_id[:12]} -> {fresh.plan_id[:12]}")
+    if frozen.user_id != fresh.user_id:
+        differences.append(f"user_id {frozen.user_id} -> {fresh.user_id}")
     if frozen.agent_name != fresh.agent_name:
         differences.append(f"agent_name {frozen.agent_name} -> {fresh.agent_name}")
     if frozen.resolved_workspace_id != fresh.resolved_workspace_id:

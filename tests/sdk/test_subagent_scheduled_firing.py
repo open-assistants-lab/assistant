@@ -11,6 +11,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -114,6 +115,80 @@ def test_from_persisted_rejects_a_row_without_a_canonical_manifest() -> None:
         SubagentLaunchPlan.from_persisted({"plan_id": "x", "agent_name": "a"})
 
 
+def test_from_persisted_rejects_a_row_with_no_hash() -> None:
+    """An absent hash is not a verified hash — that would fail open."""
+    from src.sdk.subagent_capabilities import (
+        SubagentLaunchPlan,
+        SubagentLaunchPlanTampered,
+        ToolSelectionMode,
+        build_launch_plan,
+    )
+
+    plan = build_launch_plan(
+        _profile(), "test_user", "personal", ToolSelectionMode.ALLOWLIST
+    )
+    payload = plan.to_persisted_dict()
+    payload["plan_id"] = ""
+
+    with pytest.raises(SubagentLaunchPlanTampered):
+        SubagentLaunchPlan.from_persisted(payload)
+
+
+def test_from_persisted_rejects_a_nested_manifest_edit() -> None:
+    """The nested manifest is what _run_job executes, so it is compared too.
+
+    Editing only the nested dict leaves the top-level fields (and therefore the
+    recomputed hash) untouched, so a top-level-only check would miss it.
+    """
+    from src.sdk.subagent_capabilities import (
+        SubagentLaunchPlan,
+        SubagentLaunchPlanTampered,
+        ToolSelectionMode,
+        build_launch_plan,
+    )
+
+    plan = build_launch_plan(
+        _profile(), "test_user", "personal", ToolSelectionMode.ALLOWLIST
+    )
+    payload = plan.to_persisted_dict()
+    payload["canonical_manifest"]["effective_tools"] = ["shell_execute"]
+
+    with pytest.raises(SubagentLaunchPlanTampered, match="disagrees"):
+        SubagentLaunchPlan.from_persisted(payload)
+
+
+def test_manifest_drift_detects_a_foreign_user_id() -> None:
+    """A plan resolved for another user must never pass the drift check."""
+    from src.sdk.subagent_capabilities import manifest_drift_reason
+
+    frozen = SimpleNamespace(
+        plan_id="a" * 64,
+        user_id="alice",
+        agent_name="researcher",
+        resolved_workspace_id="personal",
+        tool_selection_mode="allowlist",
+        requested_tools=(),
+        effective_tools=("files_read",),
+        requested_skills=(),
+        effective_skills=(),
+    )
+    other = SimpleNamespace(
+        plan_id="b" * 64,
+        user_id="mallory",
+        agent_name="researcher",
+        resolved_workspace_id="personal",
+        tool_selection_mode="allowlist",
+        requested_tools=(),
+        effective_tools=("files_read",),
+        requested_skills=(),
+        effective_skills=(),
+    )
+
+    reason = manifest_drift_reason(frozen, other)
+    assert reason is not None
+    assert "mallory" in reason
+
+
 # --------------------------------------------------------------------------
 # start_with_plan
 # --------------------------------------------------------------------------
@@ -215,19 +290,116 @@ async def test_drift_message_names_the_changed_authority(mock_paths) -> None:
 
 
 @pytest.mark.asyncio
+async def test_start_with_plan_accepts_a_raw_persisted_row(mock_paths) -> None:
+    """The scheduler hands over the stored row dict, not a model — cover that path."""
+    from src.sdk.coordinator import SubagentCoordinator
+
+    coord = await _coordinator_with_profile(mock_paths)
+    stored = coord.preflight("researcher").to_persisted_dict()
+
+    with patch.object(SubagentCoordinator, "_run_job"):
+        task_id = await coord.start_with_plan("researcher", "from a row", stored)
+
+    row = await (await coord._get_db()).get_task(task_id)
+    assert row is not None
+    assert json.loads(row["launch_plan"])["plan_id"] == stored["plan_id"]
+
+
+@pytest.mark.asyncio
+async def test_launch_rejection_never_crashes_the_tool_handler(mock_paths) -> None:
+    """subagent_start does `exc.plan.rejected_decisions`; that must stay safe.
+
+    A tampered row attaches no plan, so the handler has to tolerate `None`
+    rather than raising AttributeError inside its own except block.
+    """
+    from types import SimpleNamespace as _FakeProfile
+
+    from src.sdk.subagent_capabilities import SubagentLaunchPlanTampered
+    from src.sdk.tools_core.subagent import subagent_start
+
+    tampered = SubagentLaunchPlanTampered("stored canonical_manifest disagrees")
+    assert tampered.plan is None
+
+    class _Coord:
+        def load_def(self, _name):
+            return _FakeProfile(name="researcher")
+
+        async def start(self, *_a, **_k):
+            raise tampered
+
+    with patch("src.sdk.tools_core.subagent.get_coordinator", lambda *_a, **_k: _Coord()):
+        result = await subagent_start.ainvoke(
+            {
+                "agent_name": "researcher",
+                "task": "x",
+                "user_id": "test_user",
+                "workspace_id": "personal",
+            }
+        )
+
+    assert getattr(result, "is_error", False) is True
+    structured = getattr(result, "structured_content", {}) or {}
+    assert structured.get("status") == "manifest_tampered"
+
+
+@pytest.mark.asyncio
+async def test_drift_rejection_reaches_the_tool_handler_as_a_structured_error(
+    mock_paths,
+) -> None:
+    """A frozen-plan drift must surface as a clean refusal, not a crash."""
+    from types import SimpleNamespace as _FakeProfile
+
+    from src.sdk.subagent_capabilities import SubagentLaunchPlan, SubagentManifestDrift
+    from src.sdk.tools_core.subagent import subagent_start
+
+    frozen = SubagentLaunchPlan(
+        plan_id="a" * 64,
+        agent_name="researcher",
+        user_id="test_user",
+        workspace_id="personal",
+        tool_selection_mode="allowlist",
+        effective_tools=("files_read",),
+        ready=True,
+    )
+    error = SubagentManifestDrift("effective_tools gained files_write", frozen=frozen)
+
+    class _Coord:
+        def load_def(self, _name):
+            return _FakeProfile(name="researcher")
+
+        async def start(self, *_a, **_k):
+            raise error
+
+    with patch("src.sdk.tools_core.subagent.get_coordinator", lambda *_a, **_k: _Coord()):
+        result = await subagent_start.ainvoke(
+            {
+                "agent_name": "researcher",
+                "task": "x",
+                "user_id": "test_user",
+                "workspace_id": "personal",
+            }
+        )
+
+    assert getattr(result, "is_error", False) is True
+    structured = getattr(result, "structured_content", {}) or {}
+    assert structured.get("status") == "manifest_drift"
+
+
+@pytest.mark.asyncio
 async def test_start_delegates_to_the_shared_launch_tail(mock_paths) -> None:
     """`start` and `start_with_plan` must not drift into two execution paths."""
     from src.sdk.coordinator import SubagentCoordinator
 
     coord = await _coordinator_with_profile(mock_paths)
 
-    with patch.object(SubagentCoordinator, "start_with_plan") as delegated:
-        plan = coord.preflight("researcher")
-        delegated.return_value = "task-xyz"
+    with patch.object(SubagentCoordinator, "_run_job"):
         task_id = await coord.start("researcher", "hello")
 
-    assert task_id == "task-xyz"
-    assert delegated.await_count == 1
-    assert delegated.await_args.args[0] == "researcher"
-    assert delegated.await_args.args[1] == "hello"
-    assert delegated.await_args.args[2].plan_id == plan.plan_id
+    row = await (await coord._get_db()).get_task(task_id)
+    assert row is not None
+    assert row["task"] == "hello"
+    # The manifest must actually be applied on the interactive path too.
+    stored = json.loads(row["launch_plan"])
+    assert stored["canonical_manifest"]["effective_tools"] == list(
+        coord.preflight("researcher").effective_tools
+    )
