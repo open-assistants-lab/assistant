@@ -14,14 +14,17 @@ import json
 import os
 import shutil
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agentprofile.models import AgentProfile
 from agentprofile.parser import dumps_profile
 
 from src.app_logging import get_logger
+
+if TYPE_CHECKING:  # imported lazily at runtime to avoid a circular import
+    from src.sdk.subagent_capabilities import SubagentLaunchPlan
 from src.config import get_settings
 from src.sdk.agent_validation import _is_denied_memory_tool, validate_agent_def
 from src.sdk.capabilities import load_user_capabilities, resource_enabled
@@ -770,22 +773,74 @@ class SubagentCoordinator:
     ) -> str:
         if not _subagent_enabled(self.user_id, agent_name):
             raise ValueError(f"Subagent '{agent_name}' is disabled.")
-        from src.sdk.subagent_capabilities import SubagentLaunchRejected
 
-        profile = self.load_def(agent_name)
-        if profile is None:
-            raise ValueError(f"Subagent '{agent_name}' not found. Create it first with subagent_create.")
-
-        errors = validate_agent_def(
-            profile, user_id=self.user_id, workspace_id=self.requested_workspace_id
+        profile = self._require_valid_profile(agent_name)
+        return await self.start_with_plan(
+            agent_name,
+            task,
+            None,
+            parent_id=parent_id,
+            parent_session_id=parent_session_id,
+            _validated_profile=profile,
         )
-        if errors:
-            raise ValueError("Invalid subagent definition: " + "; ".join(errors))
-        plan = self.preflight(agent_name)
-        if not plan.ready:
-            raise SubagentLaunchRejected(plan)
+
+    async def start_with_plan(
+        self,
+        agent_name: str,
+        task: str,
+        plan: SubagentLaunchPlan | Mapping[str, Any] | None = None,
+        *,
+        parent_id: str | None = None,
+        parent_session_id: str | None = None,
+        _validated_profile: AgentProfile | None = None,
+    ) -> str:
+        """Launch from a manifest that was frozen earlier, re-verified now.
+
+        A scheduled run (#46) resolves its plan once at schedule creation and
+        fires long afterwards. Between those two moments the profile, the
+        capabilities, or the policy may have changed, so the frozen authority is
+        re-checked against a fresh preflight and the run is refused on any
+        difference. This never launches with a broader or narrower manifest than
+        the one that was approved.
+        """
+        from src.sdk.subagent_capabilities import (
+            SubagentLaunchPlan,
+            SubagentLaunchRejected,
+            SubagentManifestDrift,
+            manifest_drift_reason,
+        )
+
+        if not _subagent_enabled(self.user_id, agent_name):
+            raise ValueError(f"Subagent '{agent_name}' is disabled.")
+
+        profile = _validated_profile or self._require_valid_profile(agent_name)
+
+        frozen: SubagentLaunchPlan
+        if plan is None:
+            resolved = self.preflight(agent_name)
+            if not resolved.ready:
+                raise SubagentLaunchRejected(resolved)
+            frozen = resolved
+        elif isinstance(plan, SubagentLaunchPlan):
+            frozen = plan
+        else:
+            frozen = SubagentLaunchPlan.from_persisted(plan)
+
+        if not frozen.ready:
+            raise SubagentLaunchRejected(frozen)
+
+        fresh = self.preflight(agent_name)
+        if not fresh.ready:
+            raise SubagentLaunchRejected(fresh)
+        reason = manifest_drift_reason(frozen, fresh)
+        if reason:
+            raise SubagentManifestDrift(reason, frozen=frozen, fresh=fresh)
+
         profile = profile.model_copy(
-            update={"tools": list(plan.effective_tools), "skills": list(plan.effective_skills)}
+            update={
+                "tools": list(frozen.effective_tools),
+                "skills": list(frozen.effective_skills),
+            }
         )
 
         db = await self._get_db()
@@ -795,7 +850,7 @@ class SubagentCoordinator:
             profile,
             parent_id,
             parent_session_id=parent_session_id,
-            launch_plan=plan.to_persisted_dict(),
+            launch_plan=frozen.to_persisted_dict(),
         )
 
         ctx = SubagentContext(on_progress=self._make_progress_cb(task_id))
@@ -808,6 +863,20 @@ class SubagentCoordinator:
         self._background_tasks.add(background_task)
         background_task.add_done_callback(self._on_background_task_done)
         return task_id
+
+    def _require_valid_profile(self, agent_name: str) -> AgentProfile:
+        """Load and validate a profile, or raise before any queue side effect."""
+        profile = self.load_def(agent_name)
+        if profile is None:
+            raise ValueError(
+                f"Subagent '{agent_name}' not found. Create it first with subagent_create."
+            )
+        errors = validate_agent_def(
+            profile, user_id=self.user_id, workspace_id=self.requested_workspace_id
+        )
+        if errors:
+            raise ValueError("Invalid subagent definition: " + "; ".join(errors))
+        return profile
 
     def _on_background_task_done(self, task: asyncio.Task[Any]) -> None:
         self._background_tasks.discard(task)

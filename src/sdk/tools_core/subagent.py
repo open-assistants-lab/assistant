@@ -320,13 +320,15 @@ async def subagent_start(
         from src.sdk.subagent_capabilities import SubagentLaunchRejected
 
         if isinstance(exc, SubagentLaunchRejected):
-            rejected = exc.plan.rejected_decisions
+            # `plan` is None for a tampered row (nothing validated to attach);
+            # report the code rather than dereferencing it.
+            rejected = exc.plan.rejected_decisions if exc.plan is not None else ()
             status = (
                 "approval_required_before_start"
                 if any(item.status == "permission_ask" for item in rejected)
                 else "permission_denied_before_start"
                 if any(item.status == "permission_deny" for item in rejected)
-                else "capability_unavailable"
+                else getattr(exc, "code", "capability_unavailable")
             )
             return ToolResult(
                 content="Subagent launch rejected before execution: declared capabilities are unavailable.",
