@@ -1,7 +1,7 @@
 # MCP Exposure Redesign
 
 **Date:** 2026-09-26
-**Status:** Draft for review
+**Status:** Draft for review — **decisions taken 2026-09-26: `auto` is the default; a per-model exposed surface is accepted and made visible.**
 **Supersedes:** the `mcp.exposure` model introduced in v0.6.21
 **Related:** #46 (scheduling), `2026-09-25-mcp-proxy-architecture-design.md`, `2026-09-25-mcp-lifecycle-reliability-design.md`
 
@@ -172,6 +172,7 @@ Resolution order (later wins), mirroring OpenCode's model:
 
 | Value | Behaviour |
 |---|---|
+| `auto` / `auto:N` | **default.** Measure, then behave as `search` or `always` — see Layer 3 |
 | `never` | proxy only; no MCP tool definitions in context |
 | `search` | registered but **inactive**; `tool_search` activates additively |
 | `always` | all surviving tools directly callable |
@@ -276,7 +277,6 @@ class MCPConfig(_BaseSettings):
     refresh_timeout_seconds: float = 5.0
     max_result_chars: int = 20_000
 ```
-
 ```python
 # src/sdk/tools_core/mcp_config.py
 class MCPServerConfig(BaseModel):
@@ -314,10 +314,15 @@ be explicit — this is exactly where #44 went wrong.
 - The three legacy values are **accepted for one release** with a deprecation
   warning in `/mcp/health`; they map as above.
 - `mcp.direct_tools` maps to `include_tools` if it is a non-empty list.
-- The new default is `auto`, which is a **behaviour change** for deployments
-  that left `exposure` at `direct`. That is intentional and is the point of the
-  redesign, but it must be called out in release notes and shown in
-  `/mcp/health` as an `exposure_decision` entry.
+- **Explicit configuration always wins.** `auto` is the default for values that
+  are *absent*, not a policy that overrides what an operator wrote. A
+  deployment that pinned `always` keeps a fixed surface forever if it wants one.
+- **Known wrinkle, deliberate:** v0.6.21 shipped a repository `config.yaml`
+  containing an explicit `exposure: direct`. A deployment using that file has an
+  explicit value and will therefore keep `always` behaviour, *not* pick up
+  `auto`. v0.6.22's `config.yaml` ships `exposure: auto`, so new deployments and
+  those who delete the line get the measured policy. This is the desired
+  precedence — it is why `config.yaml` must change in the same release.
 - **No silent translation of an unknown value.** An unrecognised `exposure`
   fails closed to `never` with a config error, rather than defaulting to
   `always` and re-creating a governance hole.
@@ -340,16 +345,26 @@ be explicit — this is exactly where #44 went wrong.
 
 ## Rollout
 
+`auto` is the default from the first release of this change, which removes the
+option to stage it behind a flag. That makes one rule absolute:
+
+> **No release may ship `auto` as the default without the Layer 4 firewall in
+> that same release.** There is no fallback position, because every deployment
+> that never set `exposure` would be running an unguarded dynamic surface.
+
+Order within a release:
+
 1. Layer 5 fixes (independent, no behaviour risk).
 2. Layer 1 (pure removal, immediate token win, no config change).
-3. Layer 2 (new config, `auto` not yet the default).
-4. Layer 4 firewall (must land **before** Layer 3 ships `auto`).
-5. Layer 3, default flipped to `auto`, gated behind an explicit opt-in flag
-   until measured on at least one deployment.
+3. Layer 2 (new config; `exposure` still defaults to `always` for now).
+4. Layer 4 firewall (I1–I5, with tests).
+5. Layer 3, and *in the same release* flip the default to `auto` — including
+   updating the shipped `config.yaml`.
 
-Layer 4 strictly precedes Layer 3: shipping a policy that changes the model's
-reachable surface before the invariants that constrain it exist would be the
-mistake this design exists to prevent.
+Steps 1–4 may ship ahead of step 5 as a preparation release, in which case
+`exposure` still defaults to `always` and the only observable change is the
+4→1 token win. Step 5 is the single release that changes default behaviour, and
+it must carry the firewall with it.
 
 ## Acceptance criteria
 
@@ -362,19 +377,19 @@ mistake this design exists to prevent.
 - `exposure: direct|hybrid|proxy` warns, maps, and is removed after one release.
 - An unknown `exposure` fails closed.
 
-## Open questions for review
+## Decisions taken
 
-1. **Should `auto` be the default, or opt-in?** It makes the model's reachable
-   surface change during a session. The firewall makes it *auditable and
-   permission-checked*, but an operator who wants a fixed surface must be able
-   to pin one. Recommendation: ship `auto` behind an opt-in flag, measure on a
-   real deployment, then flip the default — the same staged approach the plan
-   file for #46 uses.
-2. **Is a per-model surface acceptable?** The same deployment will expose a
-   different tool set on an 8k local model than on a 200k hosted one. A
-   percentage is the correct unit, but it means "what can this model reach" is
-   not a single answer. Recommendation: accept, and make the effective decision
-   visible in `/mcp/health`.
+1. **`auto` is the default.** The concern was that a policy changing the
+   model's reachable surface mid-session is a governance question, not just a
+   UX one. It is mitigated by I1–I5: the decision is auditable (I4), permission
+   is re-checked on every invocation regardless of how a tool became visible
+   (I2), and the decision is reported in `/mcp/health`. Operators who want a
+   fixed surface pin `always` explicitly, and explicit config wins.
+2. **A per-model exposed surface is accepted and made visible.** `auto:10` on an
+   8k local model and a 200k hosted model are correctly different, since a
+   percentage is the right unit. The consequence — "what can this model reach"
+   is not one answer — is surfaced via the `exposure_decision` entry in
+   `/mcp/health` rather than papered over.
 
 ## Non-goals
 
