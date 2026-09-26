@@ -487,6 +487,16 @@ class DataPaths:
     def jobs_results_db_path(self) -> Path:
         return self.base / "jobs_results.db"
 
+    def subagent_schedules_db_path(self) -> Path:
+        """Durable schedule definitions (issue #46).
+
+        Project-level like the APScheduler jobstore, not per-user: schedules
+        carry an explicit ``user_id`` column that scopes every read and write.
+        Kept in its own file so APScheduler keeps sole ownership of the
+        ``jobs.db`` schema.
+        """
+        return self.base / "subagent_schedules.db"
+
 
 _PATHS_CACHE_MAX = 64
 _paths_cache: OrderedDict[tuple[str, str, str], DataPaths] = OrderedDict()
