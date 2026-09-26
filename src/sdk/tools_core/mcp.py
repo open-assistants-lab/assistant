@@ -7,7 +7,6 @@ All tools are now native async — no thread hack needed.
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 from typing import Any
 
 from src.app_logging import get_logger
@@ -43,6 +42,7 @@ async def _mcp_proxy(
     query: str = "",
     limit: int = 20,
     offset: int = 0,
+    session_id: str = "",
 ) -> ToolResult:
     if not user_id:
         return mcp_error_result("user_id is required", server_name=server, tool_name=tool, outcome="failed")
@@ -75,10 +75,33 @@ async def _mcp_proxy(
         )
 
     if action == "refresh":
-        await manager.rediscover()
+        from src.sdk.tools_core.mcp import reload_for_loop
+
+        try:
+            summary = await reload_for_loop(user_id, session_id=session_id)
+        except Exception as exc:
+            # Issue #30: by the time discovery runs, the session's mcp__* tools
+            # have already been unregistered, so a bare success string would
+            # claim a reload that silently cost the session its MCP tools.
+            return ToolResult(
+                content=(
+                    f"MCP reload failed: {type(exc).__name__}: {exc}. The session's MCP "
+                    "tool list may be stale or incomplete until the next successful reload."
+                ),
+                is_error=True,
+                structured_content={
+                    "outcome": "uncertain",
+                    "receipt_class": "mcp_proxy",
+                    "action": "refresh",
+                },
+            )
         return ToolResult(
-            content="MCP metadata refreshed.",
-            structured_content={"outcome": "succeeded", "receipt_class": "mcp_proxy"},
+            content=summary,
+            structured_content={
+                "outcome": "succeeded",
+                "receipt_class": "mcp_proxy",
+                "action": "refresh",
+            },
         )
 
     if not server or not tool:
@@ -193,9 +216,11 @@ async def _mcp_proxy(
 mcp_proxy = ToolDefinition(
     name="mcp_proxy",
     description=(
-        "Use the governed MCP proxy to search cached metadata, describe a tool, "
-        "refresh metadata, or call one configured MCP tool. Calls are audited and "
-        "may require approval."
+        "The single governed MCP surface. Actions: 'search' (cached metadata, "
+        "no connection), 'status', 'describe', 'refresh' (reload servers and "
+        "re-sync this conversation's tools), and 'call' (invoke one tool, "
+        "re-validating capability and permission policy first). Calls are "
+        "audited and may require approval."
     ),
     parameters={
         "type": "object",
@@ -225,6 +250,7 @@ mcp_proxy = ToolDefinition(
                 "default": 0,
                 "title": "Result Offset",
             },
+            "session_id": {"type": "string", "default": "", "title": "Session Id"},
         },
         "required": ["user_id", "action"],
     },
@@ -238,80 +264,41 @@ mcp_proxy = ToolDefinition(
 )
 
 
-async def _mcp_list(user_id: str = "") -> str:
-    if not user_id:
-        return "Error: user_id is required."
+async def reload_for_loop(
+    user_id: str,
+    loop: Any | None = None,
+    *,
+    session_id: str = "",
+) -> str:
+    """Reload MCP servers and re-sync the loop's direct tool surface.
 
+    Layer 1 of the exposure redesign: this was the body of the `mcp_reload`
+    tool, which is removed. It is now an entry point used by the
+    `mcp_proxy(action="refresh")` action and by the HTTP route.
+    """
+    from src.sdk.capabilities import load_user_capabilities, resource_enabled
+    from src.sdk.loop import get_current_agent_loop
+    from src.sdk.runner import get_user_loop
+    from src.sdk.tools_core.mcp_bridge import MCPToolBridge
     from src.sdk.tools_core.mcp_manager import get_mcp_manager
 
     manager = get_mcp_manager(user_id)
-    if get_settings().mcp.exposure == "proxy":
-        records = _cached_records(manager)
-        lines = [
-            f"  - {record.get('server_name', '')}: cached "
-            f"({len(record.get('tools', []) or [])} tools)"
-            for record in records
-        ]
-        return "\n".join(["MCP Servers (cached):", *lines]) if lines else (
-            "No cached MCP servers. Run mcp_proxy(action='refresh') to connect."
-        )
-    await manager.initialize()
-    servers = await manager.list_servers()
-
-    if not servers:
-        return "No MCP servers configured. Add .mcp.json to your user data directory."
-
-    lines = ["MCP Servers:"]
-    for name, info in servers.items():
-        status = "running" if info["running"] else "stopped"
-        lines.append(f"  - {name}: {status} ({info['tool_count']} tools)")
-
-    return "\n".join(lines)
-
-
-mcp_list = ToolDefinition(
-    name="mcp_list",
-    description="List configured MCP servers and their status.\n\nArgs:\n    user_id: User identifier (REQUIRED)",
-    parameters={
-        "type": "object",
-        "properties": {
-            "user_id": {"type": "string", "default": "", "title": "User Id"},
-        },
-    },
-    annotations=ToolAnnotations(title="List MCP Servers", read_only=True, idempotent=True),
-    function=_mcp_list,
-)
-
-
-async def _mcp_reload(user_id: str = "", session_id: str = "") -> ToolResult | str:
-    if not user_id:
-        return "Error: user_id is required."
-
-    from src.sdk.tools_core.mcp_manager import get_mcp_manager
-
-    manager = get_mcp_manager(user_id)
-    await manager.initialize()
     result = await manager.reload()
 
     try:
-        from src.sdk.capabilities import load_user_capabilities, resource_enabled
-        from src.sdk.loop import get_current_agent_loop
-        from src.sdk.runner import get_user_loop
-        from src.sdk.tools_core.mcp_bridge import MCPToolBridge
-
-        loop = get_current_agent_loop() or get_user_loop(user_id, session_id=session_id or None)
+        if loop is None:
+            loop = get_current_agent_loop() or get_user_loop(
+                user_id, session_id=session_id or None
+            )
         if loop is None:
             return f"{result} (no active conversation — tools will be picked up next conversation)"
 
-        old_names = {
-            t.name for t in loop._registry.list_tools()
-            if t.name.startswith("mcp__")
-        }
+        old_names = {t.name for t in loop._registry.list_tools() if t.name.startswith("mcp__")}
 
         bridge = getattr(loop, "_mcp_bridge", None)
         if bridge is None:
             bridge = MCPToolBridge(user_id=user_id)
-            loop._mcp_bridge = bridge  # type: ignore[attr-defined]
+            loop._mcp_bridge = bridge  # type: ignore[union-attr]
 
         for name in old_names:
             loop.unregister_tool(name)
@@ -319,12 +306,12 @@ async def _mcp_reload(user_id: str = "", session_id: str = "") -> ToolResult | s
 
         exposure = get_settings().mcp.exposure
         if exposure == "proxy":
-            # Proxy mode intentionally keeps the direct registry empty.
             return f"{result} (proxy exposure active; direct MCP tools remain hidden)"
         if exposure == "hybrid":
             await bridge.sync_direct_tools(set(get_settings().mcp.direct_tools))
         else:
             await bridge.discover()
+
         caps = load_user_capabilities(user_id)
         new_names: set[str] = set()
         for td in bridge.get_tool_definitions():
@@ -341,89 +328,6 @@ async def _mcp_reload(user_id: str = "", session_id: str = "") -> ToolResult | s
     except Exception as e:
         logger.warning("mcp_reload.bridge_error", {"error": str(e)}, user_id=user_id)
         # The session's mcp__* tools have already been unregistered by this
-        # point, so falling through to `return result` reported a clean reload
+        # point, so falling through to a success string reported a clean reload
         # while the session had silently lost its MCP tools (issue #30).
-        return ToolResult(
-            content=f"MCP reload failed: {type(e).__name__}: {e}. The session's MCP "
-            "tool list may be stale or incomplete until the next successful reload.",
-            is_error=True,
-        )
-
-
-mcp_reload = ToolDefinition(
-    name="mcp_reload",
-    description=(
-        "Reload all MCP servers from configuration file.\n\n"
-        "Use this when you've modified .mcp.json and want to apply changes.\n\n"
-        "Args:\n    user_id: User identifier (REQUIRED)\n"
-        "    session_id: Optional chat session identifier"
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "user_id": {"type": "string", "default": "", "title": "User Id"},
-            "session_id": {"type": "string", "default": "", "title": "Session Id"},
-        },
-    },
-    annotations=ToolAnnotations(title="Reload MCP Servers"),
-    function=_mcp_reload,
-)
-
-
-async def _mcp_tools(user_id: str = "", server_name: str = "") -> str:
-    if not user_id:
-        return "Error: user_id is required."
-
-    from src.sdk.tools_core.mcp_manager import get_mcp_manager
-
-    manager = get_mcp_manager(user_id)
-    if get_settings().mcp.exposure in {"proxy", "hybrid"}:
-        tools = []
-        for record in _cached_records(manager):
-            if server_name and record.get("server_name") != server_name:
-                continue
-            for metadata in record.get("tools", []) or []:
-                tools.append(SimpleNamespace(**metadata))
-        if not tools:
-            return "No cached MCP tools available. Run mcp_proxy(action='refresh') first."
-        return "\n".join(
-            [
-                "Available MCP Tools (cached):",
-                *[
-                    f"  - {tool.name}: {(tool.description or 'No description')[:80]}"
-                    for tool in tools
-                ],
-            ]
-        )
-
-    await manager.initialize()
-    tools = await manager.get_tools(server_name if server_name else None)
-
-    if not tools:
-        return "No MCP tools available."
-
-    lines = ["Available MCP Tools:"]
-    for t in tools:
-        desc = t.description or "No description"
-        lines.append(f"  - {t.name}: {desc[:80]}")
-
-    return "\n".join(lines)
-
-
-mcp_tools = ToolDefinition(
-    name="mcp_tools",
-    description=(
-        "Get available tools from MCP servers.\n\n"
-        "Args:\n    user_id: User identifier (REQUIRED)\n"
-        "    server_name: Optional server name to filter tools"
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "user_id": {"type": "string", "default": "", "title": "User Id"},
-            "server_name": {"type": "string", "default": "", "title": "Server Name"},
-        },
-    },
-    annotations=ToolAnnotations(title="List MCP Tools", read_only=True, idempotent=True),
-    function=_mcp_tools,
-)
+        raise

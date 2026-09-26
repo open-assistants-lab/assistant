@@ -17,6 +17,36 @@ def _content_text(result: Any) -> str:
     return "\n".join(parts)
 
 
+def _is_always_load(meta: Any) -> bool:
+    """Read a tool's own alwaysLoad hint from an MCP tools/list response."""
+    if meta is None:
+        return False
+    if isinstance(meta, dict):
+        return bool(meta.get("alwaysLoad") or meta.get("always_load"))
+    return bool(getattr(meta, "alwaysLoad", False) or getattr(meta, "always_load", False))
+
+
+def select_always_load(
+    tools: Any,
+    *,
+    operator_always_load: frozenset[str],
+    trust_server: bool,
+) -> frozenset[str]:
+    """Resolve which tools are exempt from deferral.
+
+    Server-supplied ``meta.alwaysLoad`` is honoured only when the operator has
+    explicitly trusted that server (spec C3). Without that opt-in a third-party
+    server could mark every tool exempt and force itself permanently into every
+    context window, defeating the exposure policy entirely.
+    """
+    selected = set(operator_always_load)
+    if trust_server:
+        for tool in tools:
+            if _is_always_load(getattr(tool, "meta", None)):
+                selected.add(str(getattr(tool, "name", "")))
+    return frozenset(name for name in selected if name)
+
+
 def mcp_result_to_tool_result(
     result: Any,
     *,

@@ -58,10 +58,10 @@ class DestructiveFakeBridge(FakeBridge):
         ]
 
 
-async def test_mcp_reload_uses_current_loop_with_multiple_active_sessions():
+async def test_refresh_uses_current_loop_with_multiple_active_sessions():
     from src.sdk import runner
     from src.sdk.loop import _current_agent_loop
-    from src.sdk.tools_core.mcp import mcp_reload
+    from src.sdk.tools_core.mcp import mcp_proxy
 
     current_loop = FakeLoop()
     other_loop = FakeLoop()
@@ -75,19 +75,19 @@ async def test_mcp_reload_uses_current_loop_with_multiple_active_sessions():
             patch("src.sdk.tools_core.mcp_manager.get_mcp_manager", return_value=FakeManager()),
             patch("src.sdk.tools_core.mcp_bridge.MCPToolBridge", FakeBridge),
         ):
-            result = await mcp_reload.ainvoke({"user_id": "u"})
+            result = await mcp_proxy.ainvoke({"user_id": "u", "action": "refresh"})
     finally:
         _current_agent_loop.reset(token)
         runner._user_loops.clear()
 
-    assert "1 MCP tools registered" in result
+    assert "1 MCP tools registered" in result.content
     assert current_loop.registered == ["mcp__math__add"]
     assert other_loop.registered == []
 
 
-async def test_mcp_reload_does_not_register_disabled_mcp_tool(monkeypatch, tmp_path):
+async def test_refresh_does_not_register_disabled_mcp_tool(monkeypatch, tmp_path):
     from src.sdk.loop import _current_agent_loop
-    from src.sdk.tools_core.mcp import mcp_reload
+    from src.sdk.tools_core.mcp import mcp_proxy
 
     loop = FakeLoop()
     token = _current_agent_loop.set(loop)
@@ -107,17 +107,17 @@ async def test_mcp_reload_does_not_register_disabled_mcp_tool(monkeypatch, tmp_p
             patch("src.sdk.tools_core.mcp_manager.get_mcp_manager", return_value=FakeManager()),
             patch("src.sdk.tools_core.mcp_bridge.MCPToolBridge", FakeBridge),
         ):
-            result = await mcp_reload.ainvoke({"user_id": "u"})
+            result = await mcp_proxy.ainvoke({"user_id": "u", "action": "refresh"})
     finally:
         _current_agent_loop.reset(token)
 
-    assert "0 MCP tools registered" in result
+    assert "0 MCP tools registered" in result.content
     assert loop.registered == []
 
 
-async def test_mcp_reload_registers_unconfigured_destructive_mcp_tool(monkeypatch, tmp_path):
+async def test_refresh_registers_unconfigured_destructive_mcp_tool(monkeypatch, tmp_path):
     from src.sdk.loop import _current_agent_loop
-    from src.sdk.tools_core.mcp import mcp_reload
+    from src.sdk.tools_core.mcp import mcp_proxy
 
     loop = FakeLoop()
     token = _current_agent_loop.set(loop)
@@ -134,11 +134,11 @@ async def test_mcp_reload_registers_unconfigured_destructive_mcp_tool(monkeypatc
             patch("src.sdk.tools_core.mcp_manager.get_mcp_manager", return_value=FakeManager()),
             patch("src.sdk.tools_core.mcp_bridge.MCPToolBridge", DestructiveFakeBridge),
         ):
-            result = await mcp_reload.ainvoke({"user_id": "u"})
+            result = await mcp_proxy.ainvoke({"user_id": "u", "action": "refresh"})
     finally:
         _current_agent_loop.reset(token)
 
-    assert "1 MCP tools registered" in result
+    assert "1 MCP tools registered" in result.content
     assert loop.registered == ["mcp__fs__delete"]
 
 
@@ -149,7 +149,7 @@ class FailingBridge(FakeBridge):
         raise RuntimeError("server handshake failed")
 
 
-async def test_mcp_reload_failure_is_reported_not_swallowed(monkeypatch):
+async def test_refresh_failure_is_reported_not_swallowed(monkeypatch):
     """Issue #30: a failed reload must not report a clean success.
 
     By the time discover() runs, the session's mcp__* tools have already been
@@ -159,7 +159,7 @@ async def test_mcp_reload_failure_is_reported_not_swallowed(monkeypatch):
     from src.sdk import runner
     from src.sdk.loop import _current_agent_loop
     from src.sdk.tools import ToolResult
-    from src.sdk.tools_core.mcp import mcp_reload
+    from src.sdk.tools_core.mcp import mcp_proxy
 
     loop = FakeLoop()
     runner._user_loops.clear()
@@ -171,7 +171,7 @@ async def test_mcp_reload_failure_is_reported_not_swallowed(monkeypatch):
             patch("src.sdk.tools_core.mcp_manager.get_mcp_manager", return_value=FakeManager()),
             patch("src.sdk.tools_core.mcp_bridge.MCPToolBridge", FailingBridge),
         ):
-            result = await mcp_reload.ainvoke({"user_id": "u"})
+            result = await mcp_proxy.ainvoke({"user_id": "u", "action": "refresh"})
     finally:
         _current_agent_loop.reset(token)
 

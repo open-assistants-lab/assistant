@@ -1,6 +1,6 @@
 """Unit tests for MCP module."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 
 class TestMCPConfig:
@@ -78,7 +78,7 @@ class TestMCPConfig:
             assert config is not None
             assert config.source_path == str(config_path)
             assert config.mcpServers["demo"].source_type == "user"
-            assert config.mcpServers["demo"].disabled is False
+            assert config.mcpServers["demo"].enabled is True
 
     def test_config_mtime_missing(self, tmp_path):
         """Test mtime when config doesn't exist."""
@@ -95,58 +95,74 @@ class TestMCPConfig:
 class TestMCPTools:
     """Tests for MCP tools (async)."""
 
-    async def test_mcp_list_requires_user_id(self):
-        from src.sdk.tools_core.mcp import mcp_list
+    async def test_mcp_proxy_requires_user_id(self):
+        from src.sdk.tools import ToolResult
+        from src.sdk.tools_core.mcp import mcp_proxy
 
-        result = await mcp_list.ainvoke({"user_id": ""})
-        assert "Error: user_id is required" in result
-
-    async def test_mcp_reload_requires_user_id(self):
-        from src.sdk.tools_core.mcp import mcp_reload
-
-        result = await mcp_reload.ainvoke({"user_id": ""})
-        assert "Error: user_id is required" in result
-
-    async def test_mcp_tools_requires_user_id(self):
-        from src.sdk.tools_core.mcp import mcp_tools
-
-        result = await mcp_tools.ainvoke({"user_id": ""})
-        assert "Error: user_id is required" in result
+        result = await mcp_proxy.ainvoke({"user_id": "", "action": "search"})
+        assert isinstance(result, ToolResult)
+        assert result.is_error is True
+        assert "user_id is required" in result.content
 
     @patch("src.sdk.tools_core.mcp_manager.get_mcp_manager")
-    async def test_mcp_list_empty(self, mock_get_manager):
+    async def test_mcp_proxy_status_with_no_cached_servers(self, mock_get_manager):
         mock_manager = MagicMock()
-        mock_manager.initialize = AsyncMock()
-        mock_manager.list_servers = AsyncMock(return_value={})
+        mock_manager.cached_metadata = MagicMock(return_value=[])
         mock_get_manager.return_value = mock_manager
 
-        from src.sdk.tools_core.mcp import mcp_list
+        from src.sdk.tools_core.mcp import mcp_proxy
 
-        result = await mcp_list.ainvoke({"user_id": "test_user"})
-        assert "No MCP servers configured" in result
+        result = await mcp_proxy.ainvoke({"user_id": "test_user", "action": "status"})
+        assert result.is_error is False
+        assert "No cached MCP servers" in result.content
 
     @patch("src.sdk.tools_core.mcp_manager.get_mcp_manager")
-    async def test_mcp_list_with_servers(self, mock_get_manager):
+    async def test_mcp_proxy_status_lists_cached_servers(self, mock_get_manager):
         mock_manager = MagicMock()
-        mock_manager.initialize = AsyncMock()
-        mock_manager.list_servers = AsyncMock(
-            return_value={
-                "math": {
-                    "command": "python",
-                    "args": ["math.py"],
-                    "transport": "stdio",
-                    "running": True,
-                    "tool_count": 2,
+        mock_manager.cached_metadata = MagicMock(
+            return_value=[
+                {
+                    "server_name": "math",
+                    "source_type": "user",
+                    "tools": [{"name": "add"}, {"name": "sub"}],
                 }
-            }
+            ]
         )
         mock_get_manager.return_value = mock_manager
 
-        from src.sdk.tools_core.mcp import mcp_list
+        from src.sdk.tools_core.mcp import mcp_proxy
 
-        result = await mcp_list.ainvoke({"user_id": "test_user"})
-        assert "math" in result
-        assert "running" in result
+        result = await mcp_proxy.ainvoke({"user_id": "test_user", "action": "status"})
+        assert result.is_error is False
+        assert "math" in result.content
+        assert "2 cached tools" in result.content
+
+    @patch("src.sdk.tools_core.mcp_manager.get_mcp_manager")
+    async def test_mcp_proxy_describe_lists_tools_without_connecting(self, mock_get_manager):
+        mock_manager = MagicMock()
+        mock_manager.cached_metadata = MagicMock(
+            return_value=[
+                {
+                    "server_name": "math",
+                    "tools": [{"name": "add", "description": "Add numbers"}],
+                }
+            ]
+        )
+        mock_get_manager.return_value = mock_manager
+
+        from src.sdk.tools_core.mcp import mcp_proxy
+
+        result = await mcp_proxy.ainvoke(
+            {
+                "user_id": "test_user",
+                "action": "describe",
+                "server": "math",
+                "tool": "add",
+            }
+        )
+        assert result.is_error is False
+        assert "add" in result.content
+        mock_manager.initialize.assert_not_called()
 
 
 class TestMCPManager:
