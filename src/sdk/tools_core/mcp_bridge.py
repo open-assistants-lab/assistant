@@ -32,6 +32,12 @@ def _parse_mcp_tool_name(namespaced: str) -> tuple[str, str] | None:
     return parts[1], parts[2]
 
 
+def _parse_server(namespaced: str) -> str:
+    """Server name for a namespaced ``mcp__<server>__<tool>`` name."""
+    parsed = _parse_mcp_tool_name(namespaced)
+    return parsed[0] if parsed else ""
+
+
 def _convert_tool_annotations(mcp_annotations: Any) -> ToolAnnotations:
     if mcp_annotations is None:
         return ToolAnnotations()
@@ -165,6 +171,77 @@ class MCPToolBridge:
                 elif tool_name in bare and bare_counts.get(tool_name, 0) > 1:
                     ambiguous.add(tool_name)
         return selected, ambiguous
+
+    async def catalogue(self) -> list[Any]:
+        """Return every available MCP tool, preferring live connections.
+
+        Used by the exposure resolver, which needs the full catalogue before it
+        can decide which tools may be direct. Falls back to the durable cache
+        when no server is connected, so a decision can be made without starting
+        anything.
+        """
+        connections = await self._get_manager().snapshot_connections()
+        if connections:
+            return [tool for conn in connections.values() for tool in conn.tools]
+        return self.cached_catalogue()
+
+    def cached_catalogue(self) -> list[Any]:
+        """Build tool objects from the durable cache without connecting."""
+        from types import SimpleNamespace
+
+        manager = self._get_manager()
+        cached_metadata = getattr(manager, "cached_metadata", None)
+        records = list(cached_metadata()) if callable(cached_metadata) else []
+        catalogue: list[Any] = []
+        for record in records:
+            server_name = str(record.get("server_name") or "")
+            for metadata in record.get("tools", []) or []:
+                catalogue.append(
+                    SimpleNamespace(
+                        name=metadata.get("name", ""),
+                        description=metadata.get("description", "") or "",
+                        inputSchema=metadata.get("inputSchema", {}) or {},
+                        annotations=metadata.get("annotations"),
+                        meta={},
+                        server_name=server_name,
+                    )
+                )
+        return catalogue
+
+    async def promote(self, decision: Any) -> tuple[list[ToolDefinition], list[ToolDefinition]]:
+        """Build the tool sets for a resolved exposure decision.
+
+        Returns ``(callable_tools, search_only_tools)``:
+
+        * ``always`` — survivors are directly callable.
+        * ``search`` — survivors carry their real schema so the tool index can
+          match them, but they are NOT callable. That is precisely our existing
+          ``tool_search`` contract: indexed and findable, absent from the loop's
+          callable set, activated into the loop on demand.
+
+        Stale promotions from a previous sync are dropped first.
+        """
+        wanted = set(decision.survivors)
+        for name in [n for n, owner in self._tool_to_server.items() if n not in wanted]:
+            self._registry.remove(name)
+            self._tool_to_server.pop(name, None)
+
+        by_name = {str(t.name): t for t in await self.catalogue()}
+        callable_tools: list[ToolDefinition] = []
+        search_only: list[ToolDefinition] = []
+        for name in sorted(wanted):
+            tool = by_name.get(name)
+            if tool is None:
+                continue
+            server_name = getattr(tool, "server_name", None) or _parse_server(name)
+            td = self._convert_mcp_tool(name, tool, server_name)
+            if decision.mode == "search":
+                search_only.append(td)
+            else:
+                self._registry.register(td)
+                self._tool_to_server[name] = server_name
+                callable_tools.append(td)
+        return callable_tools, search_only
 
     async def sync_direct_tools(self, direct_tools: set[str] | list[str]) -> dict[str, list[str]]:
         """Promote configured direct tools and remove definitions that are stale."""

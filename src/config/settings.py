@@ -326,6 +326,11 @@ class ToolsConfig(_BaseSettings):
     """Tools configuration."""
 
     native: NativeToolsConfig = Field(default_factory=NativeToolsConfig)
+    # Coarse family-level disable, borrowed from OpenCode's tools glob gate.
+    # A name matching any pattern is never exposed to the model. This narrows
+    # only: it can never re-admit a capability-disabled or governance-denied
+    # tool. Globs are matched against tool names (`*` / `?`).
+    disabled: list[str] = Field(default_factory=list)
     firecrawl_api_key: str = Field(default="", validation_alias="FIRECRAWL_API_KEY")
     firecrawl_base_url: str = Field(default="", validation_alias="FIRECRAWL_BASE_URL")
     max_retries: int = 3
@@ -514,8 +519,21 @@ class MCPConfig(_BaseSettings):
 
     enabled: bool = True
     idle_timeout_minutes: int = 30
-    exposure: Literal["direct", "hybrid", "proxy"] = "direct"
-    direct_tools: list[str] = Field(default_factory=list)
+    # Axis B: never | search | always, plus the v0.6.21 values direct|hybrid|proxy
+    # (accepted one release, reported deprecated). `auto` arrives with Layer 3,
+    # which measures the catalogue before choosing a value.
+    exposure: Literal[
+        "direct", "hybrid", "proxy", "never", "search", "always"
+    ] = "always"
+    # Global globs. `include_tools` narrows everything; `exclude_tools` is
+    # applied afterwards, so a name in both is excluded (Pi's ordering).
+    include_tools: list[str] = Field(default_factory=list)
+    exclude_tools: list[str] = Field(default_factory=list)
+    # Per-tool exemption from deferral. Server-supplied meta.alwaysLoad is
+    # ignored unless trust_server_exemptions is set (spec C3).
+    always_load: list[str] = Field(default_factory=list)
+    trust_server_exemptions: bool = False
+    defer_with_missing_metadata: bool = True
     cache_ttl_seconds: int = Field(default=86_400, ge=60, le=2_592_000)
     refresh_timeout_seconds: float = Field(default=5.0, gt=0, le=120)
     max_result_chars: int = Field(default=20_000, ge=1_000, le=200_000)

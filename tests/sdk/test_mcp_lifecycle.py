@@ -183,7 +183,7 @@ async def test_health_reports_cached_metadata_without_starting_server(monkeypatc
 
     health = await manager.health()
 
-    assert health["exposure"] in {"direct", "hybrid", "proxy"}
+    assert health["exposure"] in {"always", "search", "never", "direct", "hybrid", "proxy"}
     assert health["servers"]["cached"]["cache_status"] == "cached"
     assert health["servers"]["cached"]["tool_count"] == 1
     manager._ensure_started.assert_not_awaited()

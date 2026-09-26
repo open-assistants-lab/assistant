@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
@@ -26,6 +27,42 @@ class FakeBridge:
     def __init__(self, user_id):
         self.user_id = user_id
         self._tool_to_server = {"stale": "server"}
+
+    async def catalogue(self):
+        return [
+            SimpleNamespace(
+                name=td.name,
+                description=td.description,
+                inputSchema={},
+                annotations=None,
+                meta={},
+                server_name="math",
+            )
+            for td in self.get_tool_definitions()
+        ]
+
+    async def promote(self, decision):
+        """Return (callable, search_only) per the resolved exposure decision."""
+        from src.sdk.tools import ToolDefinition
+
+        callable_tools, search_only = [], []
+        wanted = set(decision.survivors)
+        for td in self.get_tool_definitions():
+            if td.name not in wanted:
+                continue
+            if decision.mode == "search":
+                search_only.append(td)
+            else:
+                callable_tools.append(
+                    ToolDefinition(
+                        name=td.name,
+                        description=td.description,
+                        parameters=td.parameters,
+                        annotations=td.annotations,
+                        function=td.function,
+                    )
+                )
+        return callable_tools, search_only
 
     async def discover(self):
         return 1
@@ -143,9 +180,9 @@ async def test_refresh_registers_unconfigured_destructive_mcp_tool(monkeypatch, 
 
 
 class FailingBridge(FakeBridge):
-    """Discovery fails after the session's mcp__* tools were unregistered."""
+    """Cataloguing fails after the session's mcp__* tools were unregistered."""
 
-    async def discover(self):
+    async def catalogue(self):
         raise RuntimeError("server handshake failed")
 
 
