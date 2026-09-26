@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import Any
 
@@ -104,6 +105,45 @@ class SubagentLaunchPlan(BaseModel):
             "canonical_manifest": self.canonical_manifest,
         }
 
+    @classmethod
+    def from_persisted(cls, data: Mapping[str, Any]) -> SubagentLaunchPlan:
+        """Rehydrate a frozen plan, failing closed if the row was tampered with.
+
+        The stored ``plan_id`` is the SHA-256 of the canonical manifest, so
+        recomputing it detects any capability that was added to the row after it
+        was written. A schedule row is unattended authority: it must never load
+        a manifest broader than the one that was approved.
+        """
+        payload = dict(data)
+        if not isinstance(payload.get("canonical_manifest"), dict):
+            raise ValueError("persisted launch plan is missing its canonical manifest")
+        decisions = payload.get("decisions") or ()
+        if not isinstance(decisions, list | tuple):
+            raise ValueError("persisted launch plan has malformed decisions")
+        plan = cls(
+            plan_id=str(payload.get("plan_id") or ""),
+            agent_name=str(payload.get("agent_name") or ""),
+            user_id=str(payload.get("user_id") or ""),
+            workspace_id=str(payload.get("workspace_id") or ""),
+            requested_workspace_id=payload.get("requested_workspace_id"),
+            tool_selection_mode=ToolSelectionMode(
+                payload.get("tool_selection_mode") or ToolSelectionMode.SAFE_DEFAULT
+            ),
+            requested_tools=tuple(payload.get("requested_tools") or ()),
+            effective_tools=tuple(payload.get("effective_tools") or ()),
+            requested_skills=tuple(payload.get("requested_skills") or ()),
+            effective_skills=tuple(payload.get("effective_skills") or ()),
+            decisions=tuple(CapabilityDecision(**dict(item)) for item in decisions),
+            ready=bool(payload.get("ready", False)),
+        )
+        recomputed = _plan_id(plan.canonical_manifest_json)
+        if plan.plan_id and plan.plan_id != recomputed:
+            raise SubagentLaunchPlanTampered(
+                f"frozen manifest hash {plan.plan_id[:12]} does not match its content "
+                f"({recomputed[:12]})"
+            )
+        return plan
+
     @property
     def rejected_decisions(self) -> tuple[CapabilityDecision, ...]:
         return tuple(decision for decision in self.decisions if not decision.accepted)
@@ -122,6 +162,37 @@ class SubagentLaunchRejected(ValueError):  # noqa: N818 - public contract name
         super().__init__(f"Subagent launch rejected: {rejected or self.code}")
 
 
+class SubagentManifestDrift(SubagentLaunchRejected):  # noqa: N818 - public contract name
+    """A frozen manifest no longer matches the plan resolved from current state.
+
+    Raised instead of launching with either the old or the new authority: an
+    unattended schedule must never silently broaden *or* narrow what it may do,
+    and re-authorizing it is the operator's decision (#46).
+    """
+
+    code = "manifest_drift"
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        frozen: SubagentLaunchPlan | None = None,
+        fresh: SubagentLaunchPlan | None = None,
+    ) -> None:
+        self.frozen = frozen
+        self.fresh = fresh
+        ValueError.__init__(self, f"Subagent launch rejected: {reason} ({self.code})")
+
+
+class SubagentLaunchPlanTampered(SubagentLaunchRejected):  # noqa: N818 - public contract name
+    """A persisted launch plan's content does not match its own manifest hash."""
+
+    code = "manifest_tampered"
+
+    def __init__(self, reason: str) -> None:
+        ValueError.__init__(self, f"Subagent launch rejected: {reason} ({self.code})")
+
+
 def resolve_permission(user_id: str, tool_name: str, tool_input: dict[str, Any]) -> str:
     """Resolve one effective permission without creating an approval proposal."""
     from src.sdk.governance import get_governance_service
@@ -132,6 +203,40 @@ def resolve_permission(user_id: str, tool_name: str, tool_input: dict[str, Any])
 def _plan_id(canonical_manifest_json: str) -> str:
     """Return the full SHA-256 identity of a canonical resolved manifest."""
     return hashlib.sha256(canonical_manifest_json.encode()).hexdigest()
+
+
+def manifest_drift_reason(
+    frozen: SubagentLaunchPlan, fresh: SubagentLaunchPlan
+) -> str | None:
+    """Describe how a frozen manifest differs from the freshly resolved one.
+
+    Compares the authority-bearing fields rather than the raw plan hash so the
+    operator gets an actionable reason. Returns ``None`` when the two agree.
+    """
+    differences: list[str] = []
+    if frozen.agent_name != fresh.agent_name:
+        differences.append(f"agent_name {frozen.agent_name} -> {fresh.agent_name}")
+    if frozen.resolved_workspace_id != fresh.resolved_workspace_id:
+        differences.append(
+            f"workspace {frozen.resolved_workspace_id} -> {fresh.resolved_workspace_id}"
+        )
+    if frozen.tool_selection_mode != fresh.tool_selection_mode:
+        differences.append(
+            f"tool_selection_mode {frozen.tool_selection_mode} -> {fresh.tool_selection_mode}"
+        )
+    for label, before, after in (
+        ("requested_tools", frozen.requested_tools, fresh.requested_tools),
+        ("effective_tools", frozen.effective_tools, fresh.effective_tools),
+        ("requested_skills", frozen.requested_skills, fresh.requested_skills),
+        ("effective_skills", frozen.effective_skills, fresh.effective_skills),
+    ):
+        gained = sorted(set(after) - set(before))
+        lost = sorted(set(before) - set(after))
+        if gained:
+            differences.append(f"{label} gained {', '.join(gained)}")
+        if lost:
+            differences.append(f"{label} lost {', '.join(lost)}")
+    return "; ".join(differences) or None
 
 
 def _tool_decision(name: str, tool_map: dict[str, Any], caps: dict[str, Any], user_id: str) -> CapabilityDecision:
