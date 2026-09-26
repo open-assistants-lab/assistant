@@ -56,12 +56,7 @@ from src.sdk.tools_core.filesystem import (
     files_rename,
     files_write,
 )
-from src.sdk.tools_core.mcp import (
-    mcp_list,
-    mcp_proxy,
-    mcp_reload,
-    mcp_tools,
-)
+from src.sdk.tools_core.mcp import mcp_proxy
 from src.sdk.tools_core.memory import memory_profile
 from src.sdk.tools_core.message import (
     message_count,
@@ -272,12 +267,6 @@ def _register_all() -> None:
 
     if not _desktop_excluded("mcp_proxy"):
         registry.register(mcp_proxy)
-    if not _desktop_excluded("mcp_list"):
-        registry.register(mcp_list)
-    if not _desktop_excluded("mcp_reload"):
-        registry.register(mcp_reload)
-    if not _desktop_excluded("mcp_tools"):
-        registry.register(mcp_tools)
 
     if not _desktop_excluded("skills_load"):
         registry.register(skills_load)

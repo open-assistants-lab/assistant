@@ -31,7 +31,7 @@ CORE_TOOL_NAMES: set[str] = {
     "web_search",
     "skills_load",
     "subagent_delegate",
-    "mcp_reload",
+    "mcp_proxy",
     "tool_search",
     "tool_reload",
     "tool_result_read",

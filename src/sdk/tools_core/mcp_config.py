@@ -22,9 +22,19 @@ class MCPServerConfig(BaseModel):
         description="HTTP headers for remote servers (e.g. Authorization: Bearer ...)",
     )
     transport: str = Field(default="stdio", description="Transport type: 'stdio' or 'http'")
+    # v0.6.21 shipped a `disabled` field that was exclude=True (so it could not
+    # be read from .mcp.json) and was never consulted. Replaced by `enabled`,
+    # which is real, serialisable configuration that the manager honours and
+    # health reports.
+    enabled: bool = True
+    include_tools: list[str] = Field(default_factory=list)
+    exclude_tools: list[str] = Field(default_factory=list)
+    # A third-party server must not be able to grant itself a permanent slot in
+    # the model's context (spec C3). Server-supplied meta.alwaysLoad is ignored
+    # unless the operator opts in per server.
+    trust_server_exemptions: bool = False
     source_path: str = Field(default="", exclude=True)
     source_type: Literal["user", "project", "runtime"] = Field(default="user", exclude=True)
-    disabled: bool = Field(default=False, exclude=True)
 
 
 class MCPConfig(BaseModel):

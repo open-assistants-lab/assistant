@@ -81,6 +81,28 @@ class MCPManager:
         except Exception:
             return 30 * 60
 
+    def _get_refresh_timeout(self) -> float:
+        """Seconds allowed for one tools/list fetch."""
+        try:
+            return float(get_settings().mcp.refresh_timeout_seconds)
+        except Exception:
+            return 5.0
+
+    async def _list_tools_bounded(self, conn: MCPServerConnection) -> Any:
+        """Fetch tools/list under the configured budget.
+
+        A hung server must not be able to stall a loop build or a reconnect
+        indefinitely. Candidate cleanup and generation guards already exist, so
+        a timeout here surfaces as an ordinary start error.
+        """
+        budget = self._get_refresh_timeout()
+        try:
+            return await asyncio.wait_for(conn.session.list_tools(), timeout=budget)
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"tools/list for MCP server '{conn.server_name}' timed out after {budget:g}s"
+            ) from exc
+
     def _is_enabled(self) -> bool:
         try:
             settings = get_settings()
@@ -163,6 +185,16 @@ class MCPManager:
         self._server_config_hashes = self._server_hashes(config)
 
         for server_name, server_config in config.mcpServers.items():
+            if not getattr(server_config, "enabled", True):
+                # Layer 5.1: an explicitly disabled server is never connected.
+                # It stays visible in health with a reason (I3) rather than
+                # silently vanishing, which would be a diagnosis dead end.
+                logger.info(
+                    "mcp.server_disabled",
+                    {"server": server_name},
+                    user_id=self.user_id,
+                )
+                continue
             await self._start_server(
                 server_name, server_config, generation=self._lifecycle_generation
             )
@@ -238,7 +270,7 @@ class MCPManager:
                 "mcp.starting_server", {"server": server_name, "command": server_config.command}
             )
             candidate = await self._create_connection(server_name, server_config)
-            result = await candidate.session.list_tools()
+            result = await self._list_tools_bounded(candidate)
             candidate.tools = result.tools
             candidate.last_refresh = time.time()
             candidate.last_used = candidate.last_refresh
@@ -303,7 +335,7 @@ class MCPManager:
         connections = await self.snapshot_connections()
         for server_name, conn in connections.items():
             try:
-                result = await conn.session.list_tools()
+                result = await self._list_tools_bounded(conn)
                 conn.tools = result.tools
                 conn.last_refresh = time.time()
                 self._last_errors[server_name] = None
@@ -366,7 +398,7 @@ class MCPManager:
                     # initialize() is performed by _create_connection; tools/list is the
                     # live discovery key. Always rediscover here (LC-4), because MCP tool
                     # catalogs can change while .mcp.json remains byte-identical.
-                    result = await candidate.session.list_tools()
+                    result = await self._list_tools_bounded(candidate)
                     candidate.tools = result.tools
                     candidate.last_refresh = time.time()
                     candidate.last_used = candidate.last_refresh
@@ -532,10 +564,12 @@ class MCPManager:
             for name, cfg in config.mcpServers.items():
                 conn = self._connections.get(name)
                 record = cached.get(name, {})
+                enabled = getattr(cfg, "enabled", True)
                 servers[name] = {
                     "command": cfg.command,
                     "args": cfg.args,
                     "transport": cfg.transport,
+                    "enabled": enabled,
                     "running": conn is not None,
                     "tool_count": len(conn.tools) if conn else len(record.get("tools", []) or []),
                     "cache_status": "cached" if record else "missing",
@@ -559,11 +593,15 @@ class MCPManager:
         for name in sorted(names):
             conn = connections.get(name)
             record = cached.get(name, {})
+            server_config = configured.get(name)
+            enabled = getattr(server_config, "enabled", True) if server_config is not None else True
             configured_server = name in configured
             stale = conn is not None and now - conn.last_used > timeout
             connected = conn is not None
             if not configured_server:
                 status = "absent"
+            elif not enabled:
+                status = "disabled"
             elif stale:
                 status = "stale"
             elif connected:
@@ -573,7 +611,7 @@ class MCPManager:
             servers[name] = {
                 "status": status,
                 "connected": connected,
-                "degraded": status in {"stale", "degraded", "absent"},
+                "degraded": status in {"stale", "degraded", "absent", "disabled"},
                 "last_refresh": (
                     datetime.fromtimestamp(conn.last_refresh, UTC).isoformat()
                     if conn
