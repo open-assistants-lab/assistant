@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+from collections.abc import Iterable
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -186,7 +187,12 @@ class MCPToolBridge:
         return self.cached_catalogue()
 
     def cached_catalogue(self) -> list[Any]:
-        """Build tool objects from the durable cache without connecting."""
+        """Build tool objects from the durable cache without connecting.
+
+        This is what the ``auto`` policy measures (spec C1): deciding whether to
+        defer a catalogue must not require opening the connections that create
+        the cost we are trying to avoid.
+        """
         from types import SimpleNamespace
 
         manager = self._get_manager()
@@ -208,6 +214,82 @@ class MCPToolBridge:
                 )
         return catalogue
 
+    def has_cached_metadata(self) -> bool:
+        """Whether the durable cache holds any server metadata (C2 gate)."""
+        manager = self._get_manager()
+        cached_metadata = getattr(manager, "cached_metadata", None)
+        return bool(cached_metadata()) if callable(cached_metadata) else False
+
+    async def build_definitions(self, names: Iterable[str]) -> list[ToolDefinition]:
+        """Build ToolDefinitions for the given names from the live/cache catalogue.
+
+        Used both to measure the cost of a candidate surface (Layer 3) and to
+        register it, so what we measure is exactly what we would expose.
+        """
+        by_name = {str(t.name): t for t in await self.catalogue()}
+        built: list[ToolDefinition] = []
+        for name in sorted(set(names)):
+            tool = by_name.get(name)
+            if tool is None:
+                continue
+            server_name = getattr(tool, "server_name", None) or _parse_server(name)
+            built.append(self._convert_mcp_tool(name, tool, server_name))
+        return built
+
+    async def resolve_exposure(
+        self, *, settings: Any, caps: dict[str, Any], model: str
+    ) -> Any:
+        """Resolve this user's MCP exposure for one loop build.
+
+        Centralised so the interactive path and the reload path cannot drift:
+        both ask the same question through the same code, including the
+        `auto` measurement (spec C1: measured from the durable cache, never
+        from a live connection).
+        """
+        from src.sdk.mcp_exposure import measure_mode, parse_auto, resolve_exposure
+
+        mcp_cfg = settings.mcp
+        tools_cfg = getattr(settings, "tools", None)
+        disabled_globs = tuple(getattr(tools_cfg, "disabled", []) or ())
+        common: dict[str, Any] = {
+            "include": list(getattr(mcp_cfg, "include_tools", []) or []),
+            "exclude": list(getattr(mcp_cfg, "exclude_tools", []) or []),
+            "disabled_globs": disabled_globs,
+            "caps": caps,
+            "operator_always_load": list(getattr(mcp_cfg, "always_load", []) or []),
+            "server_trust": bool(getattr(mcp_cfg, "trust_server_exemptions", False)),
+        }
+        setting = str(mcp_cfg.exposure)
+        auto_pct = parse_auto(setting)
+
+        if auto_pct is None:
+            return resolve_exposure(
+                setting=setting, tools=await self.catalogue(), **common
+            )
+
+        catalogue = self.cached_catalogue()
+        cache_warm = bool(catalogue) or self.has_cached_metadata()
+        # Filters are mode-independent, so resolve once to learn the survivors,
+        # measure their real definitions, then resolve again with the result.
+        probe = resolve_exposure(setting="always", tools=catalogue, **common)
+        candidates = await self.build_definitions(probe.survivors)
+        measured, reason = measure_mode(
+            candidates,
+            model=model,
+            threshold_pct=auto_pct,
+            cache_warm=cache_warm,
+            defer_when_unknown=bool(
+                getattr(mcp_cfg, "defer_with_missing_metadata", True)
+            ),
+        )
+        return resolve_exposure(
+            setting=setting,
+            tools=catalogue,
+            measured_mode=measured,
+            measurement_reason=reason,
+            **common,
+        )
+
     async def promote(self, decision: Any) -> tuple[list[ToolDefinition], list[ToolDefinition]]:
         """Build the tool sets for a resolved exposure decision.
 
@@ -226,20 +308,14 @@ class MCPToolBridge:
             self._registry.remove(name)
             self._tool_to_server.pop(name, None)
 
-        by_name = {str(t.name): t for t in await self.catalogue()}
         callable_tools: list[ToolDefinition] = []
         search_only: list[ToolDefinition] = []
-        for name in sorted(wanted):
-            tool = by_name.get(name)
-            if tool is None:
-                continue
-            server_name = getattr(tool, "server_name", None) or _parse_server(name)
-            td = self._convert_mcp_tool(name, tool, server_name)
+        for td in await self.build_definitions(wanted):
             if decision.mode == "search":
                 search_only.append(td)
             else:
                 self._registry.register(td)
-                self._tool_to_server[name] = server_name
+                self._tool_to_server[td.name] = _parse_server(td.name)
                 callable_tools.append(td)
         return callable_tools, search_only
 

@@ -631,7 +631,7 @@ async def create_sdk_loop(
     mcp_tools: list[Any] = []
     mcp_search_only: list[Any] = []
     mcp_bridge = None
-    from src.sdk.mcp_exposure import ExposureDecision, resolve_exposure
+    from src.sdk.mcp_exposure import resolve_exposure
 
     # Resolved against an empty catalogue first: we need the *mode* before we
     # know which servers to connect. `never` skips discovery entirely.
@@ -652,24 +652,23 @@ async def create_sdk_loop(
 
     if mode_only.mode != "never":
         try:
+            from src.sdk.mcp_exposure import ExposureDecision
             from src.sdk.tools_core.mcp_bridge import MCPToolBridge
 
             mcp_bridge = MCPToolBridge(user_id=user_id)
-            catalogue = await mcp_bridge.catalogue()
-            decision: ExposureDecision = resolve_exposure(
-                setting=exposure_setting,
-                tools=catalogue,
-                include=getattr(mcp_settings, "include_tools", []) or [],
-                exclude=getattr(mcp_settings, "exclude_tools", []) or [],
-                disabled_globs=disabled_globs,
-                caps=caps,
-                operator_always_load=getattr(mcp_settings, "always_load", []) or [],
-                server_trust=bool(getattr(mcp_settings, "trust_server_exemptions", False)),
+            decision: ExposureDecision = await mcp_bridge.resolve_exposure(
+                settings=settings, caps=caps, model=model_id
             )
             if decision.error:
                 logger.warning(
                     "sdk_runner.mcp_exposure_decision",
                     {"error": decision.error},
+                    user_id=user_id,
+                )
+            if decision.measurement_reason:
+                logger.info(
+                    "sdk_runner.mcp_exposure_measured",
+                    {"mode": decision.mode, "reason": decision.measurement_reason},
                     user_id=user_id,
                 )
             if decision.mode != "never":

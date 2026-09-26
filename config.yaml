@@ -36,13 +36,19 @@ filesystem:
 mcp:
   enabled: true
   idle_timeout_minutes: 30
-  # Axis B — which MCP tools may be direct:
+  # Axis A — when to defer (measured):
+  #   auto      equivalent to auto:10
+  #   auto:N    defer when deferrable definitions reach N% of the context window
+  # Axis B — which tools may be direct (explicit override):
   #   always  every surviving tool is directly callable
   #   search  tools are indexed and findable via tool_search, not callable
   #   never   only the governed mcp_proxy tool reaches the model
   # v0.6.21 values direct|hybrid|proxy are accepted one release and deprecated.
-  # `auto` arrives with the measured layer and becomes the default then.
-  exposure: always
+  #
+  # `auto` measures the durable metadata cache, never a live connection, so it
+  # starts no MCP server where `always` starts one per configured server. A
+  # cold cache defers rather than injecting an uncosted catalogue.
+  exposure: auto
   # Global globs; exclude is applied after include, so a name in both is
   # excluded. `*` and `?` are supported.
   include_tools: []
