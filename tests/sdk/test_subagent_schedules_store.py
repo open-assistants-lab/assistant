@@ -880,6 +880,105 @@ async def test_update_status_can_clear_a_stale_error(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_concurrent_writer_cannot_flush_a_failed_write(tmp_path: Path) -> None:
+    """Two writers on the shared connection must not cross-contaminate commits.
+
+    sqlite3's implicit transaction is per *connection*: without write
+    serialization a second writer's commit() flushes the first writer's pending
+    DML, and the first writer's rollback() is then a no-op.
+    """
+    store = _store(tmp_path)
+    try:
+        results = await asyncio.gather(
+            _create_once(store, user_id="alice", subagent_name="A"),
+            _create_once(store, user_id="bob", subagent_name="B"),
+            _create_once(store, user_id="carol", subagent_name="C"),
+            return_exceptions=True,
+        )
+        assert not [r for r in results if isinstance(r, BaseException)], results
+        assert len(await store.list_for_user("alice")) == 1
+        assert len(await store.list_for_user("bob")) == 1
+        assert len(await store.list_for_user("carol")) == 1
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_row_cannot_be_silently_rearmed(tmp_path: Path) -> None:
+    """Re-arming a cancelled row would put it back in front of startup restore."""
+    store = _store(tmp_path)
+    try:
+        created = await _create_once(store)
+        await store.cancel("alice", created["schedule_id"])
+
+        assert await store.update_status("alice", created["schedule_id"], "scheduled") is False
+
+        row = await store.get("alice", created["schedule_id"])
+        assert row is not None
+        assert row["status"] == "cancelled"
+        assert await store.due_for_restore("alice") == []
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_migration_can_opt_into_reopening(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    try:
+        created = await _create_once(store)
+        await store.update_status("alice", created["schedule_id"], "needs_review")
+
+        # needs_review is not a stop decision, so the normal path re-arms it.
+        assert (
+            await store.update_status("alice", created["schedule_id"], "scheduled") is True
+        )
+        row = await store.get("alice", created["schedule_id"])
+        assert row is not None
+        assert row["status"] == "scheduled"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_recurring_schedule_reruns_after_an_outcome(tmp_path: Path) -> None:
+    """`failed`/`completed` are outcomes, not stop decisions — cron must re-fire."""
+    store = _store(tmp_path)
+    try:
+        created = await _create_once(store, run_at=None, cron="0 8 * * *")
+        for outcome in ("failed", "completed", "running"):
+            assert await store.update_status("alice", created["schedule_id"], outcome)
+            assert (
+                await store.update_status("alice", created["schedule_id"], "running")
+            )
+        row = await store.get("alice", created["schedule_id"])
+        assert row is not None
+        assert row["status"] == "running"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_row_needs_the_explicit_reopen_opt_in(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    try:
+        created = await _create_once(store)
+        await store.cancel("alice", created["schedule_id"])
+
+        assert await store.update_status("alice", created["schedule_id"], "scheduled") is False
+        assert (
+            await store.update_status(
+                "alice",
+                created["schedule_id"],
+                "scheduled",
+                allow_terminal_reopen=True,
+            )
+            is True
+        )
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_store_works_as_an_async_context_manager(tmp_path: Path) -> None:
     async with _store(tmp_path) as store:
         created = await _create_once(store)

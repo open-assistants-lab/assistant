@@ -55,6 +55,12 @@ TERMINAL_STATUSES: frozenset[str] = frozenset(
 #: the work queue remains the authority on that run.
 CANCELLABLE_STATUSES: frozenset[str] = SCHEDULE_STATUSES - TERMINAL_STATUSES - {"running"}
 
+#: States that record an explicit *stop decision*. Nothing may re-arm a row out
+#: of these, because doing so would put cancelled work back in front of startup
+#: restore. Outcome states (``completed``/``failed``) are deliberately absent:
+#: a recurring schedule legitimately runs again after either one.
+STOPPED_STATUSES: frozenset[str] = frozenset({"cancelled", "rejected", "expired", "invalid"})
+
 TRIGGER_KINDS: frozenset[str] = frozenset({"once", "cron"})
 
 _SCHEMA = """
@@ -195,6 +201,13 @@ class SubagentScheduleStore:
         self._db_path = Path(path) if path is not None else get_paths().subagent_schedules_db_path()
         self._db: aiosqlite.Connection | None = None
         self._init_lock = asyncio.Lock()
+        # sqlite3's implicit transactions are per *connection*, not per
+        # statement: with one shared connection, a concurrent writer's commit()
+        # would flush another writer's pending DML, and the losing writer's
+        # rollback() is then a no-op. Serializing writes keeps at most one
+        # write transaction open, which is what makes the rollback paths below
+        # a real guarantee rather than a best effort.
+        self._write_lock = asyncio.Lock()
 
     async def _get_db(self) -> aiosqlite.Connection:
         if self._db is None:
@@ -291,36 +304,38 @@ class SubagentScheduleStore:
         schedule_id = _schedule_id()
         now = _now()
         db = await self._get_db()
-        try:
-            await db.execute(
-                """INSERT INTO subagent_schedules
-                (id, user_id, workspace_id, subagent_name, task, trigger_kind, run_at,
-                 cron, timezone, status, manifest_json, manifest_hash, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?)""",
-                (
-                    schedule_id,
-                    user_id,
-                    workspace_id,
-                    subagent_name,
-                    task,
-                    trigger_kind,
-                    run_at_text,
-                    cron_text,
-                    timezone.strip(),
-                    json.dumps(dict(manifest), sort_keys=True),
-                    manifest_hash,
-                    now,
-                    now,
-                ),
-            )
-            await db.commit()
-        except BaseException:
-            # sqlite3 opens an implicit transaction on DML; without this the
-            # row would stay pending on the shared connection and be committed
-            # by the *next* writer — turning a failed create into a durable
-            # schedule that startup restore would then fire unattended.
-            await db.rollback()
-            raise
+        async with self._write_lock:
+            try:
+                await db.execute(
+                    """INSERT INTO subagent_schedules
+                    (id, user_id, workspace_id, subagent_name, task, trigger_kind,
+                     run_at, cron, timezone, status, manifest_json, manifest_hash,
+                     created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?)""",
+                    (
+                        schedule_id,
+                        user_id,
+                        workspace_id,
+                        subagent_name,
+                        task,
+                        trigger_kind,
+                        run_at_text,
+                        cron_text,
+                        timezone.strip(),
+                        json.dumps(dict(manifest), sort_keys=True),
+                        manifest_hash,
+                        now,
+                        now,
+                    ),
+                )
+                await db.commit()
+            except BaseException:
+                # Without this the row would stay pending on the shared
+                # connection and be committed by the *next* writer — turning a
+                # failed create into a durable schedule that startup restore
+                # would then fire unattended.
+                await db.rollback()
+                raise
         created = await self.get(user_id, schedule_id)
         if created is None:  # pragma: no cover - insert just succeeded
             raise RuntimeError(f"schedule {schedule_id} vanished after insert")
@@ -335,32 +350,48 @@ class SubagentScheduleStore:
         last_run_id: str | None = None,
         last_error: str | None = None,
         clear_error: bool = False,
+        allow_terminal_reopen: bool = False,
     ) -> bool:
-        """Move a schedule to a new status, preserving unset fields."""
+        """Move a schedule to a new status, preserving unset fields.
+
+        A row that records a stop decision (cancelled/rejected/expired/
+        invalid) is not silently re-armed, because that would put cancelled
+        work back in front of startup restore. The legacy migration opts in
+        explicitly via ``allow_terminal_reopen``. Outcome states
+        (``completed``/``failed``) stay re-drivable so a recurring schedule can
+        fire again after them.
+        """
         if status not in SCHEDULE_STATUSES:
             raise ValueError(f"unknown schedule status {status!r}")
         db = await self._get_db()
-        try:
-            cursor = await db.execute(
-                """UPDATE subagent_schedules
-                SET status = ?, updated_at = ?,
-                    last_run_id = COALESCE(?, last_run_id),
-                    last_error = CASE WHEN ? THEN NULL ELSE COALESCE(?, last_error) END
-                WHERE id = ? AND user_id = ?""",
-                (
-                    status,
-                    _now(),
-                    last_run_id,
-                    1 if clear_error else 0,
-                    last_error,
-                    schedule_id,
-                    user_id,
-                ),
-            )
-            await db.commit()
-        except BaseException:
-            await db.rollback()
-            raise
+        async with self._write_lock:
+            try:
+                reopen_clause = (
+                    "" if allow_terminal_reopen else "AND status NOT IN ({})".format(
+                        ", ".join("?" for _ in STOPPED_STATUSES)
+                    )
+                )
+                cursor = await db.execute(
+                    f"""UPDATE subagent_schedules
+                    SET status = ?, updated_at = ?,
+                        last_run_id = COALESCE(?, last_run_id),
+                        last_error = CASE WHEN ? THEN NULL ELSE COALESCE(?, last_error) END
+                    WHERE id = ? AND user_id = ? {reopen_clause}""",  # noqa: S608 - clause and placeholders are module constants
+                    (
+                        status,
+                        _now(),
+                        last_run_id,
+                        1 if clear_error else 0,
+                        last_error,
+                        schedule_id,
+                        user_id,
+                        *(() if allow_terminal_reopen else sorted(STOPPED_STATUSES)),
+                    ),
+                )
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
         return cursor.rowcount > 0
 
     async def cancel(self, user_id: str, schedule_id: str) -> bool:
@@ -372,22 +403,23 @@ class SubagentScheduleStore:
         """
         db = await self._get_db()
         placeholders = ", ".join("?" for _ in CANCELLABLE_STATUSES)
-        try:
-            cursor = await db.execute(
-                f"UPDATE subagent_schedules SET status = 'cancelled', updated_at = ? "  # noqa: S608 - placeholders are module constants
-                f"WHERE id = ? AND user_id = ? "
-                f"AND status IN ({placeholders})",
-                (
-                    _now(),
-                    schedule_id,
-                    user_id,
-                    *sorted(CANCELLABLE_STATUSES),
-                ),
-            )
-            await db.commit()
-        except BaseException:
-            await db.rollback()
-            raise
+        async with self._write_lock:
+            try:
+                cursor = await db.execute(
+                    f"UPDATE subagent_schedules SET status = 'cancelled', updated_at = ? "  # noqa: S608 - placeholders are module constants
+                    f"WHERE id = ? AND user_id = ? "
+                    f"AND status IN ({placeholders})",
+                    (
+                        _now(),
+                        schedule_id,
+                        user_id,
+                        *sorted(CANCELLABLE_STATUSES),
+                    ),
+                )
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
         if cursor.rowcount > 0:
             return True
         # Nothing cancellable matched: report success only if the caller really
