@@ -305,17 +305,10 @@ async def reload_for_loop(
         bridge._tool_to_server = {}
 
         mcp_cfg = get_settings().mcp
-        from src.sdk.mcp_exposure import resolve_exposure
-
-        decision = resolve_exposure(
-            setting=str(mcp_cfg.exposure),
-            tools=await bridge.catalogue(),
-            include=list(mcp_cfg.include_tools or []),
-            exclude=list(mcp_cfg.exclude_tools or []),
-            disabled_globs=tuple(getattr(get_settings().tools, "disabled", []) or ()),
+        decision = await bridge.resolve_exposure(
+            settings=get_settings(),
             caps=load_user_capabilities(user_id),
-            operator_always_load=list(mcp_cfg.always_load or []),
-            server_trust=bool(getattr(mcp_cfg, "trust_server_exemptions", False)),
+            model=str(getattr(loop, "model", "") or ""),
         )
         if decision.mode == "never":
             return f"{result} ({mcp_cfg.exposure} exposure active; direct MCP tools remain hidden)"

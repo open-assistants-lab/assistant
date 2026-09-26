@@ -42,6 +42,77 @@ EXPOSURE_MODES: dict[str, Mode] = {
     **LEGACY_EXPOSURE,
 }
 
+#: `auto` is Claude Code's `auto:10`; a percentage of the context window is the
+#: right unit because the same value must mean the same thing on an 8k local
+#: model and a 200k hosted one.
+AUTO_DEFAULT_PCT = 10.0
+
+
+def parse_auto(setting: str) -> float | None:
+    """Return the threshold percentage for an ``auto`` setting, else ``None``.
+
+    A malformed value returns ``None`` rather than a default: ``auto:abc`` must
+    not quietly become 10%.
+    """
+    value = (setting or "").strip()
+    if value == "auto":
+        return AUTO_DEFAULT_PCT
+    if not value.startswith("auto:"):
+        return None
+    try:
+        pct = float(value.split(":", 1)[1])
+    except ValueError:
+        return None
+    if pct <= 0:
+        return None
+    return pct
+
+
+def measure_mode(
+    tools: Sequence[Any],
+    *,
+    model: str,
+    threshold_pct: float = AUTO_DEFAULT_PCT,
+    cache_warm: bool = True,
+    defer_when_unknown: bool = True,
+    window_override: int | None = None,
+) -> tuple[Mode, str]:
+    """Decide ``always`` vs ``search`` by measuring against the context window.
+
+    The comparison is inclusive: at exactly the threshold we defer, matching
+    Claude Code's rule that deferral activates *when* the definitions reach the
+    percentage.
+
+    Two cases resolve to ``search`` deliberately:
+
+    * **cold cache** (C2) — a catalogue we have never costed against must not
+      be injected whole. This is the opposite of Pi's
+      ``deferWithMissingMetadata: false`` default, and the deviation is
+      recorded in the design spec so it is not "corrected" by assumption. An
+      operator who prefers Pi's tradeoff sets
+      ``mcp.defer_with_missing_metadata: false``, which passes
+      ``defer_when_unknown=False`` and measures regardless.
+    * **unknown context window** — the same argument: we cannot cost the
+      catalogue, so we do not inject it.
+    """
+    from src.sdk.context_measurement import (
+        estimate_tool_schema_tokens,
+        resolve_context_window,
+    )
+
+    if not cache_warm and defer_when_unknown:
+        return "search", "metadata cache is cold; deferring until definitions are known"
+
+    window = window_override or resolve_context_window(model)
+    if not window or window <= 0:
+        return "search", f"context window unknown for {model!r}; deferring"
+
+    cost = estimate_tool_schema_tokens(list(tools))
+    pct = (cost / window) * 100
+    if pct >= threshold_pct:
+        return "search", f"definitions {pct:.1f}% of window >= {threshold_pct:g}%"
+    return "always", f"definitions {pct:.1f}% of window < {threshold_pct:g}%"
+
 
 def matches_any(name: str, patterns: Iterable[str] | None) -> bool:
     """Simple glob match: ``*`` and ``?`` wildcard, everything else literal."""
@@ -71,6 +142,8 @@ class ExposureDecision:
     always_load: frozenset[str] = frozenset()
     deprecated: bool = False
     error: str | None = None
+    #: Why `auto` chose this mode; None for explicitly configured settings.
+    measurement_reason: str | None = None
 
 
 def resolve_mode(setting: str) -> ModeDecision:
@@ -179,24 +252,32 @@ def resolve_exposure(
     caps: dict[str, Any] | None = None,
     operator_always_load: Sequence[str] = (),
     server_trust: bool = False,
+    measured_mode: Mode | None = None,
+    measurement_reason: str | None = None,
 ) -> ExposureDecision:
     """Resolve one loop's MCP exposure from configuration and a tool catalogue.
 
-    ``auto`` is not handled here: Layer 3 measures the catalogue against the
-    context window and passes the resulting concrete value. Callers that have
-    not measured should treat an ``auto`` setting as a configuration error
-    rather than silently assuming a mode.
+    For an ``auto`` setting the caller must supply ``measured_mode``, produced
+    by :func:`measure_mode` against the durable cache. An unmeasured ``auto`` is
+    a configuration error rather than a silent assumption, because defaulting it
+    to ``always`` would inject an uncosted catalogue and defaulting it to
+    ``never`` would hide working tools. Explicitly configured settings ignore
+    ``measured_mode`` entirely — the operator's choice wins.
     """
-    mode_decision = resolve_mode(setting)
-    if setting.strip() == "auto" or setting.strip().startswith("auto:"):
-        return ExposureDecision(
-            mode="search",
-            setting=setting,
-            error=(
-                "mcp.exposure 'auto' requires a measured decision and is not "
-                "available in this layer; use always|search|never."
-            ),
-        )
+    auto_pct = parse_auto(setting)
+    if auto_pct is not None:
+        if measured_mode is None:
+            return ExposureDecision(
+                mode="search",
+                setting=setting,
+                error=(
+                    f"mcp.exposure {setting!r} requires a measured decision; "
+                    "call measure_mode() against the metadata cache first."
+                ),
+            )
+        mode_decision = ModeDecision(mode=measured_mode, setting=setting)
+    else:
+        mode_decision = resolve_mode(setting)
 
     kept, excluded = filter_survivors(
         tools,
@@ -220,6 +301,7 @@ def resolve_exposure(
             ),
             deprecated=mode_decision.deprecated,
             error=mode_decision.error,
+            measurement_reason=measurement_reason,
         )
 
     return ExposureDecision(
@@ -232,4 +314,5 @@ def resolve_exposure(
         ),
         deprecated=mode_decision.deprecated,
         error=mode_decision.error,
+        measurement_reason=measurement_reason,
     )

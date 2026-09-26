@@ -519,12 +519,13 @@ class MCPConfig(_BaseSettings):
 
     enabled: bool = True
     idle_timeout_minutes: int = 30
-    # Axis B: never | search | always, plus the v0.6.21 values direct|hybrid|proxy
-    # (accepted one release, reported deprecated). `auto` arrives with Layer 3,
-    # which measures the catalogue before choosing a value.
+    # Axis A decides *when* to defer: `auto`/`auto:N` measure the deferrable
+    # definitions against the model's context window and behave as `search` or
+    # `always`. Axis B (never | search | always) is the explicit override, plus
+    # the v0.6.21 values direct|hybrid|proxy accepted one release (deprecated).
     exposure: Literal[
-        "direct", "hybrid", "proxy", "never", "search", "always"
-    ] = "always"
+        "auto", "direct", "hybrid", "proxy", "never", "search", "always"
+    ] = "auto"
     # Global globs. `include_tools` narrows everything; `exclude_tools` is
     # applied afterwards, so a name in both is excluded (Pi's ordering).
     include_tools: list[str] = Field(default_factory=list)

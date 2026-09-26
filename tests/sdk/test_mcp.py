@@ -41,6 +41,37 @@ class FakeBridge:
             for td in self.get_tool_definitions()
         ]
 
+    async def resolve_exposure(self, *, settings, caps, model):
+        from src.sdk.mcp_exposure import measure_mode, parse_auto, resolve_exposure
+        from src.sdk.tools import ToolDefinition
+
+        mcp_cfg = settings.mcp
+        setting = str(mcp_cfg.exposure)
+        catalogue = await self.catalogue()
+        measured_mode = None
+        auto_pct = parse_auto(setting)
+        if auto_pct is not None:
+            # Mirror the real bridge: measure real definitions, warm cache.
+            defs = [
+                ToolDefinition(name=t.name, description=t.description, parameters={})
+                for t in catalogue
+            ]
+            measured_mode, _reason = measure_mode(
+                defs, model=model or "openai:gpt-4o", threshold_pct=auto_pct,
+                cache_warm=bool(defs),
+            )
+        return resolve_exposure(
+            setting=setting,
+            measured_mode=measured_mode,
+            tools=catalogue,
+            caps=caps,
+            include=list(getattr(mcp_cfg, "include_tools", []) or []),
+            exclude=list(getattr(mcp_cfg, "exclude_tools", []) or []),
+            disabled_globs=tuple(getattr(settings.tools, "disabled", []) or ()),
+            operator_always_load=list(getattr(mcp_cfg, "always_load", []) or []),
+            server_trust=bool(getattr(mcp_cfg, "trust_server_exemptions", False)),
+        )
+
     async def promote(self, decision):
         """Return (callable, search_only) per the resolved exposure decision."""
         from src.sdk.tools import ToolDefinition
