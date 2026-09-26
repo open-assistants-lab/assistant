@@ -391,6 +391,62 @@ def _get_workspace_context(workspace_id: str | None) -> str:
 SKILL_DESC_BUDGET = 1536
 
 
+def _record_exposure_decision(
+    bridge: Any,
+    *,
+    user_id: str,
+    decision: Any,
+    callable_count: int,
+    search_only_count: int,
+) -> None:
+    """Firewall I4: report and audit how the reachable tool set was resolved.
+
+    Audited because the policy may choose the exposed set from measurement
+    rather than operator configuration, so an operator must still be able to
+    answer which tools this model can reach right now.
+    """
+    manager = getattr(bridge, "_manager", None)
+    payload = {
+        "mode": decision.mode,
+        "setting": decision.setting,
+        "survivors": sorted(decision.survivors),
+        "excluded": decision.excluded,
+        "deprecated": decision.deprecated,
+        "callable": callable_count,
+        "search_only": search_only_count,
+        "error": decision.error,
+    }
+    if manager is not None and hasattr(manager, "record_exposure_decision"):
+        manager.record_exposure_decision(payload)
+
+    # Only surface an event when the decision is not the plain configured
+    # default, so ordinary sessions do not fill the audit log with noise.
+    trivial = (
+        decision.mode == decision.setting
+        and not decision.excluded
+        and not decision.deprecated
+        and not decision.error
+    )
+    if trivial:
+        return
+    try:
+        from src.sdk.audit import AuditEvent, ensure_audit_store_subscribed
+
+        ensure_audit_store_subscribed(user_id).record(
+            AuditEvent(
+                kind="exposure_decision",
+                user_id=user_id,
+                detail=json.dumps(payload, sort_keys=True, default=str)[:2000],
+            )
+        )
+    except Exception as exc:  # auditing must never block a session
+        logger.warning(
+            "sdk_runner.mcp_exposure_audit_failed",
+            {"error": str(exc)},
+            user_id=user_id,
+        )
+
+
 def _load_user_capabilities(user_id: str) -> dict[str, Any]:
     try:
         return load_user_capabilities(user_id)
@@ -630,6 +686,13 @@ async def create_sdk_loop(
                     },
                     user_id=user_id,
                 )
+            _record_exposure_decision(
+                mcp_bridge,
+                user_id=user_id,
+                decision=decision,
+                callable_count=len(mcp_tools),
+                search_only_count=len(mcp_search_only),
+            )
         except Exception as e:
             logger.warning("sdk_runner.mcp_failed", {"error": str(e)}, user_id=user_id)
 
