@@ -36,9 +36,33 @@ def test_shell_defaults_to_ask(tmp_path) -> None:
     assert service._default_permission("shell_execute") == "ask"
 
 
+def _with_admin_permissions(monkeypatch, permissions: dict) -> None:
+    """Pin the ADMIN policy layer explicitly.
+
+    The test used to supply only the user layer and inherit the admin layer
+    from the shipped config.yaml, so any deliberate deployment override
+    (e.g. an admin `shell_execute: allow` for an unattended research agent)
+    silently invalidated a governance invariant test. Both layers are now
+    stated by the test, so it tests precedence rather than the current config.
+    """
+    import src.config.settings as settings_module
+
+    class _Section:
+        pass
+
+    governance = _Section()
+    governance.permissions = permissions
+    settings = _Section()
+    settings.governance = governance
+    # resolve_permission_for_call imports get_settings inside the function, so
+    # the patch target is the module it is imported from.
+    monkeypatch.setattr(settings_module, "get_settings", lambda: settings)
+
+
 def test_user_allow_cannot_weaken_shell_ask(monkeypatch, tmp_path) -> None:
     import src.sdk.capabilities as capabilities
 
+    _with_admin_permissions(monkeypatch, {})
     monkeypatch.setattr(
         capabilities,
         "load_capabilities",
@@ -47,6 +71,25 @@ def test_user_allow_cannot_weaken_shell_ask(monkeypatch, tmp_path) -> None:
     service = GovernanceService(data_root=tmp_path)
 
     assert service.resolve_permission_for_call("user", "shell_execute", {}) == "ask"
+
+
+def test_admin_allow_does_override_the_shell_ask_fallback(monkeypatch, tmp_path) -> None:
+    """The other direction: an explicit ADMIN allow is authoritative.
+
+    This is the escape hatch a deployment uses when an unattended subagent
+    genuinely needs a tool whose default is `ask`. It is deliberately spelled
+    out as a test so using it is a visible, reviewed decision rather than a
+    config value that quietly weakens a default.
+    """
+    import src.sdk.capabilities as capabilities
+
+    _with_admin_permissions(monkeypatch, {"tools": {"shell_execute": "allow"}})
+    monkeypatch.setattr(
+        capabilities, "load_capabilities", lambda _root: {"permissions": {}}
+    )
+    service = GovernanceService(data_root=tmp_path)
+
+    assert service.resolve_permission_for_call("user", "shell_execute", {}) == "allow"
 
 
 def test_custom_tool_requires_approval_falls_back_to_ask(monkeypatch, tmp_path) -> None:
