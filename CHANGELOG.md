@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.6.22 — 2026-09-26
+
+### Changed — behaviour change, read before upgrading
+- **`mcp.exposure` now defaults to `auto`.** The exposed set of MCP tools is decided by *measuring* the deferrable tool definitions against the model's context window and deferring when they reach 10% (`auto:10`), instead of asking an operator to guess. `always`, `search` and `never` remain available as explicit overrides. This is the default behaviour change in this release: a deployment that never set `exposure` now gets the measured policy.
+  - `auto` measures the **durable metadata cache** and opens **no** MCP connections, where `always` opens one per configured server. A cold cache defers rather than injecting a catalogue that has never been costed against. This deliberately differs from Pi's `deferWithMissingMetadata: false`; set `mcp.defer_with_missing_metadata: false` to opt into that behaviour instead.
+  - A percentage is the right unit, so the same deployment exposes a different tool set on an 8k local model than on a 200k hosted one. The effective decision is reported in `/mcp/health` as `exposure_decision` and written to the audit stream.
+  - The v0.6.21 values `direct`, `hybrid` and `proxy` are still accepted for one release, mapped to `always`, `search` and `never`, and reported as deprecated in `/mcp/health`. An unrecognised value fails closed to `never` with a configuration error.
+  - Note: v0.6.21 shipped a `config.yaml` containing an explicit `exposure: direct`, so deployments using that file keep a fixed surface. This release's `config.yaml` ships `exposure: auto`.
+
+- **MCP tools can now be filtered with globs.** `mcp.include_tools` then `mcp.exclude_tools` (exclude is applied second, so a name in both is excluded), per-server equivalents on each entry in `.mcp.json`, and a coarse `tools.disabled` family gate that applies to every tool family. All of them narrow only: none can re-admit a capability-disabled or governance-denied tool.
+
+### Added
+- One always-present MCP surface. `mcp_list`, `mcp_tools` and `mcp_reload` are removed and their behaviour is reachable through `mcp_proxy` actions (`status`, `describe`, `refresh`). The MCP tool surface drops from ~725 to ~342 tokens per turn.
+- A governance firewall for the tool surface, enforced in code and covered by tests: exposure decisions never influence permission resolution, a tool discovered by `tool_search` is still permission-checked on invocation, an excluded server stays visible in `/mcp/health` with a reason, the capability floor is removal-only, and an automatic change to the reachable tool set is audited as an `exposure_decision` event. The new audit kind is additive and needs no migration.
+- Per-server `enabled` replaces a `disabled` field that shipped in v0.6.21, was excluded from serialization so it could not be read from `.mcp.json`, and was never consulted. A disabled server is never connected and reports `status: disabled`.
+- Every `tools/list` fetch is bounded by `mcp.refresh_timeout_seconds`, so a hung server can no longer stall a loop build or a reconnect.
+- `mcp.always_load` exempts named tools from deferral. Server-supplied `meta.alwaysLoad` is ignored unless the operator sets `trust_server_exemptions` for that server, so a third-party server cannot grant itself a permanent slot in every context window.
+
+### Fixed
+- MCP lifecycle: a failed tool discovery closes its candidate connection instead of leaking it, configuration changes and deletions are reconciled centrally, reconnects from a superseded generation are rejected, `close_mcp_manager()` releases connections and listeners, and stale connections can be reaped. Health and cache reads no longer start a lazy server.
+- Schedule writes are transactional and serialized, so a cancelled or failed write can no longer be committed by an unrelated later writer.
+
+### Subagent scheduling (not yet reachable)
+- Durable subagent schedule definitions now have a real store, and a scheduled run launches from a frozen capability manifest that is re-verified against current state at fire time; any difference fails the run rather than silently widening or narrowing its authority. **No API or tool creates a schedule yet** — this is the persistence and launch layer only. Tracked in `docs/superpowers/plans/2026-09-25-subagent-scheduler.md`.
+
 ## v0.6.21 — 2026-09-26
 
 ### Added
