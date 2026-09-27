@@ -1,20 +1,23 @@
 """Subagent scheduler using APScheduler."""
 
+import asyncio
 import json
 import sqlite3
-import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
-from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
 from src.app_logging import get_logger
+from src.sdk.subagent_capabilities import SubagentLaunchPlan
 from src.storage.paths import get_paths
+from src.subagent.schedules_store import SubagentScheduleStore
 
 logger = get_logger()
 
@@ -28,7 +31,7 @@ def _get_results_db_path() -> Path:
 
 
 _jobstores: dict[str, Any] = {}
-_scheduler: BackgroundScheduler | None = None
+_scheduler: AsyncIOScheduler | None = None
 
 
 def _init_results_db() -> None:
@@ -148,11 +151,52 @@ def _get_jobstores() -> dict[str, Any]:
     return _jobstores
 
 
-def get_scheduler() -> BackgroundScheduler:
-    """Get or create the global scheduler."""
+def coordinator_for(user_id: str) -> Any | None:
+    """Return the governed coordinator for a user, or None when unavailable.
+
+    Scheduled runs go through ``SubagentCoordinator`` and its frozen launch
+    manifest — never the legacy ``SubagentManager``, which has no capability
+    preflight, no receipts and no work queue.
+    """
+    try:
+        from src.sdk.coordinator import SubagentCoordinator
+
+        return SubagentCoordinator(user_id)
+    except Exception as exc:  # pragma: no cover - construction is cheap but may fail
+        logger.error(
+            "subagent.scheduler_coordinator_unavailable",
+            {"error": str(exc)},
+            user_id=user_id,
+        )
+        return None
+
+
+def _job_id(schedule_id: str) -> str:
+    return f"sched:{schedule_id}"
+
+
+def _default_store() -> SubagentScheduleStore:
+    return SubagentScheduleStore(get_paths().subagent_schedules_db_path())
+
+
+def get_scheduler() -> AsyncIOScheduler:
+    """Get or create the process-local scheduler.
+
+    Must be called from inside a running event loop: ``AsyncIOScheduler``
+    schedules onto the loop it is started on, so constructing it without one
+    produces a scheduler that silently never fires. Failing loudly here is
+    strictly better than that.
+    """
     global _scheduler
     if _scheduler is None:
-        _scheduler = BackgroundScheduler(
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "get_scheduler() requires a running event loop; start it from "
+                "the application lifespan (an async context), not at import time."
+            ) from exc
+        _scheduler = AsyncIOScheduler(
             jobstores=_get_jobstores(),
             misfire_grace_time=300,
         )
@@ -174,215 +218,204 @@ def get_scheduler() -> BackgroundScheduler:
 
         _scheduler.add_listener(job_missed, EVENT_JOB_MISSED)
         _scheduler.add_listener(job_executed, EVENT_JOB_EXECUTED)
-
         _scheduler.start()
-        _restore_scheduled_jobs(_scheduler)
         logger.info("subagent.scheduler.started", {}, user_id="system")
     return _scheduler
 
 
-def _restore_scheduled_jobs(scheduler: BackgroundScheduler) -> None:
-    """Restore scheduled jobs from results DB on startup."""
-    conn = sqlite3.connect(_get_results_db_path())
-    cursor = conn.execute(
-        "SELECT job_id, user_id, subagent_name, task FROM job_results WHERE status = 'scheduled'"
-    )
-    rows = cursor.fetchall()
-    conn.close()
+async def shutdown_scheduler() -> None:
+    """Stop the scheduler and release the process-local singleton.
 
-    if not rows:
-        return
-
-    logger.info("subagent.restoring_jobs", {"count": len(rows)}, user_id="system")
-
-    for job_id, user_id, subagent_name, task in rows:
+    The jobstore cache is cleared too: it is keyed on nothing, so leaving it
+    behind would make a later get_scheduler() reuse a jobstore built for a
+    different data path.
+    """
+    global _scheduler, _jobstores
+    if _scheduler is not None:
         try:
-            from datetime import timedelta
-
-            run_at = datetime.now() + timedelta(seconds=30)
-            scheduler.add_job(
-                _run_subagent_job,
-                trigger=DateTrigger(run_date=run_at),
-                id=job_id,
-                args=[user_id, subagent_name, task, job_id],
-                replace_existing=True,
+            _scheduler.shutdown(wait=False)
+        except Exception as exc:  # pragma: no cover - shutdown is best effort
+            logger.warning(
+                "subagent.scheduler_shutdown_failed", {"error": str(exc)}, user_id="system"
             )
-            logger.info("subagent.job_restored", {"job_id": job_id}, user_id=user_id)
-        except Exception as e:
-            logger.error(
-                "subagent.job_restore_failed",
-                {"job_id": job_id, "error": str(e)},
+        _scheduler = None
+    _jobstores = {}
+
+
+def _build_trigger(row: dict[str, Any]) -> Any | None:
+    """Reconstruct a real trigger from persisted metadata.
+
+    The previous implementation discarded the persisted trigger entirely and
+    scheduled every row as a one-shot ~30s after startup, which silently turned
+    recurring schedules into one-shots and fired future one-shots early.
+    """
+    kind = row.get("trigger_kind")
+    if kind == "once":
+        raw = row.get("run_at")
+        if not raw:
+            return None
+        try:
+            run_at = datetime.fromisoformat(str(raw))
+        except ValueError:
+            return None
+        if run_at.tzinfo is None:
+            run_at = run_at.replace(tzinfo=UTC)
+        return DateTrigger(run_date=run_at)
+    if kind == "cron":
+        cron = row.get("cron")
+        if not cron:
+            return None
+        try:
+            return CronTrigger.from_crontab(
+                str(cron), timezone=ZoneInfo(str(row.get("timezone") or "UTC"))
+            )
+        except (ValueError, ZoneInfoNotFoundError, KeyError):
+            return None
+    return None
+
+
+async def restore_schedules(
+    scheduler: AsyncIOScheduler, *, store: SubagentScheduleStore | None = None
+) -> None:
+    """Rebuild triggers for every restorable schedule. Idempotent.
+
+    The job function is the module-level ``fire_schedule`` coroutine and the
+    user/schedule ids are passed as APScheduler *args*, so a trigger restored
+    from the SQLAlchemy jobstore after a restart is a normal call with its
+    arguments intact. A closure would not survive that round trip.
+    """
+    store = store or _default_store()
+    for row in await store.all_due_for_restore():
+        schedule_id = str(row.get("schedule_id") or "")
+        if not schedule_id:
+            continue
+        user_id = str(row.get("user_id"))
+        if str(row.get("trigger_kind")) == "once" and _is_past(row.get("run_at")):
+            await store.update_status(
+                user_id,
+                schedule_id,
+                "expired",
+                last_error="run_at passed while the process was not running",
+            )
+            logger.warning(
+                "subagent.schedule_expired",
+                {"schedule_id": schedule_id, "run_at": row.get("run_at")},
                 user_id=user_id,
             )
-
-
-def _run_subagent_job(user_id: str, subagent_name: str, task: str, job_id: str) -> None:
-    """Module-level function to run subagent job (picklable)."""
-    from src.subagent.manager import get_subagent_manager
-
-    logger.info(
-        "subagent.job_executing",
-        {"job_id": job_id, "subagent_name": subagent_name},
-        user_id=user_id,
-    )
-
-    try:
-        manager = get_subagent_manager(user_id)
-        result = manager.invoke(subagent_name, task)
-        _save_job_result(
-            job_id=job_id,
-            user_id=user_id,
-            subagent_name=subagent_name,
-            task=task,
-            status="completed" if result.get("success") else "failed",
-            result=result,
+            continue
+        trigger = _build_trigger(row)
+        if trigger is None:
+            await store.update_status(
+                user_id,
+                schedule_id,
+                "invalid",
+                last_error="trigger metadata is missing or unparseable",
+            )
+            continue
+        scheduler.add_job(
+            fire_schedule,
+            trigger=trigger,
+            id=_job_id(schedule_id),
+            args=[user_id, schedule_id],
+            replace_existing=True,
+            misfire_grace_time=300,
         )
         logger.info(
-            "subagent.scheduled_run_completed",
-            {"job_id": job_id, "success": result.get("success")},
+            "subagent.schedule_restored",
+            {"schedule_id": schedule_id, "trigger_kind": row.get("trigger_kind")},
             user_id=user_id,
         )
-    except Exception as e:
-        _save_job_result(
-            job_id=job_id,
-            user_id=user_id,
-            subagent_name=subagent_name,
-            task=task,
-            status="failed",
-            error=str(e),
-        )
-        logger.error(
-            "subagent.scheduled_run_failed",
-            {"job_id": job_id, "error": str(e)},
-            user_id=user_id,
-        )
-        raise
 
 
-def schedule_once(
-    user_id: str,
-    subagent_name: str,
-    task: str,
-    run_at: datetime,
-) -> str:
-    """Schedule a one-time subagent execution."""
-    job_id = f"subagent_{uuid.uuid4().hex[:8]}"
-
-    scheduler = get_scheduler()
-
-    scheduler.add_job(
-        _run_subagent_job,
-        trigger=DateTrigger(run_date=run_at),
-        id=job_id,
-        args=[user_id, subagent_name, task, job_id],
-        replace_existing=True,
-    )
-
-    _save_job_result(
-        job_id=job_id,
-        user_id=user_id,
-        subagent_name=subagent_name,
-        task=task,
-        status="scheduled",
-    )
-
-    logger.info(
-        "subagent.scheduled",
-        {"job_id": job_id, "subagent_name": subagent_name, "run_at": run_at.isoformat()},
-        user_id=user_id,
-    )
-
-    return job_id
-
-
-def schedule_now(
-    user_id: str,
-    subagent_name: str,
-    task: str,
-) -> str:
-    """Schedule a subagent to run immediately (async)."""
-    return schedule_once(user_id, subagent_name, task, datetime.now())
-
-
-def schedule_recurring(
-    user_id: str,
-    subagent_name: str,
-    task: str,
-    cron: str,
-) -> str:
-    """Schedule a recurring subagent execution."""
-    job_id = f"recurring_{uuid.uuid4().hex[:8]}"
-
-    scheduler = get_scheduler()
-
+def _is_past(raw: Any) -> bool:
+    if not raw:
+        return False
     try:
-        trigger = CronTrigger.from_crontab(cron)
-    except Exception as e:
-        raise ValueError(f"Invalid cron expression: {e}")
-
-    scheduler.add_job(
-        _run_subagent_job,
-        trigger=trigger,
-        id=job_id,
-        args=[user_id, subagent_name, task, job_id],
-    )
-
-    _save_job_result(
-        job_id=job_id,
-        user_id=user_id,
-        subagent_name=subagent_name,
-        task=task,
-        status="scheduled",
-    )
-
-    logger.info(
-        "subagent.scheduled_recurring",
-        {"job_id": job_id, "subagent_name": subagent_name, "cron": cron},
-        user_id=user_id,
-    )
-
-    return job_id
+        run_at = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return False
+    if run_at.tzinfo is None:
+        run_at = run_at.replace(tzinfo=UTC)
+    return run_at < datetime.now(UTC)
 
 
-def cancel_job(job_id: str) -> bool:
-    """Cancel a scheduled job."""
-    scheduler = get_scheduler()
-    job = scheduler.get_job(job_id)
-    if job:
-        job.remove()
-        conn = sqlite3.connect(_get_results_db_path())
-        conn.execute(
-            "UPDATE job_results SET status = 'cancelled', completed_at = ? WHERE job_id = ?",
-            (datetime.now().isoformat(), job_id),
+async def fire_schedule(
+    user_id: str, schedule_id: str, *, store: SubagentScheduleStore | None = None
+) -> str | None:
+    """Run one schedule through the governed coordinator.
+
+    Never raises: an APScheduler job that raises is lost silently, so every
+    failure is recorded on the schedule row with a reason.
+    """
+    store = store or _default_store()
+    try:
+        row = await store.get(user_id, schedule_id)
+        if row is None:
+            logger.warning(
+                "subagent.schedule_missing",
+                {"schedule_id": schedule_id},
+                user_id=user_id,
+            )
+            return None
+        status = str(row.get("status"))
+        if status not in {"scheduled", "running", "failed"}:
+            logger.info(
+                "subagent.schedule_skipped",
+                {"schedule_id": schedule_id, "status": status},
+                user_id=user_id,
+            )
+            return None
+
+        manifest = row.get("manifest")
+        if not isinstance(manifest, dict) or not manifest:
+            raise ValueError("schedule has no frozen manifest to launch from")
+        plan = SubagentLaunchPlan.from_persisted(manifest)
+
+        coordinator = coordinator_for(user_id)
+        if coordinator is None:
+            raise RuntimeError("no coordinator available for user")
+
+        task_id = await coordinator.start_with_plan(
+            str(row.get("subagent_name")), str(row.get("task")), plan
         )
-        conn.commit()
-        conn.close()
-        return True
-    return False
+        await store.update_status(user_id, schedule_id, "running", last_run_id=task_id)
+        logger.info(
+            "subagent.schedule_fired",
+            {"schedule_id": schedule_id, "task_id": task_id},
+            user_id=user_id,
+        )
+        return str(task_id) if task_id else None
+    except Exception as exc:
+        logger.error(
+            "subagent.schedule_fire_failed",
+            {"schedule_id": schedule_id, "error": str(exc)},
+            user_id=user_id,
+        )
+        try:
+            await store.update_status(
+                user_id,
+                schedule_id,
+                "failed",
+                last_error=f"{type(exc).__name__}: {exc}",
+            )
+        except Exception:  # pragma: no cover - the store itself is broken
+            pass
+        return None
 
 
-def list_jobs(user_id: str | None = None) -> list[dict[str, Any]]:
-    """List all scheduled jobs."""
-    conn = sqlite3.connect(_get_results_db_path())
-    if user_id:
-        cursor = conn.execute(
-            "SELECT job_id, user_id, subagent_name, task, status FROM job_results WHERE user_id = ?",
-            (user_id,),
-        )
-    else:
-        cursor = conn.execute(
-            "SELECT job_id, user_id, subagent_name, task, status FROM job_results"
-        )
-    jobs = []
-    for row in cursor.fetchall():
-        jobs.append(
-            {
-                "job_id": row[0],
-                "user_id": row[1],
-                "subagent_name": row[2],
-                "task": row[3],
-                "status": row[4],
-            }
-        )
-    conn.close()
-    return jobs
+async def cancel_schedule(user_id: str, schedule_id: str) -> bool:
+    """Remove the trigger and mark the schedule cancelled. Idempotent."""
+    scheduler = _scheduler
+    if scheduler is not None:
+        try:
+            job = scheduler.get_job(_job_id(schedule_id))
+            if job is not None:
+                job.remove()
+        except Exception as exc:  # pragma: no cover
+            logger.warning(
+                "subagent.schedule_cancel_trigger_failed",
+                {"schedule_id": schedule_id, "error": str(exc)},
+                user_id=user_id,
+            )
+    store = _default_store()
+    return await store.cancel(user_id, schedule_id)
