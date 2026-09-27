@@ -150,7 +150,9 @@ async def subagent_create(
     if existing is not None:
         return f"Error: Subagent '{name}' already exists. Use subagent_update to amend it."
 
-    from src.sdk.subagent_capabilities import ToolSelectionMode
+    from src.sdk.subagent_capabilities import (
+        ToolSelectionMode,
+    )
 
     tool_selection_mode = (
         ToolSelectionMode.SAFE_DEFAULT
@@ -168,7 +170,53 @@ async def subagent_create(
         lines.append(f"Tools: {', '.join(tools)}")
     lines.append(f"Max LLM calls: {max_llm_calls}, Cost limit: ${cost_limit_usd}")
 
+    # Report declared capabilities that will make a launch fail. The launch
+    # gate is unchanged and stays fail-closed; this only tells the operator now
+    # rather than at run time.
+    lines.extend(
+        _unlaunchable_warnings(
+            coordinator,
+            agent_profile,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            tool_selection_mode=tool_selection_mode,
+        )
+    )
+
     return "\n".join(lines)
+
+
+def _unlaunchable_warnings(
+    coordinator: Any,
+    profile: Any,
+    *,
+    user_id: str,
+    workspace_id: str,
+    tool_selection_mode: Any = None,
+) -> list[str]:
+    """Best-effort warning lines for a profile that cannot launch.
+
+    Entirely advisory: any failure here must not break create or update, so the
+    whole path is defensive and simply returns nothing on error.
+    """
+    try:
+        from src.sdk.subagent_capabilities import build_launch_plan, launch_blockers
+
+        mode = tool_selection_mode
+        if mode is None:
+            mode = coordinator.load_tool_selection_mode(profile.name)
+        plan = build_launch_plan(profile, user_id, workspace_id, mode)
+        blockers = launch_blockers(plan)
+    except Exception as exc:
+        logger.warning(
+            "subagent.blocker_check_failed", {"error": str(exc)}, user_id=user_id
+        )
+        return []
+    if not blockers:
+        return []
+    return ["", "WARNING: this subagent cannot start until these are resolved:"] + [
+        f"  - {message}" for message in blockers
+    ]
 
 
 subagent_create.annotations = ToolAnnotations(title="Create Subagent", destructive=True)
@@ -269,7 +317,19 @@ async def subagent_update(
     if updated is None:
         return f"Error: Failed to update subagent '{name}'."
 
-    return f"Subagent '{name}' updated: {', '.join(update_kwargs.keys())}"
+    lines = [f"Subagent '{name}' updated: {', '.join(update_kwargs.keys())}"]
+    # An edit can introduce a tool the subagent will never be allowed to use,
+    # so re-check after the update rather than only at creation.
+    lines.extend(
+        _unlaunchable_warnings(
+            coordinator,
+            updated,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            tool_selection_mode=tool_selection_mode,
+        )
+    )
+    return "\n".join(lines)
 
 
 subagent_update.annotations = ToolAnnotations(title="Update Subagent", destructive=True)

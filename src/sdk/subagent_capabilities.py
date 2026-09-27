@@ -163,6 +163,26 @@ class SubagentLaunchPlan(BaseModel):
         return tuple(decision for decision in self.decisions if not decision.accepted)
 
 
+def launch_blockers(plan: SubagentLaunchPlan) -> list[str]:
+    """Describe declared capabilities that will make a launch fail.
+
+    Used to warn at create/update time. The launch gate itself is unchanged and
+    stays fail-closed: this exists so an operator learns that a profile is
+    unlaunchable *before* it silently fails at run time, instead of reaching for
+    a blanket deployment-wide permission override as a workaround.
+    """
+    messages: list[str] = []
+    for decision in plan.decisions:
+        if decision.accepted or not decision.status.startswith("permission_"):
+            continue
+        messages.append(
+            f"'{decision.name}' resolves to {decision.status.removeprefix('permission_')}, "
+            f"so this subagent cannot start until that permission is set to 'allow' "
+            f"({decision.reason})."
+        )
+    return messages
+
+
 class SubagentLaunchRejected(ValueError):  # noqa: N818 - public contract name
     """Preflight rejected a launch before any queue or LLM side effect."""
 
