@@ -85,9 +85,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         _go_logger().warning("governance.dispatcher_start_failed", {"error": str(exc)})
     if not desktop_mode:
         try:
-            from src.subagent.scheduler import get_scheduler
+            from src.subagent.scheduler import get_scheduler, restore_schedules
 
-            get_scheduler()
+            scheduler = get_scheduler()
+            # Restore is async (the schedule store is aiosqlite) and must run
+            # before the app serves traffic, so a schedule whose trigger window
+            # opened during the restart is not missed.
+            await restore_schedules(scheduler)
         except Exception:
             pass
 
@@ -138,9 +142,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         if _token_refresh_task is not None:
             _token_refresh_task.cancel()
-            get_logger().info("scheduler.stopped", {}, user_id="system")
+            get_logger().info("token_refresh.stopped", {}, user_id="system")
         if _operation_dispatcher is not None:
             await _operation_dispatcher.stop()
+        # Stop the subagent scheduler and drop its jobstore singleton so a
+        # later start rebuilds it for the current data path.
+        try:
+            from src.subagent.scheduler import shutdown_scheduler
+
+            await shutdown_scheduler()
+            get_logger().info("scheduler.stopped", {}, user_id="system")
+        except Exception:
+            pass
     except Exception:
         pass
 
