@@ -1,7 +1,23 @@
-"""Workspace model — multi-project isolation for EA.
+"""Workspace model — a named scope on a user-global substrate.
 
-Each workspace is a named, isolated project container with its own
-conversation history, memory, files, subagents, and custom AI instructions.
+A workspace is a **labelling and execution scope**, not a storage boundary.
+It carries a name, description, custom instruction prompt, model override, and
+the execution context handed to subagent runs.
+
+What a workspace does **not** do (see issue #47):
+
+* Files, custom tools, skills, subagent definitions and memory are
+  **user-global**. Two workspaces belonging to one user share them.
+* Conversation history is user-global, and the ``memory_profile`` digest is
+  computed from that same history, so it deliberately spans all of a user's
+  projects. Memory and conversation are one substrate, not two.
+* The real isolation boundary is ``user_id`` — two users never share storage.
+
+Future direction: the sharing boundary that matters is the **team**, not the
+workspace. ``DataPaths`` already accepts ``team_id`` and team data already
+lives under ``data/teams/{team_id}/``, so moving from user-global to
+team-scoped storage is a scope change on a seam that exists. Per-workspace
+storage would be the wrong axis and would have to be unpicked.
 """
 
 from __future__ import annotations
