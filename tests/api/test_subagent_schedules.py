@@ -74,6 +74,25 @@ def _schedules_via_api(client, user_id="alice"):
     return r.json()["schedules"]
 
 
+@pytest.fixture(autouse=True)
+def pinned_permissions(monkeypatch):
+    """Pin capability permissions so these tests never read deployment config.
+
+    `build_launch_plan` resolves each declared tool through the governance
+    policy, which comes from the ambient config.yaml. A deployment that sets an
+    admin `shell_execute: allow` therefore turns a "not ready" plan into a ready
+    one, and these tests would fail or — worse — pass for the wrong reason.
+    Same class of coupling as a governance-invariant test reading a mutable
+    deployment config, so the permission is fixed here instead.
+    """
+    import src.sdk.subagent_capabilities as caps
+
+    def _resolve(user_id, tool_name, tool_input):
+        return "ask" if tool_name == "shell_execute" else "allow"
+
+    monkeypatch.setattr(caps, "resolve_permission", _resolve)
+
+
 @pytest.fixture
 def ready_coordinator(monkeypatch):
     """A coordinator whose preflight yields a ready plan with one tool."""

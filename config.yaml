@@ -4,10 +4,18 @@ agent:
   # No pinned model ships in the repo (D0-5): each deployment supplies its
   # own via PROFILE.md, per-user settings, or AGENT_MODEL / this file. Empty
   # = fail-fast at first use with guidance. Example: anthropic:claude-... or
-  # ollama-cloud:deepseek-v4-flash:0731 (our local-test pin lives in .env).
+  # deepseek-v4.1-flash:cloud is the current research pin (2026-09-27; 0731 was retired).
   model: ''
   name: Jen
-  max_iterations: 25
+  # Raised from 25. The property-research procedure needs: composing a persona,
+  # writing plan.md, six subagent_create calls, each subagent reading its brief
+  # (files_read pages at 100 lines, so a 90-line brief costs 1-2 iterations),
+  # reading evidence back, and compiling the report. The first real acceptance
+  # run spent all 25 iterations re-reading a 260-line doctrine that was ALREADY
+  # its system prompt, created zero subagents, and produced no dossier.
+  # 100 is the schema's hard ceiling (AppConfig validation), so this is as
+  # high as it goes. The POC's profile used max_llm_calls: 120 for the same reason.
+  max_iterations: 100  # schema ceiling is 100 (settings.py validation); cannot go higher
   system_prompt: "You are a helpful assistant.\n\nCRITICAL RULES:\n- NEVER guess or\
     \ estimate - always use tools to get exact numbers/facts\n- If you don't know,\
     \ say \"Let me check\" and call the appropriate tool\n- Tell user EXACTLY what\
@@ -92,6 +100,12 @@ sandbox:
   # Explicit deployment-only variables available to sandboxed commands.
   # Never add provider/API secrets unless a custom tool requires them.
   env_allow: []
+scheduling:
+  # Unattended subagent schedules (#46). Off by default: a scheduled run cannot
+  # pause for approval, so only plans whose every capability resolves to `allow`
+  # can be scheduled, and the surface stays dark until you opt in.
+  #   SCHEDULING_SUBAGENT_ENABLED=1
+  subagent_enabled: false
 shell_tool:
   # shell_execute is approval-required when governance is enabled.
   # Add interpreters or other broad capabilities only as explicit deployment opt-ins.
@@ -101,13 +115,33 @@ shell_tool:
   - whoami
   - pwd
   - agent-browser
+  # firecrawl: the property-research agent's only web access. The pack's
+  # fetch-rules block (in every brief) tells each subagent to reach the web with
+  # `shell_execute` running this CLI, so without it in the allowlist every
+  # research subagent's first call is refused. Requires firecrawl-cli installed
+  # in the image (docker/Dockerfile) and FIRECRAWL_API_KEY in docker/.env.
+  - firecrawl
   enabled: true
   max_output_kb: 100
-  timeout_seconds: 30
+  # Raised from 30s: a firecrawl scrape of a property portal routinely runs
+  # 40-90s, and at 30s the command is killed mid-fetch — which looks exactly
+  # like a blocked or empty source to the agent.
+  timeout_seconds: 180
   # Per-file write budget for sandboxed commands (RLIMIT_FSIZE, MB).
   # Left commented on purpose: a value here would override
   # SHELL_TOOL_MAX_WRITE_MB. Default 64. See issue #32 part 3.
   # max_write_mb: 64
+governance:
+  # `_tool_decision` calls resolve_permission() for every tool a subagent is
+  # created with, and requires "allow" — and it does so whether or not
+  # `enabled` is true (subagent_capabilities.py:295-300). `_default_permission`
+  # hard-codes shell_execute -> "ask" (governance.py:233-236), so without this
+  # entry a correctly-created research subagent is REFUSED at preflight with
+  # "tool: shell_execute (permission_ask)" and the run silently degrades to no
+  # fetching at all.
+  permissions:
+    tools:
+      shell_execute: allow
 skills:
   enabled: true
 subagent: null
