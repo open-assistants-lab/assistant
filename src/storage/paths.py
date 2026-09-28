@@ -218,9 +218,23 @@ class DataPaths:
     # -- Workspace compatibility methods (runtime storage is user-scoped) --
 
     def workspace_skills_dir(self) -> Path:
+        """USER-GLOBAL: this path is shared by every workspace of this user.
+
+        The ``workspace_`` prefix is historical (see #47) — ``workspace_id`` is
+        not part of the path. Files, memory, skills, subagents, conversation and
+        cache are all scoped by ``user_id`` alone; the real isolation boundary
+        is the user, and the future boundary is the team via ``team_id``.
+        """
         return self.user_skills_dir()
 
     def workspace_subagents_dir(self) -> Path:
+        """USER-GLOBAL: this path is shared by every workspace of this user.
+
+        The ``workspace_`` prefix is historical (see #47) — ``workspace_id`` is
+        not part of the path. Files, memory, skills, subagents, conversation and
+        cache are all scoped by ``user_id`` alone; the real isolation boundary
+        is the user, and the future boundary is the team via ``team_id``.
+        """
         return self.user_subagents_dir()
 
     def workspace_tools_dir(self) -> Path:
@@ -235,15 +249,43 @@ class DataPaths:
         return p
 
     def workspace_files_dir(self) -> Path:
+        """USER-GLOBAL: this path is shared by every workspace of this user.
+
+        The ``workspace_`` prefix is historical (see #47) — ``workspace_id`` is
+        not part of the path. Files, memory, skills, subagents, conversation and
+        cache are all scoped by ``user_id`` alone; the real isolation boundary
+        is the user, and the future boundary is the team via ``team_id``.
+        """
         return self.files_dir()
 
     def workspace_memory_dir(self) -> Path:
+        """USER-GLOBAL: this path is shared by every workspace of this user.
+
+        The ``workspace_`` prefix is historical (see #47) — ``workspace_id`` is
+        not part of the path. Files, memory, skills, subagents, conversation and
+        cache are all scoped by ``user_id`` alone; the real isolation boundary
+        is the user, and the future boundary is the team via ``team_id``.
+        """
         return self.user_memory_dir()
 
     def workspace_conversation_path(self) -> Path:
+        """USER-GLOBAL: this path is shared by every workspace of this user.
+
+        The ``workspace_`` prefix is historical (see #47) — ``workspace_id`` is
+        not part of the path. Files, memory, skills, subagents, conversation and
+        cache are all scoped by ``user_id`` alone; the real isolation boundary
+        is the user, and the future boundary is the team via ``team_id``.
+        """
         return self.conversation_dir() / "app.db"
 
     def workspace_cache(self) -> Path:
+        """USER-GLOBAL: this path is shared by every workspace of this user.
+
+        The ``workspace_`` prefix is historical (see #47) — ``workspace_id`` is
+        not part of the path. Files, memory, skills, subagents, conversation and
+        cache are all scoped by ``user_id`` alone; the real isolation boundary
+        is the user, and the future boundary is the team via ``team_id``.
+        """
         return self.user_dir / ".file_cache.json"
 
     def versions_dir(self) -> Path:

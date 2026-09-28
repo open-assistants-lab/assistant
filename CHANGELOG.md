@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Documentation — corrects a published claim
+- **Workspaces are a named scope, not a storage boundary** (#47). Files, custom tools, skills, subagent definitions, conversation history and memory are all **user-global**; two workspaces belonging to one user share them. This is what the code has always done — the isolation claim in `workspace_models.py` was the defect — and the docstrings now say so.
+  - Concretely, a previous release note stated *"Child file access is confined to that workspace."* **That was not accurate.** `workspace_id` is threaded correctly to the path resolver, but the resolver returns a user-scoped directory, so a child's file access is confined to the **user's** files directory. Accordingly, `requested_workspace_id` in a subagent launch manifest scopes skills, prompt and tool-selection context — it does not confine the filesystem. That guarantee needs to be added deliberately if it is ever wanted.
+  - The real isolation boundary is `user_id`. The sharing boundary that matters next is the **team**: `DataPaths` already accepts `team_id` and team data already lives under `data/teams/{team_id}/`, so moving from user-global to team-scoped storage is a scope change on a seam that already exists.
+  - The per-workspace `workspace_id` column on the messages table is currently never populated and is left in place as reserved.
+
 ## v0.6.22 — 2026-09-26
 
 ### Changed — behaviour change, read before upgrading
