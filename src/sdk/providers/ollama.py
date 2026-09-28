@@ -26,6 +26,45 @@ from src.sdk.providers.base import (
 from src.sdk.tools import ToolDefinition
 
 
+def _resolve_usage_tokens(
+    raw_usage: Any, data: dict[str, Any]
+) -> tuple[int, int]:
+    """Resolve token counts across every Ollama payload shape.
+
+    Three shapes occur in the wild and all must work:
+
+    * native ``prompt_eval_count`` / ``eval_count``
+    * OpenAI chat ``prompt_tokens`` / ``completion_tokens``
+    * OpenAI responses ``input_tokens`` / ``output_tokens``
+
+    A ``usage`` object that is *present but zeroed* must not win: preferring a
+    present-but-zero field silently discarded the authoritative native counts
+    and reported every call as free (#48). So the first strictly positive
+    candidate wins, and each field falls back independently.
+    """
+    raw = raw_usage if isinstance(raw_usage, dict) else {}
+    data = data if isinstance(data, dict) else {}
+
+    def _pick(*candidates: Any) -> int:
+        numbers = [c for c in candidates if isinstance(c, int) and not isinstance(c, bool)]
+        positive = [c for c in numbers if c > 0]
+        if positive:
+            return positive[0]
+        return numbers[0] if numbers else 0
+
+    input_tokens = _pick(
+        raw.get("prompt_tokens"),
+        raw.get("input_tokens"),
+        data.get("prompt_eval_count"),
+    )
+    output_tokens = _pick(
+        raw.get("completion_tokens"),
+        raw.get("output_tokens"),
+        data.get("eval_count"),
+    )
+    return input_tokens, output_tokens
+
+
 class OllamaCloud(LLMProvider):
     """Provider for Ollama Cloud (ollama.com/api/chat).
 
@@ -141,18 +180,13 @@ class OllamaCloud(LLMProvider):
 
         usage = None
         raw_usage = data.get("usage") or data.get("eval_count")
-        if isinstance(raw_usage, dict):
+        input_tokens, output_tokens = _resolve_usage_tokens(raw_usage, data)
+        if input_tokens or output_tokens:
             usage = Usage(
-                input_tokens=raw_usage.get("prompt_tokens", 0),
-                output_tokens=raw_usage.get("completion_tokens", 0),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
                 # Ollama's native API doesn't report reasoning tokens
                 # separately; estimate from the thinking content.
-                reasoning_tokens=len(reasoning) // 4 if reasoning else 0,
-            )
-        elif isinstance(raw_usage, int) and "prompt_eval_count" in data:
-            usage = Usage(
-                input_tokens=data.get("prompt_eval_count", 0),
-                output_tokens=raw_usage,
                 reasoning_tokens=len(reasoning) // 4 if reasoning else 0,
             )
 
@@ -250,29 +284,15 @@ class OllamaCloud(LLMProvider):
                 )
             current_tool_calls.clear()
 
-            raw_usage = data.get("usage") or {}
-            if raw_usage:
-                chunks.append(
-                    StreamChunk.usage_event(
-                        Usage(
-                            input_tokens=raw_usage.get(
-                                "prompt_tokens", data.get("prompt_eval_count", 0)
-                            ),
-                            output_tokens=raw_usage.get(
-                                "completion_tokens", data.get("eval_count", 0)
-                            ),
-                        )
-                    )
-                )
-            elif "prompt_eval_count" in data or "eval_count" in data:
-                chunks.append(
-                    StreamChunk.usage_event(
-                        Usage(
-                            input_tokens=data.get("prompt_eval_count", 0),
-                            output_tokens=data.get("eval_count", 0),
-                        )
-                    )
-                )
+            raw_usage = data.get("usage") or data.get("eval_count")
+            input_tokens, output_tokens = _resolve_usage_tokens(raw_usage, data)
+            # Emit nothing for an all-zero payload: a zeroed usage event reads
+            # as "measured and free", which is worse than no event at all.
+            if input_tokens or output_tokens:
+                chunks.append(StreamChunk.usage_event(Usage(
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                )))
 
             chunks.append(StreamChunk.done(content=content))
         else:
