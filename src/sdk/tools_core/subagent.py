@@ -698,3 +698,84 @@ async def subagent_delete(name: str, user_id: str, workspace_id: str = "personal
 
 
 subagent_delete.annotations = ToolAnnotations(title="Delete Subagent", destructive=True)
+
+
+@tool
+async def subagent_schedule(
+    subagent_name: str,
+    task: str,
+    user_id: str = DEFAULT_USER_ID,
+    workspace_id: str = "personal",
+    run_at: str | None = None,
+    cron: str | None = None,
+    timezone: str = "UTC",
+) -> ToolResult | str:
+    """Schedule a subagent to run later, unattended.
+
+    Supply exactly one of `run_at` (an ISO-8601 instant) or `cron` (a 5-field
+    crontab). The subagent's declared capabilities must all resolve to "allow":
+    a scheduled run cannot pause for approval, so a plan that would need one is
+    refused here rather than stalling at fire time.
+
+    This creates a schedule and nothing else — the returned ID is not permission
+    to execute. To run something now, use subagent_start.
+
+    Args:
+        subagent_name: Name of an existing subagent
+        task: What the subagent should do when it runs
+        user_id: User identifier
+        workspace_id: Workspace to run in (defaults to "personal")
+        run_at: ISO-8601 instant for a one-shot run, e.g. 2026-09-26T18:00:00Z
+        cron: 5-field crontab for a recurring run, e.g. "30 7 * * 1-5"
+        timezone: Timezone for interpreting `cron` (default "UTC")
+
+    Returns:
+        The schedule ID and status, or an error explaining the refusal.
+    """
+    from src.subagent.schedule_service import ScheduleRejected, create_schedule
+
+    try:
+        created = await create_schedule(
+            user_id=user_id,
+            subagent_name=subagent_name,
+            task=task,
+            workspace_id=workspace_id,
+            run_at=run_at,
+            cron=cron,
+            timezone=timezone,
+        )
+    except ScheduleRejected as exc:
+        return ToolResult(
+            content=f"Schedule not created: {exc}",
+            is_error=True,
+            structured_content={
+                "status": "rejected",
+                "code": exc.code,
+                "blocked": exc.blocked,
+                "schedule_id": None,
+            },
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.error("subagent_schedule.failed", {"error": str(exc)}, user_id=user_id)
+        return ToolResult(
+            content=f"Schedule not created: {type(exc).__name__}: {exc}",
+            is_error=True,
+            structured_content={
+                "status": "rejected",
+                "code": "unexpected_error",
+                "schedule_id": None,
+            },
+        )
+
+    return (
+        f"Subagent '{subagent_name}' scheduled ({created['trigger_kind']}).\n"
+        f"**Schedule ID**: {created['schedule_id']}\n"
+        f"**Status**: {created['status']}\n"
+        f"**Manifest**: {created['manifest_hash'][:12]}\n\n"
+        "This schedules future work only; it does not run anything now."
+    )
+
+
+subagent_schedule.annotations = ToolAnnotations(
+    title="Schedule a Subagent", destructive=True
+)

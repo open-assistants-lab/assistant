@@ -81,6 +81,7 @@ from src.sdk.tools_core.subagent import (
     subagent_delete,
     subagent_instruct,
     subagent_list,
+    subagent_schedule,
     subagent_start,
     subagent_tasks,
     subagent_update,
@@ -246,6 +247,8 @@ def _register_all() -> None:
         registry.register(subagent_create)
     if not _desktop_excluded("subagent_delegate"):
         registry.register(subagent_delegate)
+    if not _desktop_excluded("subagent_schedule"):
+        registry.register(subagent_schedule)
     if not _desktop_excluded("subagent_start"):
         registry.register(subagent_start)
     if not _desktop_excluded("subagent_check"):
