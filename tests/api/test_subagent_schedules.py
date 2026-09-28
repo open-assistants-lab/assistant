@@ -56,6 +56,15 @@ def isolated_store(tmp_path, monkeypatch):
     def make_store(_path=None):
         return store_module.SubagentScheduleStore(db_path)
 
+    def fake_paths(*_a, **_k):
+        return DataPaths(data_path=str(per_test), data_root=str(per_test), user_id="alice")
+
+    # create_schedule() builds its own SubagentScheduleStore() from
+    # get_paths(), while the read/delete routes use the router's _store(). Patch
+    # the store module's resolver so BOTH land in this test's directory —
+    # patching only the router's factory let create and delete use different
+    # databases.
+    monkeypatch.setattr(store_module, "get_paths", fake_paths)
     monkeypatch.setattr(router_module, "SubagentScheduleStore", make_store)
     monkeypatch.setattr(router_module, "_store", lambda: make_store(), raising=False)
     yield db_path
@@ -123,7 +132,7 @@ def ready_coordinator(monkeypatch):
             return AgentProfile(name=name, tools=["files_read"])
 
     monkeypatch.setattr(
-        "src.http.routers.subagent_schedules.get_coordinator", lambda *_a, **_k: _Coord()
+        "src.subagent.schedule_service._get_coordinator", lambda *_a, **_k: _Coord()
     )
     return make_plan
 
@@ -255,7 +264,7 @@ def test_a_not_ready_plan_is_rejected_and_nothing_is_written(client, monkeypatch
             return AgentProfile(name=name, tools=["shell_execute"])
 
     monkeypatch.setattr(
-        "src.http.routers.subagent_schedules.get_coordinator", lambda *_a, **_k: _Coord()
+        "src.subagent.schedule_service._get_coordinator", lambda *_a, **_k: _Coord()
     )
 
     r = client.post("/subagents/schedules", json=_body(), params={"user_id": "alice"})
@@ -284,7 +293,7 @@ def test_a_rejection_names_the_blocking_capability(client, monkeypatch):
             return AgentProfile(name=name, tools=["shell_execute"])
 
     monkeypatch.setattr(
-        "src.http.routers.subagent_schedules.get_coordinator", lambda *_a, **_k: _Coord()
+        "src.subagent.schedule_service._get_coordinator", lambda *_a, **_k: _Coord()
     )
     r = client.post("/subagents/schedules", json=_body(), params={"user_id": "alice"})
     assert r.status_code == 400
@@ -302,7 +311,7 @@ def test_a_missing_subagent_is_rejected(client, monkeypatch):
             return None
 
     monkeypatch.setattr(
-        "src.http.routers.subagent_schedules.get_coordinator", lambda *_a, **_k: _Coord()
+        "src.subagent.schedule_service._get_coordinator", lambda *_a, **_k: _Coord()
     )
     r = client.post(
         "/subagents/schedules", json=_body(subagent_name="ghost"), params={"user_id": "alice"}

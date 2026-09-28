@@ -116,46 +116,27 @@ async def create_schedule(
 ) -> ScheduleCreateResponse:
     _require_enabled()
 
-    if bool(request.run_at) == bool(request.cron):
-        raise HTTPException(
-            status_code=400,
-            detail="Exactly one of run_at or cron is required — not both, not neither.",
-        )
+    # One creation path shared with the subagent_schedule tool, so the two
+    # surfaces cannot disagree about the frozen-manifest gate.
+    from src.subagent.schedule_service import ScheduleRejected, create_schedule
 
-    coordinator = get_coordinator(user_id, request.workspace_id)
     try:
-        plan = coordinator.preflight(request.subagent_name)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.error("schedules.preflight_failed", {"error": str(exc)}, user_id=user_id)
-        raise HTTPException(status_code=400, detail=f"preflight failed: {exc}") from exc
-
-    if not plan.ready:
-        raise HTTPException(status_code=400, detail=_rejection_detail(plan.rejected_decisions))
-
-    store = _store()
-    try:
-        created = await store.create(
+        created = await create_schedule(
             user_id=user_id,
-            workspace_id=request.workspace_id,
             subagent_name=request.subagent_name,
             task=request.task,
-            trigger_kind="cron" if request.cron else "once",
+            workspace_id=request.workspace_id,
             run_at=request.run_at,
             cron=request.cron,
             timezone=request.timezone,
-            manifest=plan.to_persisted_dict(),
-            manifest_hash=plan.plan_id,
         )
-    except ValueError as exc:
-        # Invalid cron/timezone/instant — rejected before any write.
+    except ScheduleRejected as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return ScheduleCreateResponse(
-        schedule_id=str(created["schedule_id"]),
-        status=str(created["status"]),
-        manifest_hash=str(created["manifest_hash"]),
+        schedule_id=created["schedule_id"],
+        status=created["status"],
+        manifest_hash=created["manifest_hash"],
     )
 
 
