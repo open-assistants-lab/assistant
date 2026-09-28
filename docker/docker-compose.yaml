@@ -6,7 +6,14 @@ services:
       dockerfile: docker/Dockerfile
     container_name: assistant
     ports:
-      - "127.0.0.1:8080:8080"   # loopback only — bot runs on this host; never expose
+      # Loopback only — bot runs on this host; never expose.
+      # 8099, not 8080: the `research-stack` compose project already binds
+      # 127.0.0.1:8080 for searxng, so the 8080 mapping below could never bind
+      # and the container had to be started on 8099 by hand. Recording that here
+      # makes `docker compose up -d --build` reproduce the running container
+      # instead of failing on a taken port. (The property-research app and the
+      # POC's docs both assumed 8080 — that assumption was wrong.)
+      - "127.0.0.1:8099:8080"
     command: ["uv", "run", "assistant", "http"]
     env_file:
       - path: .env
