@@ -10,6 +10,7 @@ from src.http.routers.memories import router as memories_router
 from src.http.routers.profile import router as profile_router
 from src.http.routers.settings import router as settings_router
 from src.http.routers.skills import router as skills_router
+from src.http.routers.subagent_schedules import router as subagent_schedules_router
 from src.http.routers.subagents import router as subagents_router
 from src.http.routers.tenancy import router as tenancy_router
 from src.http.routers.todos import router as todos_router
@@ -38,6 +39,7 @@ __all__ = [
     "user_prompt_router",
     "skills_router",
     "settings_router",
+    "subagent_schedules_router",
     "subagents_router",
     "tools_router",
     "webhooks_router",
