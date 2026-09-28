@@ -800,6 +800,17 @@ class TestIndexHealthCheck:
                 mock_logger.error.assert_called()
                 db2.close()
 
+    @pytest.mark.xfail(
+        raises=Exception,
+        reason=(
+            "Intermittent: force_rebuild_chroma_index() can raise NotFoundError "
+            "because the process-wide Chroma client pool is not invalidated "
+            "across the directory swap. Tracked in open-assistants-lab/HybridDB#1; "
+            "this flake has cost A/B verification twice. Remove this marker when "
+            "we pull a HybridDB release containing the fix. See also #49."
+        ),
+        strict=False,
+    )
     def test_force_rebuild_creates_new_index(self, tmp_dir):
         db = HybridDB(
             tmp_dir,
