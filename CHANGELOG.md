@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.6.24 — 2026-09-28
+
+### Added — subagent scheduling is now reachable (#46)
+Scheduled subagent runs can finally be created. The scheduler was built, durable and restored on boot, but nothing could create a job, so the capability was dead code.
+
+- `POST/GET/DELETE /subagents/schedules` and `GET /subagents/schedules/{id}/runs`, which joins a schedule with the work-queue task it last launched. A `subagent_schedule` tool gives agents the same capability under the normal approval model. **Off by default** — set `SCHEDULING_SUBAGENT_ENABLED=1`.
+- A schedule may only be created from a **ready** frozen launch plan. `build_launch_plan` already resolves `ask`/`deny` for every declared capability, so requiring readiness is what makes an unattended schedule impossible to register when nobody can answer an approval. There is no attestation mode and no second governance tier.
+- The API and the tool share one creation path, so the two surfaces cannot disagree about that gate.
+- Cross-user access returns **404, not 403**: a schedule ID never discloses that it exists. Cancellation is idempotent and a foreign cancel leaves the owner's row untouched.
+
+### Fixed
+- Trigger restoration is faithful. The previous path discarded the persisted trigger and rebuilt every scheduled row as a one-shot ~30 seconds after startup, so a recurring schedule silently became a one-shot and a future one-shot fired at the wrong time. A one-shot missed while the process was down is now reported as `expired` rather than run hours late.
+- Scheduled runs go through the governed coordinator and its work queue, replacing the legacy path that had no capability preflight, no receipts and no work queue. A frozen manifest is re-verified at fire time and the run is **refused** on any difference, with a distinct `manifest_drift` / `manifest_tampered` code, rather than silently widening or narrowing its authority.
+- Schedule writes are transactional and serialised. A cancelled or failed `create()` used to leave its row pending on the shared SQLite connection, where the *next* writer's commit made it durable — a schedule the caller never received an ID for, which restore would then have fired unattended. A cancel can no longer overwrite an in-flight run's status, and a disabled server stays visible in `/mcp/health` with a reason instead of silently vanishing.
+- `subagent_create`/`subagent_update` now warn when a declared capability would block a launch, so an unlaunchable profile is visible at creation rather than at run time. The launch gate itself is unchanged and stays fail-closed.
+
+### Changed
+- Legacy `job_results` rows are migrated at startup into `subagent_schedules`, but **parked as `needs_review`** rather than given a reconstructed trigger: that table stored no `run_at`/`cron`/`timezone`, so a 03:00 one-shot and a daily cron are indistinguishable and inventing a time could fire unattended work at the wrong moment. Each row keeps its reason and the originating job id, and the legacy row is marked `migrated` so the migration is re-entrant.
+
+### Deployment
+- The local property-research deployment wiring is now on main: the firecrawl CLI and Node in the image (the research agent's only web access runs inside the container), a 180s shell timeout for long scrapes, and compose on `127.0.0.1:8099` where 8080 is already held. This deployment also sets `governance.permissions.tools.shell_execute: allow` at the admin level, overriding the `ask` default that exists because #40 is open. It is scoped to that config file, not the code.
+
 ## v0.6.23 — 2026-09-26
 
 ### Fixed
