@@ -28,6 +28,7 @@ from src.http.routers import (
     memories_router,
     profile_router,
     skills_router,
+    subagent_schedules_router,
     subagents_router,
     tenancy_router,
     todos_router,
@@ -369,6 +370,7 @@ app.include_router(workspace_router)
 app.include_router(workspaces_router)
 app.include_router(sync_router)
 app.include_router(skills_router)
+app.include_router(subagent_schedules_router)  # before subagents: literal /schedules paths
 app.include_router(subagents_router)
 app.include_router(tools_router)
 app.include_router(capabilities.router)

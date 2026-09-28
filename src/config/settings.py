@@ -542,6 +542,18 @@ class MCPConfig(_BaseSettings):
     model_config = SettingsConfigDict(env_prefix="MCP_")
 
 
+class SchedulingConfig(_BaseSettings):
+    """Background scheduling of subagent work (#46).
+
+    Off by default. Scheduled runs are unattended, so the surface is gated
+    explicitly rather than enabled by installing a dependency.
+    """
+
+    subagent_enabled: bool = False
+
+    model_config = SettingsConfigDict(env_prefix="SCHEDULING_")
+
+
 class TelemetryConfig(_BaseSettings):
     """Owner telemetry sidecar (Phase 2 D1-1). OFF by default: self-hosters
     opt in explicitly (TELEMETRY_ENABLED); opt-out is the shipped stance."""
@@ -653,6 +665,7 @@ class AppConfig(_BaseSettings):
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     email_sync: EmailSyncConfig = Field(default_factory=EmailSyncConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
+    scheduling: SchedulingConfig = Field(default_factory=SchedulingConfig)
     metering: MeteringConfig = Field(default_factory=MeteringConfig)
     session_log: SessionLogConfig = Field(default_factory=SessionLogConfig)
 

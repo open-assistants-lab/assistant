@@ -92,6 +92,12 @@ sandbox:
   # Explicit deployment-only variables available to sandboxed commands.
   # Never add provider/API secrets unless a custom tool requires them.
   env_allow: []
+scheduling:
+  # Unattended subagent schedules (#46). Off by default: a scheduled run cannot
+  # pause for approval, so only plans whose every capability resolves to `allow`
+  # can be scheduled, and the surface stays dark until you opt in.
+  #   SCHEDULING_SUBAGENT_ENABLED=1
+  subagent_enabled: false
 shell_tool:
   # shell_execute is approval-required when governance is enabled.
   # Add interpreters or other broad capabilities only as explicit deployment opt-ins.
