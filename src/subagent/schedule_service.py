@@ -8,7 +8,13 @@ is how the two drift apart, so both call here.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
+
+from src.app_logging import get_logger
+
+logger = get_logger()
 
 
 class ScheduleRejected(ValueError):  # noqa: N818 - mirrors SubagentLaunchRejected
@@ -108,4 +114,121 @@ async def create_schedule(
     }
 
 
-__all__ = ["ScheduleRejected", "create_schedule"]
+__all__ = [
+    "ScheduleRejected",
+    "create_schedule",
+    "migrate_legacy_schedules",
+    "LEGACY_MIGRATED_STATUS",
+]
+
+
+# --------------------------------------------------------------------------
+# Legacy migration
+# --------------------------------------------------------------------------
+
+#: Status written to a legacy `job_results` row once it has been consumed, so
+#: the migration is re-entrant and the legacy table keeps an audit trail rather
+#: than being silently emptied.
+LEGACY_MIGRATED_STATUS = "migrated"
+
+_LEGACY_REASON = (
+    "migrated from a legacy job_results row that stored no trigger metadata "
+    "(run_at/cron/timezone), so the schedule is parked for review rather than "
+    "guessed — see #46"
+)
+
+
+def _legacy_results_path() -> Any:
+    """Reuse the scheduler's path helper so there is one seam, not two."""
+    from src.subagent import scheduler as scheduler_module
+
+    return scheduler_module._get_results_db_path()  # noqa: SLF001 - same subsystem
+
+
+async def migrate_legacy_schedules() -> dict[str, int]:
+    """Surface legacy `scheduled` rows as `needs_review` schedules.
+
+    The legacy scheduler persisted only job_id/user_id/subagent/task/status — no
+    trigger. A one-shot that ran at 03:00 and a daily cron look identical, so
+    recovering a *plausible* time would be a guess that can fire unattended work
+    at the wrong moment. These rows are therefore parked for an operator, which
+    is the only honest option until someone restates the intent.
+
+    Re-entrant: a consumed legacy row is marked ``migrated`` and never revisited.
+    """
+    import sqlite3
+
+    from src.subagent.schedules_store import SubagentScheduleStore
+
+    stats = {"migrated": 0, "needs_review": 0, "already_migrated": 0, "skipped": 0}
+    try:
+        path = _legacy_results_path()
+        if not Path(str(path)).exists():
+            return stats
+    except Exception:  # pragma: no cover - paths unavailable
+        return stats
+
+    conn = sqlite3.connect(str(path))
+    try:
+        try:
+            rows = conn.execute(
+                "SELECT job_id, user_id, subagent_name, task, created_at "
+                "FROM job_results WHERE status = 'scheduled' AND job_id IS NOT NULL"
+            ).fetchall()
+            already = conn.execute(
+                "SELECT COUNT(*) FROM job_results WHERE status = ?", (LEGACY_MIGRATED_STATUS,)
+            ).fetchone()[0]
+        except sqlite3.Error:
+            # Table absent (fresh install) — nothing to migrate.
+            return stats
+        stats["already_migrated"] = int(already or 0)
+        if not rows:
+            return stats
+
+        store = SubagentScheduleStore()
+        for job_id, user_id, subagent_name, task, created_at in rows:
+            if not (user_id and subagent_name and task):
+                stats["skipped"] += 1
+                continue
+            try:
+                # trigger_kind/run_at/cron are all None: the store requires
+                # exactly one, so the row is inserted with a sentinel and
+                # corrected to needs_review immediately after.
+                created = await store.create(
+                    user_id=str(user_id),
+                    workspace_id="personal",
+                    subagent_name=str(subagent_name),
+                    task=str(task),
+                    trigger_kind="once",
+                    run_at=datetime.now(UTC).isoformat(),
+                    cron=None,
+                    timezone="UTC",
+                    manifest={"legacy": True, "job_id": str(job_id)},
+                    manifest_hash=f"legacy:{job_id}",
+                )
+                # Park it: the trigger is unknown, so the row must not look
+                # runnable. The sentinel run_at above is corrected away here.
+                await store.update_status(
+                    str(user_id),
+                    str(created["schedule_id"]),
+                    "needs_review",
+                    last_error=_LEGACY_REASON,
+                )
+                stats["needs_review"] += 1
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "schedules.legacy_migration_failed",
+                    {"job_id": str(job_id), "error": str(exc)},
+                    user_id=str(user_id),
+                )
+                stats["skipped"] += 1
+                continue
+            stats["migrated"] += 1
+            conn.execute(
+                "UPDATE job_results SET status = ? WHERE job_id = ?",
+                (LEGACY_MIGRATED_STATUS, str(job_id)),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return stats
