@@ -86,7 +86,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         _go_logger().warning("governance.dispatcher_start_failed", {"error": str(exc)})
     if not desktop_mode:
         try:
+            from src.subagent.schedule_service import migrate_legacy_schedules
             from src.subagent.scheduler import get_scheduler, restore_schedules
+
+            # Surface legacy job_results rows before restoring, so a parked
+            # `needs_review` row can never be picked up as a live trigger.
+            # Re-entrant: consumed rows are marked `migrated`.
+            migrated = await migrate_legacy_schedules()
+            if migrated.get("needs_review"):
+                from src.app_logging import get_logger
+
+                get_logger().info(
+                    "schedules.legacy_migration", dict(migrated), user_id="system"
+                )
 
             scheduler = get_scheduler()
             # Restore is async (the schedule store is aiosqlite) and must run
