@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.6.23 — 2026-09-26
 
 ### Fixed
 - Token usage is no longer reported as zero for Ollama providers (#48). Two payload shapes defeated the parser: a `usage` object that was *present but zeroed* took precedence over the authoritative native `prompt_eval_count`/`eval_count` (because `dict.get(key, fallback)` only falls back when a key is **absent**), and `usage` in OpenAI `input_tokens`/`output_tokens` shape missed both known keys entirely. All three shapes — native counts, `prompt_tokens`/`completion_tokens`, and `input_tokens`/`output_tokens` — now resolve correctly, and each field falls back independently. A payload with no token information at all now emits **no** usage event rather than a zeroed one, which previously read as "measured and free".
@@ -12,6 +12,12 @@
   - Concretely, a previous release note stated *"Child file access is confined to that workspace."* **That was not accurate.** `workspace_id` is threaded correctly to the path resolver, but the resolver returns a user-scoped directory, so a child's file access is confined to the **user's** files directory. Accordingly, `requested_workspace_id` in a subagent launch manifest scopes skills, prompt and tool-selection context — it does not confine the filesystem. That guarantee needs to be added deliberately if it is ever wanted.
   - The real isolation boundary is `user_id`. The sharing boundary that matters next is the **team**: `DataPaths` already accepts `team_id` and team data already lives under `data/teams/{team_id}/`, so moving from user-global to team-scoped storage is a scope change on a seam that already exists.
   - The per-workspace `workspace_id` column on the messages table is currently never populated and is left in place as reserved.
+
+### Added — subagent scheduling foundations
+- Durable subagent schedule definitions now have a real store, and a scheduled run launches from a frozen capability manifest that is re-verified against current state at fire time; any difference fails the run rather than silently widening or narrowing its authority.
+- The APScheduler path is now async and restores triggers faithfully. Previously every persisted schedule was rebuilt as a one-shot roughly 30 seconds after startup — so a recurring schedule silently became a one-shot and a future one-shot fired at the wrong time. A one-shot missed while the process was down is now reported as `expired` rather than run hours late.
+- Scheduled runs go through the governed coordinator and its work queue, replacing the legacy path that had no capability preflight, no receipts and no work queue. The whole warning path on create/update is advisory: a subagent that cannot launch now says so at creation instead of silently failing at run time.
+- **Still not reachable**: no API or tool creates a schedule yet. Tracked in `docs/superpowers/plans/2026-09-25-subagent-scheduler.md`.
 
 ## v0.6.22 — 2026-09-26
 
