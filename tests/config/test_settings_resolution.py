@@ -199,3 +199,55 @@ def test_startup_validation_accepts_provider_model_slash_form():
     cfg_bare = AppConfig(agent={"name": "T", "model": "some-local-pull"})
     validate_startup_model_references(cfg_bare)  # must not raise
 
+
+
+# --------------------------------------------------------------------------
+# Environment must beat config.yaml (audit: pydantic-settings gives init kwargs
+# precedence, so every key in config.yaml used to be env-inert)
+# --------------------------------------------------------------------------
+
+
+def test_env_overrides_a_key_present_in_yaml(monkeypatch, fresh_settings) -> None:
+    """config.yaml says exposure: auto; the environment must still win."""
+    monkeypatch.setenv("MCP__EXPOSURE", "never")
+    cfg = reload_settings()
+    assert cfg.mcp.exposure == "never"
+
+
+def test_env_overrides_a_key_absent_from_its_yaml_section(monkeypatch, fresh_settings) -> None:
+    """A whole section being present in yaml used to seal off all of its env vars."""
+    monkeypatch.setenv("MCP__MAX_RESULT_CHARS", "12345")
+    cfg = reload_settings()
+    assert cfg.mcp.max_result_chars == 12345
+
+
+def test_yaml_still_applies_when_no_env_is_set(monkeypatch, fresh_settings) -> None:
+    """With no env var, config.yaml is still the source of truth."""
+    monkeypatch.delenv("MCP__EXPOSURE", raising=False)
+    cfg = reload_settings()
+    assert cfg._yaml_doc["mcp"]["exposure"] == cfg.mcp.exposure
+
+
+def test_flat_deployment_contracts_still_win(monkeypatch, fresh_settings) -> None:
+    """API_PORT is a flat deployment contract, not a nested env var — keep it."""
+    monkeypatch.setenv("API_PORT", "9123")
+    cfg = reload_settings()
+    assert cfg.api.port == 9123
+
+
+def test_env_precedence_is_reported_at_startup(monkeypatch, fresh_settings, caplog) -> None:
+    """A behaviour change that is silent is the same failure as the bug itself."""
+    monkeypatch.setenv("MCP__EXPOSURE", "never")
+    with caplog.at_level("WARNING"):
+        reload_settings()
+    assert any("config.yaml" in r.message and "MCP__EXPOSURE" in r.message for r in caplog.records), (
+        "expected a warning naming the overridden key; got "
+        f"{[r.message for r in caplog.records]}"
+    )
+
+
+def test_no_warning_when_env_and_yaml_agree(monkeypatch, fresh_settings, caplog) -> None:
+    monkeypatch.delenv("MCP__EXPOSURE", raising=False)
+    with caplog.at_level("WARNING"):
+        reload_settings()
+    assert not [r for r in caplog.records if "config.yaml" in r.message]

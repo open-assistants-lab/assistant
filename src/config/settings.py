@@ -8,8 +8,8 @@ from typing import Any, Literal
 
 import yaml
 from dotenv import dotenv_values
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, PrivateAttr
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 # Repository root — resolved from THIS file so config/.env are found
 # regardless of process CWD (audit E23).
@@ -645,8 +645,15 @@ def _migrate_legacy_governance(data: dict[str, Any]) -> None:
     )
 
 
+_MISSING = object()
+
+
 class AppConfig(_BaseSettings):
     """Main application configuration."""
+
+    #: The raw config.yaml document this model was built from, so the env/yaml
+    #: disagreement report compares against the file rather than the merge.
+    _yaml_doc: dict[str, Any] = PrivateAttr(default_factory=dict)
 
     agent: AgentConfig = Field(default_factory=AgentConfig)
     deployment: DeploymentConfig = Field(default_factory=DeploymentConfig)
@@ -679,6 +686,36 @@ class AppConfig(_BaseSettings):
     model_config = SettingsConfigDict(
         env_file=str(REPO_ROOT / ".env"), env_nested_delimiter="__"
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Make the environment outrank config.yaml.
+
+        pydantic-settings resolves sources with the FIRST one winning, and
+        `from_yaml` passes the yaml document as init kwargs. With the default
+        ordering that made every key present in config.yaml immune to the
+        environment, silently defeating the documented priority
+        (env > .env > config.yaml > defaults) and the deployment instructions in
+        the release notes.
+
+        Ordering here is (env, .env, yaml, secrets): the environment wins,
+        .env is the next tier, and yaml still supplies everything unset. Later
+        sources deep-merge beneath earlier ones, so a section like `mcp` is
+        filled from yaml without clobbering the keys the environment set.
+        """
+        return (
+            env_settings,
+            dotenv_settings,
+            init_settings,
+            file_secret_settings,
+        )
 
     @property
     def deployment_mode(self) -> str:
@@ -713,10 +750,12 @@ class AppConfig(_BaseSettings):
                 data = loaded
 
         _migrate_legacy_governance(data)
+        yaml_doc = dict(data)
 
         # Bare AGENT (set by opencode/agent runtimes) collides with the nested agent config field.
         _drop_colliding_env()
         config = cls(**data)
+        config._yaml_doc = yaml_doc
         # Native-tool policy is an explicit deployment control. Apply it after
         # every construction path and revalidate instead of mutating models.
         config.tools.native = _apply_native_tools_env_override(config.tools.native)
@@ -860,6 +899,65 @@ def _drop_colliding_env() -> None:
         os.environ.pop(key, None)
 
 
+def _report_env_overrides(config: "AppConfig") -> list[str]:
+    """Log every setting where the environment disagrees with config.yaml.
+
+    The environment now outranks yaml (see `settings_customise_sources`). That
+    is a behaviour change, and a behaviour change made silently is the same
+    failure as the bug being fixed: a deployment could set an env var long ago,
+    later change the yaml, and only discover at runtime that the env still
+    wins. Reporting the disagreement at startup makes it visible instead.
+    """
+    from pydantic_settings.sources import EnvSettingsSource
+
+    try:
+        from_env = EnvSettingsSource(
+            type(config), env_nested_delimiter=config.model_config.get(
+                "env_nested_delimiter", "__"
+            )
+        )()
+    except Exception as exc:  # pragma: no cover - reporting must never block
+        logging.getLogger(__name__).debug("settings.env_report_failed: %s", exc)
+        return []
+
+    disagreements: list[str] = []
+
+    yaml_doc = config._yaml_doc  # noqa: SLF001 - same module
+
+    def _yaml_at(path: tuple[str, ...]) -> Any:
+        """The value config.yaml supplies at this path, or a missing sentinel."""
+        node: Any = yaml_doc
+        for part in path:
+            if not isinstance(node, dict) or part not in node:
+                return _MISSING
+            node = node[part]
+        return node
+
+    def _walk(node: Any, path: tuple[str, ...]) -> None:
+        if not isinstance(node, dict):
+            # Compare against what config.yaml supplied. Comparing against the
+            # merged model would never fire: where the environment wins, the
+            # model necessarily equals the environment.
+            from_yaml_value = _yaml_at(path)
+            if from_yaml_value is _MISSING:
+                return  # environment supplies a new key; nothing to disagree with
+            if str(from_yaml_value) != str(node):
+                disagreements.append(
+                    f"{'__'.join(path).upper()}={node} (config.yaml: {from_yaml_value})"
+                )
+            return
+        for key, value in node.items():
+            _walk(value, (*path, key))
+
+    _walk(from_env, ())
+    if disagreements:
+        logging.getLogger(__name__).warning(
+            "settings.env_overrides_yaml environment=%s config.yaml supplies the rest",
+            ", ".join(sorted(disagreements)),
+        )
+    return sorted(disagreements)
+
+
 def get_settings() -> AppConfig:
     """Get application settings singleton."""
     global _config
@@ -868,9 +966,10 @@ def get_settings() -> AppConfig:
         # (audit E23: a relative "config.yaml" silently missed when launched
         # from any other directory).
         _config = AppConfig.from_yaml()
-        # pydantic-settings gives init kwargs (yaml data) precedence over
-        # environment variables; deployment contracts (docker-compose sets
-        # API_PORT/API_HOST) must win, so apply them explicitly (audit E22).
+        # E22-class flat deployment contracts. These are deliberately NOT routed
+        # through pydantic-settings: a flat name like API_PORT would have to be
+        # API__PORT under the nested delimiter, and API_PORT / AGENT_MODEL /
+        # OIDC_* are the documented deployment contract. They still beat yaml.
         host = os.environ.get("API_HOST")
         port = os.environ.get("API_PORT")
         if host:
@@ -879,17 +978,15 @@ def get_settings() -> AppConfig:
             _config.api.port = int(port)
         # Same E22 class of fix-up for agent models: flat AGENT_MODEL /
         # AGENT_TITLE_MODEL never match pydantic-settings nested-env rules
-        # (they'd need AGENT__MODEL, and even that loses to init kwargs from
-        # yaml). Deployments document AGENT_MODEL as the deployment-model
-        # contract (D0-5) — wire it explicitly, env beats yaml.
+        # (they'd need AGENT__MODEL). Deployments document AGENT_MODEL as the
+        # deployment-model contract (D0-5) — wire it explicitly, env beats yaml.
         env_agent = os.environ.get("AGENT_MODEL")
         if env_agent:
             _config.agent.model = env_agent
         env_title = os.environ.get("AGENT_TITLE_MODEL")
         if env_title:
             _config.agent.title_model = env_title
-        # OIDC deployment knobs: env beats yaml (same E22 class — nested
-        # sections lose to flat env vars per pydantic-settings rules).
+        # OIDC deployment knobs: flat env beats yaml (same E22 class).
         for env_key, field_name in (
             ("OIDC_ISSUER", "issuer"),
             ("OIDC_CLIENT_ID", "client_id"),
@@ -900,6 +997,7 @@ def get_settings() -> AppConfig:
             val = os.environ.get(env_key)
             if val:
                 setattr(_config.oidc, field_name, val)
+        _report_env_overrides(_config)
         # OB-0: fail closed on an ambiguous Langfuse destination before any
         # client can be constructed against the cloud default.
         try:
