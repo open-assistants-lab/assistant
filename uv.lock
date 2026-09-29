@@ -1196,14 +1196,14 @@ wheels = [
 
 [[package]]
 name = "hybriddb"
-version = "0.6.0"
+version = "0.8.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "chromadb" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/bd/c7/35c7d32fab49d7b76aadb5b7c80f6f6d00206aaa9c37f71f0f4c6c1cc220/hybriddb-0.6.0.tar.gz", hash = "sha256:12a25811f2d4a47a0b96aa1f7a70156d047123bcd6a88fa4a2ec2c2a75dec372", size = 370080, upload-time = "2026-08-27T14:56:52.24Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/39/45/1b42f8767da46f777e21a2392b5ac1c861617be13a843092951b8c5dd567/hybriddb-0.8.4.tar.gz", hash = "sha256:2af4648bfb36ff955a04c39e45937f4f74b21feffdf4191b7b224713cd6fd368", size = 411221, upload-time = "2026-09-28T14:06:04.121Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/52/09/174a33671ec272391e50e75d4443feb57c4f73b15fb72da2241046720b18/hybriddb-0.6.0-py3-none-any.whl", hash = "sha256:17a71627981d6d494d29348d2074483f85be96bb0799881bd24d00723713bcf3", size = 51042, upload-time = "2026-08-27T14:56:50.152Z" },
+    { url = "https://files.pythonhosted.org/packages/40/ca/64ed704665240f0c06ca658bc3b512b20efb2230cd83f2ee52f2cf85d549/hybriddb-0.8.4-py3-none-any.whl", hash = "sha256:30db22c97ed9aef729bd4193745b319455f2e4ef0d99eee1159179006a0405da", size = 63396, upload-time = "2026-09-28T14:06:05.43Z" },
 ]
 
 [[package]]
