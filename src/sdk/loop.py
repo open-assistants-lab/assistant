@@ -2649,6 +2649,37 @@ class AgentLoop:
                         continue
                     # Mixed batch: fall through and EXECUTE the fresh calls —
                     # skipping them would leave their ids unanswered too.
+                # Same per-tool budget as the non-streaming path. This point was
+                # missed initially and the budget silently did not apply to
+                # streaming runs — which is the API's default, so the guard was
+                # effectively off in production. Observed: 14 shell_execute calls
+                # against a budget of 12.
+                from src.sdk.repetition import RepetitionLimitReached
+
+                try:
+                    for tc in fresh_calls:
+                        self._repetition_guard(state).check(
+                            tc.name, self._tool_args_key(tc)
+                        )
+                except RepetitionLimitReached as exc:
+                    for tc in fresh_calls:
+                        state.add_message(
+                            Message.tool_result(
+                                tool_call_id=tc.id,
+                                content=str(exc),
+                                name=tc.name,
+                            )
+                        )
+                    if not state.extra.get("_repetition_stopped"):
+                        state.extra["_repetition_stopped"] = True
+                        state.add_message(
+                            Message.system(
+                                "Stop calling the same tool with different arguments. "
+                                "Report what you have found, or take a different approach."
+                            )
+                        )
+                    continue
+
                 stream_tool_calls = fresh_calls
 
                 # Record tool calls AFTER dedup so only unique names are reported

@@ -1,0 +1,48 @@
+# Override for the Eddy Ave vertical-slice run — DO NOT USE for normal assistant work.
+#
+# WHY THIS EXISTS
+#
+# The container currently running as `assistant` is hand-started, NOT the compose
+# one. It differs from docker-compose.yaml in three ways that matter:
+#
+#   1. /app/data is the NAMED VOLUME `assistant-data` (Users, Workspaces,
+#      Messages, Memory, Skills, Subagents, jobs.db …). The base compose file
+#      bind-mounts ./data instead. A plain `docker compose up -d` would point
+#      /app/data at a different directory and the assistant would come back
+#      looking like it had lost all its state.
+#   2. It has NO ../config.yaml mount, so the shell_execute allowlist and the
+#      governance permission in config.yaml are not in effect.
+#   3. It was started without docker/.env, so it has no OLLAMA_API_KEY — every
+#      model call 401s against https://ollama.com/api/chat — and no
+#      FIRECRAWL_API_KEY.
+#
+# This override recreates the container with the current image (which carries
+# the uncommitted docker/Dockerfile change that installs firecrawl-cli 1.15.2),
+# with docker/.env applied, with config.yaml mounted, and — critically — while
+# still mounting the `assistant-data` volume so no state is lost.
+#
+# The build reads the WORKING TREE, so the uncommitted Dockerfile change is
+# included; no commit is required for this to work.
+#
+# Usage:
+#   docker compose -f docker/docker-compose.yaml -f docker/docker-compose.slice.yaml \
+#     up -d --build app
+#
+# To go back to the compose default afterwards:
+#   docker compose -f docker/docker-compose.yaml up -d --build app
+
+services:
+  app:
+    volumes:
+      # Same target path as the base file, so this REPLACES the ./data bind
+      # mount rather than adding a second mount at the same destination.
+      - assistant-data:/app/data
+      - ../config.yaml:/app/config.yaml
+    env_file:
+      - path: .env
+        required: true
+
+volumes:
+  assistant-data:
+    name: assistant-data
+    external: true

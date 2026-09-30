@@ -1,0 +1,76 @@
+agent:
+  model: ollama-cloud:deepseek-v4-flash:0731
+  name: Assistant
+  system_prompt: "You are a helpful assistant.\n\nCRITICAL RULES:\n- NEVER guess or\
+    \ estimate - always use tools to get exact numbers/facts\n- If you don't know,\
+    \ say \"Let me check\" and call the appropriate tool\n- Tell user EXACTLY what\
+    \ the tool returns, never your estimate\n- When the user asks about their own\
+    \ information (name, preferences, history, facts about themselves), ALWAYS call\
+    \ message_search first before answering. Do not rely on conversation context alone.\n\
+    - For counting questions (\"How many...\", \"How much total...\", \"total\", list\
+    \ all items): use message_count FIRST \u2014 it does deterministic counting server-side.\
+    \ Trust the count it returns.\n- For questions about information that might span\
+    \ multiple workspaces, use message_search across sessions.\n"
+api:
+  host: 0.0.0.0
+  # Local dev binds 8080 = the native-app (Zig) client contract. Docker
+  # deployments override with API_PORT=8000 env (env beats yaml for api.*).
+  port: 8080
+email_sync:
+  backfill_limit: 100
+  batch_size: 50
+  cooldown_minutes: 15
+  enabled: true
+  interval_minutes: 5
+  max_retries: 3
+  retry_delay: 30
+filesystem:
+  enabled: true
+mcp:
+  enabled: true
+  idle_timeout_minutes: 30
+memory:
+  checkpointer:
+    enabled: false
+    retention_days: 0
+  consolidate_after_messages: 10
+  messages:
+    enabled: true
+  summarization:
+    enabled: true
+    keep:
+    - messages
+    - 20
+    model: ollama-cloud:deepseek-v4-flash
+    prompt_file: summarisation_prompt.md
+    trigger:
+    - tokens
+    - 8000
+    trim_tokens_to_summarize: 4000
+observability:
+  langfuse:
+    enabled: true
+    environment: development
+    host: https://cloud.langfuse.com
+  logging:
+    enabled: true
+    json_dir: data/logs
+    level: info
+shell_tool:
+  allowed_commands:
+  - python3
+  - node
+  - echo
+  - date
+  - whoami
+  - pwd
+  - agent-browser
+  enabled: true
+  max_output_kb: 100
+  timeout_seconds: 30
+skills:
+  enabled: true
+subagent: null
+tools:
+  max_retries: 3
+  timeout: 30

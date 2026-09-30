@@ -274,3 +274,67 @@ def json_settings(section: str):
     from src.config import get_settings
 
     return getattr(get_settings(), section)
+
+
+@pytest.mark.asyncio
+async def test_the_streaming_path_is_bounded_too() -> None:
+    """The guard was wired to the non-streaming dispatch only.
+
+    Streaming is the API default, so the budget was effectively off in
+    production: 14 shell_execute calls sailed past a budget of 12.
+    """
+    from src.sdk.loop import AgentLoop, RunConfig
+    from src.sdk.messages import Message, StreamChunk
+    from src.sdk.providers.base import LLMProvider
+    from src.sdk.tools import ToolAnnotations, ToolDefinition
+
+    calls: list[str] = []
+
+    def _sh(command: str = "", user_id: str = "x", workspace_id: str = "personal"):
+        calls.append(command)
+        return ToolResult(content="total 0")
+
+    td = ToolDefinition(
+        name="shell_execute",
+        description="run",
+        parameters={"type": "object", "properties": {"command": {"type": "string"}}},
+        annotations=ToolAnnotations(destructive=True),
+        function=_sh,
+    )
+
+    def _batch(n: int):
+        return [
+            StreamChunk.tool_input_start(
+                tool="shell_execute", call_id=f"c{n}", args={"command": f"ls /p/{n}"}
+            ),
+            StreamChunk.tool_input_end(tool="shell_execute", call_id=f"c{n}"),
+            StreamChunk.done(content=""),
+        ]
+
+    class _P(LLMProvider):
+        provider_id = "probe"
+        model = "probe"
+
+        def __init__(self):
+            self.i = 0
+
+        async def chat(self, messages, **kw):
+            return Message.assistant(content="done")
+
+        async def chat_stream(self, messages, **kw):
+            n = self.i
+            self.i += 1
+            for chunk in _batch(n):
+                yield chunk
+
+        def count_tokens(self, text, model=None):
+            return 4
+
+        def get_model_info(self, model):
+            return None
+
+    loop = AgentLoop(provider=_P(), tools=[td], run_config=RunConfig(max_iterations=30))
+    _ = [c async for c in loop.run_stream([Message.user("go")])]
+
+    assert calls, "the tool should have run at least once"
+    assert len(calls) <= 13, f"streaming run was not bounded: {len(calls)} calls"

@@ -1,0 +1,71 @@
+{
+  "name": "Fix Repeated Tool-Call Loop + Stale Tool-Result Persistence",
+  "branchName": "ralph/fix-repeated-tool-call-loop",
+  "description": "Stop the agent re-invoking the same tool (time_get) 3-8x per round and stop the store accumulating stale tool-result rows across runs. Two root causes: (1) the deepseek-v4-flash model re-issues an already-answered tool call because it believes its own output was cut off; (2) audit tool rows marked include_in_model_context=False are never filtered at load, so they re-enter the LLM context and get re-persisted by the next run's audit. Fix: a soft, repeatable, configurable duplicate-call guard in the agent loop (system-message nudges, all tools, K=3 default, then a capped brief final response) plus storage fixes (context filter + audit provenance).",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Exclude audit records from model-context loading",
+      "description": "As a backend developer, I want get_messages_with_summary to filter rows whose metadata has include_in_model_context=false, so previous tool results never leak into the LLM context.",
+      "acceptanceCriteria": [
+        "get_messages_with_summary excludes rows with metadata[\"include_in_model_context\"] == False",
+        "The filter applies to both the non-summary and the summary-provenance branches",
+        "New storage test: persisted audit rows do not appear in get_messages_with_summary output, while user/reasoning/assistant rows do",
+        "Live check: after a tool round, a follow-up run's Langfuse prompt contains no tool-role rows from previous runs",
+        "uv run pytest passes (full backend suite)",
+        "uv run ruff check src/ passes",
+        "uv run mypy src/ passes",
+        "uv run native test passes (Zig, 87 tests)",
+        "bash tests/frontend_suite.sh --all passes (37 tests)"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": "",
+      "dependsOn": []
+    },
+    {
+      "id": "US-002",
+      "title": "Audit only the current run's tool executions",
+      "description": "As a developer, I want _tool_audit_records to collect only tool messages produced by the current run (not rows loaded from history), so stored transcripts stop accumulating stale rows.",
+      "acceptanceCriteria": [
+        "_tool_audit_records distinguishes current-run messages from history-loaded ones (e.g. via storage_id/storage_ts provenance on SDK messages)",
+        "Two consecutive tool-using runs produce exactly 1 + 1 tool rows in the store (not 1 + 25)",
+        "All audit rows carry tool_name + tool_call_id metadata",
+        "New unit test: run twice with a fake store; assert the second run's stored rows contain none from the first",
+        "uv run pytest passes (full backend suite)",
+        "uv run ruff check src/ passes",
+        "uv run mypy src/ passes",
+        "uv run native test passes (Zig, 87 tests)",
+        "bash tests/frontend_suite.sh --all passes (37 tests)"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": "",
+      "dependsOn": []
+    },
+    {
+      "id": "US-003",
+      "title": "Soft duplicate-call guard in the agent loop (all tools)",
+      "description": "As a user, I want the agent to call a tool at most once per distinct request, so the transcript doesn't show the model re-calling time_get because it thinks the output was cut off.",
+      "acceptanceCriteria": [
+        "Live test (native automate): a 'what time is it' query produces exactly 1 tool_input_start event (was 3-8)",
+        "Soft, repeatable: when the model re-proposes a (tool, args) pair already executed this run, the loop does NOT execute it - it injects a system message with the existing result ('this tool already returned: <result> - answer directly') and continues; no error framing, no blocking of other tools",
+        "The nudge limit is configurable via RunConfig.max_duplicate_tool_nudges, default 3",
+        "After K nudges, the loop makes one final model call requesting a brief final text response, capped at ~200 tokens via provider_options; any tool call in that final response is suppressed and the text is used as the answer",
+        "The guard applies to all tools (no read-only restriction)",
+        "The guard is stateless apart from the nudge counter carried in loop state (state.extra)",
+        "Text-with-tool-call hold: text bundled with a tool call is withheld until the model stops calling tools (no partial answer committed mid-loop)",
+        "Stress script: 50 rounds contain no round with >1 time_get execution",
+        "uv run pytest passes (full backend suite)",
+        "uv run ruff check src/ passes",
+        "uv run mypy src/ passes",
+        "uv run native test passes (Zig, 87 tests)",
+        "bash tests/frontend_suite.sh --all passes (37 tests)"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": "",
+      "dependsOn": []
+    }
+  ]
+}
