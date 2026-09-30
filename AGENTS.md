@@ -269,7 +269,7 @@ Decision: **SQLite + ChromaDB per-user even for team/enterprise** (not shared DB
 
 ### Deployment
 
-Four supported shapes (see `DEPLOYMENT.md`): **Local** (localhost, auth off), **Solo WAN** (one user, many devices — one server = sessions *and* files in sync; `API_KEY` + Tailscale or VPS), **Multi-tenant trusted** (several users, **one container per user**, shared secret), **Multi-tenant untrusted** (one container per user + per-user auth). **The rule is N users = N containers**; trusted/untrusted is about authentication, not isolation. One container serving several users is not supported. See `DEPLOYMENT.md#isolation-by-mode`.
+Four supported shapes (see `DEPLOYMENT.md`): **Local** (localhost, auth off), **Solo WAN** (one user, many devices — one server = sessions *and* files in sync; `API_KEY` + Tailscale or VPS), **Multi-tenant trusted** (several users, one container, shared secret — **no OS isolation between users**), **Multi-tenant untrusted** (container per user + per-user auth — the only shape with OS-level isolation). Do not describe a trusted multi-user deployment as isolated; see `DEPLOYMENT.md#isolation-by-mode`.
 
 Key facts:
 - Entry point is `uv run assistant http` (console script `assistant` — `ea` was never valid). Listens on `0.0.0.0:8000` by default (`API_HOST`/`API_PORT`).
