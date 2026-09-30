@@ -23,27 +23,31 @@ basics (data layout, backups, secrets, observability) that apply to all of them.
 What actually stops one user reaching another's data. Read this before hosting
 for more than one person — the distinction is not visible from configuration.
 
-| Mode | Users per process | Auth | **What separates users** |
-|---|---|---|---|
-| 1 — Local | 1 | none (`SOLO_BYPASS`) | the user's own OS account |
-| 2 — Solo WAN | 1 | shared `API_KEY` | the user's own OS account |
-| **3a — trusted** | **N** | shared secret | **our tool policy only** |
-| 3b — untrusted | 1 per container | per-user keys | the kernel / container |
+**The rule: N users means N containers.** Authentication and topology are
+independent choices — you can have strong auth in one container, or weak auth in
+three — but the number of containers follows the number of users.
 
-In **3a**, per-user directories are separated by *path name only*. There is no
-per-tenant OS user, `chown` or `chmod` anywhere in the codebase, so a command
-run for user A can read user B's `Files/` and `Memory/`.
+| Deployment | Containers | Users per container | Auth | **What separates users** |
+|---|---|---|---|---|
+| 1 — Local | 1 | 1 | none | the user's own OS account |
+| 2 — Solo WAN | 1 | 1 | shared `API_KEY` | the user's own OS account |
+| **3a — trusted** | **one per user** | **1** | shared secret | the kernel / container |
+| 3b — untrusted | one per user | 1 | per-user keys | the kernel / container |
 
-**We detect this rather than trusting configuration.** The server records which
-users it has served; once one process has served more than one, an `allow` for
-`shell_execute` is capped to `ask`. A correctly deployed per-user container
-serves one user and is never affected. If your isolation is provided by
-something outside the process (a VM, a separate host), set
+Trusted vs untrusted is about *who can log in*, not about isolation. Both give
+each user their own container either way.
+
+**One container serving several users is not a supported shape.** Nothing in the
+codebase enforces it, so a container that accidentally serves three would give
+each of them a command that can read the other two: per-user directories are
+separated by *path name* only, with no per-tenant OS user, `chown` or `chmod`.
+
+**We catch that mistake rather than trusting configuration.** The server records
+which users it has served; once one process has served more than one, an `allow`
+for `shell_execute` resolves to `ask`. With one container per user this never
+fires — it is a backstop against misconfiguration, not the primary control. If
+you provide isolation outside the process (a VM, a separate host), set
 `governance.allow_shell_when_multi_user: true` — deliberately and audibly.
-
-This caps the **capability**, not access: every user keeps working, which is what
-the "family or small team on one host" deployment needs. It only stops the one
-configuration that turns a shared container into a shared filesystem.
 
 ## Architecture in 30 seconds
 
@@ -69,7 +73,7 @@ configuration that turns a shared container into a shared filesystem.
 |---|---|---|
 | Single user, desktop only | **Mode 1 — Local** | Zero configuration. Data is local files — other apps can access them directly. |
 | Single user, multiple devices (phone, laptop, desktop) | **Mode 2 — Solo WAN** | One server = sessions **and** files in sync everywhere. |
-| Several users, one container (family, small team) | **Mode 3a — trusted** | Policy layer only. **No OS isolation** — see [Isolation by mode](#isolation-by-mode). |
+| Several users on one host (family, small team) | **Mode 3a — trusted** | **One container per user**, one shared secret. Heavier than a single container, but the only supported multi-user shape. |
 | Several users, per-user containers + per-user auth | **Mode 3b — untrusted** | Container per user = OS-level isolation. |
 | Enterprise teams (SSO, shared workspaces) | **Not available yet** | See [Known gaps](#known-gaps). The data model has team skeletons but no identity layer. |
 

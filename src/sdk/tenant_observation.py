@@ -5,23 +5,23 @@ built:
 
   1. single user, one device          boundary = the user's OS account
   2. single user, many devices        one uid, one user
-  3. **multi users, trusted**         **one shared uid — no OS isolation**
-  4. multi users, untrusted           per-user microVM
+  3. multi users, trusted             one container per user, shared secret
+  4. multi users, untrusted           one container per user, per-user auth
 
-`DEPLOYMENT.md` describes mode 3 as "container per user = OS-level isolation".
-That is true *only if the operator actually deploys it that way*, and nothing
-enforces it: per-user directories are separated by path name alone, with no
-per-tenant uid, `chown` or `chmod` anywhere in the codebase.
+For 3 and 4 the container count follows the user count: **N users, N
+containers.** Trusted vs untrusted is about authentication, not isolation.
 
 So a deployment can end up serving several users from one process with no
-separation between them. From inside a single process we cannot tell whether
-the other users live in sibling containers, so this module does not guess.
+separation between them — per-user directories are separated by path name
+alone, with no per-tenant uid, `chown` or `chmod` anywhere in the codebase.
+From inside a single process we cannot tell whether the other users live in
+sibling containers, so this module does not guess.
 
 Instead it observes: **how many distinct users has this process served?** That
 number is self-calibrating.
 
-* one process, one user  -> almost certainly a per-user container (or solo).
-  Nothing is refused. Correct mode-3 and mode-4 deployments are unaffected.
+* one process, one user  -> the supported shape for multi-user deployments.
+  Nothing is refused; this is a backstop, not the primary control.
 * one process, N users   -> this process is NOT a per-user container, so the
   documented isolation does not exist here. The dangerous capability is refused.
 
