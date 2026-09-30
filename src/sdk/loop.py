@@ -645,6 +645,22 @@ class AgentLoop:
                 fresh.append(tc)
         return fresh, dupes
 
+    def _repetition_guard(self, state: AgentState) -> Any:
+        """Per-RUN tool-call budget, held on state like the duplicate nudges.
+
+        Per-run rather than per-loop so a long-lived loop does not carry one
+        agent's budget into the next run.
+        """
+        guard = state.extra.get("_repetition_guard")
+        if guard is None:
+            from src.config import get_settings
+            from src.sdk.repetition import RepetitionGuard
+
+            max_repeats = int(get_settings().filesystem.max_repeated_tool_calls)
+            guard = RepetitionGuard(limit=3, per_tool_limit=max_repeats * 4)
+            state.extra["_repetition_guard"] = guard
+        return guard
+
     def _synthetic_duplicate_results(
         self, duplicate_calls: list[ToolCall], prior_result: str
     ) -> list[Message]:
@@ -2055,6 +2071,43 @@ class AgentLoop:
                     continue
                 # Mixed batch: fall through and EXECUTE the fresh calls —
                 # skipping them would leave their ids unanswered too.
+            # Per-tool budget: the duplicate guard above only sees IDENTICAL
+            # (tool, args). Probing the same tool with different arguments — 32
+            # files_list calls across sibling directories — is the expensive
+            # case and is invisible to it. Bounded here so a confused run ends
+            # with a usable message instead of exhausting the token budget.
+            from src.sdk.repetition import RepetitionLimitReached
+
+            try:
+                for tc in effective_tool_calls:
+                    self._repetition_guard(state).check(tc.name, self._tool_args_key(tc))
+            except RepetitionLimitReached as exc:
+                state.add_message(
+                    Message.tool_result(
+                        tool_call_id=effective_tool_calls[0].id,
+                        content=str(exc),
+                        name=effective_tool_calls[0].name,
+                    )
+                )
+                for tc in effective_tool_calls[1:]:
+                    state.add_message(
+                        Message.tool_result(
+                            tool_call_id=tc.id,
+                            content="Not executed: run stopped by the tool-call budget.",
+                            name=tc.name,
+                        )
+                    )
+                if state.extra.get("_repetition_stopped"):
+                    break
+                state.extra["_repetition_stopped"] = True
+                state.add_message(
+                    Message.system(
+                        "Stop calling the same tool with different arguments. "
+                        "Report what you have found, or take a different approach."
+                    )
+                )
+                continue
+
             effective_tool_calls = fresh_calls
 
             # Classify tool calls: parallel-safe, sequential, interrupts
