@@ -223,11 +223,11 @@ class GovernanceService:
             tool_name, tool_input, fallback=fallback
         )
 
-        # #40: once one process has served more than one distinct user it is
-        # not a per-user container, so nothing separates tenants at the OS level
-        # and the documented "container per user" isolation does not hold here.
-        # Cap an `allow` down to `ask`. Applied AFTER resolution so an explicit
-        # deny stays deny, and so this cannot re-enter the policy path.
+        # #40: mode 3a (several tenants, one container) is *specified* with one
+        # OS user per tenant, but that is not built — every tenant currently
+        # shares this process's uid, so nothing but policy separates them.
+        # Cap an `allow` down to `ask` as the stopgap. Applied AFTER resolution
+        # so an explicit deny stays deny and this cannot re-enter the policy path.
         if (
             tool_name == "shell_execute"
             and decision == "allow"

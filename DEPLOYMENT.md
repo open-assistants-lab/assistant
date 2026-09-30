@@ -1,49 +1,63 @@
 # Assistant — Deployment Guide
 
-This guide covers the three supported deployment modes and the operational
+This guide covers the four supported deployment shapes and the operational
 basics (data layout, backups, secrets, observability) that apply to all of them.
 
 - **Mode 1 — Local**: one user, one machine, terminal or desktop app.
 - **Mode 2 — Solo WAN**: one user, many devices. Sessions (and files) stay in
   sync because there is exactly one server.
-- **Mode 3a — Multi-tenant, trusted**: several users, one container, shared
-  secret. **No OS isolation between users** — see [Isolation by mode](#isolation-by-mode).
-- **Mode 3b — Multi-tenant, untrusted**: several users, one container *per
-  user*, per-user authentication. This is the mode that delivers the isolation
-  Mode 3 has always been described as providing.
+- **Mode 3a — Multi-tenant, trusted**: several users in **one container**, one
+  **OS user per tenant**, soft sandbox, one shared secret. Isolation is the OS
+  user boundary inside the container — **and it is not built yet**, see
+  [Status](#status).
+- **Mode 3b — Multi-tenant, untrusted**: **one container (or microVM) per
+  user**, per-user authentication. Isolation is the container/VM boundary.
 
 > **Docker deployment source of truth:** [`docker/DEPLOYMENT.md`](docker/DEPLOYMENT.md)
-> (multi-user trusted deployment). This file covers the three deployment modes and
+> (3a/3b). This file covers the four deployment shapes and
 > host/VPS specifics. **No clone needed:** `docker pull
 > ghcr.io/open-assistants-lab/assistant:latest` — published on every release tag
 > (multi-arch amd64+arm64).
 
 ## Isolation by mode
 
-What actually stops one user reaching another's data. Read this before hosting
-for more than one person — the distinction is not visible from configuration.
+Isolation is a property of the **topology**. 3a and 3b differ in *how many
+users can share a boundary*, not in how strong the authentication is.
 
-| Mode | Users per process | Auth | **What separates users** |
-|---|---|---|---|
-| 1 — Local | 1 | none (`SOLO_BYPASS`) | the user's own OS account |
-| 2 — Solo WAN | 1 | shared `API_KEY` | the user's own OS account |
-| **3a — trusted** | **N** | shared secret | **our tool policy only** |
-| 3b — untrusted | 1 per container | per-user keys | the kernel / container |
+| Deployment | Containers | OS users | Sandbox | Auth | **What separates users** |
+|---|---|---|---|---|---|
+| 1 — Local | none | 1 | soft | none | the user's own OS account |
+| 2 — Solo WAN | 1 | 1 | soft | shared `API_KEY` | the user's OS account |
+| **3a — trusted** | **1** | **one per tenant** | soft | shared secret | **the OS user boundary** |
+| 3b — untrusted | one per user | 1 | hard | per-user keys | the container / VM |
 
-In **3a**, per-user directories are separated by *path name only*. There is no
-per-tenant OS user, `chown` or `chmod` anywhere in the codebase, so a command
-run for user A can read user B's `Files/` and `Memory/`.
+In 3a every tenant's store and files belong to that tenant's OS account, so the
+kernel refuses a cross-tenant read with no policy involved. In 3b the container
+itself is the boundary.
 
-**We detect this rather than trusting configuration.** The server records which
-users it has served; once one process has served more than one, an `allow` for
-`shell_execute` is capped to `ask`. A correctly deployed per-user container
-serves one user and is never affected. If your isolation is provided by
-something outside the process (a VM, a separate host), set
+### Status
+
+| | |
+|---|---|
+| **Per-tenant OS user (real 3a isolation)** | **not built.** Every tenant's directories are created by the same process under the same uid — no per-tenant user, `chown` or `chmod` anywhere in the codebase. Until it exists, 3a runs on a shared uid. |
+| Detection + `shell_execute` cap | built. Fires only when one process serves several users. |
+| Mode 3b (container per user) | works today, no code required. |
+
+Building 3a properly needs a **per-tenant worker process**, so the uid is dropped
+at process creation. That is not optional polish: `setuid` per request inside an
+async server handling every tenant is unsafe — one missed switch is a full
+compromise, and it is not safe under concurrency.
+
+Until then the cap is the only control between tenants in 3a, and it should be
+read as a stopgap rather than a fix. The server records which users it has
+served; once one process has served more than one, an `allow` for
+`shell_execute` resolves to `ask`. If your isolation comes from outside the
+process entirely (a VM, a separate host), set
 `governance.allow_shell_when_multi_user: true` — deliberately and audibly.
 
-This caps the **capability**, not access: every user keeps working, which is what
-the "family or small team on one host" deployment needs. It only stops the one
-configuration that turns a shared container into a shared filesystem.
+The cap applies to the **capability**, not to access: every tenant keeps working,
+which is what a shared container needs. It only stops the one setting that turns
+a shared container into a shared filesystem.
 
 ## Architecture in 30 seconds
 
@@ -69,8 +83,8 @@ configuration that turns a shared container into a shared filesystem.
 |---|---|---|
 | Single user, desktop only | **Mode 1 — Local** | Zero configuration. Data is local files — other apps can access them directly. |
 | Single user, multiple devices (phone, laptop, desktop) | **Mode 2 — Solo WAN** | One server = sessions **and** files in sync everywhere. |
-| Several users, one container (family, small team) | **Mode 3a — trusted** | Policy layer only. **No OS isolation** — see [Isolation by mode](#isolation-by-mode). |
-| Several users, per-user containers + per-user auth | **Mode 3b — untrusted** | Container per user = OS-level isolation. |
+| Several users sharing one host (family, small team) | **Mode 3a — trusted** | One container, one OS user per tenant. Isolation is not built yet — see [Status](#status). |
+| Several users, per-user auth (SSO, per-user keys) | **Mode 3b — untrusted** | One container per user. Works today. |
 | Enterprise teams (SSO, shared workspaces) | **Not available yet** | See [Known gaps](#known-gaps). The data model has team skeletons but no identity layer. |
 
 ---
