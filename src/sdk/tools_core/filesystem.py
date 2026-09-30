@@ -3,6 +3,7 @@
 import itertools
 from contextvars import ContextVar
 from pathlib import Path
+from typing import Any
 
 from src.app_logging import get_logger
 from src.sdk.tools import ToolAnnotations, ToolResult, tool
@@ -29,32 +30,65 @@ def set_workspace_id(workspace_id: str) -> None:
     _current_workspace_id.set(workspace_id)
 
 
+def _allowed_roots(user_id: str, paths: Any) -> list[Path]:
+    """Roots the filesystem tools may touch: the data root, plus configured roots.
+
+    The data root is always included so the assistant's own store stays
+    reachable with no configuration. ``filesystem.allowed_roots`` adds
+    project directories. ``workspace_root`` is the older single-root setting and
+    is still honoured so existing deployments keep working.
+    """
+    from src.config import get_settings
+
+    fs = get_settings().filesystem
+    roots: list[Path] = [paths.root.resolve()]
+    for entry in list(getattr(fs, "allowed_roots", []) or []):
+        roots.append(Path(entry).expanduser().resolve())
+    legacy = getattr(fs, "workspace_root", None)
+    if legacy:
+        roots.append(Path(legacy).expanduser().resolve())
+    return roots
+
+
+def _reject_outside_roots(resolved: Path, roots: list[Path], original: str) -> Path:
+    """Fail closed, but say what to do instead.
+
+    The previous message was a bare "Absolute path outside EA root", which left
+    the agent probing the same refused path 32 times before it discovered
+    shell_execute. The boundary is unchanged; only the explanation improved.
+    """
+    if any(resolved == root or resolved.is_relative_to(root) for root in roots):
+        return resolved
+    allowed = ", ".join(str(root) for root in roots) or "(none configured)"
+    raise ValueError(
+        f"Path is not under any allowed root: {original}. "
+        f"Allowed roots: {allowed}. "
+        "To use a path outside them, either add it to filesystem.allowed_roots, "
+        "or use shell_execute (which is separately approval-gated)."
+    )
+
+
 def _resolve_path(path: str | None, user_id: str, workspace_id: str = "personal") -> Path:
     if user_id == DEFAULT_USER_ID:
         user_id = _current_user_id.get()
 
     paths = get_paths(user_id, workspace_id=workspace_id)
     root_path = paths.workspace_files_dir().resolve()
+    roots = _allowed_roots(user_id, paths)
 
     if path is None:
         return root_path
 
-    from src.config import get_settings
-    if get_settings().filesystem.workspace_root:
-        if path.startswith("/"):
-            resolved = Path(path).resolve()
-            data_root = paths.root.resolve()
-            if resolved.is_relative_to(data_root) or str(resolved) == str(data_root):
-                return resolved
-            raise ValueError(f"Absolute path outside EA root: {path}")
-        return (root_path / path).resolve()
 
     if path.startswith("/"):
-        resolved = Path(path).resolve()
-        data_root = paths.root.resolve()
-        if resolved.is_relative_to(data_root) or str(resolved) == str(data_root):
-            return resolved
-        raise ValueError(f"Absolute path outside EA root: {path}")
+        return _reject_outside_roots(Path(path).resolve(), roots, path)
+
+    # Relative paths resolve against the workspace root, or against a
+    # configured workspace_root when one is set.
+    from src.config import get_settings as _gs
+
+    legacy = getattr(_gs().filesystem, "workspace_root", None)
+    base = Path(legacy).expanduser().resolve() if legacy else root_path
 
     is_skills_path = str(paths.user_skills_dir()) in path or path.startswith(
         "data/private/skills/"
@@ -77,9 +111,19 @@ def _resolve_path(path: str | None, user_id: str, workspace_id: str = "personal"
         if not resolved.is_relative_to(paths.user_tools_dir()):
             raise ValueError(f"Path outside tools directory: {path}")
     else:
-        resolved = (root_path / path).resolve()
-        if not resolved.is_relative_to(root_path):
-            raise ValueError(f"Path outside user directory: {path}")
+        # Relative paths are workspace-relative BY DEFINITION and must stay
+        # inside the base directory. Checking them against `roots` instead
+        # would widen them to the whole data root (Skills/, Subagents/, …) and
+        # let `../` traverse out — the tests for that caught it. Operator-granted
+        # roots apply to ABSOLUTE paths only.
+        resolved = (base / path).resolve()
+        if not (resolved == base or resolved.is_relative_to(base)):
+            raise ValueError(
+                f"Path escapes the workspace: {path}. Relative paths resolve "
+                f"inside {base} and cannot use '..' to leave it. Use an "
+                "absolute path (it is checked against filesystem.allowed_roots) "
+                "or shell_execute."
+            )
 
     return resolved
 
@@ -118,7 +162,10 @@ def files_list(path: str = ".", user_id: str =  DEFAULT_USER_ID, workspace_id: s
             items.append(f"{item_type:6} {size:>10} {item.name}")
 
         if not items:
-            return f"Empty directory: {path}"
+            # Name the directory actually inspected. "Empty directory: ." is
+            # how an agent concludes the project is empty when the listing was
+            # resolved somewhere else entirely.
+            return f"Empty directory: {resolved_root}"
 
         return "\n".join(["", *items, ""])
     except Exception as e:

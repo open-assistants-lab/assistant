@@ -3,13 +3,14 @@
 import json
 import logging
 import os
+import re
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import yaml
 from dotenv import dotenv_values
-from pydantic import Field, PrivateAttr
-from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+from pydantic import Field, PrivateAttr, field_validator
+from pydantic_settings import BaseSettings, NoDecode, PydanticBaseSettingsSource, SettingsConfigDict
 
 # Repository root — resolved from THIS file so config/.env are found
 # regardless of process CWD (audit E23).
@@ -388,6 +389,52 @@ class FilesystemConfig(_BaseSettings):
 
     enabled: bool = True
     max_file_size_mb: int = 10
+    # NoDecode stops pydantic-settings JSON-parsing this list in the *source*,
+    # which would otherwise reject `FILESYSTEM_ALLOWED_ROOTS=/home/me/project`
+    # before the validator below ever runs.
+    allowed_roots: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        description="Extra directories the filesystem tools may read and write, "
+        "in addition to the assistant's own data root. Use this to grant access to "
+        "a project checkout without widening every tool: files_* still enforce "
+        "the list, while shell_execute remains separately approval-gated.",
+    )
+    max_repeated_tool_calls: int = Field(
+        default=3,
+        ge=2,
+        le=50,
+        description="Identical (tool, arguments) calls allowed per run before the "
+        "loop is stopped. A repeated call cannot produce a new result; without a "
+        "cap, a confused agent can spend an entire token budget repeating itself.",
+    )
+    @field_validator("allowed_roots", mode="before")
+    @classmethod
+    def _split_allowed_roots(cls, value: object) -> object:
+        """Accept a JSON list, or plain newline/comma separated paths.
+
+        pydantic-settings parses list fields as JSON only, so
+        ``FILESYSTEM_ALLOWED_ROOTS=/home/me/project`` would otherwise fail
+        validation — and a path list that quietly fails to apply is a
+        security problem, not a papercut. Anything genuinely unparseable is
+        raised rather than dropped.
+        """
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            if raw.startswith("["):
+                try:
+                    parsed = json.loads(raw)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"filesystem.allowed_roots looks like JSON but did not parse: {exc}"
+                    ) from exc
+                if not isinstance(parsed, list):
+                    raise ValueError("filesystem.allowed_roots JSON must be a list of paths")
+                return [str(item) for item in parsed]
+            return [part.strip() for part in re.split(r"[,\n]", raw) if part.strip()]
+        return value
+
     workspace_root: str | None = Field(
         default=None,
         description="Shared workspace directory. When set, all filesystem tools "
