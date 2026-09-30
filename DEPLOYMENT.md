@@ -6,14 +6,44 @@ basics (data layout, backups, secrets, observability) that apply to all of them.
 - **Mode 1 — Local**: one user, one machine, terminal or desktop app.
 - **Mode 2 — Solo WAN**: one user, many devices. Sessions (and files) stay in
   sync because there is exactly one server.
-- **Mode 3 — Multi-tenant**: one container per user behind a reverse proxy.
-  The current safe path for hosting several users on one machine.
+- **Mode 3a — Multi-tenant, trusted**: several users, one container, shared
+  secret. **No OS isolation between users** — see [Isolation by mode](#isolation-by-mode).
+- **Mode 3b — Multi-tenant, untrusted**: several users, one container *per
+  user*, per-user authentication. This is the mode that delivers the isolation
+  Mode 3 has always been described as providing.
 
 > **Docker deployment source of truth:** [`docker/DEPLOYMENT.md`](docker/DEPLOYMENT.md)
 > (multi-user trusted deployment). This file covers the three deployment modes and
 > host/VPS specifics. **No clone needed:** `docker pull
 > ghcr.io/open-assistants-lab/assistant:latest` — published on every release tag
 > (multi-arch amd64+arm64).
+
+## Isolation by mode
+
+What actually stops one user reaching another's data. Read this before hosting
+for more than one person — the distinction is not visible from configuration.
+
+| Mode | Users per process | Auth | **What separates users** |
+|---|---|---|---|
+| 1 — Local | 1 | none (`SOLO_BYPASS`) | the user's own OS account |
+| 2 — Solo WAN | 1 | shared `API_KEY` | the user's own OS account |
+| **3a — trusted** | **N** | shared secret | **our tool policy only** |
+| 3b — untrusted | 1 per container | per-user keys | the kernel / container |
+
+In **3a**, per-user directories are separated by *path name only*. There is no
+per-tenant OS user, `chown` or `chmod` anywhere in the codebase, so a command
+run for user A can read user B's `Files/` and `Memory/`.
+
+**We detect this rather than trusting configuration.** The server records which
+users it has served; once one process has served more than one, an `allow` for
+`shell_execute` is capped to `ask`. A correctly deployed per-user container
+serves one user and is never affected. If your isolation is provided by
+something outside the process (a VM, a separate host), set
+`governance.allow_shell_when_multi_user: true` — deliberately and audibly.
+
+This caps the **capability**, not access: every user keeps working, which is what
+the "family or small team on one host" deployment needs. It only stops the one
+configuration that turns a shared container into a shared filesystem.
 
 ## Architecture in 30 seconds
 
@@ -39,7 +69,8 @@ basics (data layout, backups, secrets, observability) that apply to all of them.
 |---|---|---|
 | Single user, desktop only | **Mode 1 — Local** | Zero configuration. Data is local files — other apps can access them directly. |
 | Single user, multiple devices (phone, laptop, desktop) | **Mode 2 — Solo WAN** | One server = sessions **and** files in sync everywhere. |
-| Several users on one host (family, small team) | **Mode 3 — Multi-tenant** | Container per user = OS-level isolation for the agent's shell/files access. |
+| Several users, one container (family, small team) | **Mode 3a — trusted** | Policy layer only. **No OS isolation** — see [Isolation by mode](#isolation-by-mode). |
+| Several users, per-user containers + per-user auth | **Mode 3b — untrusted** | Container per user = OS-level isolation. |
 | Enterprise teams (SSO, shared workspaces) | **Not available yet** | See [Known gaps](#known-gaps). The data model has team skeletons but no identity layer. |
 
 ---

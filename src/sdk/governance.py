@@ -215,11 +215,35 @@ class GovernanceService:
 
         governance = getattr(get_settings(), "governance", None)
         admin_permissions = getattr(governance, "permissions", None) or {}
+
+        workspace_id = str(tool_input.get("workspace_id") or "personal")
         workspace_id = str(tool_input.get("workspace_id") or "personal")
         fallback = self._default_permission(tool_name, user_id=user_id, workspace_id=workspace_id)
-        return PermissionPolicy(admin=admin_permissions, user=user_permissions).resolve(
+        decision = PermissionPolicy(admin=admin_permissions, user=user_permissions).resolve(
             tool_name, tool_input, fallback=fallback
         )
+
+        # #40: once one process has served more than one distinct user it is
+        # not a per-user container, so nothing separates tenants at the OS level
+        # and the documented "container per user" isolation does not hold here.
+        # Cap an `allow` down to `ask`. Applied AFTER resolution so an explicit
+        # deny stays deny, and so this cannot re-enter the policy path.
+        if (
+            tool_name == "shell_execute"
+            and decision == "allow"
+            and not bool(getattr(governance, "allow_shell_when_multi_user", False))
+        ):
+            from src.sdk.tenant_observation import is_multi_user_process
+
+            if is_multi_user_process():
+                logger.warning(
+                    "governance.shell_downgraded_multi_user",
+                    {"user_id": user_id, "workspace_id": workspace_id},
+                    user_id=user_id,
+                )
+                decision = "ask"
+
+        return decision
 
     def resolve_permission(self, user_id: str, tool_name: str) -> str:
         """Resolve a tool permission without item-specific arguments."""

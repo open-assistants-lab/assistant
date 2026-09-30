@@ -333,6 +333,17 @@ async def api_key_auth_middleware(request: Request, call_next: Any) -> Any:
     # without resolving twice.
     request.state.identity = result
 
+    # Record who this process has served. If more than one distinct user turns
+    # up, this process is not a per-user container, so the documented
+    # "container per user = OS-level isolation" does not hold here (#40).
+    try:
+        from src.sdk.tenant_observation import observe_user
+
+        requested_uid = request.query_params.get("user_id")
+        observe_user(result.user_id or requested_uid or "default_user")
+    except Exception:  # never let observation break a request
+        pass
+
     # Roadmap decision D0-5 follow-up: make an omitted user_id visible.
     # GET/DELETE endpoints take user_id as a query param; when absent the
     # endpoint silently defaults to 'default_user', which is indistinguishable

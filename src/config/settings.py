@@ -136,6 +136,17 @@ class GovernanceConfig(_BaseSettings):
         default="",
         description="Required deployment secret for external governed-operation callbacks.",
     )
+    allow_shell_when_multi_user: bool = Field(
+        default=False,
+        description=(
+            "Permit shell_execute to resolve to 'allow' even after this process "
+            "has served more than one distinct user (#40). In that state the "
+            "deployment is NOT a per-user container, so the documented "
+            "'container per user = OS-level isolation' does not hold and one "
+            "user's shell can read another user's files. Leave false unless the "
+            "isolation is provided by something outside this process."
+        ),
+    )
     external_executor_allowed_hosts: list[str] = Field(
         default_factory=list,
         description=(

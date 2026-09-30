@@ -39,3 +39,23 @@ _registry_fetch_stub.__test_stub__ = True  # type: ignore[attr-defined]
 import src.sdk.registry as _registry_mod  # noqa: E402
 
 _registry_mod._fetch_api = _registry_fetch_stub
+
+
+# ---------------------------------------------------------------------------
+# Per-test reset of process-global tenant observation
+# ---------------------------------------------------------------------------
+# src.sdk.tenant_observation is deliberately process-lifetime: the server must
+# remember every user it has served, and that history is exactly what makes the
+# #40 shell cap safe. That makes it global mutable state, so without a reset any
+# test that touches two user_ids poisons every later test in the same process —
+# which is how an existing policy test started failing for an unrelated reason.
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _reset_tenant_observation():
+    from src.sdk.tenant_observation import reset
+
+    reset()
+    yield
+    reset()
