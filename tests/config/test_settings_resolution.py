@@ -251,3 +251,41 @@ def test_no_warning_when_env_and_yaml_agree(monkeypatch, fresh_settings, caplog)
     with caplog.at_level("WARNING"):
         reload_settings()
     assert not [r for r in caplog.records if "config.yaml" in r.message]
+
+
+class TestClickstackSinkConfig:
+    """The second operational sink must only ever be configured on purpose.
+
+    Regression: clickstack was typed as OtelConfig, whose env_prefix is OTEL_,
+    so OTEL_ENDPOINT silently configured BOTH sinks and every span was exported
+    to one destination twice.
+    """
+
+    def test_otel_endpoint_does_not_configure_clickstack(self, monkeypatch):
+        monkeypatch.setenv("OTEL_ENDPOINT", "http://127.0.0.1:9/v1/traces")
+        monkeypatch.delenv("OBSERVABILITY__CLICKSTACK__ENDPOINT", raising=False)
+        monkeypatch.delenv("CLICKSTACK_OTEL_ENDPOINT", raising=False)
+        from src.config.settings import AppConfig
+
+        obs = AppConfig().observability
+        assert str(obs.otel.endpoint) == "http://127.0.0.1:9/v1/traces"
+        assert str(obs.clickstack.endpoint) == ""
+
+    def test_clickstack_owns_its_env_prefix(self, monkeypatch):
+        monkeypatch.setenv("CLICKSTACK_OTEL_ENDPOINT", "http://collector:4318")
+        monkeypatch.delenv("OBSERVABILITY__CLICKSTACK__ENDPOINT", raising=False)
+        monkeypatch.delenv("OTEL_ENDPOINT", raising=False)
+        from src.config.settings import AppConfig
+
+        obs = AppConfig().observability
+        assert str(obs.clickstack.endpoint) == "http://collector:4318"
+        assert str(obs.otel.endpoint) == ""
+
+    def test_nested_delimiter_path_still_configures_clickstack(self, monkeypatch):
+        monkeypatch.setenv("OBSERVABILITY__CLICKSTACK__ENDPOINT", "http://cs:4318")
+        monkeypatch.delenv("CLICKSTACK_OTEL_ENDPOINT", raising=False)
+        monkeypatch.delenv("OTEL_ENDPOINT", raising=False)
+        from src.config.settings import AppConfig
+
+        obs = AppConfig().observability
+        assert str(obs.clickstack.endpoint) == "http://cs:4318"

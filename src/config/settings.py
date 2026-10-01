@@ -268,6 +268,19 @@ class OtelConfig(_BaseSettings):
     model_config = SettingsConfigDict(env_prefix="OTEL_")
 
 
+class ClickstackConfig(OtelConfig):
+    """Second operational OTLP destination: our hosted ClickStack.
+
+    Deliberately NOT plain OtelConfig: that class reads OTEL_ENDPOINT, so a
+    second field of that type would silently configure itself from the admin
+    endpoint and every span would be exported to one destination twice.
+    Own prefix = it can only be configured on purpose (CLICKSTACK_OTEL_ENDPOINT
+    / CLICKSTACK_OTEL__HEADERS, or the OBSERVABILITY__CLICKSTACK__ nested path).
+    """
+
+    model_config = SettingsConfigDict(env_prefix="CLICKSTACK_OTEL_")
+
+
 class LoggingConfig(_BaseSettings):
     """Logging configuration."""
 
@@ -288,7 +301,7 @@ class ObservabilityConfig(_BaseSettings):
     # Used when we host a deployment and want traces in our own ClickStack as
     # well as (optionally) the operator's own observability. Same filter
     # applies: operational spans, allowlisted attributes, no prompts.
-    clickstack: OtelConfig = Field(default_factory=OtelConfig)
+    clickstack: ClickstackConfig = Field(default_factory=ClickstackConfig)
 
 
 class AuthConfig(_BaseSettings):

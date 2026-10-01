@@ -589,9 +589,13 @@ def configure_observability(settings: AppConfig) -> Any | None:
 
     otel_cfg = getattr(getattr(settings, "observability", None), "otel", None)
     endpoint = str(getattr(otel_cfg, "endpoint", "") or "")
-    multi_sink = bool(endpoint) or bool(
-        str(getattr(settings.observability.clickstack, "endpoint", "") or "")
+    # Defensive on `observability.clickstack`: hosts swap in SimpleNamespace
+    # settings fakes that predate the field.
+    observability_cfg = getattr(settings, "observability", None)
+    cs_endpoint = str(
+        getattr(getattr(observability_cfg, "clickstack", None), "endpoint", "") or ""
     )
+    multi_sink = bool(endpoint) or bool(cs_endpoint)
     if multi_sink and _state["operational_telemetry_provider"] is None:
         operational_provider = SDKTracerProvider(
             resource=Resource.create({"service.name": "assistant"})
@@ -602,7 +606,7 @@ def configure_observability(settings: AppConfig) -> Any | None:
         # applies to every sink equally. One span of work, N destinations.
         for sink_name, sink_cfg in (
             ("otel", otel_cfg),
-            ("clickstack", settings.observability.clickstack),
+            ("clickstack", getattr(observability_cfg, "clickstack", None)),
         ):
             sink_endpoint = str(getattr(sink_cfg, "endpoint", "") or "")
             if not sink_endpoint:
