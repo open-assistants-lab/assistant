@@ -1,6 +1,7 @@
 """HTTP server for Assistant."""
 
 import asyncio
+import json
 import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -71,6 +72,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     desktop_mode = desktop_mode_active()
     warn_unknown_model_providers(get_settings())
+    # The filesystem boundary is a security-relevant setting, and this arc has
+    # twice found it silently not applied (NoDecode dropped the env var; a
+    # broken benchmark launch chain never passed it to the server). Log the
+    # effective value at startup so a misconfigured deployment can be SEEN —
+    # and so the parity benchmark can assert its own precondition.
+    from src.app_logging import get_logger as _startup_logger_getter
+
+    _fs_settings = get_settings().filesystem
+    _startup_logger_getter().info(
+        "filesystem.boundary_effective",
+        {
+            "allowed_roots": list(_fs_settings.allowed_roots),
+            "user_id": "system",
+        },
+    )
+    # Startup facts also go to stdout: launchers (and the parity benchmark)
+    # assert the effective boundary from the process output, and the JSONL
+    # logger is file-only.
+    print(
+        "filesystem boundary effective: allowed_roots="
+        + json.dumps(_fs_settings.allowed_roots)
+    )
     _token_refresh_task: asyncio.Task[Any] | None = None
     _operation_dispatcher: Any | None = None
     # Durable external operation dispatch is independent of the approving
