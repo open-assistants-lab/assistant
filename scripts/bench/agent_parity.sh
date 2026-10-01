@@ -183,6 +183,15 @@ mkdir -p "$BENCH_DIR/data" "$BENCH_DIR/path"
 # The precondition check below makes this class of harness bug loud.
 DEPLOYMENT_DATA_ROOT="$BENCH_DIR/data" DEPLOYMENT_DATA_PATH="$BENCH_DIR/path" \
 FILESYSTEM_ALLOWED_ROOTS="$BENCH_DIR/app" \
+# Traces: our own Langfuse (semantic, full payload) AND our ClickStack
+# (operational). ClickStack ingest needs the plain OTLP_AUTH_TOKEN — the MCP
+# bearer is a different credential and 401s here.
+# Sink 1 — Langfuse (semantic+operational via OTLP; full payload)
+OBSERVABILITY__OTEL__ENDPOINT="$LANGFUSE_BASE_URL/api/public/otel/v1/traces" \
+OBSERVABILITY__OTEL__HEADERS="$(python3 -c "import base64,os,json;print(json.dumps({'authorization':'Basic '+base64.b64encode((os.environ['LANGFUSE_PUBLIC_KEY']+':'+os.environ['LANGFUSE_SECRET_KEY']).encode()).decode()}))")" \
+# Sink 2 — ClickStack, fanned out in parallel (operational, filtered)
+OBSERVABILITY__CLICKSTACK__ENDPOINT="$CLICKSTACK_BASE_URL/otlp/v1/traces" \
+OBSERVABILITY__CLICKSTACK__HEADERS="{\"authorization\":\"$OTLP_AUTH_TOKEN\"}" \
 DEPLOYMENT_MODE=local API_PORT="$API_PORT" \
   nohup uv run assistant http > "$BENCH_DIR/server.log" 2>&1 &
 SERVER_PID=$!

@@ -241,7 +241,29 @@ class OtelConfig(_BaseSettings):
     """
 
     endpoint: str = ""
-    headers: dict[str, str] = Field(default_factory=dict)
+    # NoDecode: without it pydantic-settings JSON-parses the dict in the
+    # *source* and silently drops OTEL__HEADERS, so the exporter ships with no
+    # credentials and every span export 401s. Same failure class as allowed_roots.
+    headers: Annotated[dict[str, str], NoDecode] = Field(default_factory=dict)
+
+    @field_validator("headers", mode="before")
+    @classmethod
+    def _parse_headers(cls, value: object) -> object:
+        """NoDecode hands the raw string here; parse it, loudly on failure."""
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return {}
+            try:
+                parsed = json.loads(raw)
+            except ValueError as exc:
+                raise ValueError(
+                    f"observability.otel.headers looks like JSON but did not parse: {exc}"
+                ) from exc
+            if not isinstance(parsed, dict):
+                raise ValueError("observability.otel.headers must be a JSON object")
+            return {str(k): str(v) for k, v in parsed.items()}
+        return value
 
     model_config = SettingsConfigDict(env_prefix="OTEL_")
 
@@ -262,6 +284,11 @@ class ObservabilityConfig(_BaseSettings):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     langfuse: LangfuseConfig = Field(default_factory=LangfuseConfig)
     otel: OtelConfig = Field(default_factory=OtelConfig)
+    # A SECOND operational destination, fanned out in parallel to `otel`.
+    # Used when we host a deployment and want traces in our own ClickStack as
+    # well as (optionally) the operator's own observability. Same filter
+    # applies: operational spans, allowlisted attributes, no prompts.
+    clickstack: OtelConfig = Field(default_factory=OtelConfig)
 
 
 class AuthConfig(_BaseSettings):

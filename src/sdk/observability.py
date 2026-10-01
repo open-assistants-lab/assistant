@@ -589,20 +589,39 @@ def configure_observability(settings: AppConfig) -> Any | None:
 
     otel_cfg = getattr(getattr(settings, "observability", None), "otel", None)
     endpoint = str(getattr(otel_cfg, "endpoint", "") or "")
-    if endpoint and _state["operational_telemetry_provider"] is None:
-        delegate = OTLPSpanExporter(
-            endpoint=endpoint,
-            headers=dict(getattr(otel_cfg, "headers", None) or {}),
-            timeout=5,
-        )
-        exporter = FilteringSpanExporter(delegate)
+    multi_sink = bool(endpoint) or bool(
+        str(getattr(settings.observability.clickstack, "endpoint", "") or "")
+    )
+    if multi_sink and _state["operational_telemetry_provider"] is None:
         operational_provider = SDKTracerProvider(
             resource=Resource.create({"service.name": "assistant"})
         )
-        processor = BatchSpanProcessor(exporter, export_timeout_millis=5000)
-        operational_provider.add_span_processor(processor)
+
+        # Fan-out: each configured destination gets its own exporter behind the
+        # SAME FilteredSpanExporter, so the operational allowlist (no prompts)
+        # applies to every sink equally. One span of work, N destinations.
+        for sink_name, sink_cfg in (
+            ("otel", otel_cfg),
+            ("clickstack", settings.observability.clickstack),
+        ):
+            sink_endpoint = str(getattr(sink_cfg, "endpoint", "") or "")
+            if not sink_endpoint:
+                continue
+            delegate = OTLPSpanExporter(
+                endpoint=sink_endpoint,
+                headers=dict(getattr(sink_cfg, "headers", None) or {}),
+                timeout=5,
+            )
+            processor = BatchSpanProcessor(
+                FilteringSpanExporter(delegate), export_timeout_millis=5000
+            )
+            operational_provider.add_span_processor(processor)
+            _register_owned_operational_processor(processor)
+            logger.info(
+                "observability.operational_sink_configured", {"sink": sink_name}
+            )
+
         _state["operational_telemetry_provider"] = operational_provider
-        _register_owned_operational_processor(processor)
 
     return provider
 
