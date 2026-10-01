@@ -68,6 +68,7 @@ from src.sdk.tools_core.research import (
     research_list,
     research_start,
 )
+from src.sdk.tools_core.run_tests import run_tests
 from src.sdk.tools_core.shell import shell_execute
 from src.sdk.tools_core.skills import (
     skills_load,
@@ -134,6 +135,8 @@ def _register_all() -> None:
         registry.register(time_get)
     if not _desktop_excluded("shell_execute"):
         registry.register(shell_execute)
+    if not _desktop_excluded("run_tests"):
+        registry.register(run_tests)
     if not _desktop_excluded("user_prompt_get"):
         registry.register(user_prompt_get)
     if not _desktop_excluded("user_prompt_set"):
