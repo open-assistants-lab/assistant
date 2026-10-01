@@ -150,9 +150,39 @@ else
 fi
 
 note "3/4 subject arm — this agent"
+# Precondition: if the harness cannot read the task file, any measurement is
+# invalid. Fail loudly rather than reporting the agent's behaviour as the result.
+if ! FILESYSTEM_ALLOWED_ROOTS="$BENCH_DIR/app" DEPLOYMENT_DATA_ROOT="$BENCH_DIR/data" \
+     DEPLOYMENT_DATA_PATH="$BENCH_DIR/path" uv run --project "$REPO_ROOT" \
+     python - "$BENCH_DIR/app/jobq.py" <<'PYCHECK'
+import asyncio, sys
+from src.sdk.tools_core.filesystem import files_read
+r = asyncio.run(files_read.ainvoke({"path": sys.argv[1], "user_id": "parity"}))
+content = str(getattr(r, "content", r))
+sys.exit(0 if "not under any allowed root" not in content else 1)
+PYCHECK
+then
+  printf '  %sHARNESS INVALID%s — the agent cannot read %s/app/jobq.py.\n' "\033[31m" "\033[0m" "$BENCH_DIR"
+  echo "  Set FILESYSTEM_ALLOWED_ROOTS to include the task dir before trusting a result."
+  exit 1
+fi
+ok "harness can read the task file"
+
+
 reset_fixture
 mkdir -p "$BENCH_DIR/data" "$BENCH_DIR/path"
+# FILESYSTEM_ALLOWED_ROOTS is REQUIRED here, not optional.
+#
+# The task directory is deliberately outside the agent's data root, so without
+# this `files_read` refuses the exact file the task points at. The agent then
+# adapts by routing around the broken tool — measured here as reading a .py file
+# through `browser_open file://...` and launching a headless browser three times,
+# which was most of a 768s run. Four consecutive runs were misread as agent
+# behaviour until the refusal was reproduced directly.
+#
+# The precondition check below makes this class of harness bug loud.
 DEPLOYMENT_DATA_ROOT="$BENCH_DIR/data" DEPLOYMENT_DATA_PATH="$BENCH_DIR/path" \
+FILESYSTEM_ALLOWED_ROOTS="$BENCH_DIR/app" \
 DEPLOYMENT_MODE=local API_PORT="$API_PORT" \
   nohup uv run assistant http > "$BENCH_DIR/server.log" 2>&1 &
 SERVER_PID=$!
