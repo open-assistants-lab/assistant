@@ -1,0 +1,19 @@
+{
+  "_comment": "MCP SERVER CONFIG LOCATION: the server reads ~/Assistant/.mcp.json (solo/desktop) or data_root/Users/<id>/.mcp.json ONLY. A .mcp.json at the repo root is gitignored and NOT read by the server. Copy this file there, fill in placeholders, then call mcp_proxy(action='refresh'). Two shapes: HTTP (type 'http' + url + headers) and stdio (command + args). The `type` field is folded into transport explicitly; it used to be silently dropped and only worked because url was also set.",
+  "mcpServers": {
+    "clickstack": {
+      "url": "https://clickstack.example.org/api/mcp",
+      "type": "http",
+      "headers": {
+        "Authorization": "Bearer <MCP_TOKEN>"
+      }
+    },
+    "local-tools": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "some-mcp-server@latest"
+      ]
+    }
+  }
+}

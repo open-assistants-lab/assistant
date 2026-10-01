@@ -22,6 +22,12 @@ class MCPServerConfig(BaseModel):
         description="HTTP headers for remote servers (e.g. Authorization: Bearer ...)",
     )
     transport: str = Field(default="stdio", description="Transport type: 'stdio' or 'http'")
+    # The MCP config convention writes transport as `type` (OpenCode/HyperDX/our own
+    # .mcp.example.json). It used to be silently dropped by extra=ignore, so a server
+    # declared as {"type": "http"} parsed back as transport="stdio" and only worked
+    # because the connection code also branched on `url` being set. Accept it
+    # explicitly so the config round-trips.
+    type: str | None = Field(default=None, exclude=True, description="Alias of transport")
     # v0.6.21 shipped a `disabled` field that was exclude=True (so it could not
     # be read from .mcp.json) and was never consulted. Replaced by `enabled`,
     # which is real, serialisable configuration that the manager honours and
@@ -35,6 +41,27 @@ class MCPServerConfig(BaseModel):
     trust_server_exemptions: bool = False
     source_path: str = Field(default="", exclude=True)
     source_type: Literal["user", "project", "runtime"] = Field(default="user", exclude=True)
+
+
+def _apply_type_alias(data: dict) -> dict:
+    """Fold the config convention's `type` into `transport`.
+
+    Done outside the model because a nested-model field value is provided as a
+    plain dict, so a per-field validator never runs; without this the field is
+    silently dropped and the transport falls back to stdio.
+    """
+    servers = data.get("mcpServers")
+    if not isinstance(servers, dict):
+        return data
+    fixed = dict(data)
+    servers = dict(servers)
+    for name, cfg in servers.items():
+        if isinstance(cfg, dict) and cfg.get("type") and not cfg.get("transport"):
+            cfg = dict(cfg)
+            cfg["transport"] = cfg["type"]
+            servers[name] = cfg
+    fixed["mcpServers"] = servers
+    return fixed
 
 
 class MCPConfig(BaseModel):
@@ -57,7 +84,7 @@ def load_mcp_config_state(user_id: str) -> tuple[MCPConfig | None, str, str]:
 
     try:
         data = json.loads(config_path.read_text())
-        config = MCPConfig(**data)
+        config = MCPConfig(**_apply_type_alias(data))
     except Exception:
         return None, "invalid", str(config_path)
     config.source_path = str(config_path)
