@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.6.25 — 2026-10-01
+
+### Added — trace fan-out, and an agent that finishes what it starts
+- **Operational traces fan out to two sinks.** We host deployments, so traces belong in our Langfuse *and* our ClickStack, and a tenant may bring their own later. `observability.clickstack` is a second OTLP destination fanned out in parallel to `observability.otel` — one span of work, N destinations, the same filtered exporter (operational spans, allowlisted attributes, **no prompts**) wrapping every sink equally. Verified live end to end in both directions: Langfuse generations land and ClickStack stores real spans from a real run (`sandbox.exec`, `db.query`, with true durations) and reads them back through its MCP.
+  - ClickStack ingest auth is the **plain `authorization: <OTLP_AUTH_TOKEN>`** header — the UI/MCP bearer key is a different credential and 401s. Wrong-credential failures show up as `Failed to export span batch code: 401` in the server log; that log line is where to look.
+- **`run_tests`** — a bounded pytest runner over the sandbox seam (timeout, output and write caps), enforcing `filesystem.allowed_roots` before anything runs. It returns an honest `RESULT: ALL PASS / FAILING` line first and points at the failing test as the spec. Deliberately **not** `read_only`-auto-approved: pytest executes arbitrary code, so blanket auto-approval would be a wider hole than the shell it sits beside. Benchmark traces showed why it's needed: agents were spending 4 of 13 calls building a custom `run_pytest` tool to route around approval friction, and in 3 of 5 runs never editing anything at all.
+
+### Fixed — three silent-misapplication bugs, two found by one trace
+- **The ClickStack sink could only ever be configured on purpose.** It was typed as `OtelConfig`, whose env prefix is `OTEL_` — so `OTEL_ENDPOINT` silently configured *both* sinks and every span was exported to one destination **twice**. `ClickstackConfig` now has its own env namespace (`CLICKSTACK_OTEL_*` or the `OBSERVABILITY__CLICKSTACK__` nested path); caught by the lifecycle gate test (`assert 2 == 1` exporter builds), which did exactly what it exists for.
+- **The duplicate-call guard served stale receipts for state-changing tools.** Its nudge premise — "the same call returns the same result" — is false after an edit: a live trace showed `run_tests` re-run after a successful fix being answered with the pre-edit FAILING result, telling the model its fix did not work when it did. The guard now tracks **read-only tools only** (identical re-reads stay deduplicated); non-read-only tools re-execute, bounded by the per-tool repetition budget, max iterations and cost limits. Grader re-run seeding applies the same filter.
+- **The filesystem boundary is visible at startup.** The effective `filesystem.allowed_roots` is logged (`filesystem.boundary_effective`) and echoed to stdout when the server starts. A security-relevant setting that silently fails to apply is a security bug, and this one twice went unnoticed — third instance of the same class (after NoDecode and the dropped MCP `type` field).
+
+### Benchmark — parity achieved
+`scripts/bench/agent_parity.sh` now **asserts its own precondition**: after the server reports healthy, the script greps the startup boundary line for the task directory and aborts loudly if the agent cannot write it. This closes the failure that invalidated ten samples across two rounds: a `#` comment inside the backslash-continued server launch chain detached `FILESYSTEM_ALLOWED_ROOTS` from the command, the agent routed around the refusal by fixing a *copy* of the app in its own data dir (tests passing there), and the harness failed it against the untouched original — the instrument was measuring a phantom.
+
+With the instrument honest, the traced verdict: **6/6 PASS at 12–36 s / 6–15 calls** vs Pi's 7–12 s, inside the ≤2× gate — and the trace says what remains is model time (12.05 s of a 14 s run is 7 generations; tools ~1.3 s; framework under a second). Full breakdown recorded in `docs/audits/2026-09-29-agent-posture-audit.md` §7.
+
+### Verified — #37 closed
+Dropped-stream session wedging is verified fixed against the **published image** (`ghcr.io/open-assistants-lab/assistant:0.6.24`): a client killed mid-stream leaves the session usable within seconds (the disconnect teardown releases the session lock), `POST /message/cancel` returns `{"status":"cancelled"}`, and a full run afterwards completes. No operator `/profile/reload`, no forever-`session_busy`. Operational note from the verification: a container's first-ever message blocks ~80 s on ChromaDB's 79 MB ONNX embedding model download before stream headers arrive — a long-polling client with a short timeout will time out on a legitimate cold start.
+
+### Also in this release (previously unreleased)
+- Environment variables now override `config.yaml` (`env > .env > yaml > secrets`, with startup disagreement warnings) — previously yaml silently beat every env var.
+- `filesystem.allowed_roots` lets the agent work outside its workspace under an enforced boundary, with a per-tool call budget against probing.
+- The tenant-isolation guard: once one process serves more than one user, `shell_execute: allow` degrades to `ask` (`allow_shell_when_multi_user` escape hatch).
+- MCP config example (`.mcp.example.json`) and the `type` field fix; the server reads `~/Assistant/.mcp.json` only.
+- Multi-user isolation posture corrected and documented: **3a = one container, one OS user per tenant** (specified, not built).
+
 ## v0.6.24 — 2026-09-28
 
 ### Added — subagent scheduling is now reachable (#46)

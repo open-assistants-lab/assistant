@@ -135,3 +135,47 @@ demonstrably work before more is added to it.
 - **Renaming `workspace_*` accessors.** ~21 call sites, cosmetic.
 - **`Users/<id>/` → `Assistants/<id>/` data move.** Live data in `docker/data/`;
   needs the profile spec and a `desktop_migration.py`-shaped migration first.
+
+## 7. Benchmark verdict (2026-10-01): parity achieved, and the gap was the instrument
+
+The parity benchmark (`scripts/bench/agent_parity.sh`, ours vs the Pi harness,
+same model `deepseek-v4.1-flash`, same task, n≥5 samples per round) now
+**passes 6/6** at 12–36 s / 6–15 calls, against Pi's 7–12 s — inside the
+script's own ≤2× gate.
+
+The traced breakdown (Langfuse generations + ClickStack operational spans,
+both live from a real run) says the remaining wall clock is **model time**:
+of a 14 s run, **12.05 s is 7 model generations** (1.1–2.3 s each), ~1.3 s is
+tool execution, and the framework adds under a second. There is no harness
+overhead left worth chasing; Pi's profile is the same shape.
+
+Getting there required three fixes, one per failure mode, and the instrument
+itself was the biggest one:
+
+1. **The instrument graded a phantom.** A `#` comment inside a
+   backslash-continued launch chain detached `FILESYSTEM_ALLOWED_ROOTS` from
+   the server, so the agent was refused the task directory, did the
+   reasonable thing (copied the app into its own data dir and fixed the
+   *copy*, tests ALL PASS there), and was failed against the untouched
+   original. Ten samples across two rounds were invalidated by this —
+   including a "negative result" for the `run_tests` tool that was never
+   actually measured. The server now logs its effective filesystem boundary
+   at startup and the benchmark asserts that precondition from the server's
+   own output, aborting loudly when it is wrong.
+2. **The duplicate guard served stale receipts for state-changing tools**
+   (a `run_tests` re-run after an edit was answered with the pre-edit FAILING
+   result, telling the model its fix did not work when it did). The guard now
+   applies to read-only tools only; probing budgets still bound loops.
+3. **`run_tests` shipped** — a bounded pytest runner over the sandbox seam,
+   deliberately not `read_only`-auto-approved, described to point at the
+   failing test as the spec.
+
+Process lesson, recorded: the environment-precondition bug class (NoDecode,
+launch-chain comments, stale ingest credentials) has now cost this project
+three rounds of wasted measurement. Every one was found by reading one trace
+end to end rather than aggregate results. The precondition check added to the
+benchmark is the structural fix: the instrument now verifies itself.
+
+Issue #37 (dropped stream wedges a session) is verified fixed against the
+published image and closed: disconnect teardown releases the session lock,
+`/message/cancel` works, and a new message is accepted within seconds.
