@@ -605,11 +605,31 @@ class AgentLoop:
         """Identity key for the duplicate-call guard: (name, normalized args)."""
         return (tc.name, json.dumps(tc.arguments or {}, sort_keys=True))
 
-    @staticmethod
-    def _record_executed_tools(tool_calls: list[ToolCall], state: AgentState) -> None:
-        """Track executed (tool, args) pairs for the duplicate-call guard."""
+    def _is_read_only_tool(self, name: str) -> bool:
+        """True when the tool's annotations declare it read-only.
+
+        The duplicate-call guard's premise is "the same call returns the same
+        result". That holds for read-only tools; it is FALSE for state-changing
+        ones — re-running tests after an edit is the canonical legitimate
+        repeat, and serving the earlier receipt told the model its fix did not
+        work when it did (live benchmark trace). Doom-loop protection for
+        non-read-only tools still exists: the RepetitionGuard identical-args
+        budget (limit 3) plus max iterations and cost limits.
+        """
+        tool_def = self._registry.get(name)
+        return bool(tool_def is not None and tool_def.annotations.read_only)
+
+    def _record_executed_tools(self, tool_calls: list[ToolCall], state: AgentState) -> None:
+        """Track executed (tool, args) pairs for the duplicate-call guard.
+
+        Read-only tools ONLY: identical re-reads are pure waste and are
+        answered from the earlier result. Non-read-only tools always
+        re-execute, because the world may have changed between calls.
+        """
         executed = state.extra.setdefault("_executed_tool_calls", [])
         for tc in tool_calls:
+            if not self._is_read_only_tool(tc.name):
+                continue
             key = AgentLoop._tool_call_key(tc)
             if key not in executed:
                 executed.append(key)
@@ -625,6 +645,8 @@ class AgentLoop:
         for msg in state.messages:
             if msg.role == "assistant" and msg.tool_calls:
                 for tc in msg.tool_calls:
+                    if not self._is_read_only_tool(tc.name):
+                        continue
                     key = self._tool_call_key(tc)
                     if key not in executed:
                         executed.append(key)
@@ -1119,7 +1141,7 @@ class AgentLoop:
         )
         # Issue #19: only a PERMITTED, executed call enters the duplicate
         # guard's executed-set. Blocked calls returned before this point.
-        AgentLoop._record_executed_tools([tc], state)
+        self._record_executed_tools([tc], state)
 
     async def _execute_tool_batch(self, tool_calls: list[ToolCall], state: AgentState) -> None:
         """Execute a batch of parallel-safe tool calls concurrently via asyncio.gather().
@@ -1171,7 +1193,7 @@ class AgentLoop:
 
             # Issue #19: only a PERMITTED, executed call enters the duplicate
             # guard's executed-set. Blocked calls must never be recorded.
-            AgentLoop._record_executed_tools([tc], state)
+            self._record_executed_tools([tc], state)
             return Message.tool_result(
                 tool_call_id=tc.id,
                 content=result_content,
@@ -1270,7 +1292,7 @@ class AgentLoop:
         )
         # Issue #19: only a PERMITTED, executed call enters the duplicate
         # guard's executed-set. Blocked calls returned before this point.
-        AgentLoop._record_executed_tools([tc], state)
+        self._record_executed_tools([tc], state)
         preview = result_content[:2000] if result_content else ""
         yield StreamChunk.tool_result_event(tool=tc.name, call_id=tc.id, result_preview=preview, is_error=result.is_error)
         yield StreamChunk.tool_end(tool=tc.name, call_id=tc.id, result_preview=preview)
@@ -1333,7 +1355,7 @@ class AgentLoop:
 
             # Issue #19: only a PERMITTED, executed call enters the duplicate
             # guard's executed-set. Blocked calls must never be recorded.
-            AgentLoop._record_executed_tools([tc], state)
+            self._record_executed_tools([tc], state)
             return tc, result_content, result.is_error
 
         results = await asyncio.gather(*[_run_one(tc) for tc in tool_calls], return_exceptions=True)

@@ -211,6 +211,9 @@ def echo(text: str = "hello") -> str:
     return text
 
 
+echo.annotations.read_only = True
+
+
 @tool
 def context_probe(user_id: str = "default_user", workspace_id: str = "personal") -> str:
     """Return the execution context ids."""
@@ -2153,6 +2156,77 @@ class TestDuplicateToolCallGuard:
         assert len(nudge_msgs) == 1
         final = [m for m in result if m.role == "assistant" and m.content == "The result is: hi"]
         assert final, "the final text answer must be used"
+
+    async def test_non_read_only_tool_reexecutes_instead_of_stale_receipt(self):
+        """run_tests after an edit, shell after a change: the guard's premise
+        ('the same call returns the same result') is FALSE for state-changing
+        tools. Serving the earlier receipt told the model its fix did not work
+        when it did (live benchmark trace, sample 10, call 16)."""
+
+        state_box: dict[str, int] = {"n": 0}
+
+        @tool
+        def flaky_counter(seed: str = "x") -> str:
+            """A stateful tool: each execution returns a different verdict."""
+            state_box["n"] += 1
+            n = state_box["n"]
+            return f"attempt {n}: {'FAILING' if n == 1 else 'ALL PASS'}"
+
+        # NOT read_only: its result depends on the world, not just its args.
+        provider = MockProvider(
+            responses=[
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="c1", name="flaky_counter", arguments={"seed": "x"})],
+                ),
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="c2", name="flaky_counter", arguments={"seed": "x"})],
+                ),
+                Message.assistant(content="done"),
+            ]
+        )
+        loop = AgentLoop(provider=provider, tools=[flaky_counter])
+        result = await loop.run([Message.user("run twice")])
+
+        contents = [str(m.content) for m in result if m.role == "tool"]
+        assert contents == ["attempt 1: FAILING", "attempt 2: ALL PASS"], (
+            "the identical re-call must re-execute and return the NEW state, "
+            f"not a stale receipt; got {contents}"
+        )
+        assert not any("Duplicate call skipped" in c for c in contents)
+
+    async def test_read_only_tool_is_still_deduplicated(self):
+        """The narrowed guard keeps its original purpose: identical re-reads
+        are pure waste and must be answered from the earlier result."""
+
+        @tool
+        def probe(key: str = "k") -> str:
+            """A pure read."""
+            return f"value({key})"
+
+        probe.annotations.read_only = True
+
+        provider = MockProvider(
+            responses=[
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="c1", name="probe", arguments={"key": "k"})],
+                ),
+                Message.assistant(
+                    content="",
+                    tool_calls=[ToolCall(id="c2", name="probe", arguments={"key": "k"})],
+                ),
+                Message.assistant(content="done"),
+            ]
+        )
+        loop = AgentLoop(provider=provider, tools=[probe])
+        result = await loop.run([Message.user("read twice")])
+
+        contents = [str(m.content) for m in result if m.role == "tool"]
+        assert contents == ["value(k)", "Duplicate call skipped — earlier identical call to 'probe' returned: value(k)"]
+        nudge_msgs = [m for m in result if m.role == "system" and "already called" in str(m.content)]
+        assert len(nudge_msgs) == 1
 
     async def test_duplicate_guard_escalates_to_capped_final_response(self):
         """After max_duplicate_tool_nudges nudges, the loop requests one brief
