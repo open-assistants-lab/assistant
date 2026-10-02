@@ -55,24 +55,35 @@ OUTCOME_TIMED_OUT = TIMEOUT_MARKER
 OUTCOME_KILLED = KILLED_MARKER
 # Mirrors the three refusal codes set by the branches below.
 _REFUSAL_ERRORS = frozenset({"tool disabled", "permission changed", "unknown tool"})
-
-
-def outcome_for(result: dict[str, Any]) -> str:
-    """One word for what an executed proposal actually did.
-
-    Kept deliberately small so a consumer can switch on it: a clean run, a
-    refusal (the tool never ran), a timeout, a signal kill, or a failure.
-    """
-    structured = result.get("structured_content") or {}
-    explicit = str(structured.get("outcome") or "")
-    if explicit in {
+#: Every terminal state the execution vocabulary defines. Kept as literals
+#: because the persisted proposals vocabulary is frozen (see above).
+_KNOWN_OUTCOMES = frozenset(
+    {
         OUTCOME_SUCCEEDED,
         OUTCOME_REFUSED,
         OUTCOME_FAILED,
         OUTCOME_TIMED_OUT,
         OUTCOME_KILLED,
+        "cancelled",
+        "uncertain",
         "incomplete",
-    }:
+        "rejected",
+    }
+)
+
+
+def outcome_for(result: dict[str, Any]) -> str:
+    """One word for what an executed proposal actually did.
+
+    Every terminal state in the Outcome vocabulary survives, including the
+    ambiguous ones: an UNCERTAIN, CANCELLED or REJECTED result used to fall
+    through to "succeeded" (issue #52), which is the one thing a receipt must
+    never invent. Refusals (the tool never ran) are derived from the error
+    code when the tool did not state an outcome itself.
+    """
+    structured = result.get("structured_content") or {}
+    explicit = str(structured.get("outcome") or "")
+    if explicit in _KNOWN_OUTCOMES:
         return explicit
     if not result.get("is_error"):
         return OUTCOME_SUCCEEDED

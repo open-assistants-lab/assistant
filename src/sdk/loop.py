@@ -1526,6 +1526,25 @@ class AgentLoop:
                 logger.warning(f"input_guardrail_error name={guardrail.name}: {e}")
         return None
 
+    def _block_output_in_place(
+        self, message: Message, tripwire: GuardrailTripwire, state: AgentState
+    ) -> None:
+        """Replace blocked assistant content on the message already in state.
+
+        Appending an "Output blocked" message left the prohibited text in the
+        returned and persisted history (issue #60). Mutating the stored message
+        removes it from the transcript and from the final `done` chunk, which
+        takes its content from the last state message. Two limits stay honest:
+        the session-log observer has already seen the original text, and a
+        streaming client has already received the deltas — bytes on the wire
+        cannot be recalled, so the block is also recorded as an audit event.
+        """
+        message.content = f"Output blocked: {tripwire.result.message}"
+        self._emit_audit(
+            kind="error",
+            detail=f"output_blocked: {tripwire.result.message}",
+        )
+
     async def _check_output_guardrails(self, output: str, state: AgentState) -> None:
         for guardrail in self.output_guardrails:
             try:
@@ -2125,6 +2144,11 @@ class AgentLoop:
                 if response.tool_calls:
                     response.tool_calls = []
                 output_text = response.content if isinstance(response.content, str) else ""
+                try:
+                    await self._check_output_guardrails(output_text, state)
+                except GuardrailTripwire as e:
+                    self._block_output_in_place(response, e, state)
+                    output_text = str(response.content or "")
                 break
 
             # FR-4: text bundled with a tool call is held back — it must not
@@ -2138,9 +2162,8 @@ class AgentLoop:
                 try:
                     await self._check_output_guardrails(output_text, state)
                 except GuardrailTripwire as e:
-                    state.add_message(
-                        Message.assistant(content=f"Output blocked: {e.result.message}")
-                    )
+                    self._block_output_in_place(response, e, state)
+                    output_text = str(response.content or "")
                 break
 
             effective_tool_calls = [self._with_runtime_context(tc) for tc in response.tool_calls]
@@ -2678,6 +2701,7 @@ class AgentLoop:
                     try:
                         await self._check_output_guardrails(output_text, state)
                     except GuardrailTripwire as e:
+                        self._block_output_in_place(assistant_msg, e, state)
                         yield StreamChunk.error(message=f"Output blocked: {e.result.message}")
                     break
 
@@ -2692,6 +2716,7 @@ class AgentLoop:
                     try:
                         await self._check_output_guardrails(output_text, state)
                     except GuardrailTripwire as e:
+                        self._block_output_in_place(assistant_msg, e, state)
                         yield StreamChunk.error(message=f"Output blocked: {e.result.message}")
                     break
 
