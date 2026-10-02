@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.6.28 — 2026-10-02
+
+### Fixed — twelve issues from the 2026-10-02 audit batch (#50–#61)
+Every fix below has a regression that fails on the previous code. Suite: 3633 passed, 27 skipped.
+
+**Governance fails closed (#50).** An exception inside a `guard_tool_call` hook — the enforcement point for `ask`/`deny` — was swallowed, and the gated tool then executed. Guards now return an explicit non-executed error. Audit emission stays best-effort and cancellation still propagates.
+
+**Approvals resolve the live catalog (#51).** The approval execution leg rebuilt its own registry, skipping the deployment ceiling and preferring a shipped tool over a custom override of the same name, and falling back to a shipped body when the catalog failed. It now resolves through the same function the loop uses.
+
+**Cross-user store access is refused (#56).** The filesystem allowlist included the whole data root, so under a shared root any user could read another user's Files/Skills/Tools/Subagents/Memory. Allowed roots are now the caller's own store plus granted project roots, with a post-resolution ownership check that no root and no symlink can override.
+
+**Tool dispatch fidelity (#57, #58, #59, #61).** The streaming dedup left unanswered tool-call ids in the stored assistant message (a hard 400 on strict providers); the duplicate-read cache spanned user turns and served pre-edit reads after a write; the tool-call budget was skipped by lazy-loaded tools and never reset between streamed runs; and each skipped duplicate id was answered with whichever tool's result came first. All four are corrected, with the cache scoped to the current turn and invalidated only for arguments a mutation actually touched.
+
+**Receipts keep ambiguous outcomes (#52).** `outcome_for()` accepted six of nine terminal states, so an `UNCERTAIN` result with `is_error=False` was receipted as *succeeded*. Every value in the frozen vocabulary now passes through unchanged.
+
+**Blocked output leaves no trace (#60).** A tripped output guardrail appended a notice but left the prohibited content in returned and persisted history, and the post-nudge final-answer branch skipped the check entirely. The stored message is now rewritten in place, which also cleans the streaming `done` chunk.
+
+**Work-queue integrity (#53, #54, #55).** `set_running` could resurrect a cancelled or finished row and `set_status` could write a terminal state without its completion event; both are guarded. `add_instruction` was a read-modify-write that lost concurrent instructions and accepted terminal tasks; it is now a single atomic guarded update. A live in-process `invoke()` now claims its task with an owner and heartbeats, and stale recovery skips tasks running in this process.
+
+### Known limits, stated rather than implied
+- #60: a streaming client has already received the text deltas, and the session-log observer has already seen the original text. Blocking bytes already on the wire would require buffering before stream, which is not claimed here.
+- #53: a task live in *another* process still relies on that process's heartbeats.
+- #51: the runtime ceiling is enforced at execution time, so a drifted tool is blocked rather than executed; proposals still do not record which definition the approver saw.
+- #56: a resolver-level guarantee only. It is not OS or process isolation and does not resolve #40.
+
 ## v0.6.27 — 2026-10-02
 
 ### Fixed — operational traces are structurally trustworthy
