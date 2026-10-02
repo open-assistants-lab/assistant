@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.6.27 — 2026-10-02
+
+### Fixed — operational traces are structurally trustworthy
+A review of the stored ClickStack data (TRACE_VERDICT 2026-10-02) found the operational pipeline's own review failing on its findings: every child span orphaned (64/64 parents never stored), durations of 9–28µs against 1–3s real times (spans described operations instead of bracketing them), `SpanKind=Internal` on inbound and outbound HTTP alike, no service version. Waterfalls built on this data would lie.
+
+- **Parentage**: operational spans inherited the current *semantic* span as parent — but semantic spans are exported by a different pipeline and never reach the operational destination, so every stored parent reference dangled. Operational spans now parent to the nearest open *operational* span (contextvar stack; the operational tree forms within its own pipeline) and are never the global current span — which also prevents the symmetric dangling one pipeline over, where semantic spans would have attached to operational parents. Spans with no operational ancestor keep the natural parent (preserving the shared trace ID, the join key between the sinks) and carry an allowlisted `operational.detached` tag; the exporter — which already rebuilds every span for attribute filtering — zeroes the never-storable parent while preserving the trace ID.
+- **Timing**: `http.client` (post + stream) and `db.query` spans now *bracket* the operation — the stream adapter opens on `__aenter__` and closes on `__aexit__`, covering connect through close. `duration_ms` remains for compatibility.
+- **Quality**: `SpanKind` SERVER on inbound `http.request`, CLIENT on outbound `http.client`; error paths set status ERROR (the exporter keeps the code, strips the PII-bearing description); `service.version` in the operational resource.
+
+**Verified against the live destination**: a traced benchmark run stores 27 spans under one root with **zero** dangling parents, `http.client` 1.2–4.1s summing to ~12.9s of model time under a 14.6s root, kinds Server/Client/Internal, version on every span — and the same trace ID appears in Langfuse (25 observations), so the two sinks correlate.
+
+### Changed — the two Ollama paths have distinct names
+`OLLAMA_CLOUD_BASE_URL` governs `ollama-cloud:` models; `OLLAMA_LOCAL_BASE_URL` governs `ollama:` models; the cloud default is `https://ollama.com` per Ollama's documented base-URL table. `OLLAMA_BASE_URL` remains honoured as the deprecated cloud alias (warns; the new name wins a conflict). All reads route through one resolver.
+
+### Benchmark — task ladder + third arm
+`agent_parity.sh` compares three harnesses (pi, opencode, ours) across a three-task ladder: T1 single-file fix, T2 two-file feature (backward-compat + new module), T3 persistent-state rewrite. opencode's non-interactive mode auto-rejects permission requests — without `--auto` the arm measured a permission policy, not the agent. First honest 3-way: all three pass all three tasks; ours within the 2× gate on each (7–14s vs ours 12–34s). No task separates the harnesses at this complexity.
+
 ## v0.6.26 — 2026-10-02
 
 ### Fixed — the tracing acceptance gate is now real
