@@ -334,7 +334,7 @@ provider.end_span(span)
 
 ### Watch out: Ollama has two provider paths
 - `ollama:<model>` — OpenAI-compatible local path at `/v1/chat/completions`; uses `OLLAMA_LOCAL_BASE_URL` (default `http://localhost:11434/v1`).
-- `ollama-cloud:<model>` — native `/api/chat` cloud path; uses `OLLAMA_BASE_URL` and `OLLAMA_API_KEY` (default host `https://ollama.com`).
+- `ollama-cloud:<model>` — native `/api/chat` cloud path; uses `OLLAMA_CLOUD_BASE_URL` and `OLLAMA_API_KEY` (default host `https://ollama.com`, per Ollama's documented base-URL table). `OLLAMA_BASE_URL` is the deprecated alias for this path — honoured with a warning; if both are set the new name wins.
 
 The model prefix selects the path. `create_model_from_config()` does not switch an
 `ollama:` model to cloud based on `OLLAMA_BASE_URL` or `OLLAMA_API_KEY`.

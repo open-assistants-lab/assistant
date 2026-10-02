@@ -2182,3 +2182,58 @@ class TestNoBakedInModelDefault:
             mock_settings.return_value.agent.model = ""
             p = create_model_from_config("openai:gpt-4o")
             assert isinstance(p, OpenAIProvider)
+
+
+class TestOllamaCloudBaseUrlNames:
+    """Two paths, two names — and the docs default.
+
+    OLLAMA_BASE_URL was ambiguous (it governed only the CLOUD path while
+    sounding like THE ollama URL). Distinct names now: OLLAMA_CLOUD_BASE_URL
+    for ollama-cloud:, OLLAMA_LOCAL_BASE_URL for ollama:. The legacy name is
+    honoured with a deprecation warning so existing deployments do not
+    silently change behaviour; the new name wins a conflict.
+    """
+
+    def _clean(self, monkeypatch):
+        for var in ("OLLAMA_CLOUD_BASE_URL", "OLLAMA_BASE_URL", "OLLAMA_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_docs_default_when_unset(self, monkeypatch):
+        self._clean(monkeypatch)
+        from src.sdk.providers.factory import resolve_ollama_cloud_base_url
+
+        # Ollama's documented direct-cloud host (docs.ollama.com/api/introduction)
+        assert resolve_ollama_cloud_base_url() == "https://ollama.com"
+
+    def test_new_name_resolves(self, monkeypatch):
+        self._clean(monkeypatch)
+        monkeypatch.setenv("OLLAMA_CLOUD_BASE_URL", "https://cloud.example.com")
+        from src.sdk.providers.factory import resolve_ollama_cloud_base_url
+
+        assert resolve_ollama_cloud_base_url() == "https://cloud.example.com"
+
+    def test_legacy_alias_still_honoured(self, monkeypatch):
+        self._clean(monkeypatch)
+        monkeypatch.setenv("OLLAMA_BASE_URL", "https://proxy.example.com")
+        from src.sdk.providers.factory import resolve_ollama_cloud_base_url
+
+        assert resolve_ollama_cloud_base_url() == "https://proxy.example.com"
+
+    def test_new_name_wins_conflict(self, monkeypatch):
+        self._clean(monkeypatch)
+        monkeypatch.setenv("OLLAMA_CLOUD_BASE_URL", "https://cloud.example.com")
+        monkeypatch.setenv("OLLAMA_BASE_URL", "https://legacy.example.com")
+        from src.sdk.providers.factory import resolve_ollama_cloud_base_url
+
+        assert resolve_ollama_cloud_base_url() == "https://cloud.example.com"
+
+    def test_key_requirement_honours_new_name(self, monkeypatch):
+        self._clean(monkeypatch)
+        monkeypatch.setenv("OLLAMA_CLOUD_BASE_URL", "http://host.docker.internal:11434")
+        from src.sdk.providers.factory import provider_key_requirement
+
+        # A non-ollama.com cloud URL is a local daemon proxy: no key needed.
+        assert provider_key_requirement("ollama-cloud") is None
+
+        monkeypatch.setenv("OLLAMA_CLOUD_BASE_URL", "https://ollama.com")
+        assert provider_key_requirement("ollama-cloud") == "OLLAMA_API_KEY"

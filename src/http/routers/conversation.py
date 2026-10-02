@@ -36,6 +36,7 @@ from src.http.conversation_persistence import (
 from src.http.models import MessageRequest, MessageResponse, VerificationVerdict
 from src.http.stream_adapter import adapt_stream_chunk
 from src.sdk.messages import Message, ToolCall
+from src.sdk.providers.factory import explicit_ollama_cloud_base_url
 from src.sdk.run_events import ContextCompressedEvent
 from src.sdk.run_models import display_model_name
 from src.sdk.run_service import RunService
@@ -540,7 +541,7 @@ def _provider_key_source(provider: str, user_id: str) -> str | None:
     env_key = _PROVIDER_ENV_KEYS.get(provider)
     if env_key and os.environ.get(env_key):
         return "hosted" if provider == "agnes" else "env"
-    if provider == "ollama-cloud" and os.environ.get("OLLAMA_BASE_URL"):
+    if provider == "ollama-cloud" and explicit_ollama_cloud_base_url():
         return "env"
     return None
 

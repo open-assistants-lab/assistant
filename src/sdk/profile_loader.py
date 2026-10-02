@@ -94,8 +94,8 @@ def validate_model_reference(
     provider_type, _model_name = _parse_model_string(model_ref)
 
     # Single source of truth: the factory's key-requirement helper honours
-    # OLLAMA_BASE_URL for ollama-cloud (local daemon proxy needs no key) —
-    # bootstrap and runtime construction can no longer drift (Jen CR B3).
+    # OLLAMA_CLOUD_BASE_URL for ollama-cloud (local daemon proxy needs no
+    # key) — bootstrap and runtime construction can no longer drift (Jen CR B3).
     from src.sdk.providers.factory import provider_key_requirement
 
     env_name = provider_key_requirement(provider_type)

@@ -237,6 +237,61 @@ def _resolve_provider_type(provider_id: str) -> tuple[str, str]:
     return "openai-compatible", ""
 
 
+
+# Ollama Cloud's documented host, per the official base-URL table
+# (https://docs.ollama.com/api/introduction): direct cloud access is
+# https://ollama.com/api (native) / https://ollama.com/v1 (OpenAI-compat).
+# The provider appends the API path, so the host is https://ollama.com.
+_OLLAMA_CLOUD_DEFAULT_BASE_URL = "https://ollama.com"
+
+
+def _ollama_cloud_base_url() -> tuple[str, bool]:
+    """Ollama Cloud base URL and whether an explicit override is set.
+
+    Distinct names for distinct paths (renamed from the ambiguous
+    OLLAMA_BASE_URL): OLLAMA_CLOUD_BASE_URL governs the ollama-cloud: path,
+    OLLAMA_LOCAL_BASE_URL the ollama: path. The legacy OLLAMA_BASE_URL is
+    still honoured for the cloud path so existing deployments do not
+    silently change behaviour — but it warns, and the new name wins a
+    conflict.
+    """
+    cloud = os.environ.get("OLLAMA_CLOUD_BASE_URL", "").strip()
+    legacy = os.environ.get("OLLAMA_BASE_URL", "").strip()
+    if cloud and legacy and cloud != legacy:
+        logger.warning(
+            "ollama.base_url_conflict",
+            {
+                "ollama_cloud_base_url": cloud,
+                "legacy_ollama_base_url": legacy,
+                "resolution": "OLLAMA_CLOUD_BASE_URL wins",
+            },
+        )
+    if legacy and not cloud:
+        logger.warning(
+            "ollama.base_url_deprecated",
+            {
+                "hint": (
+                    "OLLAMA_BASE_URL is the legacy name for the Ollama Cloud "
+                    "path; rename it to OLLAMA_CLOUD_BASE_URL. The local "
+                    "path is OLLAMA_LOCAL_BASE_URL."
+                )
+            },
+        )
+    url = cloud or legacy or _OLLAMA_CLOUD_DEFAULT_BASE_URL
+    return url, bool(cloud or legacy)
+
+
+def resolve_ollama_cloud_base_url() -> str:
+    """Effective Ollama Cloud base URL (docs default: https://ollama.com)."""
+    return _ollama_cloud_base_url()[0]
+
+
+def explicit_ollama_cloud_base_url() -> bool:
+    """True when an explicit cloud base-URL override is configured
+    (either name) — e.g. a local daemon proxying ollama.com."""
+    return _ollama_cloud_base_url()[1]
+
+
 def create_provider(
     provider_type: str,
     model: str | None = None,
@@ -257,7 +312,7 @@ def create_provider(
 
     if resolved_type == "ollama-cloud":
         resolved_key = api_key or os.environ.get("OLLAMA_API_KEY", "")
-        resolved_url = base_url or os.environ.get("OLLAMA_BASE_URL", "") or "https://ollama.com"
+        resolved_url = base_url or resolve_ollama_cloud_base_url()
         return OllamaCloud(
             base_url=resolved_url,
             model=model or "minimax-m2.5",
@@ -336,11 +391,11 @@ def _resolve_registry_provider(
 
     base_url = provider_info.get("base_url") or None
     if provider_id == "ollama-cloud":
-        # OLLAMA_BASE_URL overrides the models.dev endpoint (a local daemon
-        # proxying ollama.com needs no key and must not be sent to ollama.com)
-        # — keeps the registry path consistent with the ollama-cloud
-        # constructor branch (Jen CR B3).
-        base_url = os.environ.get("OLLAMA_BASE_URL", "") or base_url
+        # An explicit cloud base URL (OLLAMA_CLOUD_BASE_URL, or the legacy
+        # OLLAMA_BASE_URL) overrides the models.dev endpoint — a local daemon
+        # proxying ollama.com needs no key and must not be sent to ollama.com.
+        # Keeps the registry path consistent with the constructor branch (Jen CR B3).
+        base_url = resolve_ollama_cloud_base_url() if explicit_ollama_cloud_base_url() else base_url
     env_keys = provider_info.get("env") or []
     resolved_key = api_key
     for env_key in env_keys:
@@ -358,14 +413,13 @@ def provider_key_requirement(provider_type: str) -> str | None:
     """Return the env var whose API key is required for provider_type, or None
     when the provider can resolve without one.
 
-    ollama-cloud with a non-default OLLAMA_BASE_URL (e.g. a local daemon
-    proxying ollama.com) needs no key — this mirrors the constructor's URL
-    resolution so bootstrap validation and runtime construction agree
+    ollama-cloud with a non-default OLLAMA_CLOUD_BASE_URL (e.g. a local
+    daemon proxying ollama.com) needs no key — this mirrors the constructor's
+    URL resolution so bootstrap validation and runtime construction agree
     (Jen CR B3). The ollama.com default endpoint still requires a key.
     """
     if provider_type == "ollama-cloud":
-        base_url = os.environ.get("OLLAMA_BASE_URL", "") or "https://ollama.com"
-        if "ollama.com" not in base_url:
+        if "ollama.com" not in resolve_ollama_cloud_base_url():
             return None
         return "OLLAMA_API_KEY"
     return _ENV_KEY_MAP.get(provider_type)
