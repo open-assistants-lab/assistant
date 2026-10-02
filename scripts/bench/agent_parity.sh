@@ -111,7 +111,7 @@ reset_fixture() { ( cd "$BENCH_DIR/app" && git checkout -q . && rm -f jobs.jsonl
 run_tests()    { ( cd "$BENCH_DIR/app" && uv run --project "$REPO_ROOT" pytest -q test_queue.py 2>&1 | tail -1 ); }
 
 # ------------------------------------------------------------------- arms
-note "1/4 baseline — the suite must start red"
+note "1/5 baseline — the suite must start red"
 build_fixture
 BASE="$(run_tests)"
 case "$BASE" in
@@ -119,7 +119,7 @@ case "$BASE" in
   *)            bad "fixture did not start broken: $BASE"; exit 1 ;;
 esac
 
-note "2/4 reference arm — pi"
+note "2/5 reference arm — pi"
 PI_ELAPSED=-1; PI_RESULT="(skipped)"
 if command -v pi >/dev/null 2>&1; then
   mkdir -p "$BENCH_DIR/piagent"
@@ -149,7 +149,35 @@ else
   bad "pi is not installed; the reference arm cannot run"
 fi
 
-note "3/4 subject arm — this agent"
+note "3/5 second reference arm — opencode"
+# Same fixture, same task text, same model. opencode runs with its own global
+# config; the task dir has no .opencode/, so it cannot see the repo's plugins
+# or skills — a clean environment. Non-interactive `opencode run`.
+#
+# --auto grants the permissions the other arms already have: ours gets the
+# task dir via FILESYSTEM_ALLOWED_ROOTS, pi runs unconstrained, but opencode's
+# run mode AUTO-REJECTS permission requests (measured: one rejected bash call,
+# immediate exit in 5s — that graded a permission policy, not the agent).
+OPENCODE_MODEL="${OPENCODE_MODEL:-ollama-cloud/$MODEL}"
+OC_ELAPSED=-1; OC_RESULT="(skipped)"
+if command -v opencode >/dev/null 2>&1; then
+  reset_fixture
+  START=$(date +%s)
+  ( cd "$BENCH_DIR/app" \
+      && timeout 900 opencode run --auto --model "$OPENCODE_MODEL" \
+        "$(cat "$BENCH_DIR/TASK.txt")" \
+        > "$BENCH_DIR/opencode.log" 2> "$BENCH_DIR/opencode.err" )
+  OC_ELAPSED=$(( $(date +%s) - START ))
+  OC_RESULT="$(run_tests)"
+  case "$OC_RESULT" in
+    *"3 passed"*) ok "opencode fixed it in ${OC_ELAPSED}s" ;;
+    *)            bad "opencode left it failing after ${OC_ELAPSED}s ($OC_RESULT)" ;;
+  esac
+else
+  bad "opencode is not installed; the second reference arm cannot run"
+fi
+
+note "4/5 subject arm — this agent"
 # Precondition: if the harness cannot read the task file, any measurement is
 # invalid. Fail loudly rather than reporting the agent's behaviour as the result.
 if ! FILESYSTEM_ALLOWED_ROOTS="$BENCH_DIR/app" DEPLOYMENT_DATA_ROOT="$BENCH_DIR/data" \
@@ -251,9 +279,10 @@ fi
 kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null
 
 # ----------------------------------------------------------------- verdict
-note "4/4 verdict"
+note "5/5 verdict"
 printf '  %-10s %-12s %s\n' "harness" "wall clock" "result"
 printf '  %-10s %-12s %s\n' "pi"   "${PI_ELAPSED}s"   "$PI_RESULT"
+printf '  %-10s %-12s %s\n' "opencode" "${OC_ELAPSED}s" "$OC_RESULT"
 printf '  %-10s %-12s %s\n' "ours" "${OUR_ELAPSED}s"   "$OUR_RESULT (tool calls: $OUR_CALLS)"
 echo
 
