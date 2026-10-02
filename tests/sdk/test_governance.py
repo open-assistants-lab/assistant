@@ -206,6 +206,7 @@ class TestExecutionLegChecks:
         monkeypatch.setattr(
             "src.sdk.native_tools.get_native_tools", lambda: [td]
         )
+        monkeypatch.setattr("src.sdk.runner.get_native_tools", lambda: [td])
         pid = svc.create_pending(
             "u1", "gated_tool", {"x": "1"}, permission="ask"
         )

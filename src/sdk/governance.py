@@ -633,23 +633,19 @@ class GovernanceService:
                 )
                 return result
             if registry is None:
-                from src.sdk.native_tools import get_native_tools
+                from src.sdk.runner import get_active_tool_definition
 
-                registry = get_native_tools()
-                # Issue #13: the loop's function list includes the user's
-                # custom TOOL.md tools — the execution leg must resolve the
-                # same set, not the core-only native registry.
-                try:
-                    from src.sdk.tools_custom import get_custom_tools
+                # Match the current live catalog, including deployment policy
+                # and custom overrides. Catalog failures must not fall back to
+                # a different (native) body for the approved name.
+                td = get_active_tool_definition(user_id, tool)
+            else:
+                from src.sdk.deployment_tools import filter_denied_native_tools
 
-                    custom = get_custom_tools(user_id)
-                    have = {x.name for x in registry}
-                    registry = list(registry) + [
-                        x for x in custom if x.name not in have
-                    ]
-                except Exception:
-                    pass  # custom scan failure -> core-only resolution
-            td = next((x for x in registry if x.name == tool), None)
+                # Explicit registries may include connected MCP definitions,
+                # but cannot bypass the current shipped-native ceiling.
+                allowed = filter_denied_native_tools(list(registry))
+                td = next((x for x in reversed(allowed) if x.name == tool), None)
             if td is None:
                 result = {
                     "content": f"Tool not found for execution: {tool}",
