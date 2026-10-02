@@ -31,23 +31,55 @@ def set_workspace_id(workspace_id: str) -> None:
 
 
 def _allowed_roots(user_id: str, paths: Any) -> list[Path]:
-    """Roots the filesystem tools may touch: the data root, plus configured roots.
+    """Roots the filesystem tools may touch: THIS USER's store, plus configured roots.
 
-    The data root is always included so the assistant's own store stays
-    reachable with no configuration. ``filesystem.allowed_roots`` adds
-    project directories. ``workspace_root`` is the older single-root setting and
-    is still honoured so existing deployments keep working.
+    The user's own store is always included so the assistant's files stay
+    reachable with no configuration. The whole data root is NOT: under a shared
+    root it also holds every other user's store (issue #56). ``filesystem.allowed_roots``
+    adds project directories. ``workspace_root`` is the older single-root setting
+    and is still honoured so existing deployments keep working.
     """
     from src.config import get_settings
 
     fs = get_settings().filesystem
-    roots: list[Path] = [paths.root.resolve()]
+    roots: list[Path] = [paths.user_dir.resolve()]
     for entry in list(getattr(fs, "allowed_roots", []) or []):
         roots.append(Path(entry).expanduser().resolve())
     legacy = getattr(fs, "workspace_root", None)
     if legacy:
         roots.append(Path(legacy).expanduser().resolve())
     return roots
+
+
+def _reject_other_user_data(resolved: Path, paths: Any, user_id: str, original: str) -> Path:
+    """Store ownership outranks every filesystem grant (issue #56).
+
+    Project roots, the legacy ``workspace_root``, and symlinks may point
+    anywhere, but no grant and no symlink lets one user's agent read or write
+    another user's store under a shared data root. This runs after path
+    resolution, so symlinked paths are checked at their real destination.
+    """
+    root = paths.root.resolve()
+    if user_id == DEFAULT_USER_ID:
+        # The default user's store IS the data root; the named-user tree
+        # beneath it belongs to other users.
+        others = (root / "Users").resolve()
+        if resolved == others or resolved.is_relative_to(others):
+            raise ValueError(
+                f"Path belongs to another user's data: {original}. Your files "
+                f"live under {root}. A configured root or symlink cannot grant "
+                "access to another user's store."
+            )
+        return resolved
+    if resolved == root or resolved.is_relative_to(root):
+        own = paths.user_dir.resolve()
+        if resolved != own and not resolved.is_relative_to(own):
+            raise ValueError(
+                f"Path belongs to another user's data: {original}. Your files "
+                f"live under {own}. A configured root or symlink cannot grant "
+                "access to another user's store."
+            )
+    return resolved
 
 
 def _reject_outside_roots(resolved: Path, roots: list[Path], original: str) -> Path:
@@ -81,7 +113,8 @@ def _resolve_path(path: str | None, user_id: str, workspace_id: str = "personal"
 
 
     if path.startswith("/"):
-        return _reject_outside_roots(Path(path).resolve(), roots, path)
+        resolved = _reject_outside_roots(Path(path).resolve(), roots, path)
+        return _reject_other_user_data(resolved, paths, user_id, path)
 
     # Relative paths resolve against the workspace root, or against a
     # configured workspace_root when one is set.
@@ -125,7 +158,7 @@ def _resolve_path(path: str | None, user_id: str, workspace_id: str = "personal"
                 "or shell_execute."
             )
 
-    return resolved
+    return _reject_other_user_data(resolved, paths, user_id, path)
 
 
 @tool
