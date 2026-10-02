@@ -1,0 +1,16 @@
+{
+  "_comment": "OPENCODE PROJECT CONFIG: the real opencode.json at this repo root is GITIGNORED and untracked, because it carries live MCP credentials. Copy this file to opencode.json, fill in your Authorization header (Basic base64 of public:secret for the Langfuse MCP), and never commit the result. A previous opencode.json with a live key was pushed to origin — that key must be rotated; removing it from HEAD does not remove it from history.",
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    "superpowers@git+https://github.com/obra/superpowers.git"
+  ],
+  "mcp": {
+    "langfuse": {
+      "type": "remote",
+      "url": "https://langfuse.example.com/api/public/mcp",
+      "headers": {
+        "Authorization": "Basic <BASE64_PUBLIC_KEY:SECRET_KEY>"
+      }
+    }
+  }
+}

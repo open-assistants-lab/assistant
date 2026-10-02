@@ -75,3 +75,4 @@ clients/typescript/dist/
 
 # MCP server config (contains tokens)
 .mcp.json
+opencode.json
