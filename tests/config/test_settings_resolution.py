@@ -289,3 +289,55 @@ class TestClickstackSinkConfig:
 
         obs = AppConfig().observability
         assert str(obs.clickstack.endpoint) == "http://cs:4318"
+
+
+class TestLangfuseConsentPrecedence:
+    """Tracing consent: an explicit env opt-out must beat yaml, always.
+
+    Found live in the Docker product deployment: config.yaml (baked into the
+    image) shipped `observability.langfuse.enabled: true`, and the yaml
+    bridge overwrote `LANGFUSE_ENABLED=0` AFTER construction. Tracing was
+    then on in a container whose owner had explicitly not accepted it — the
+    gate only held while keys/hosts were absent.
+    """
+
+    def test_env_optout_beats_yaml_true(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("LANGFUSE_ENABLED", "0")
+        monkeypatch.setenv("LANGFUSE_HOST", "https://langfuse.example.org")
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text(
+            "observability:\n  langfuse:\n    enabled: true\n"
+        )
+        import src.config.settings as sm
+
+        cfg = sm.AppConfig.from_yaml(cfg_file)
+        assert cfg.langfuse.enabled is False, (
+            "an explicit LANGFUSE_ENABLED=0 must close the gate even when "
+            "yaml says enabled: true"
+        )
+
+    def test_yaml_applies_when_env_silent(self, monkeypatch, tmp_path):
+        for var in ("LANGFUSE_ENABLED", "LANGFUSE_HOST", "LANGFUSE_BASE_URL",
+                    "LANGFUSE_ENVIRONMENT"):
+            monkeypatch.delenv(var, raising=False)
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text(
+            "observability:\n  langfuse:\n    enabled: true\n"
+        )
+        import src.config.settings as sm
+
+        cfg = sm.AppConfig.from_yaml(cfg_file)
+        assert cfg.langfuse.enabled is True
+
+    def test_env_optin_beats_yaml_false(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("LANGFUSE_ENABLED", "1")
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text(
+            "observability:\n  langfuse:\n    enabled: false\n"
+        )
+        import src.config.settings as sm
+
+        cfg = sm.AppConfig.from_yaml(cfg_file)
+        assert cfg.langfuse.enabled is True

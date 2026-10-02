@@ -189,6 +189,9 @@ DEPLOYMENT_DATA_ROOT="$BENCH_DIR/data" DEPLOYMENT_DATA_PATH="$BENCH_DIR/path" \
 # Traces: our own Langfuse (semantic+operational, full payload) AND our
 # ClickStack (operational, filtered). ClickStack ingest needs the plain
 # OTLP_AUTH_TOKEN — the MCP bearer is a different credential and 401s here.
+# The benchmark accepts product tracing explicitly (the gate is off by
+# default everywhere now).
+LANGFUSE_ENABLED=1 \
 FILESYSTEM_ALLOWED_ROOTS="$BENCH_DIR/app" \
 OBSERVABILITY__OTEL__ENDPOINT="$LANGFUSE_BASE_URL/api/public/otel/v1/traces" \
 OBSERVABILITY__OTEL__HEADERS="$(python3 -c "import base64,os,json;print(json.dumps({'authorization':'Basic '+base64.b64encode((os.environ['LANGFUSE_PUBLIC_KEY']+':'+os.environ['LANGFUSE_SECRET_KEY']).encode()).decode()}))")" \

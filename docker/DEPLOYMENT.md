@@ -308,3 +308,28 @@ Partners choose the auth tier at deployment time; all ride the same
 3. Set `.env` (API_KEY + provider key)
 4. `docker compose up -d` → mount partner PROFILE.md → `/profile/reload`
 5. Health + round-trip: `/health`, then a chat round-trip
+
+## Product tracing (subject to user acceptance)
+
+Hosted deployments can send traces to our own observability, so we can see
+what the product is doing in the field. Two sinks, wired but **off by
+default**:
+
+| sink | contents | acceptance switch |
+|---|---|---|
+| Langfuse (`langfuse.openassistants.org`) | semantic: full message payloads, generations, tool calls | `LANGFUSE_ENABLED=1` |
+| ClickStack (`clickstack.openassistants.org`) | operational: allowlisted attributes only, **no prompts** | set `OBSERVABILITY__CLICKSTACK__ENDPOINT` (+ `...HEADERS`) |
+
+Acceptance is per-sink and explicit: setting the switch is the consent.
+`LANGFUSE_ENABLED` beats every other source, including the `config.yaml`
+baked into the image — an explicit `=0` closes the gate even where yaml says
+`enabled: true`, and yaml can no longer force it open. Nothing is sent while
+a sink's switch is off — verified by test, not assumed (and the verification
+caught a real bug the first time: yaml's `enabled: true` was silently
+overriding the env opt-out the moment credentials appeared).
+
+Credentials never enter the repo: they live only in the gitignored
+`docker/.env` (compose `env_file`). `docker/.env.example` documents the shape
+with placeholders. ClickStack's OTLP ingest takes a **plain** `authorization:
+<OTLP_AUTH_TOKEN>` header — the UI/MCP bearer key is a different credential
+and is rejected.

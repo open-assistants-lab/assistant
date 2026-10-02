@@ -135,6 +135,10 @@ class TestObservabilityValidation:
         """Startup hook: enabled+credentials with no explicit host must fail
         get_settings(), not boot toward cloud.langfuse.com."""
         self._clean_langfuse_env(monkeypatch)
+        # Enablement is an explicit opt-in (consent), never the yaml default:
+        # config.yaml now ships enabled: false, so the fail-closed host
+        # check is exercised through LANGFUSE_ENABLED=1.
+        monkeypatch.setenv("LANGFUSE_ENABLED", "1")
         monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
         monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
         import src.config.settings as settings_module

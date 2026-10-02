@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.6.26 — 2026-10-02
+
+### Fixed — the tracing acceptance gate is now real
+**`config.yaml` could force product tracing on over an explicit opt-out.** The committed yaml shipped `observability.langfuse.enabled: true`, the Docker image bakes that yaml in, and the loader's yaml-bridge copied it onto `langfuse.enabled` *after* construction — so `LANGFUSE_ENABLED=0` was silently overwritten. The gate only appeared to hold while Langfuse keys/hosts were absent; the moment credentials were wired (as v0.6.25's product-tracing setup does), a container whose owner had explicitly **not** accepted tracing was sending full message payloads to our Langfuse. Found by testing the acceptance contract rather than asserting it: the gate-closed container produced 8 observations.
+
+- **Env beats yaml on the gate**: the bridge now applies yaml's `enabled`/`host`/`environment` only when the corresponding `LANGFUSE_*` env var is silent, matching the documented `env > .env > yaml` precedence everywhere else.
+- **Consent default is OFF**: `config.yaml` ships `enabled: false`. Opt in per deployment with `LANGFUSE_ENABLED=1` or `enabled: true` in yaml — but never both ways: an explicit `=0` closes the gate regardless of yaml.
+- **Regression tests pin the contract**: env opt-out beats yaml-true; yaml applies when env is silent; env opt-in beats yaml-false. The fail-closed host validation (enabled + credentials + no host → refuse to boot) is unchanged, now triggered by explicit opt-in instead of the yaml default.
+
+### Product tracing, wired but off (subject to user acceptance)
+Hosted deployments can trace to our own observability, per sink, each with its own acceptance switch:
+
+| sink | contents | acceptance switch |
+|---|---|---|
+| Langfuse (`langfuse.openassistants.org`) | semantic: full message payloads | `LANGFUSE_ENABLED=1` |
+| ClickStack (`clickstack.openassistants.org`) | operational: allowlisted attributes, no prompts | set `OBSERVABILITY__CLICKSTACK__ENDPOINT` + `...__HEADERS` |
+
+Credentials live only in the gitignored `docker/.env` (compose `env_file`); `docker/.env.example` documents the shape with placeholders and the acceptance semantics. **Verified by test at the image level, both directions**: `LANGFUSE_ENABLED=0` → a message completes and produces **zero** Langfuse observations; `LANGFUSE_ENABLED=1` → the same message produces its generation + spans. ClickStack's OTLP ingest takes a plain `authorization: <OTLP_AUTH_TOKEN>` header — the UI/MCP bearer key is a different credential and is rejected.
+
+Also: `opencode.json` (repo root) is untracked and gitignored — it carried a live Langfuse MCP credential, now rotated; `opencode.example.json` documents the shape.
+
 ## v0.6.25 — 2026-10-01
 
 ### Added — trace fan-out, and an agent that finishes what it starts

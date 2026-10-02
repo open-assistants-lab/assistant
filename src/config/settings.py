@@ -859,11 +859,21 @@ class AppConfig(_BaseSettings):
         config.tools.native = _apply_native_tools_env_override(config.tools.native)
         # Langfuse behavior belongs under observability in YAML, while its
         # credentials continue to arrive through LANGFUSE_* environment vars.
+        # CONSENT PRECEDENCE (found live): the bridge used to run
+        # unconditionally, so a baked-in config.yaml with
+        # `observability.langfuse.enabled: true` overrode an explicit
+        # `LANGFUSE_ENABLED=0` AFTER construction — env-over-yaml did not
+        # apply on this line, and the acceptance gate was not real. The gate
+        # (enabled) bridges from yaml ONLY when the environment is silent,
+        # and host/environment fields likewise yield to their env vars.
         if isinstance(data.get("observability"), dict) and "langfuse" in data["observability"]:
             behavior = config.observability.langfuse
-            config.langfuse.enabled = behavior.enabled
-            config.langfuse.host = behavior.host
-            config.langfuse.environment = behavior.environment
+            if "LANGFUSE_ENABLED" not in os.environ:
+                config.langfuse.enabled = behavior.enabled
+            if not ("LANGFUSE_HOST" in os.environ or "LANGFUSE_BASE_URL" in os.environ):
+                config.langfuse.host = behavior.host
+            if "LANGFUSE_ENVIRONMENT" not in os.environ:
+                config.langfuse.environment = behavior.environment
         validate_startup_model_references(config)
         return config
 

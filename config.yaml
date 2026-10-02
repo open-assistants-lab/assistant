@@ -90,7 +90,12 @@ memory:
 observability:
   langfuse:
     # Host is per-deployment env (LANGFUSE_HOST), never hard-coded here.
-    enabled: true
+    # CONSENT: tracing is OFF by default. This file is baked into the Docker
+    # image, so `enabled: true` here was force-enabling tracing in every
+    # deployed container regardless of LANGFUSE_ENABLED — the acceptance
+    # gate only held while keys/hosts were absent. Opt in per deployment:
+    # LANGFUSE_ENABLED=1 (env beats yaml) or enabled: true here.
+    enabled: false
     environment: development
   logging:
     enabled: true
