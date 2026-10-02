@@ -23,6 +23,16 @@ logger = get_logger()
 
 USER_LEVEL_WORKSPACE_ID = "user"
 
+#: States a task never leaves. Terminal rows are written by the transactional
+#: completion path (set_completed/set_failed/set_cancelled), never by a bare
+#: status update, so the row and its completion event cannot disagree (#54).
+_TERMINAL_STATUSES = (
+    TaskStatus.COMPLETED,
+    TaskStatus.FAILED,
+    TaskStatus.TIMED_OUT,
+    TaskStatus.CANCELLED,
+)
+
 # Persisted authority boundaries: work_queue.status owns lifecycle; result owns
 # output/usage/result-level reason; launch_plan owns the frozen execution
 # capabilities and requested workspace. completion_events is the transactional
@@ -182,24 +192,58 @@ class SubagentWorkQueueDB:
         return task_id
 
     async def set_status(self, task_id: str, status: TaskStatus) -> bool:
+        """Move a task between NON-terminal states.
+
+        Terminal states are refused here on purpose: a completed/failed/
+        cancelled row is written by set_completed/set_failed/set_cancelled,
+        which also write the completion event in the same transaction. A bare
+        status update could contradict or omit that event (issue #54).
+        """
+        if status in _TERMINAL_STATUSES:
+            return False
         db = await self._get_db()
         now = _now()
         cursor = await db.execute(
-            "UPDATE work_queue SET status = ?, updated_at = ? WHERE id = ? AND user_id = ?",
-            (status.value, now, task_id, self.user_id),
+            """UPDATE work_queue SET status = ?, updated_at = ?
+            WHERE id = ? AND user_id = ?
+            AND status NOT IN ({})""".format(
+                ", ".join("?" * len(_TERMINAL_STATUSES))
+            ),
+            (
+                status.value,
+                now,
+                task_id,
+                self.user_id,
+                *(s.value for s in _TERMINAL_STATUSES),
+            ),
         )
         await db.commit()
         return cursor.rowcount > 0
 
     async def set_running(self, task_id: str) -> bool:
+        """Start a PENDING task.
+
+        Guarded like claim_task (issue #54): a late start must not resurrect a
+        cancelled, cancelling or finished row, and must not undo a
+        cancellation that arrived first. The boolean is meaningful - callers
+        must honour a refusal.
+        """
         db = await self._get_db()
         now = _now()
         cursor = await db.execute(
             """UPDATE work_queue
             SET status = ?, started_at = COALESCE(started_at, ?),
                 heartbeat_at = COALESCE(heartbeat_at, ?), updated_at = ?
-            WHERE id = ? AND user_id = ?""",
-            (TaskStatus.RUNNING.value, now, now, now, task_id, self.user_id),
+            WHERE id = ? AND user_id = ? AND status = ? AND cancel_requested = 0""",
+            (
+                TaskStatus.RUNNING.value,
+                now,
+                now,
+                now,
+                task_id,
+                self.user_id,
+                TaskStatus.PENDING.value,
+            ),
         )
         await db.commit()
         return cursor.rowcount > 0
@@ -466,6 +510,15 @@ class SubagentWorkQueueDB:
         return cursor.rowcount > 0
 
     async def mark_stale_running_failed(self, max_age_seconds: int = 300) -> int:
+        """Fail abandoned running tasks. Never one that is alive in this process.
+
+        A second coordinator for the same user (or a sweep on the next
+        request) used to fail a long-running in-process task whose heartbeat
+        had aged past the window, and the task's own later success could not
+        replace the FAILED row (issue #53).
+        """
+        from src.sdk.coordinator import _active as in_process_tasks
+
         db = await self._get_db()
         now = _now()
         cutoff = (datetime.now(UTC) - timedelta(seconds=max_age_seconds)).isoformat()
@@ -485,6 +538,8 @@ class SubagentWorkQueueDB:
         recovered_count = 0
         for stale in stale_rows:
             task_id = stale["id"]
+            if task_id in in_process_tasks:
+                continue  # alive here: another sweep must not fail it
             cancelled = bool(stale["cancel_requested"])
             status = TaskStatus.CANCELLED if cancelled else TaskStatus.FAILED
             terminal_error = "cancelled during restart recovery" if cancelled else error
@@ -545,16 +600,34 @@ class SubagentWorkQueueDB:
         return cursor.rowcount > 0
 
     async def add_instruction(self, task_id: str, message: str) -> bool:
+        """Append one instruction atomically, to an ACTIVE task only.
+
+        The previous read-modify-write (read the row, append in Python, write
+        the whole column) lost concurrent instructions and accepted terminal
+        tasks it could never act on (issue #55). One guarded UPDATE does both:
+        SQLite applies it as a single statement, so two callers cannot
+        interleave, and the status condition refuses a finished task without
+        touching its stored instructions.
+        """
         db = await self._get_db()
         now = _now()
-        row = await self.get_task(task_id)
-        if row is None:
-            return False
-        instructions = json.loads(row.get("instructions") or "[]")
-        instructions.append({"added_at": now, "message": message})
         cursor = await db.execute(
-            "UPDATE work_queue SET instructions = ?, updated_at = ? WHERE id = ? AND user_id = ?",
-            (json.dumps(instructions, ensure_ascii=True), now, task_id, self.user_id),
+            """UPDATE work_queue
+            SET instructions = json_insert(
+                    instructions, '$[#]', json_object('added_at', ?, 'message', ?)
+                ),
+                updated_at = ?
+            WHERE id = ? AND user_id = ? AND status IN (?, ?, ?)""",
+            (
+                now,
+                message,
+                now,
+                task_id,
+                self.user_id,
+                TaskStatus.PENDING.value,
+                TaskStatus.RUNNING.value,
+                TaskStatus.CANCELLING.value,
+            ),
         )
         await db.commit()
         return cursor.rowcount > 0

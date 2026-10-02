@@ -55,6 +55,15 @@ def mock_paths(tmp_dir):
                 yield mock
 
 
+def _ok_result():
+    """A minimal successful result for the transactional completion path."""
+    from src.sdk.subagent_models import SubagentResult
+
+    return SubagentResult(
+        name="test_agent", task="t", success=True, output="done", cost_usd=0.0, llm_calls=1
+    )
+
+
 @pytest.fixture
 async def db(mock_paths):
     from src.sdk.subagent_work_queue import SubagentWorkQueueDB
@@ -361,13 +370,14 @@ class TestSubagentWorkQueueDB:
 
     @pytest.mark.asyncio
     async def test_request_cancel_active_tasks_for_agent_only(self, db, profile):
-        from src.sdk.subagent_models import TaskStatus
-
         pending_id = await db.insert_task("test_agent", "pending", profile)
         running_id = await db.insert_task("test_agent", "running", profile)
         await db.set_running(running_id)
         completed_id = await db.insert_task("test_agent", "completed", profile)
-        await db.set_status(completed_id, TaskStatus.COMPLETED)
+        # Terminal rows come from the transactional path (#54): set_running
+        # then set_completed, not a bare status update.
+        await db.set_running(completed_id)
+        await db.set_completed(completed_id, _ok_result())
         other_id = await db.insert_task("other_agent", "running", profile)
         await db.set_running(other_id)
 
@@ -2179,11 +2189,13 @@ name: {name}
         cancelling_id = await db.insert_task("deleteme", "cancelling", profile)
         await db.set_status(cancelling_id, TaskStatus.CANCELLING)
         completed_id = await db.insert_task("deleteme", "completed", profile)
-        await db.set_status(completed_id, TaskStatus.COMPLETED)
+        await db.set_running(completed_id)
+        await db.set_completed(completed_id, _ok_result())
         failed_id = await db.insert_task("deleteme", "failed", profile)
-        await db.set_status(failed_id, TaskStatus.FAILED)
+        await db.set_running(failed_id)
+        await db.set_failed(failed_id, "boom")
         cancelled_id = await db.insert_task("deleteme", "cancelled", profile)
-        await db.set_status(cancelled_id, TaskStatus.CANCELLED)
+        await db.set_cancelled(cancelled_id)
         other_id = await db.insert_task("keepme", "running", other_def)
         await db.set_running(other_id)
 
@@ -2195,7 +2207,10 @@ name: {name}
         assert await db.is_cancel_requested(cancelling_id)
         assert not await db.is_cancel_requested(completed_id)
         assert not await db.is_cancel_requested(failed_id)
-        assert not await db.is_cancel_requested(cancelled_id)
+        # A cancelled row already carries its own cancel flag (set_cancelled
+        # writes it), so the property under test is that delete() left the
+        # terminal row alone, not that the flag is absent (#54).
+        assert (await db.get_task(cancelled_id))["status"] == "cancelled"
         assert not await db.is_cancel_requested(other_id)
         pending = await db.get_task(pending_id)
         assert pending["status"] == "cancelled"

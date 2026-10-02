@@ -530,10 +530,19 @@ class SubagentCoordinator:
         task_id = await db.insert_task(
             agent_name, task, profile, parent_id, launch_plan=plan.to_persisted_dict()
         )
-        await db.set_running(task_id)
+        # Claim, do not just flag as running: the claim records an owner and
+        # refuses a task that was cancelled before it started, so recovery can
+        # tell a live in-process run from an abandoned row (#53, #54).
+        worker_id = f"{self.user_id}:{self.workspace_id}:{id(self)}"
+        if not await db.claim_task(task_id, worker_id):
+            # Only reachable when the task was cancelled (or claimed)
+            # between insert and claim; refusing here is what stops the body
+            # running for a task the operator already cancelled (#54).
+            raise TaskCancelledError(task_id)
 
         ctx = SubagentContext()
         _active[task_id] = ctx
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop(task_id, worker_id, db))
 
         try:
             result = await asyncio.wait_for(
@@ -577,6 +586,9 @@ class SubagentCoordinator:
             if not failed:
                 await self._set_cancelled_if_requested(task_id, db)
         finally:
+            heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat_task
             _active.pop(task_id, None)
 
         return task_id
