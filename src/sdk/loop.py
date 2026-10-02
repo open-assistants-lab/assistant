@@ -627,22 +627,53 @@ class AgentLoop:
         re-execute, because the world may have changed between calls.
         """
         executed = state.extra.setdefault("_executed_tool_calls", [])
+        arg_values: dict[tuple[str, str], frozenset[str]] = state.extra.setdefault(
+            "_executed_tool_argvalues", {}
+        )
+        # A state-changing call may invalidate memoized reads of what it
+        # touched (issue #58): read -> write -> same read must re-read. Scoped
+        # to the arguments in common, so an unrelated call does not throw away
+        # every memoized read in the run.
+        touched = {
+            value
+            for tc in tool_calls
+            if not self._is_read_only_tool(tc.name)
+            for value in tc.arguments.values()
+            if isinstance(value, str) and value
+        }
+        if touched:
+            for key in [k for k in executed if arg_values.get(k, frozenset()) & touched]:
+                executed.remove(key)
+                arg_values.pop(key, None)
         for tc in tool_calls:
             if not self._is_read_only_tool(tc.name):
                 continue
             key = AgentLoop._tool_call_key(tc)
             if key not in executed:
                 executed.append(key)
+                arg_values[key] = frozenset(
+                    v for v in tc.arguments.values() if isinstance(v, str) and v
+                )
 
     def _seed_executed_tool_calls(self, state: AgentState) -> None:
-        """Seed the executed set from tool calls already present in the run's
-        messages. The grader re-run (attempt 2+) rebuilds the state from the
-        previous attempt's messages, so without this the re-run would treat
-        the previous attempt's calls as fresh and re-execute them."""
+        """Seed the executed set from tool calls already present in THIS turn.
+
+        The grader re-run (attempt 2+) rebuilds the state from the previous
+        attempt's messages, so without this the re-run would treat the previous
+        attempt's calls as fresh and re-execute them. Seeding stops at the last
+        user message: calls from EARLIER turns are history, not this turn, and
+        a read-only call is not a promise that its result still holds
+        (issue #58).
+        """
         executed = state.extra.setdefault("_executed_tool_calls", [])
         if executed:
             return
-        for msg in state.messages:
+        start = 0
+        for index in range(len(state.messages) - 1, -1, -1):
+            if state.messages[index].role == "user":
+                start = index
+                break
+        for msg in state.messages[start:]:
             if msg.role == "assistant" and msg.tool_calls:
                 for tc in msg.tool_calls:
                     if not self._is_read_only_tool(tc.name):
@@ -684,23 +715,45 @@ class AgentLoop:
         return guard
 
     def _synthetic_duplicate_results(
-        self, duplicate_calls: list[ToolCall], prior_result: str
+        self, duplicate_calls: list[ToolCall], state: AgentState
     ) -> list[Message]:
         """Provider APIs require every assistant tool_call/tool_use to be
         answered by a tool result — an unanswered block is a hard 400 on
         OpenAI-compatible and Anthropic APIs. Emit a synthetic result per
-        duplicate call so the guard's nudge/escalation turns stay valid."""
+        duplicate call so the guard's nudge/escalation turns stay valid.
+
+        Each skipped id is answered from ITS OWN earlier result: keying by tool
+        name gave a whole duplicate batch one tool's output (issue #61)."""
         return [
             Message.tool_result(
                 tool_call_id=tc.id,
                 content=(
                     f"Duplicate call skipped — earlier identical call to "
-                    f"'{tc.name}' returned: {prior_result}"
+                    f"'{tc.name}' returned: {self._last_result_for_call(state, tc)}"
                 ),
                 name=tc.name,
             )
             for tc in duplicate_calls
         ]
+
+    def _last_result_for_call(self, state: AgentState, tc: ToolCall, limit: int = 200) -> str:
+        """The most recent REAL result produced by this exact (tool, args) pair."""
+        key = self._tool_call_key(tc)
+        id_to_key: dict[str, tuple[str, str]] = {}
+        for msg in state.messages:
+            if msg.role == "assistant" and msg.tool_calls:
+                for call in msg.tool_calls:
+                    id_to_key[call.id] = self._tool_call_key(call)
+        for msg in reversed(state.messages):
+            if msg.role != "tool" or not msg.tool_call_id:
+                continue
+            if id_to_key.get(msg.tool_call_id) != key:
+                continue
+            content = str(msg.content or "")
+            if content.startswith("Duplicate call skipped"):
+                continue  # never quote a synthetic skip as if it were a result
+            return content if len(content) <= limit else content[:limit] + "…"
+        return "(result unavailable)"
 
     @staticmethod
     def _last_tool_result(state: AgentState, name: str, limit: int = 200) -> str:
@@ -788,6 +841,36 @@ class AgentLoop:
                 return blocked  # type: ignore[no-any-return]
         return None
 
+    def _consume_tool_call_budget(self, tc: ToolCall) -> ToolResult | None:
+        """Charge one tool call against this run's budget (H2, issue #59).
+
+        The single budget for every dispatch path: the lazy-load path used to
+        return before the check, so an indexed tool ran with the counter still
+        at zero. Returns a synthetic error result when exhausted, not an
+        exception, so the model sees a normal tool_result and can finish.
+        """
+        max_calls = getattr(self.run_config, "max_tool_calls", None)
+        if max_calls is not None and self._tool_calls_this_run >= max_calls:
+            logger.warning(f"sdk.tool_budget_exceeded tool={tc.name} max={max_calls}")
+            return ToolResult(
+                content=json.dumps(
+                    {
+                        "error": "tool_budget_exceeded",
+                        "tool": tc.name,
+                        "max_tool_calls": max_calls,
+                        "message": "This run's tool-call budget is exhausted; finish without further tool calls.",
+                    }
+                ),
+                is_error=True,
+            )
+        self._tool_calls_this_run += 1
+        return None
+
+    def _reset_run_counters(self) -> None:
+        """Per-run counters. Loops are cached per user, so a run that does not
+        reset these charges the next run for the previous one's work (issue #59)."""
+        self._tool_calls_this_run = 0
+
     async def _execute_tool(self, tc: ToolCall) -> ToolResult:
         """Execute a tool call, returning a ToolResult with structured content."""
         if self.subagent_ctx and self.subagent_ctx.cancel_event.is_set():
@@ -820,23 +903,9 @@ class AgentLoop:
         ):
             return ToolResult(content=f"Tool is disabled: {tc.name}", is_error=True)
 
-        max_calls = getattr(self.run_config, "max_tool_calls", None)
-        if max_calls is not None and self._tool_calls_this_run >= max_calls:
-            # H2: budget exceeded -> synthetic tool result, not an exception
-            # (model sees a normal tool_result and can finish its turn).
-            logger.warning(f"sdk.tool_budget_exceeded tool={tc.name} max={max_calls}")
-            return ToolResult(
-                content=json.dumps(
-                    {
-                        "error": "tool_budget_exceeded",
-                        "tool": tc.name,
-                        "max_tool_calls": max_calls,
-                        "message": "This run's tool-call budget is exhausted; finish without further tool calls.",
-                    }
-                ),
-                is_error=True,
-            )
-        self._tool_calls_this_run += 1
+        budget = self._consume_tool_call_budget(tc)
+        if budget is not None:
+            return budget
 
         self._recently_used.add(tc.name)
         tc = self._with_runtime_context(tc)
@@ -1029,6 +1098,11 @@ class AgentLoop:
 
         self._register_tool_definition(td)
         self._recently_used.add(tc.name)
+        # The lazy path has its own dispatch, so it charges the same budget
+        # (issue #59) rather than running free.
+        budget = self._consume_tool_call_budget(tc)
+        if budget is not None:
+            return budget
         tc = self._with_runtime_context(tc)
 
         try:
@@ -1913,7 +1987,7 @@ class AgentLoop:
         self._log_session_header(list(messages))
         # Per-run harness timings (loops are cached per user — reset each run).
         self.timings = HarnessTimings()
-        self._tool_calls_this_run = 0  # H2 budget counter
+        self._reset_run_counters()  # H2 budget counter
         state = AgentState(messages=list(messages))
         # R-SL1 P1-T11: every model-visible message is logged (session log,
         # opt-in). Observing AgentState.add_message covers ALL add sites.
@@ -2083,8 +2157,8 @@ class AgentLoop:
                 # Answer the dangling duplicate ids BEFORE either branch:
                 # unanswered assistant tool_calls are a hard 400 on strict
                 # provider APIs.
-                tool_result = self._last_tool_result(state, duplicate_calls[0].name)
-                for synthetic in self._synthetic_duplicate_results(duplicate_calls, tool_result):
+                tool_result = self._last_result_for_call(state, duplicate_calls[0])
+                for synthetic in self._synthetic_duplicate_results(duplicate_calls, state):
                     state.add_message(synthetic)
                 nudges = state.extra.get("_duplicate_tool_nudges", 0)
                 max_nudges = self.run_config.max_duplicate_tool_nudges
@@ -2262,6 +2336,7 @@ class AgentLoop:
         import uuid as _uuid
 
         self._flow_run_id = _uuid.uuid4().hex
+        self._reset_run_counters()  # H2 budget counter (issue #59)
         self.state = state
         if self.rubric:
             state.extra["rubric"] = self.rubric
@@ -2636,6 +2711,13 @@ class AgentLoop:
                         len(stream_tool_calls) - len(deduped_calls),
                     )
                 stream_tool_calls = [self._with_runtime_context(tc) for tc in deduped_calls]
+                if len(deduped_calls) < len(assistant_msg.tool_calls or []):
+                    # The assistant message is already in state (issue #57):
+                    # dropping the ids only from the local list left the stored
+                    # tool_calls pointing at calls that are never answered, and
+                    # an unanswered assistant tool_call is a hard 400 on strict
+                    # provider APIs. Mirror the FR-9 fix: rewrite the message.
+                    assistant_msg.tool_calls = list(stream_tool_calls)
 
                 # Soft duplicate-call guard (US-003): a (tool, args) pair
                 # already executed this run is not executed again. The model
@@ -2656,8 +2738,8 @@ class AgentLoop:
                     # Answer the dangling tool_calls BEFORE either nudge
                     # branch (same rationale as the non-streaming twin) and
                     # surface the synthetic results on the wire.
-                    tool_result = self._last_tool_result(state, duplicate_calls[0].name)
-                    for synthetic in self._synthetic_duplicate_results(duplicate_calls, tool_result):
+                    tool_result = self._last_result_for_call(state, duplicate_calls[0])
+                    for synthetic in self._synthetic_duplicate_results(duplicate_calls, state):
                         state.add_message(synthetic)
                         yield StreamChunk.tool_result_event(
                             tool=synthetic.name or "",
