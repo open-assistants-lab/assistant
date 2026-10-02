@@ -79,6 +79,8 @@ class Middleware(ABC):
         Returns:
             None to proceed with execution, or a ToolResult that REPLACES
             execution entirely (synthetic refusal / pending acknowledgment).
-            Hook exceptions are swallowed by the loop (emit-only contract).
+            Hook exceptions fail closed: the loop returns a non-executed
+            error result instead of invoking the tool. Best-effort telemetry
+            belongs in the audit hooks, not this enforcement hook.
         """
         return None

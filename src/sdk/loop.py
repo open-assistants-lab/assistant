@@ -757,9 +757,11 @@ class AgentLoop:
             pass
 
     async def _run_guards(self, tc: ToolCall) -> ToolResult | None:
-        """Run middleware guard_tool_call hooks (M4-1). First non-None result
-        REPLACES execution (deny refusal / pending acknowledgment).
-        Emit-only: guard exceptions never break the loop."""
+        """Run enforcement hooks; the first non-None result replaces execution.
+
+        Guard failures fail closed with a non-executed error result. Unlike
+        audit emission, failure to establish authorization cannot permit a call.
+        """
         for mw in self.middlewares:
             guard = getattr(mw, "guard_tool_call", None)
             if guard is None:
@@ -769,7 +771,19 @@ class AgentLoop:
             except Exception:
                 mw_name = getattr(mw, "name", type(mw).__name__)
                 logger.warning(f"guard_tool_call error in {mw_name} for {tc.name}", exc_info=True)
-                continue
+                return ToolResult(
+                    content=(
+                        f"Authorization could not be established for tool '{tc.name}'. "
+                        "This call was NOT executed."
+                    ),
+                    is_error=True,
+                    structured_content={
+                        "governance": "error",
+                        "error_code": "guard_failed",
+                        "tool": tc.name,
+                        "executed": False,
+                    },
+                )
             if blocked is not None:
                 return blocked  # type: ignore[no-any-return]
         return None
@@ -1048,8 +1062,8 @@ class AgentLoop:
         middleware wrapping -> governance ``guard_tool_call``. A blocked
         outcome is TERMINAL: the caller must yield/return the blocked result
         and must not execute the tool body, record the call as executed, or
-        re-dispatch it. Emit-only on middleware errors (parity with the
-        previous inline blocks).
+        re-dispatch it. Governance guard errors fail closed; argument-wrapping
+        hooks retain their best-effort behavior.
         """
         if self.subagent_ctx and self.subagent_ctx.runtime_block is not None:
             return _PreparedToolCall(
