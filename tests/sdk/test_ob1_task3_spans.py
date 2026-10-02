@@ -34,21 +34,10 @@ def obs_env(tmp_path, monkeypatch):
 
     spans: list[Any] = []
 
-    class Recorder:
-        def start_as_current_span(self, name, attributes=None):
-
-            class _Ctx:
-                def __enter__(self):
-                    rec = _SpanRec(name, dict(attributes or {}))
-                    spans.append(rec)
-                    return rec
-
-                def __exit__(self, *exc):
-                    return False
-
-            return _Ctx()
-
     # Replace the provider's tracer with a recorder for assertions.
+    # SDK shape: start_span returns the span itself (operational spans are
+    # never the global current span — see operational_telemetry_span), and
+    # the recorder captures it on end().
     class _SpanRec:
         def __init__(self, name: str, attributes: dict[str, Any]):
             self.name = name
@@ -57,12 +46,18 @@ def obs_env(tmp_path, monkeypatch):
         def set_attribute(self, k, v):
             self.attributes[k] = v
 
+        def set_status(self, status):
+            self.status = status
+
         def record_exception(self, exc):
             self.attributes["error.type"] = type(exc).__name__
 
+        def end(self):
+            spans.append(self)
+
     class _Tracer:
-        def start_as_current_span(self, name, attributes=None):
-            return Recorder().start_as_current_span(name, attributes)
+        def start_span(self, name, context=None, kind=None, attributes=None):
+            return _SpanRec(name, dict(attributes or {}))
 
     operational_provider = obs._state["operational_telemetry_provider"]
     assert operational_provider is not None

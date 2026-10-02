@@ -26,27 +26,26 @@ def obs_env(monkeypatch):
     spans: list[Any] = []
 
     class Span:
+        """SDK-shaped span: start_span returns the span itself (never the
+        global current span), recorded when ended."""
+
         def __init__(self, name: str, attributes: dict[str, Any]) -> None:
             self.name = name
             self.attributes = attributes
+            self.status: Any = None
 
         def set_attribute(self, key: str, value: Any) -> None:
             self.attributes[key] = value
 
-    class Context:
-        def __init__(self, name: str, attributes: dict[str, Any]) -> None:
-            self._span = Span(name, attributes)
+        def set_status(self, status: Any) -> None:
+            self.status = status
 
-        def __enter__(self):
-            spans.append(self._span)
-            return self._span
-
-        def __exit__(self, *args: Any) -> bool:
-            return False
+        def end(self) -> None:
+            spans.append(self)
 
     class Tracer:
-        def start_as_current_span(self, name: str, attributes=None):
-            return Context(name, dict(attributes or {}))
+        def start_span(self, name, context=None, kind=None, attributes=None):
+            return Span(name, dict(attributes or {}))
 
     operational_provider = obs._state["operational_telemetry_provider"]
     assert operational_provider is not None

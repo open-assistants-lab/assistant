@@ -27,6 +27,7 @@ import logging
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 # opentelemetry-sdk and the OTLP HTTP exporter are direct runtime
@@ -43,7 +44,15 @@ from opentelemetry.sdk.trace.export import (
     SpanExporter,
     SpanExportResult,
 )
-from opentelemetry.trace import Status
+from opentelemetry.trace import (
+    SpanContext,
+    SpanKind,
+    Status,
+    StatusCode,
+    TraceFlags,
+    get_current_span,
+    set_span_in_context,
+)
 
 from src.config import AppConfig
 
@@ -78,6 +87,9 @@ ALLOWED_OPERATIONAL_ATTRIBUTES = frozenset(
         "db.operation",
         # sandbox / background work
         "sandbox.backend",
+        # trace-tree fidelity: set when a span's parent lives in the semantic
+        # pipeline and can never be stored here; the exporter zeroes it.
+        "operational.detached",
         "sandbox.command_class",
         "sandbox.exit_code",
         "scheduler.cycle_type",
@@ -146,19 +158,73 @@ def _reset_langfuse_singleton() -> None:  # pragma: no cover - test hook point
     """Hook point for tests that must isolate the Langfuse singleton."""
 
 
+def _release_version() -> str:
+    """Installed package version for resource identity ('' if unknown)."""
+    try:
+        from importlib.metadata import version
+
+        return str(version("assistant"))
+    except Exception:  # pragma: no cover - editable/dev environments
+        return ""
+
+
+def _operational_resource() -> Any:
+    """Resource for the operational pipeline.
+
+    Verdict observation: service version was absent — it is included when the
+    package reports one, and is resource-allowlisted for the exporter.
+    """
+    attrs: dict[str, Any] = {"service.name": "assistant"}
+    _version = _release_version()
+    if _version:
+        attrs["service.version"] = _version
+    return Resource.create(attrs)
+
+
 def operational_telemetry_active() -> bool:
     """True only when an explicit endpoint created the operational pipeline."""
     return _state["operational_telemetry_provider"] is not None
 
 
+_operational_span_stack: ContextVar[Any] = ContextVar(
+    "operational_span_stack", default=None
+)
+
+
+def _current_context_is_foreign_span() -> bool:
+    """True when the current global span belongs to another pipeline.
+
+    TRACE_VERDICT 2026-10-02, finding 1: operational spans inherit the current
+    SEMANTIC span as parent — but semantic spans are exported by a different
+    pipeline and never reach the operational destination, so the stored span
+    references a parent that is never stored (64/64 child spans orphaned).
+    Such spans are TAGGED; the exporter zeroes the parent (trace ID — the
+    join key — is preserved) when building the stored copy.
+    """
+    current = get_current_span()
+    ctx = getattr(current, "get_span_context", lambda: None)()
+    return ctx is not None and getattr(ctx, "is_valid", False)
+
+
 @contextmanager
-def operational_telemetry_span(name: str, **attributes: Any) -> Iterator[Any]:
+def operational_telemetry_span(
+    name: str, kind: SpanKind | None = None, **attributes: Any
+) -> Iterator[Any]:
     """Open an operational span without exposing it to semantic processors.
 
-    The dedicated provider retains the current OTel context as its parent, so
-    its span shares an active semantic trace ID while its processor pipeline is
-    completely independent. With no explicit operational endpoint this is a
-    true no-op: callers do no tracer lookup and create no span.
+    Parentage (finding 1): parents to the nearest OPEN OPERATIONAL span (a
+    contextvar stack — the operational tree forms within this pipeline).
+    With no operational ancestor it inherits the natural context (semantic),
+    which keeps the shared trace ID, and is tagged ``operational.detached`` so
+    the exporter replaces the never-storable parent with span id 0. The span
+    is NOT made the global current span, so the semantic pipeline's own
+    nesting is untouched either way.
+
+    Timing (finding 2): callers open this span AROUND the operation, so the
+    span brackets it. Errors set status ERROR (the exporter strips the
+    description, never the code).
+
+    With no explicit operational endpoint this is a true no-op.
     """
     provider = _state["operational_telemetry_provider"]
     if provider is None:
@@ -166,8 +232,29 @@ def operational_telemetry_span(name: str, **attributes: Any) -> Iterator[Any]:
         return
     tracer_override = getattr(provider, "_tracer_override", None)
     tracer = tracer_override or provider.get_tracer("assistant.operational")
-    with tracer.start_as_current_span(name, attributes=attributes) as span:
+    stack_parent = _operational_span_stack.get()
+    if stack_parent is not None:
+        context = set_span_in_context(stack_parent)
+    else:
+        context = None
+        if _current_context_is_foreign_span():
+            attributes = {**attributes, "operational.detached": True}
+    span = tracer.start_span(
+        name,
+        context=context,
+        kind=kind or SpanKind.INTERNAL,
+        attributes=attributes or None,
+    )
+    token = _operational_span_stack.set(span)
+    try:
         yield span
+    except BaseException:
+        if span is not None:
+            span.set_status(Status(StatusCode.ERROR))
+        raise
+    finally:
+        _operational_span_stack.reset(token)
+        span.end()
 
 
 def instrument_provider_http(provider: Any) -> None:
@@ -206,34 +293,30 @@ def instrument_provider_http(provider: Any) -> None:
             # ``hostname`` intentionally excludes a credential-bearing userinfo
             # component, port, path, query, and fragment (unlike ``netloc``).
             host = urlparse(str(url)).hostname or ""
+            # Verdict finding 2: the span must BRACKET the operation. The old
+            # shape opened the span after the response arrived, so the stored
+            # duration was the ~µs of an empty with-body while the real time
+            # lived in the duration_ms attribute — waterfalls lied.
             start = time.monotonic()
-            try:
+            with operational_telemetry_span(
+                "http.client",
+                kind=SpanKind.CLIENT,
+                **{
+                    "http.request.method": "POST",
+                    "server.address": host,
+                },
+            ) as span:
                 response = await client.post(url, **kwargs)
-                with operational_telemetry_span(
-                    "http.client",
-                    **{
-                        "http.request.method": "POST",
-                        "server.address": host,
-                        "http.response.status_code": getattr(
-                            response, "status_code", 0
-                        ),
-                        "duration_ms": round((time.monotonic() - start) * 1000, 3),
-                    },
-                ) as span:
-                    if span is not None:
-                        pass
+                if span is not None:
+                    span.set_attribute(
+                        "http.response.status_code",
+                        getattr(response, "status_code", 0),
+                    )
+                    span.set_attribute(
+                        "duration_ms",
+                        round((time.monotonic() - start) * 1000, 3),
+                    )
                 return response
-            except Exception:
-                with operational_telemetry_span(
-                    "http.client",
-                    **{
-                        "http.request.method": "POST",
-                        "server.address": host,
-                        "duration_ms": round((time.monotonic() - start) * 1000, 3),
-                    },
-                ):
-                    pass
-                raise
 
         return wrapped
 
@@ -253,7 +336,13 @@ def instrument_provider_http(provider: Any) -> None:
         return wrapped
 
     class _InstrumentedStream:
-        """Async-context-manager adapter that emits one safe outbound span."""
+        """Async-context-manager adapter whose span BRACKETS the lifecycle.
+
+        Verdict finding 2: the old shape emitted the span after the stream
+        closed (post-hoc; stored duration ~µs against a real duration_ms).
+        The span now opens on __aenter__ and ends on __aexit__, covering
+        connect through close, so the stored waterfall is truthful.
+        """
 
         def __init__(self, stream: Any, *, method: str, host: str) -> None:
             self._stream = stream
@@ -261,41 +350,59 @@ def instrument_provider_http(provider: Any) -> None:
             self._host = host
             self._response: Any | None = None
             self._start: float | None = None
-            self._emitted = False
+            self._span_cm: Any = None
+            self._span: Any = None
 
-        def _emit(self) -> None:
-            if self._emitted:
+        def _open_span(self) -> None:
+            self._start = time.monotonic()
+            self._span_cm = operational_telemetry_span(
+                "http.client",
+                kind=SpanKind.CLIENT,
+                **{
+                    "http.request.method": self._method,
+                    "server.address": self._host,
+                },
+            )
+            self._span = self._span_cm.__enter__()
+
+        def _close_span(self, *exc: Any) -> None:
+            cm, self._span_cm = self._span_cm, None
+            if cm is None:
                 return
-            self._emitted = True
-            attributes: dict[str, Any] = {
-                "http.request.method": self._method,
-                "server.address": self._host,
-                "duration_ms": round(
-                    (time.monotonic() - (self._start or time.monotonic())) * 1000,
-                    3,
-                ),
-            }
-            if self._response is not None:
-                attributes["http.response.status_code"] = getattr(
-                    self._response, "status_code", 0
+            span = getattr(self, "_span", None)
+            if span is not None:
+                span.set_attribute(
+                    "duration_ms",
+                    round(
+                        (time.monotonic() - (self._start or time.monotonic()))
+                        * 1000,
+                        3,
+                    ),
                 )
-            with operational_telemetry_span("http.client", **attributes):
-                pass
+                if self._response is not None:
+                    span.set_attribute(
+                        "http.response.status_code",
+                        getattr(self._response, "status_code", 0),
+                    )
+            if exc and exc[0] is not None:
+                cm.__exit__(exc[0], exc[1], exc[2])
+            else:
+                cm.__exit__(None, None, None)
 
         async def __aenter__(self) -> Any:
-            self._start = time.monotonic()
+            self._open_span()
             try:
                 self._response = await self._stream.__aenter__()
                 return self._response
-            except Exception:
-                self._emit()
+            except Exception as exc:
+                self._close_span(type(exc), exc, exc.__traceback__)
                 raise
 
         async def __aexit__(self, *args: Any) -> Any:
             try:
                 return await self._stream.__aexit__(*args)
             finally:
-                self._emit()
+                self._close_span()
 
     provider._http_client = _InstrumentedClient(original_client)
     provider._ob1_http_instrumented_client = provider._http_client
@@ -373,31 +480,25 @@ def instrument_sqlite_connection(conn: Any) -> Any:
             op = "pragma"
         else:
             op = "other"
+        # Verdict finding 2: bracket the operation. The old shape opened the
+        # span AFTER execute() returned, so the stored duration was the ~µs
+        # of an empty with-body while the real time lived in duration_ms.
         start = time.monotonic()
-        try:
+        with operational_telemetry_span(
+            "db.query",
+            kind=None,
+            **{
+                "db.system": "sqlite",
+                "db.operation": op,
+            },
+        ) as span:
             result = original_execute(sql, *args)
-            with operational_telemetry_span(
-                "db.query",
-                **{
-                    "db.system": "sqlite",
-                    "db.operation": op,
-                    "duration_ms": round((time.monotonic() - start) * 1000, 3),
-                },
-            ) as span:
-                if span is not None:
-                    pass
+            if span is not None:
+                span.set_attribute(
+                    "duration_ms",
+                    round((time.monotonic() - start) * 1000, 3),
+                )
             return result
-        except Exception:
-            with operational_telemetry_span(
-                "db.query",
-                **{
-                    "db.system": "sqlite",
-                    "db.operation": op,
-                    "duration_ms": round((time.monotonic() - start) * 1000, 3),
-                },
-            ):
-                pass
-            raise
 
     proxy = _SQLiteProxy(conn, wrapped_execute)
     return proxy
@@ -504,10 +605,26 @@ class FilteringSpanExporter(SpanExporter):
         # operational-telemetry contract exists for them yet); the resource is
         # filtered to release-identity only; the status loses its
         # human-readable description.
+        # Trace-tree fidelity (verdict finding 1): a span whose parent lives
+        # in the semantic pipeline references a parent that is never stored
+        # here. Zero the parent span id (this becomes a root of its trace)
+        # while PRESERVING the trace id — the join key between the layers.
+        parent = span.parent
+        if (
+            attrs.get("operational.detached")
+            and parent is not None
+            and getattr(parent, "span_id", 0) != 0
+        ):
+            parent = SpanContext(
+                trace_id=parent.trace_id,
+                span_id=0,
+                is_remote=False,
+                trace_flags=getattr(parent, "trace_flags", None) or TraceFlags(0),
+            )
         return ReadableSpan(
             name=span.name,
             context=span.context,
-            parent=span.parent,
+            parent=parent,
             resource=self._filtered_resource(span.resource),
             attributes=attrs,
             events=self._filtered_events(span.events),
@@ -597,9 +714,7 @@ def configure_observability(settings: AppConfig) -> Any | None:
     )
     multi_sink = bool(endpoint) or bool(cs_endpoint)
     if multi_sink and _state["operational_telemetry_provider"] is None:
-        operational_provider = SDKTracerProvider(
-            resource=Resource.create({"service.name": "assistant"})
-        )
+        operational_provider = SDKTracerProvider(resource=_operational_resource())
 
         # Fan-out: each configured destination gets its own exporter behind the
         # SAME FilteredSpanExporter, so the operational allowlist (no prompts)

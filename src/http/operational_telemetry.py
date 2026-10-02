@@ -53,7 +53,11 @@ class OperationalTelemetryMiddleware:
             "url.path": scope.get("path", ""),
             "url.scheme": scope.get("scheme", "http"),
         }
-        with operational_telemetry_span("http.request", **attributes) as span:
+        from opentelemetry.trace import SpanKind as _SpanKind
+
+        with operational_telemetry_span(
+            "http.request", kind=_SpanKind.SERVER, **attributes
+        ) as span:
             async def send_wrapper(message: Message) -> None:
                 if message["type"] == "http.response.start" and span is not None:
                     span.set_attribute(
