@@ -306,6 +306,14 @@ class Interrupt(Exception):  # noqa: N818
         super().__init__(f"Interrupt: tool call '{tool_call.name}' requires approval")
 
 
+def _is_json_object(raw: str) -> bool:
+    """Whether an accumulated tool-argument payload is a complete JSON object."""
+    try:
+        return isinstance(json.loads(raw), dict)
+    except (json.JSONDecodeError, TypeError):
+        return False
+
+
 class AgentLoop:
     """ReAct agent loop.
 
@@ -2459,6 +2467,9 @@ class AgentLoop:
                 stream_content_parts: list[str] = []
                 stream_tool_calls: list[ToolCall] = []
                 stream_tool_calls_map: dict[int, dict[str, Any]] = {}
+                # Set when the provider reports an in-band error for this
+                # round; an errored round is never dispatched (#68).
+                round_error: str | None = None
                 stream_reasoning_parts: list[str] = []
                 in_text_block = False
                 in_reasoning_block = False
@@ -2520,6 +2531,8 @@ class AgentLoop:
                                     in_reasoning_block,
                                 ):
                                     yield event
+                                    if event.canonical_type == "error":
+                                        round_error = str(event.content or "provider error")
                                     if event.type == "text_start":
                                         in_text_block = True
                                     elif event.type == "text_end":
@@ -2608,6 +2621,8 @@ class AgentLoop:
                                 in_reasoning_block,
                             ):
                                 yield event
+                                if event.canonical_type == "error":
+                                    round_error = str(event.content or "provider error")
                                 if event.type == "text_start":
                                     in_text_block = True
                                 elif event.type == "text_end":
@@ -2663,6 +2678,31 @@ class AgentLoop:
                     yield StreamChunk.text_end()
                 if in_reasoning_block:
                     yield StreamChunk.reasoning_end()
+
+                # An in-band provider error (overload, truncation) means the
+                # round is abandoned: executing its calls would run an action
+                # the provider gave up on (#68). Truncated arguments are
+                # treated the same way - a call whose arguments we cannot parse
+                # is not a call we should execute. A start-only provider (no
+                # tool_input_end, no argument deltas) is still fine: its
+                # accumulated arguments are empty, which parses as {}.
+                unparsable = [
+                    entry["id"]
+                    for entry in stream_tool_calls_map.values()
+                    if isinstance(entry.get("arguments", ""), str)
+                    and entry["arguments"].strip()
+                    and not _is_json_object(entry["arguments"])
+                ]
+                if round_error or unparsable:
+                    reason = round_error or f"unparsable tool arguments for {unparsable}"
+                    logger.warning(
+                        "sdk.round_abandoned iteration=%s reason=%s", iteration, reason
+                    )
+                    stream_tool_calls_map.clear()
+                    yield StreamChunk.error(
+                        message=f"Provider round abandoned ({reason}); no tools were executed."
+                    )
+                    break
 
                 for tc_data in stream_tool_calls_map.values():
                     args = tc_data.get("arguments", {})
@@ -2802,7 +2842,11 @@ class AgentLoop:
                     state.add_message(guard_msg)
                     if not fresh_calls:
                         # Every proposed call was a duplicate: hand the turn
-                        # back to the model with the guidance above.
+                        # back to the model with the guidance above. This is
+                        # still a model round, so it is charged against
+                        # max_iterations (#69) - the same reason the other
+                        # streaming retry branch increments explicitly.
+                        iteration += 1
                         continue
                     # Mixed batch: fall through and EXECUTE the fresh calls —
                     # skipping them would leave their ids unanswered too.
