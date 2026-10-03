@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.6.31 — 2026-10-02
+
+### Fixed — an abandoned provider round executes nothing; streaming retries are bounded (#68, #69)
+Two defects that compounded into a write executed three times from a generation the provider had already given up on.
+
+**#68 — a round the provider abandoned still ran its tools.** An in-band provider error (overload, truncation) left tool calls half-assembled, and they were dispatched anyway — on arguments that could be partial or empty. The streaming loop forwarded the error event and then carried on assembling and dispatching the round. A round is now abandoned when the provider reports an in-band error, or when a call accumulated arguments that do not parse as a JSON object: nothing is dispatched, and nothing is recorded that could leave an unanswered `tool_call` id behind. A start-only provider stream is still honoured — its accumulated arguments are empty, which parses as `{}` — so no provider loses working tool calls. Permission guards were never bypassed; this was an action taken from a failed generation.
+
+**#69 — the duplicate-only retry bypassed the iteration budget.** That streaming branch returned to the model without charging `max_iterations`, so a model stuck re-proposing the same call kept getting rounds (five model calls observed with `max_iterations=2`). It now charges its iteration, like the other streaming retry branch. The repetition-budget branch was already correct and is unchanged.
+
+Tests cover the provider error, truncated arguments, a complete round as the control, and both retry paths against `max_iterations`. Suite: 3653 passed, 27 skipped.
+
 ## v0.6.30 — 2026-10-02
 
 ### Fixed — lazy-loaded tool executions are audited (#59)
