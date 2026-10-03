@@ -504,7 +504,7 @@ def message_timeline(
     """
     core = _get_message_core(user_id, workspace_id)
 
-    results = core.search_enhanced(query, limit=limit)
+    results = core.recall(query, strategy="episodic", limit=limit)
 
     seen_sessions: set[str] = set()
     timeline: list[tuple[str, str, str]] = []  # (date, session_id, snippet)
