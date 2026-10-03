@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.6.29 — 2026-10-02
+
+### Fixed — the v0.6.28 residuals (#51, #53, #54, #56, #58, #59, #62–#67)
+v0.6.28 closed twelve issues, and a review of the release found that four of them were only partly fixed and six further residuals existed behind them. Those issues were reopened rather than left closed, and the gaps are closed here. Suite: 3647 passed, 27 skipped.
+
+**Approvals are bound to their definition (#51, #62).** The approval leg resolved through the live catalog, but nothing tied an approval to the definition the approver actually saw: a replacement body under the same name executed silently. Proposals now carry a definition fingerprint — schema, description, annotations, and a body signature derived from the callable's module, qualname, captured closure values and constants, because a custom tool's command *is* a closure variable. Execution refuses on mismatch. The resolver also passes `workspace_id` through to custom-tool lookup, so a project request no longer resolves the personal-workspace body (a one-argument callable is still accepted).
+
+**Read-cache invalidation is sound (#58, #66).** A failed read-only call was memoized and its failure replayed as if it were data. Argument-overlap invalidation was unsound: a write naming no target, or naming one through an alias, left a pre-write read alive. Any state-changing call now invalidates every memoized read, and a read proposed after a write in the same response executes rather than being answered from a pre-write memo.
+
+**Blocked output is scrubbed consistently (#67).** A tripped guardrail left `Message.reasoning` intact, so the same text survived in the reasoning field. **Corrected claim:** v0.6.28 said blocked content "leaves no trace"; that overstated what is guaranteed. Streaming deltas already on the wire and the session-log copy taken when the message is added are not recalled — that requires buffering before stream, which is not claimed here.
+
+**Work-queue transitions are explicit (#54, #64).** `set_status` still allowed `CANCELLING → RUNNING`, walking a cancellation back. It now enforces a transition map (`PENDING → RUNNING`, `RUNNING → CANCELLING`) with `cancel_requested = 0`.
+
+**Recovery is race-safe and cleanup is total (#53, #63).** A failing heartbeat re-raised out of the `invoke` cleanup and left the task registered as live; cleanup now runs first and the heartbeat error is logged rather than raised. Stale recovery re-checks the heartbeat cutoff in its UPDATE, closing the window where a live worker's refresh between SELECT and UPDATE still lost.
+
+**The default path is ownership-checked (#56, #65).** `path=None` returned the workspace root before the check, so a symlinked workspace directory exposed another user's files. The default path is now checked like any other, and a non-string path is refused.
+
+**Lazy-loaded tools are audited (#59).** The lazy dispatch path emitted no audit events, so those executions were absent from the trail entirely.
+
+### Known limits, stated rather than implied
+- #62: the fingerprint is an identity, not a proof of body equivalence.
+- #63: a task live in *another* process still relies on that process's heartbeats; the in-process guard is not a distributed lease.
+- #67: deltas already emitted and the observer's copy are not recalled.
+
 ## v0.6.28 — 2026-10-02
 
 ### Fixed — twelve issues from the 2026-10-02 audit batch (#50–#61)
