@@ -1105,13 +1105,25 @@ class AgentLoop:
         if budget is not None:
             return budget
         tc = self._with_runtime_context(tc)
+        self._emit_audit(kind="tool_call", tool=tc.name, call_id=tc.id)
 
         try:
             # Same as _execute_tool: route through ainvoke so sync bodies
             # (lazy-loaded custom/native tools) run off the event loop.
             result = await td.ainvoke(tc.arguments)
+            self._emit_audit(
+                kind="tool_result",
+                tool=tc.name,
+                call_id=tc.id,
+                detail=(
+                    result.content[:200]
+                    if hasattr(result, "content") and isinstance(result.content, str)
+                    else None
+                ),
+            )
             return ToolResult.from_raw(result)
         except Exception as e:
+            self._emit_audit(kind="error", tool=tc.name, call_id=tc.id, detail=str(e))
             return ToolResult(content=str(e), is_error=True)
 
     def _with_runtime_context(self, tc: ToolCall) -> ToolCall:

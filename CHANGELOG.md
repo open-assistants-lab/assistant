@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.6.30 — 2026-10-02
+
+### Fixed — lazy-loaded tool executions are audited (#59)
+`_try_lazy_load` dispatched a tool body without emitting any audit event, so an execution through the lazy path left no trace in the audit trail — a gap in exactly the action evidence #41 asks for. The lazy path now emits the same `tool_call`, `tool_result` and `error` events the registered path does.
+
+Suite: 3648 passed, 27 skipped.
+
 ## v0.6.29 — 2026-10-02
 
 ### Fixed — the v0.6.28 residuals (#51, #53, #54, #56, #58, #59, #62–#67)
