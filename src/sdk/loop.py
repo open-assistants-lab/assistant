@@ -627,33 +627,18 @@ class AgentLoop:
         re-execute, because the world may have changed between calls.
         """
         executed = state.extra.setdefault("_executed_tool_calls", [])
-        arg_values: dict[tuple[str, str], frozenset[str]] = state.extra.setdefault(
-            "_executed_tool_argvalues", {}
-        )
-        # A state-changing call may invalidate memoized reads of what it
-        # touched (issue #58): read -> write -> same read must re-read. Scoped
-        # to the arguments in common, so an unrelated call does not throw away
-        # every memoized read in the run.
-        touched = {
-            value
-            for tc in tool_calls
-            if not self._is_read_only_tool(tc.name)
-            for value in tc.arguments.values()
-            if isinstance(value, str) and value
-        }
-        if touched:
-            for key in [k for k in executed if arg_values.get(k, frozenset()) & touched]:
-                executed.remove(key)
-                arg_values.pop(key, None)
+        # Any state-changing call invalidates every memoized read (issues #58
+        # and #66). Keying on arguments was tried and is not sound: a write can
+        # name no target at all, or name one through an alias ("x" vs "./x"),
+        # and serving a pre-write read is worse than re-reading a file.
+        if any(not self._is_read_only_tool(tc.name) for tc in tool_calls):
+            executed.clear()
         for tc in tool_calls:
             if not self._is_read_only_tool(tc.name):
                 continue
             key = AgentLoop._tool_call_key(tc)
             if key not in executed:
                 executed.append(key)
-                arg_values[key] = frozenset(
-                    v for v in tc.arguments.values() if isinstance(v, str) and v
-                )
 
     def _seed_executed_tool_calls(self, state: AgentState) -> None:
         """Seed the executed set from tool calls already present in THIS turn.
@@ -678,9 +663,22 @@ class AgentLoop:
                 for tc in msg.tool_calls:
                     if not self._is_read_only_tool(tc.name):
                         continue
+                    if self._call_result_was_error(state, tc.id):
+                        continue  # a failure is not a memoized result (#58)
                     key = self._tool_call_key(tc)
                     if key not in executed:
                         executed.append(key)
+
+    @staticmethod
+    def _call_result_was_error(state: AgentState, call_id: str) -> bool:
+        """Whether a tool result carries an error, using the loop's own
+        convention: error results are stored as {"error": ...}."""
+        for msg in state.messages:
+            if msg.role != "tool" or msg.tool_call_id != call_id:
+                continue
+            content = str(msg.content or "")
+            return content.lstrip().startswith("{") and '"error"' in content
+        return False
 
     def _split_duplicate_tool_calls(
         self, tool_calls: list[ToolCall], state: AgentState
@@ -688,14 +686,17 @@ class AgentLoop:
         """Soft duplicate-call guard: split proposed calls into fresh and
         already-executed-this-run (same tool + same args). The executed set
         is tracked in state.extra['_executed_tool_calls']."""
-        executed = set(state.extra.get("_executed_tool_calls", []))
         fresh: list[ToolCall] = []
         dupes: list[ToolCall] = []
         for tc in tool_calls:
-            if self._tool_call_key(tc) in executed:
+            # Re-read the live set each step: recording a fresh mutation above
+            # clears it, so ordering within one response is respected (#66).
+            if self._tool_call_key(tc) in set(state.extra.get("_executed_tool_calls", [])):
                 dupes.append(tc)
             else:
                 fresh.append(tc)
+                if not self._is_read_only_tool(tc.name):
+                    self._record_executed_tools([tc], state)
         return fresh, dupes
 
     def _repetition_guard(self, state: AgentState) -> Any:
@@ -1540,6 +1541,7 @@ class AgentLoop:
         cannot be recalled, so the block is also recorded as an audit event.
         """
         message.content = f"Output blocked: {tripwire.result.message}"
+        message.reasoning = None  # reasoning is model output too (#67)
         self._emit_audit(
             kind="error",
             detail=f"output_blocked: {tripwire.result.message}",
