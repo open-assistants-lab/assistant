@@ -586,10 +586,21 @@ class SubagentCoordinator:
             if not failed:
                 await self._set_cancelled_if_requested(task_id, db)
         finally:
-            heartbeat_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await heartbeat_task
+            # Cleanup first: a heartbeat failure must not leave the task
+            # registered as live (issue #63). A heartbeat error is logged, not
+            # raised - the run's own outcome is already recorded by this point.
             _active.pop(task_id, None)
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as heartbeat_error:  # noqa: BLE001
+                logger.warning(
+                    "subagent.heartbeat_failed",
+                    {"task_id": task_id, "error": str(heartbeat_error)},
+                    user_id="system",
+                )
 
         return task_id
 

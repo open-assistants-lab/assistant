@@ -34,7 +34,11 @@ class HITLMiddleware(Middleware):
         self, tool_name: str, tool_input: dict[str, Any]
     ) -> ToolResult | None:
         """Allow, deny, or persist an approval request for one tool call."""
-        from src.sdk.governance import get_governance_service, governance_enabled
+        from src.sdk.governance import (
+            definition_fingerprint,
+            get_governance_service,
+            governance_enabled,
+        )
 
         if not governance_enabled():
             return None
@@ -99,6 +103,9 @@ class HITLMiddleware(Middleware):
             permission="ask",
             session_id=session_id,
             executor=executor,
+            # Bind the approval to the definition shown to the user (#62). The
+            # loop's registry already resolved it for this call.
+            definition_hash=definition_fingerprint(definition),
         )
         return ToolResult(
             content=(

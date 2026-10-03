@@ -2174,7 +2174,6 @@ name: {name}
         from agentprofile.models import AgentProfile
 
         from src.sdk.coordinator import SubagentCoordinator
-        from src.sdk.subagent_models import TaskStatus
 
         coord = SubagentCoordinator("test_user")
         await coord.create(AgentProfile(name="deleteme", description="Temporary"))
@@ -2187,7 +2186,8 @@ name: {name}
         running_id = await db.insert_task("deleteme", "running", profile)
         await db.set_running(running_id)
         cancelling_id = await db.insert_task("deleteme", "cancelling", profile)
-        await db.set_status(cancelling_id, TaskStatus.CANCELLING)
+        await db.set_running(cancelling_id)
+        await db.request_cancel(cancelling_id)
         completed_id = await db.insert_task("deleteme", "completed", profile)
         await db.set_running(completed_id)
         await db.set_completed(completed_id, _ok_result())

@@ -7,6 +7,7 @@ policy evaluation lives in :class:`PermissionPolicy`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import subprocess
@@ -108,6 +109,54 @@ def governance_enabled() -> bool:
 logger = get_logger()
 
 
+def _body_signature(function: Any) -> str:
+    """A stable signature of a tool's callable.
+
+    Schema alone does not identify a body: a custom tool's command is a
+    closure variable of its rebuilt function, so editing TOOL.md can change
+    what runs while the name, description and parameters stay identical
+    (issue #62). Captured values and constants are what separate one body
+    from another.
+    """
+    parts = [
+        str(getattr(function, "__module__", "")),
+        str(getattr(function, "__qualname__", "")),
+    ]
+    for cell in getattr(function, "__closure__", None) or ():
+        try:
+            value = cell.cell_contents
+        except ValueError:  # empty cell
+            continue
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            parts.append(repr(value))
+    for const in getattr(getattr(function, "__code__", None), "co_consts", ()) or ():
+        if isinstance(const, (str, int, float, bool)) or const is None:
+            parts.append(repr(const))
+    return "|".join(parts)
+
+
+def definition_fingerprint(definition: Any) -> str | None:
+    """A stable identity for a tool definition, or None when unknown.
+
+    Binds an approval to the definition the approver actually saw (issue
+    #62). It is an identity, not a proof of equivalence: two bodies that are
+    indistinguishable to this signature are still treated as the same tool.
+    """
+    if definition is None:
+        return None
+    annotations = getattr(definition, "annotations", None)
+    payload = {
+        "name": getattr(definition, "name", None),
+        "description": getattr(definition, "description", None),
+        "parameters": getattr(definition, "parameters", None),
+        "annotations": annotations.model_dump(mode="json") if annotations is not None else None,
+        "body": _body_signature(getattr(definition, "function", None)),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
 class GovernanceService:
     """Permission resolution + durable pending proposals + receipts."""
 
@@ -141,13 +190,21 @@ class GovernanceService:
                 session_id TEXT,
                 user_id TEXT,
                 executor_json TEXT,
-                outcome TEXT
+                outcome TEXT,
+                definition_hash TEXT
             )
             """
         )
         # Migration-safe: older databases lack the newer columns. Historical
         # proposals are conservatively treated as requiring approval.
-        for column in ("permission", "session_id", "user_id", "executor_json", "outcome"):
+        for column in (
+            "permission",
+            "session_id",
+            "user_id",
+            "executor_json",
+            "outcome",
+            "definition_hash",
+        ):
             try:
                 conn.execute(f"ALTER TABLE proposals ADD COLUMN {column} TEXT")
                 conn.commit()
@@ -302,6 +359,7 @@ class GovernanceService:
         permission: str = "ask",
         session_id: str | None = None,
         executor: Any | None = None,
+        definition_hash: str | None = None,
     ) -> str:
         proposal_id = uuid.uuid4().hex
         expiry = None
@@ -311,7 +369,7 @@ class GovernanceService:
         executor_json = json.dumps(executor.model_dump(mode="json"), sort_keys=True) if executor else None
         with self._conn(user_id) as conn:
             conn.execute(
-                "INSERT INTO proposals (proposal_id, ts, tool, arguments, permission, status, expires_at, session_id, user_id, executor_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO proposals (proposal_id, ts, tool, arguments, permission, status, expires_at, session_id, user_id, executor_json, definition_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     proposal_id,
                     datetime.now(UTC).isoformat(),
@@ -323,6 +381,7 @@ class GovernanceService:
                     session_id,
                     user_id,
                     executor_json,
+                    definition_hash,
                 ),
             )
             # M4-2 anti-fatigue: proposals_created per tool.
@@ -376,7 +435,8 @@ class GovernanceService:
         with self._conn(user_id) as conn:
             row = conn.execute(
                 "SELECT proposal_id, tool, arguments, permission, status, expires_at,"
-                " session_id, executor_json, outcome FROM proposals WHERE proposal_id = ?",
+                " session_id, executor_json, outcome, definition_hash FROM proposals"
+                " WHERE proposal_id = ?",
                 (proposal_id,),
             ).fetchone()
         if row is None:
@@ -391,6 +451,7 @@ class GovernanceService:
             "session_id": row[6],
             "executor": json.loads(row[7]) if row[7] else None,
             "outcome": row[8],
+            "definition_hash": row[9],
         }
 
     def approve(
@@ -657,7 +718,24 @@ class GovernanceService:
                 # but cannot bypass the current shipped-native ceiling.
                 allowed = filter_denied_native_tools(list(registry))
                 td = next((x for x in reversed(allowed) if x.name == tool), None)
-            if td is None:
+            # Issue #62: bind the approval to the definition the approver saw.
+            # A replacement body under the same name is refused rather than run.
+            approved_hash = row.get("definition_hash")
+            drifted = bool(approved_hash) and definition_fingerprint(td) != approved_hash
+            if drifted:
+                result = {
+                    "content": (
+                        f"Tool '{tool}' changed since this proposal was created "
+                        "— approval did not execute it. Re-create the request "
+                        "against the current definition."
+                    ),
+                    "structured_content": {
+                        "executed": False,
+                        "error": "definition changed since approval",
+                    },
+                    "is_error": True,
+                }
+            elif td is None:
                 result = {
                     "content": f"Tool not found for execution: {tool}",
                     "structured_content": {"executed": False, "error": "unknown tool"},

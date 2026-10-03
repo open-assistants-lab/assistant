@@ -32,6 +32,11 @@ _TERMINAL_STATUSES = (
     TaskStatus.TIMED_OUT,
     TaskStatus.CANCELLED,
 )
+#: The only non-terminal transitions a bare status update may perform (#64).
+_ALLOWED_STATUS_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
+    TaskStatus.RUNNING: frozenset({TaskStatus.PENDING}),
+    TaskStatus.CANCELLING: frozenset({TaskStatus.RUNNING}),
+}
 
 # Persisted authority boundaries: work_queue.status owns lifecycle; result owns
 # output/usage/result-level reason; launch_plan owns the frozen execution
@@ -192,30 +197,26 @@ class SubagentWorkQueueDB:
         return task_id
 
     async def set_status(self, task_id: str, status: TaskStatus) -> bool:
-        """Move a task between NON-terminal states.
+        """Move a task along the ONE permitted transition.
 
-        Terminal states are refused here on purpose: a completed/failed/
-        cancelled row is written by set_completed/set_failed/set_cancelled,
-        which also write the completion event in the same transaction. A bare
-        status update could contradict or omit that event (issue #54).
+        Terminal states are refused because they belong to the transactional
+        completion path (set_completed/set_failed/set_cancelled), which also
+        writes the completion event; a bare status update could contradict or
+        omit it (issue #54). The remaining map is explicit (issue #64): only
+        PENDING -> RUNNING and RUNNING -> CANCELLING are legal, so a cancelling
+        row cannot be walked back to running and cancel a cancellation.
         """
-        if status in _TERMINAL_STATUSES:
+        allowed = _ALLOWED_STATUS_TRANSITIONS.get(status, frozenset())
+        if not allowed:
             return False
         db = await self._get_db()
         now = _now()
         cursor = await db.execute(
             """UPDATE work_queue SET status = ?, updated_at = ?
-            WHERE id = ? AND user_id = ?
-            AND status NOT IN ({})""".format(
-                ", ".join("?" * len(_TERMINAL_STATUSES))
+            WHERE id = ? AND user_id = ? AND status IN ({}) AND cancel_requested = 0""".format(
+                ", ".join("?" * len(allowed))
             ),
-            (
-                status.value,
-                now,
-                task_id,
-                self.user_id,
-                *(s.value for s in _TERMINAL_STATUSES),
-            ),
+            (status.value, now, task_id, self.user_id, *(s.value for s in allowed)),
         )
         await db.commit()
         return cursor.rowcount > 0
@@ -555,7 +556,8 @@ class SubagentWorkQueueDB:
                 """UPDATE work_queue
                 SET status = ?, result = ?, error = ?, terminal_reason = ?, completed_at = ?, updated_at = ?
                 WHERE id = ? AND user_id = ? AND status IN (?, ?)
-                AND cancel_requested = ?""",
+                AND cancel_requested = ?
+                AND (heartbeat_at IS NULL OR heartbeat_at < ?)""",
                 (
                     status.value,
                     terminal_result.model_dump_json(),
@@ -568,6 +570,7 @@ class SubagentWorkQueueDB:
                     TaskStatus.RUNNING.value,
                     TaskStatus.CANCELLING.value,
                     int(cancelled),
+                    cutoff,
                 ),
             )
             if changed.rowcount:

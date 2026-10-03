@@ -109,7 +109,13 @@ def _resolve_path(path: str | None, user_id: str, workspace_id: str = "personal"
     roots = _allowed_roots(user_id, paths)
 
     if path is None:
-        return root_path
+        # The default path is checked like every other path (issue #65): a
+        # workspace directory that is a symlink into another user's store
+        # would otherwise list their files.
+        return _reject_other_user_data(root_path, paths, user_id, "(default workspace path)")
+
+    if not isinstance(path, str):
+        raise ValueError(f"Path must be a string, got {type(path).__name__}.")
 
 
     if path.startswith("/"):
