@@ -22,6 +22,19 @@ from src.sdk.tools_core.apps import (
 _TEST_USER = "sheets_test_user"
 
 
+@pytest.fixture(autouse=True)
+def _allow_tmp_import_root(tmp_path, monkeypatch):
+    """app_import_csv resolves paths through the filesystem boundary (#131),
+    so a test's temp directory must be an allowed root."""
+    from src.config import reload_settings
+
+    monkeypatch.setenv("FILESYSTEM_ALLOWED_ROOTS", str(tmp_path))
+    reload_settings()
+    yield
+    monkeypatch.delenv("FILESYSTEM_ALLOWED_ROOTS", raising=False)
+    reload_settings()
+
+
 @pytest.fixture()
 def csv_file(tmp_path: Path) -> Path:
     p = tmp_path / "clients.csv"

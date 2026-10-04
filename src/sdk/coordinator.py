@@ -12,6 +12,7 @@ import contextlib
 import copy
 import json
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Callable, Mapping
@@ -288,6 +289,28 @@ def _extract_output(messages: list[Any], max_chars: int = 2000) -> tuple[str, bo
     return output.strip(), False
 
 
+_AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def _agent_dir(base: Path, name: str) -> Path:
+    """Resolve a subagent name to its directory inside ``base``.
+
+    A subagent name is used as a raw path segment by load_def, delete,
+    update and the runtime-policy paths, but only ``subagent_create``
+    validated it. A caller-supplied ``../victim`` could therefore read,
+    rewrite or rmtree a directory outside the subagents folder (issue #109).
+    """
+    if not isinstance(name, str) or not _AGENT_NAME_PATTERN.match(name):
+        raise ValueError(
+            "Invalid subagent name: names may contain letters, digits, "
+            f"underscore, dot and dash (got {name!r})"
+        )
+    resolved = (base / name).resolve()
+    if resolved.parent != base.resolve():
+        raise ValueError(f"Invalid subagent name: {name!r} escapes the subagents directory")
+    return resolved
+
+
 class SubagentCoordinator:
     """Creates, invokes, and supervises subagents via work_queue."""
 
@@ -401,7 +424,7 @@ class SubagentCoordinator:
             if tool_selection_mode is not None
             else _infer_tool_selection_mode(profile)
         )
-        agent_path = self.base_path / profile.name
+        agent_path = _agent_dir(self.base_path, profile.name)
         agent_path.mkdir(parents=True, exist_ok=True)
 
         # Validate profile dict
@@ -456,7 +479,7 @@ class SubagentCoordinator:
         update_data = {k: v for k, v in kwargs.items() if v is not None}
         updated = current.model_copy(update=update_data)
 
-        agent_path = self.base_path / name
+        agent_path = _agent_dir(self.base_path, name)
 
         from src.sdk.subagent_capabilities import ToolSelectionMode
 
@@ -1282,7 +1305,7 @@ class SubagentCoordinator:
             return False
         db = await self._get_db()
         await db.request_cancel_active_tasks_for_agent(name)
-        agent_path = self.base_path / name
+        agent_path = _agent_dir(self.base_path, name)
         if agent_path.exists():
             shutil.rmtree(agent_path)
         return True
@@ -1356,7 +1379,7 @@ class SubagentCoordinator:
             mode = ToolSelectionMode.NONE
 
         self._write_runtime_policy(
-            self.base_path / name / "runtime-policy.json", mode, migrated_from="legacy"
+            _agent_dir(self.base_path, name) / "runtime-policy.json", mode, migrated_from="legacy"
         )
         logger.info(
             "subagent.runtime_policy_migrated",
@@ -1369,7 +1392,7 @@ class SubagentCoordinator:
         """Load or one-time migrate a profile's explicit capability selection."""
         from src.sdk.subagent_capabilities import ToolSelectionMode
 
-        policy_path = self.base_path / name / "runtime-policy.json"
+        policy_path = _agent_dir(self.base_path, name) / "runtime-policy.json"
         if not policy_path.exists():
             return self._migrate_legacy_tool_selection_mode(name)
         try:
@@ -1397,8 +1420,18 @@ class SubagentCoordinator:
                 f"Invalid runtime policy for subagent '{name}': {exc}"
             ) from exc
 
+    def validate_name(self, name: str) -> str:
+        """Raise if `name` cannot address a subagent directory (#109).
+
+        Callers that accept a name from an untrusted source use this to
+        separate "this name is not addressable" (client error) from "no such
+        agent" or "agent disabled" (not found).
+        """
+        _agent_dir(self.base_path, name)
+        return name
+
     def load_def(self, name: str) -> AgentProfile | None:
-        profile_path = self.base_path / name / "PROFILE.md"
+        profile_path = _agent_dir(self.base_path, name) / "PROFILE.md"
         if profile_path.exists():
             try:
                 from agentprofile.parser import load_profile as _load_ap

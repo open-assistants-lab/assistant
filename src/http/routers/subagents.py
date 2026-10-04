@@ -76,6 +76,15 @@ def _serialize_job(row: dict[str, Any]) -> dict[str, Any]:
     return job
 
 
+def _invalid_name(exc: ValueError) -> HTTPException:
+    """A subagent name that cannot address a directory is a client error (#109).
+
+    The coordinator refuses such names by raising; without this mapping a bad
+    name in the URL would surface as a 500 instead of a 4xx.
+    """
+    return HTTPException(status_code=400, detail=str(exc))
+
+
 def _validate_context_ids(user_id: str, workspace_id: str) -> None:
     from src.storage.paths import get_paths
 
@@ -163,7 +172,11 @@ async def create_subagent(
 
     _validate_context_ids(user_id, workspace_id)
     coordinator = get_coordinator(user_id, workspace_id)
-    if coordinator.load_def(body.name) is not None:
+    try:
+        existing = coordinator.load_def(body.name)
+    except ValueError as exc:
+        raise _invalid_name(exc) from exc
+    if existing is not None:
         raise HTTPException(status_code=400, detail=f"Subagent '{body.name}' already exists.")
 
     try:
@@ -303,7 +316,10 @@ async def update_subagent(
     update_data = body.model_dump(exclude_unset=True)
     update_data.pop("name", None)
 
-    current = coordinator.load_def(name)
+    try:
+        current = coordinator.load_def(name)
+    except ValueError as exc:
+        raise _invalid_name(exc) from exc
     if current is None:
         raise HTTPException(status_code=404, detail=f"Subagent '{name}' not found.")
 
@@ -318,7 +334,10 @@ async def update_subagent(
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors})
 
-    updated = await coordinator.update(name, **update_data)
+    try:
+        updated = await coordinator.update(name, **update_data)
+    except ValueError as exc:
+        raise _invalid_name(exc) from exc
     if updated is None:
         raise HTTPException(status_code=404, detail=f"Subagent '{name}' not found.")
     return {"status": "updated", "subagent": updated.model_dump()}
@@ -337,7 +356,11 @@ async def delete_subagent(
 
     _validate_context_ids(user_id, workspace_id)
     coordinator = get_coordinator(user_id, workspace_id)
-    if not await coordinator.delete(name):
+    try:
+        deleted = await coordinator.delete(name)
+    except ValueError as exc:
+        raise _invalid_name(exc) from exc
+    if not deleted:
         raise HTTPException(status_code=404, detail=f"Subagent '{name}' not found.")
     return {"status": "deleted", "name": name, "workspace_id": workspace_id}
 
@@ -356,6 +379,12 @@ async def start_subagent(
 
     _validate_context_ids(user_id, workspace_id)
     coordinator = get_coordinator(user_id, workspace_id)
+    # A name that cannot address a directory is a client error (#109); the
+    # other ValueErrors from start() (disabled/unknown agent) stay 404.
+    try:
+        coordinator.validate_name(name)
+    except ValueError as exc:
+        raise _invalid_name(exc) from exc
     try:
         task_id = await coordinator.start(name, body.task, parent_id=body.parent_id)
     except ValueError as e:

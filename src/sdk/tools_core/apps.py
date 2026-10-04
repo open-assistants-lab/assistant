@@ -95,13 +95,34 @@ def _sanitize_app_name(name: str) -> str:
     return "".join(c if c.isalnum() or c == "_" else "_" for c in name.lower())
 
 
-def _get_app_path(app_name: str, user_id: str) -> Path:
+def _validate_app_name(app_name: str) -> str:
+    """A sanitised app name that can never collapse to the Apps root.
+
+    An empty name (or one that sanitises away entirely) made
+    ``base_path / ""`` the Apps root itself, and ``app_delete`` then rmtree'd
+    every app the user had (issue #132).
+    """
+    safe = _sanitize_app_name(app_name)
+    if not safe or set(safe) <= {"_"}:
+        raise ValueError(
+            "App name must contain at least one letter or digit "
+            f"(got {app_name!r}); it cannot address the apps directory itself."
+        )
+    return safe
+
+
+def _resolve_app_path(app_name: str, user_id: str, *, create: bool) -> Path:
+    """Path for an app, validated. Read paths must not create directories:
+    a delete of a non-existent app must report not-found, not succeed."""
     base = _get_base_path(user_id)
-    base.mkdir(parents=True, exist_ok=True)
-    safe_name = _sanitize_app_name(app_name)
-    app_path = base / safe_name
-    app_path.mkdir(parents=True, exist_ok=True)
+    app_path = base / _validate_app_name(app_name)
+    if create:
+        app_path.mkdir(parents=True, exist_ok=True)
     return app_path
+
+
+def _get_app_path(app_name: str, user_id: str) -> Path:
+    return _resolve_app_path(app_name, user_id, create=True)
 
 
 def _get_db(app_name: str, user_id: str) -> HybridDB:
@@ -144,7 +165,7 @@ def _list_apps(user_id: str) -> list[str]:
 
 
 def _delete_app(app_name: str, user_id: str) -> bool:
-    app_path = _get_app_path(app_name, user_id)
+    app_path = _resolve_app_path(app_name, user_id, create=False)
     key = f"{user_id}:{app_name}"
     _dbs.pop(key, None)
     if app_path.exists():
@@ -678,7 +699,12 @@ def app_import_csv(
 
     user_id = user_id or DEFAULT_USER_ID
     try:
-        src = Path(path).expanduser().resolve()
+        # Same boundary as the files_* tools: allowed roots plus the
+        # cross-user ownership check. Resolving the path directly here read
+        # any file on the host, bypassing that boundary entirely (#131).
+        from src.sdk.tools_core.filesystem import _resolve_path
+
+        src = _resolve_path(path, user_id)
         if not src.exists():
             return f"Error: file not found: {src}"
         sheets = parse_sheets(src)
@@ -721,6 +747,8 @@ def app_import_csv(
             user_id=user_id,
         )
         return f"Imported from '{src.name}':\n  - " + "\n  - ".join(imported)
+    except ValueError as exc:
+        return f"Error: {exc}"
     except SheetParseError as e:
         return str(e)
     except Exception as e:
