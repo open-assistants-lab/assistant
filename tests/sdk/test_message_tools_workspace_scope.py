@@ -166,8 +166,8 @@ def test_fetch_session_ids_uses_real_message_store_core_db(tmp_path):
 
 def test_message_timeline_ignores_workspace_id_for_search_metadata(monkeypatch):
     core = RecordingCore()
-    core.search_enhanced = lambda query, limit, **kwargs: core.calls.append(
-        {"query": query, "limit": limit, **kwargs}
+    core.recall = lambda query, **kwargs: core.calls.append(
+        {"query": query, **kwargs}
     ) or [
         SimpleNamespace(
             memory=SimpleNamespace(
@@ -184,4 +184,6 @@ def test_message_timeline_ignores_workspace_id_for_search_metadata(monkeypatch):
     )
 
     assert "Alpha project started" in result
-    assert core.calls == [{"query": "alpha", "limit": 20}]
+    # recall() is the pinned CoreMem 0.13.1 API (#127); the strategy is
+    # explicit so the timeline path stays zero-LLM.
+    assert core.calls == [{"query": "alpha", "strategy": "direct", "limit": 20}]

@@ -504,7 +504,11 @@ def message_timeline(
     """
     core = _get_message_core(user_id, workspace_id)
 
-    results = core.search_enhanced(query, limit=limit)
+    # CoreMem 0.13.1 (the pinned version) exposes `recall`, not the removed
+    # `search_enhanced`: every message_timeline call raised AttributeError
+    # against the real dependency (issue #127). recall() returns the same
+    # SearchResult objects (result.memory) this function already consumes.
+    results = core.recall(query, strategy="direct", limit=limit)
 
     seen_sessions: set[str] = set()
     timeline: list[tuple[str, str, str]] = []  # (date, session_id, snippet)

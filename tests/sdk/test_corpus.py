@@ -128,3 +128,61 @@ class TestCorpusTools:
         out = search_corpus.invoke(args={"query": "retainer", "user_id": "alice"})
         for phrase in ("files_write", "index_corpus(", "write"):
             assert phrase not in out
+
+
+def test_corpus_failed_reindex_keeps_previous_data(tmp_path, monkeypatch):
+    """#129: a failed replacement must not leave the source empty.
+
+    Deletes and inserts were committed one at a time, so an insert failure
+    after the deletes left the canonical table empty while the FTS mirror
+    still returned the old text: data loss plus a search state that
+    disagreed with the index.
+    """
+    import sqlite3
+    import types
+
+    from src.storage.corpus import CorpusStore
+
+    store = CorpusStore.__new__(CorpusStore)
+    store.user_id = "u"
+    store.workspace_id = "personal"
+    store._db = None
+    monkeypatch.setattr(
+        "src.storage.paths.get_paths",
+        lambda user, workspace_id="personal": types.SimpleNamespace(
+            user_dir=tmp_path, workspace_id=workspace_id
+        ),
+    )
+    store.index("original text about dolphins", "src-a")
+    assert store.search("dolphins"), "precondition: the original was indexed"
+
+    real_connect = sqlite3.connect
+    state = {"armed": False}
+
+    class _FlakyConnection(sqlite3.Connection):
+        def execute(self, sql, *args, **kwargs):
+            upper = sql.strip().upper()
+            if (
+                state["armed"]
+                and upper.startswith("INSERT INTO CORPUS ")
+                and "CORPUS_FTS" not in upper
+            ):
+                raise sqlite3.OperationalError("injected insert failure")
+            return super().execute(sql, *args, **kwargs)
+
+    def flaky_connect(path, *args, **kwargs):
+        kwargs["factory"] = _FlakyConnection
+        return real_connect(path, *args, **kwargs)
+
+    monkeypatch.setattr("src.storage.corpus.sqlite3.connect", flaky_connect)
+    state["armed"] = True
+    with pytest.raises(sqlite3.OperationalError):
+        store.index("replacement text about whales", "src-a")
+
+    # Restore only the connect seam: the paths patch must stay for the search.
+    monkeypatch.setattr("src.storage.corpus.sqlite3.connect", real_connect)
+
+    after = store.search("dolphins")
+    assert after, "the previous canonical data was lost"
+    assert any("dolphins" in str(row) for row in after), after
+    assert not store.search("whales"), "a rolled-back reindex left replacement rows behind"

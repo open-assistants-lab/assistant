@@ -141,7 +141,7 @@ def run_component_benchmarks(num_runs: int) -> dict:
     ] * (num_runs // 3 + 1)
     for q in hybrid_queries[:num_runs]:
         with timed("hybrid", hybrid_times):
-            core.search_enhanced(q, limit=8)
+            core.recall(q, strategy="fusion", limit=8)
     results["search_hybrid"] = report_stats("search_hybrid (ChromaDB+FTS5+RRF)", hybrid_times)
 
     # ── 3. search_observations (hybrid) ──
@@ -176,7 +176,7 @@ def run_component_benchmarks(num_runs: int) -> dict:
     for q in pipeline_queries[:num_runs]:
         start = time.perf_counter()
         core.search_observations(q, limit=6)
-        core.search_enhanced(q, limit=8)
+        core.recall(q, strategy="fusion", limit=8)
         pipeline_times.append((time.perf_counter() - start) * 1000)
     results["retrieval_pipeline"] = report_stats("Full retrieval pipeline (2 DB queries)", pipeline_times)
 

@@ -105,54 +105,53 @@ class CorpusStore:
 
     def index(self, text: str, source: str) -> int:
         """Index text under `source`. Idempotent: re-indexing the same
-        source replaces its previous chunks. Returns chunks indexed."""
+        source replaces its previous chunks. Returns chunks indexed.
+
+        The replacement is ONE transaction over the canonical rows AND the
+        FTS mirror (same SQLite file). Previously the deletes and inserts were
+        committed one at a time, so a failure part-way through left the source
+        with NO canonical chunks while the FTS table still served the old
+        text: data loss plus a search state that disagreed with the index
+        (issue #129). A failure now rolls back and the previous data stands.
+        """
         if not source or not source.strip():
             raise ValueError("source must be a non-empty string")
         chunks = _chunk_text(text)
         if not chunks:
             raise ValueError("text must be a non-empty string")
-        db = self._get_db()
-        # Idempotency: drop previous chunks for this source, then insert.
-        try:
-            existing = db.read_query(
-                "SELECT id FROM corpus WHERE source = ?", (source,)
-            )
-            for row in existing:
-                try:
-                    db.delete("corpus", row["id"])
-                except Exception:
-                    pass
-        except Exception:
-            pass  # first index for this source
+        self._get_db()  # ensure the canonical table exists
         now = datetime.now(UTC).isoformat()
-        for i, chunk in enumerate(chunks):
-            cid = f"{source}#c{i}"
-            data = {
-                "id": cid,
-                "source": source,
-                "chunk_idx": i,
-                "text": chunk,
-                "indexed_at": now,
-            }
-            try:
-                db.insert("corpus", data)
-            except Exception:
-                # Row exists (delete path failed): update in place.
-                db.update("corpus", cid, {
-                    k: v for k, v in data.items() if k != "id"
-                })
-        fts = self._fts_conn()
+        db_path = self.db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        # isolation_level=None: explicit transaction control. With the default
+        # implicit handling, the CREATE VIRTUAL TABLE / DML sequence committed
+        # outside our BEGIN and the rollback could not restore the FTS mirror.
+        conn = sqlite3.connect(str(db_path), isolation_level=None)
         try:
-            fts.execute("DELETE FROM corpus_fts WHERE source = ?", (source,))
+            conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS corpus_fts USING fts5("
+                "text, source, source_pk UNINDEXED)"
+            )
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM corpus WHERE source = ?", (source,))
+            conn.execute("DELETE FROM corpus_fts WHERE source = ?", (source,))
             for i, chunk in enumerate(chunks):
-                fts.execute(
-                    "INSERT INTO corpus_fts(text, source, source_pk) "
-                    "VALUES (?, ?, ?)",
-                    (chunk, source, f"{source}#c{i}"),
+                cid = f"{source}#c{i}"
+                conn.execute(
+                    "INSERT INTO corpus (id, source, chunk_idx, text, indexed_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (cid, source, i, chunk, now),
                 )
-            fts.commit()
+                conn.execute(
+                    "INSERT INTO corpus_fts(text, source, source_pk) VALUES (?, ?, ?)",
+                    (chunk, source, cid),
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
         finally:
-            fts.close()
+            conn.close()
         return len(chunks)
 
     def search(self, query: str, k: int = 5) -> list[dict[str, Any]]:

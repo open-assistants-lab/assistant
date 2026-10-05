@@ -184,7 +184,16 @@ class MessageStore:
         conn = None
         try:
             conn = sqlite3.connect(str(db_path))
+            # Issue #130: PRAGMA table_info OMITS VIRTUAL generated columns, so
+            # the presence check never saw them and every second startup tried to
+            # ADD COLUMN again, hit "duplicate column name", and returned False
+            # before creating the indexes - silently downgrading every query to
+            # the json_extract fallback. table_xinfo includes hidden columns;
+            # the CREATE INDEXs are also idempotent, so a repeatable run is
+            # safe either way.
             existing = {
+                r[1] for r in conn.execute("PRAGMA table_xinfo('messages')")
+            } | {
                 r[1] for r in conn.execute("PRAGMA table_info('messages')")
             }
             if "run_id" not in existing:
@@ -346,9 +355,19 @@ class MessageStore:
             new_conn.commit()
             new_conn.close()
             old_conn.close()
-        except Exception:
-            pass  # Migration failed — non-fatal, old DB still exists
+        except Exception as exc:
+            # Issue #128: a failed migration used to be swallowed AND the
+            # sentinel was still touched, so every later start skipped the
+            # migration forever although no fact was ever imported. Leave the
+            # sentinel absent (retryable) and surface the failure.
+            from src.app_logging import get_logger
 
+            get_logger().warning(
+                "memory_store.migration_failed", {"error": str(exc)}
+            )
+            return
+
+        # Success: the import committed, so mark it done.
         sentinel.touch()
 
     @staticmethod
@@ -1059,16 +1078,51 @@ class MessageStore:
             ]
             return [self._stored_to_message(row) for row in rows]
 
-        # Load rows up to summary_sequence + extra after it
+        # Load the summary row plus the session's NEWEST messages.
+        # The old query bounded rows with "rowid <= summary_sequence + limit",
+        # treating a GLOBAL rowid as a message count (issue #122): inserts in
+        # other sessions, or simply more than `limit` later messages, pushed
+        # the newest question outside the window and it was dropped. Both
+        # selects are session-scoped and take the newest rows directly.
         summary_sequence, (summarized_ids, preserved_ids) = summary_state
         with self._core.db._connect() as cur:
-            rows_raw = cur.execute(
+            summary_row = cur.execute(
                 "SELECT rowid, id, ts, role, content, metadata, session_id "
-                "FROM messages "
-                "WHERE session_id = ? AND rowid <= ? "
-                "ORDER BY rowid ASC",
-                [session_id, summary_sequence + limit],
+                "FROM messages WHERE session_id = ? AND rowid = ?",
+                [session_id, summary_sequence],
+            ).fetchone()
+            # Newest-first, but only rows AFTER the summary: this keeps the
+            # "many newer rows" case bounded while never excluding the newest
+            # messages (issue #122).
+            tail_rows_raw = cur.execute(
+                "SELECT rowid, id, ts, role, content, metadata, session_id "
+                "FROM messages WHERE session_id = ? AND rowid > ? "
+                "ORDER BY rowid DESC LIMIT ?",
+                [session_id, summary_sequence, max(limit * 4, limit + 32)],
             ).fetchall()
+            # A message the summary explicitly preserved may sit at or before
+            # the summary rowid (equal timestamps order by insertion, not id);
+            # fetch those by id so the retained filter can still include them.
+            preserved_rows_raw = []
+            missing_preserved = [
+                pid for pid in preserved_ids if pid not in {r[1] for r in tail_rows_raw}
+            ]
+            if missing_preserved:
+                placeholders = ",".join("?" * len(missing_preserved))
+                preserved_rows_raw = cur.execute(
+                    "SELECT rowid, id, ts, role, content, metadata, session_id "
+                    f"FROM messages WHERE session_id = ? AND id IN ({placeholders})",
+                    [session_id, *missing_preserved],
+                ).fetchall()
+        if summary_row is None:
+            return []
+        # One ordered set: tail + explicitly preserved + the summary itself,
+        # in insertion order (equal timestamps order by rowid, not by id).
+        merged = {int(r[0]): r for r in tail_rows_raw}
+        for r in preserved_rows_raw:
+            merged[int(r[0])] = r
+        merged[int(summary_row[0])] = summary_row
+        rows_raw = [merged[rowid] for rowid in sorted(merged)]
         rows = [
             _StoredMessage(
                 sequence=int(r[0]),
@@ -1257,6 +1311,9 @@ class MessageStore:
         due to the _patch_coremem_for_integer_pk patch that omits id
         from INSERT statements).
         """
+        # Collect vector ids BEFORE the rows go (#123): after the delete the
+        # fetch returns nothing, so the vectors would be orphaned.
+        workspace_vector_ids = self._collect_vector_ids({"workspace_id": workspace_id})
         with self._core.db._connect() as cur:
             if self._generated_columns:
                 cur.execute(
@@ -1274,23 +1331,63 @@ class MessageStore:
                 " AND json_extract(metadata, '$.workspace_id') = ?",
                 [workspace_id],
             )
-        if self._core.db._chroma is not None:
-            try:
-                memories = self._core.fetch(limit=10000, metadata={"workspace_id": workspace_id})
-                ids = [m.id for m in memories if m.id != "None"]
-                if ids:
-                    self._core.db._chroma.delete(
-                        collection_name="messages_content",
-                        ids=ids,
-                    )
-            except Exception:
-                pass
+        self._purge_vectors(workspace_vector_ids)
         try:
             self._core.db.sync_duckdb_table("messages")
         except Exception:
             pass
         self._invalidate_summary_cache()
         return cast(int, count)
+
+    def _index_message_row(self, message_id: str, session_id: str) -> bool:
+        """Upsert an already-stored message row into the vector index (#124).
+
+        persist_run writes rows with raw INSERTs (transactional ordering and an
+        explicit id), which bypassed CoreMem's embedding step: after a normal
+        turn SQLite held the answer while messages_content held only the
+        question, so recall could never return it.
+
+        This is INDEX ONLY - it must not insert a second message row (calling
+        CoreMem's ingest here would duplicate the message). It embeds the
+        stored content with CoreMem's embedder and upserts it into the same
+        collection the purge path uses, keyed by the message id.
+
+        Best-effort: an unavailable embedding model or collection must never
+        fail a persisted run.
+        """
+        try:
+            with self._core.db._connect() as cur:
+                row = cur.execute(
+                    "SELECT role, content, metadata FROM messages WHERE id = ?",
+                    [message_id],
+                ).fetchone()
+            if row is None:
+                return False
+            client = getattr(self._core.db, "_chroma", None)
+            if client is None:
+                return False
+            from coremem.core import _batch_embed_texts
+
+            content = str(row[1] or "")
+            if not content.strip():
+                return False
+            embedding = _batch_embed_texts([content])[0]
+            collection = client.get_collection("messages_content")
+            collection.upsert(
+                ids=[message_id],
+                documents=[content],
+                embeddings=[embedding],
+                metadatas=[
+                    {
+                        "role": str(row[0] or ""),
+                        "session_id": str(session_id or ""),
+                        "source": "message",
+                    }
+                ],
+            )
+            return True
+        except Exception:
+            return False
 
     def persist_run(
         self,
@@ -1395,12 +1492,28 @@ class MessageStore:
                 )
 
                 cur.execute("COMMIT")
+
+                # Vector index the final answer (#124). persist_run writes rows
+                # with raw INSERTs for transactional ordering and an explicit
+                # id, which bypassed CoreMem's journal+embedding step: after a
+                # normal turn, SQLite had the answer while messages_content had
+                # only the question, so recall could never return it.
+                #
+                # Decision: index the ANSWER only. Audit records and reasoning
+                # rows carry include_in_model_context: false and are not part
+                # of what recall should surface. Indexing is best-effort - it
+                # must never fail a persisted run.
+                self._index_message_row(answer_mid, session_id)
                 return answer_mid
             except Exception:
                 cur.execute("ROLLBACK")
                 raise
 
     def clear(self) -> None:
+        # Purge vectors too (#123): CoreMem.clear() only issues
+        # DELETE FROM messages, so the vector collection kept every deleted
+        # message's document and recall could still return it.
+        self._purge_vectors(self._collect_vector_ids({}))
         self._core.clear()
         self._invalidate_summary_cache()
 
@@ -1536,6 +1649,38 @@ class MessageStore:
             "metadata": metadata,
         }
 
+    def _collect_vector_ids(self, metadata_filter: dict[str, Any]) -> list[str]:
+        """Ids to purge from the vector store BEFORE rows are deleted.
+
+        #123: the delete paths removed SQLite rows first and then asked
+        CoreMem for the ids, so the fetch was always empty; and the purge
+        called ``client.delete(...)`` on a chromadb Client, which has no such
+        method (the AttributeError was swallowed), so vectors survived every
+        session/workspace/memory deletion.
+        """
+        try:
+            memories = self._core.fetch(limit=10000, metadata=metadata_filter)
+        except Exception:
+            return []
+        ids: list[str] = []
+        for memory in memories or []:
+            identifier = str(getattr(memory, "id", "") or "")
+            if identifier and identifier != "None" and identifier not in ids:
+                ids.append(identifier)
+        return ids
+
+    def _purge_vectors(self, ids: list[str]) -> None:
+        """Delete vector documents through the COLLECTION API."""
+        client = getattr(self._core.db, "_chroma", None)
+        if client is None or not ids:
+            return
+        try:
+            collection = client.get_collection("messages_content")
+            collection.delete(ids=ids)
+        except Exception:
+            # Never let vector cleanup break the deletion that already happened.
+            pass
+
     def delete_session(self, session_id: str) -> int:
         """Delete all messages in a specific chat session.
 
@@ -1544,6 +1689,8 @@ class MessageStore:
         sessions no longer surface via memory/hybrid recall.
         """
         try:
+            # Collect vector ids BEFORE the rows go (#123).
+            session_vector_ids = self._collect_vector_ids({"session_id": session_id})
             with self._core.db._connect() as cur:
                 cur.execute(
                     "DELETE FROM messages WHERE session_id = ?",
@@ -1555,17 +1702,7 @@ class MessageStore:
                     " AND json_extract(metadata, '$.session_id') = ?",
                     [session_id],
                 )
-            if self._core.db._chroma is not None:
-                try:
-                    memories = self._core.fetch(limit=10000, metadata={"session_id": session_id})
-                    ids = [m.id for m in memories if m.id != "None"]
-                    if ids:
-                        self._core.db._chroma.delete(
-                            collection_name="messages_content",
-                            ids=ids,
-                        )
-                except Exception:
-                    pass
+            self._purge_vectors(session_vector_ids)
             try:
                 self._core.db.sync_duckdb_table("messages")
             except Exception:

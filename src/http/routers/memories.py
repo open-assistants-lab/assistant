@@ -64,6 +64,11 @@ async def clear_memories(
 ) -> dict[str, Any]:
     """Delete all messages for the user."""
     user_id = resolve_user_id(request, user_id)
-    core = _get_core(user_id, workspace_id)
-    core.clear()
+    # Go through the MessageStore contract (issue #125): core.clear() left the
+    # store's summary cache pointing at a deleted rowid, and the next context
+    # load raised StopIteration on it.
+    from src.storage.messages import aget_message_store
+
+    store = await aget_message_store(user_id)
+    store.clear()
     return {"status": "cleared", "user_id": user_id, "workspace_id": workspace_id}
