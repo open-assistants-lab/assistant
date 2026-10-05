@@ -620,6 +620,11 @@ async def subagent_instruct(
     """
     coordinator = get_coordinator(user_id, workspace_id)
 
+    # #110: route through coordinator.instruct, which ALSO fills the live
+    # SubagentContext queue. The tool used to write only the DB column, and
+    # nothing reads that column back into a running loop, so the tool kept
+    # reporting success while the child never received the instruction.
+
     async def _instruct() -> bool | None:
         db = await coordinator._get_db()
         row = await db.get_task(task_id)
@@ -627,8 +632,7 @@ async def subagent_instruct(
             return None
         if row.get("status") not in ("pending", "running"):
             return None
-        ok = await db.add_instruction(task_id, message)
-        return ok
+        return await coordinator.instruct(task_id, message)
 
     result = await _instruct()
 

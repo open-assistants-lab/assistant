@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from src.app_logging import get_logger
 from src.sdk.subagent_models import SubagentResult
 
 CompletionCallback = Callable[["SubagentCompletion"], Awaitable[None] | None]
@@ -52,9 +53,17 @@ class SubagentCompletion:
         }
 
 
+_logger = get_logger()
+
+
 class SubagentCompletionBus:
     def __init__(self) -> None:
         self._subscribers: list[tuple[str | None, str | None, CompletionCallback]] = []
+        # Issue #114: (task_id, id(callback)) records of successful deliveries,
+        # so a retry after a failed subscriber cannot redeliver to the healthy
+        # ones. Bounded: when full, the oldest half is dropped (replay then
+        # redelivers once, as today, instead of growing forever).
+        self._delivered: dict[tuple[str, int], None] = {}
 
     def subscribe(
         self,
@@ -74,17 +83,43 @@ class SubagentCompletionBus:
         return _unsubscribe
 
     async def publish(self, event: SubagentCompletion) -> bool:
+        """Deliver to every matching subscriber.
+
+        One callback's exception neither aborts the others (#114) nor marks
+        the event delivered for them: the drain keeps the row retryable, and
+        this ledger makes the retry skip the subscribers that already got it,
+        so the healthy subscriber is not redelivered the same completion.
+        """
         delivered = False
+        failed = False
         for user_id, session_id, callback in list(self._subscribers):
             if user_id is not None and user_id != event.user_id:
                 continue
             if session_id is not None and session_id != event.session_id:
                 continue
-            result = callback(event)
-            if inspect.isawaitable(result):
-                await result
+            key = (event.task_id, id(callback))
+            if key in self._delivered:
+                delivered = True
+                continue
+            try:
+                result = callback(event)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:
+                failed = True
+                _logger.warning(
+                    "completion.subscriber_failed",
+                    {"task_id": event.task_id, "error": str(exc)},
+                )
+                continue
             delivered = True
-        return delivered
+            self._delivered[key] = None
+            if len(self._delivered) > 4096:
+                half = len(self._delivered) // 2
+                for stale_key in list(self._delivered)[:half]:
+                    self._delivered.pop(stale_key, None)
+        return delivered and not failed
+
 
 
 completion_bus = SubagentCompletionBus()
