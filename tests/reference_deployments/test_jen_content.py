@@ -38,7 +38,7 @@ def test_write_requires_explicit_approval():
 def test_no_customer_endpoints_or_data():
     assert PACKAGE.exists()
     for p in PACKAGE.rglob("*"):
-        if p.is_file():
+        if p.is_file() and "__pycache__" not in p.parts:
             text = p.read_text()
             assert "gongchatea.com.au" not in text
             assert "host.docker.internal" not in text
