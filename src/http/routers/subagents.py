@@ -326,6 +326,13 @@ async def update_subagent(
 
     candidate_data = current.model_dump()
     candidate_data.update({k: v for k, v in update_data.items() if v is not None})
+    # #113: the API field is the schema dict; AgentProfile.output_schema is a
+    # pointer to a companion file. The dict was fed to the str field, so every
+    # PATCH with a valid schema 422'd and the schema could never be set.
+    if "output_schema" in update_data and update_data["output_schema"] is not None:
+        candidate_data["output_schema"] = None
+        candidate_data["output_schema_def"] = update_data["output_schema"]
+        update_data["output_schema_def"] = update_data.pop("output_schema")
     try:
         candidate = AgentProfile(**candidate_data)
     except ValidationError as e:

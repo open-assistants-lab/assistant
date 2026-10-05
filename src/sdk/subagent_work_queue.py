@@ -672,7 +672,9 @@ class SubagentWorkQueueDB:
         await db.commit()
         return cursor.rowcount > 0
 
-    async def request_cancel_active_tasks_for_agent(self, agent_name: str) -> int:
+    async def request_cancel_active_tasks_for_agent(
+        self, agent_name: str, *, return_ids: bool = False
+    ) -> int | list[str]:
         db = await self._get_db()
         now = _now()
         error = "cancelled before start"
@@ -717,7 +719,8 @@ class SubagentWorkQueueDB:
         active_cursor = await db.execute(
             """UPDATE work_queue
             SET cancel_requested = 1, status = ?, updated_at = ?
-            WHERE user_id = ? AND agent_name = ? AND status IN (?, ?)""",
+            WHERE user_id = ? AND agent_name = ? AND status IN (?, ?)
+            RETURNING id""",
             (
                 TaskStatus.CANCELLING.value,
                 now,
@@ -727,8 +730,11 @@ class SubagentWorkQueueDB:
                 TaskStatus.CANCELLING.value,
             ),
         )
+        active_ids = [row["id"] for row in await active_cursor.fetchall()]
         await db.commit()
-        return pending_count + active_cursor.rowcount
+        if return_ids:
+            return pending_ids + active_ids
+        return pending_count + len(active_ids)
 
     async def is_cancel_requested(self, task_id: str) -> bool:
         row = await self.get_task(task_id)

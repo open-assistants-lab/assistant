@@ -277,16 +277,21 @@ def _extract_final_output(messages: list[Any]) -> str:
 
 
 def _extract_output(messages: list[Any], max_chars: int = 2000) -> tuple[str, bool]:
-    output = ""
+    """The subagent's answer: the LAST non-empty assistant message.
+
+    Concatenating every assistant message returned narration AND older
+    narration replaced the accumulated final answer when the cap hit
+    (issue #112): messages [user, 'x'*1990, 'FINAL ANSWER'] returned a slice
+    of the filler and lost the answer entirely.
+    """
     for msg in reversed(messages):
-        if hasattr(msg, "role") and msg.role == "assistant" and msg.content:
-            content = msg.content
-            if isinstance(content, str) and content.strip():
-                if len(output) + len(content) > max_chars:
-                    output = content[:max_chars - len(output)] + "..."
-                    return output, True
-                output = content + "\n" + output
-    return output.strip(), False
+        if not (hasattr(msg, "role") and msg.role == "assistant" and msg.content):
+            continue
+        content = msg.content
+        if isinstance(content, str) and content.strip():
+            truncated = len(content) > max_chars
+            return (content[:max_chars] if truncated else content), truncated
+    return "", False
 
 
 _AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -668,8 +673,10 @@ class SubagentCoordinator:
         failed — the caller must not treat every return as success.
 
         Like invoke() but with agent-def validation and full middleware stack.
-        Unlike start(), this blocks until the subagent completes.
-        No claim_task or heartbeat needed — runs in-process.
+        Unlike start(), this blocks until the subagent completes. The task is
+        claimed (with an owner and heartbeat, issue #116): an unclaimed row
+        stayed PENDING for the whole run - invisible to status=running and,
+        after a crash, unsweepable because recovery only touches RUNNING rows.
 
         The effective timeout is min(timeout_seconds, profile.timeout_seconds).
         """
@@ -724,6 +731,17 @@ class SubagentCoordinator:
         task_id = await db.insert_task(
             agent_name, task, profile, parent_id, launch_plan=plan.to_persisted_dict()
         )
+        # Claim before running (#116): with an owner and heartbeat the run is
+        # visible as RUNNING while it executes and sweepable after a crash.
+        worker_id = f"{self.user_id}:{self.workspace_id}:{id(self)}"
+        if not await db.claim_task(task_id, worker_id):
+            # Nothing was registered yet (claim precedes ctx registration).
+            return ToolResult(
+                content="The task was cancelled before it started.",
+                structured_content={ "status": "cancelled", "task_id": task_id, "executed": False },
+                is_error=True,
+            )
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop(task_id, worker_id, db))
 
         ctx = SubagentContext(on_progress=self._make_progress_cb(task_id))
         await self._register_active_context(task_id, db, ctx)
@@ -809,6 +827,9 @@ class SubagentCoordinator:
             return ToolResult(content=f"Error: {type(e).__name__}: {e}", is_error=True)
         finally:
             _active.pop(task_id, None)
+            heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat_task
 
     async def start(
         self,
@@ -958,6 +979,11 @@ class SubagentCoordinator:
 
         row = await db.get_task(task_id)
         if row is None:
+            # Claim succeeded but the row vanished (deleted mid-launch); the
+            # context registered below would leak, so pop it (#115).
+            from src.sdk.coordinator import _active as _in_process
+
+            _in_process.pop(task_id, None)
             return
 
         profile = AgentProfile(**json.loads(row.get("config") or "{}"))
@@ -1077,6 +1103,12 @@ class SubagentCoordinator:
                     task_id, profile.name, TaskStatus.CANCELLED.value, None, "cancelled", parent_session_id
                 )
         finally:
+            # #115: _run_job registered this task's context as live; every
+            # exit path must release it, or the id stays in _active for the
+            # life of the process and recovery treats it as alive forever.
+            from src.sdk.coordinator import _active as _in_process
+
+            _in_process.pop(task_id, None)
             heartbeat_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat_task
@@ -1300,11 +1332,23 @@ class SubagentCoordinator:
         return await db.add_instruction(task_id, message)
 
     async def delete(self, name: str) -> bool:
+        # #111: deleting a subagent must STOP its running tasks the way
+        # cancel() does - the DB flag alone is never polled by the loop, whose
+        # cancellation check is the context cancel_event.
+        from src.sdk.coordinator import _active
+
         profile = self.load_def(name)
         if profile is None:
             return False
         db = await self._get_db()
-        await db.request_cancel_active_tasks_for_agent(name)
+        affected = await db.request_cancel_active_tasks_for_agent(name, return_ids=True)
+        for task_id in (affected if isinstance(affected, list) else []):
+            ctx = _active.get(task_id)
+            if ctx is not None:
+                ctx.cancel_event.set()
+                await ctx.instructions.put(
+                    "This subagent was deleted; wrap up immediately and stop."
+                )
         agent_path = _agent_dir(self.base_path, name)
         if agent_path.exists():
             shutil.rmtree(agent_path)
