@@ -190,3 +190,54 @@ Checks are `package`, `configuration`, `profile`, `tools`, `fixture_state`, `run
 ## Handoff
 
 Review the plan before implementation. Recommend native execution for this small, tightly coupled example, with independent review before integration; subagent-driven execution remains available. No implementation or container startup occurs merely because this plan was written.
+
+## Native execution record
+
+Implemented on `feat/jen-reference` in `.worktrees/jen-reference`, based on
+`93fe49dd`, with the reviewed uncommitted contract/plan/inventory explicitly
+copied and committed into that isolated worktree. No `src/`, existing test,
+lockfile, customer-source or other worktree edits. Six targeted task commits,
+with RED/GREEN evidence in the local ignored execution ledger.
+
+Final checks:
+- Reference acceptance: **69 passed**.
+- Existing governance/custom-tool/profile regressions plus reference tests:
+  **277 passed**, one existing Pydantic deprecation warning.
+- Ruff scoped to new example/tests: passed.
+- Mypy: passed for four new Python modules with `--explicit-package-bases
+  --namespace-packages --follow-imports=silent` (namespace layout otherwise
+  reports the fixture module under two names).
+- Compose `config --quiet`: passed for a temporary synthetic instance and
+  synthetic digest string; no resolved configuration/key output. This checks
+  syntax only, not whether an image exists or starts.
+- Full unfiltered pytest was attempted with an ephemeral external-DNS/TCP
+  guard, isolated data root, cleared credential env and a synthetic `.env`
+  shadow to prevent parent credentials loading. **Timed out after 600 seconds;
+  incomplete, not passed.** Progress showed no failures before timeout but
+  cannot certify the remaining suite. The nearby collected test
+  `tests/api/test_provider_options.py::test_provider_options_reach_provider_chat`
+  passed alone under the same guard (16.46s); a hanging-test diagnosis is not
+  established. Temporary repository `.env` removed.
+- Docker startup/two-runtime/restart smoke: **not executed**; no real cached
+  digest supplied. No login, pull, build, inference, Telegram or production call.
+
+Author self-review found/fixed: explicit pipefail required for failed CLI writes
+  to receive failed governance outcomes; malformed metadata/catalog must return
+  bounded diagnostics; restore acceptance must consume the recipe-generated
+  denied policy, not substitute a hardcoded test policy. The `/tools` API also
+  lists native entries: readiness compares enabled custom entries, not its entire
+  catalog. Denial uses the engine's `refused` outcome. All are documented without
+  changing the engine or weakening mutation/approval assertions.
+
+Recovery acceptance preserves real proposal records, fixture revisions and a
+saved JSON transcript artifact; it does **not** claim full MessageStore or
+production history recovery. Instance preparation supports the fixed package
+files as they were added in dependency order; the completed readiness gate
+requires immutable hashes and fixture state. No universal compiler/resolver,
+backup daemon or fleet control plane was introduced.
+
+**Integration remains gated:** fresh-context independent review was unavailable
+(no reviewer-dispatch tool), so author self-review is not represented as one.
+Main advanced to `77995db8` during execution; revalidate on the reviewed merged
+bug-fix baseline and complete broader verification before merging. No merge,
+rebase, production deployment or existing worktree cleanup was performed.

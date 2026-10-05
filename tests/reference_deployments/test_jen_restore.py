@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from examples.jen_reference.fixture import read_store, set_pause
-from examples.jen_reference.instance import validate_instance
+from examples.jen_reference.instance import read_configuration, validate_instance
 from src.config import reload_settings
 from src.sdk.governance import GovernanceService
 from src.sdk.tools_custom import get_custom_tools
@@ -48,7 +48,9 @@ async def test_stopped_restore_preserves_state_pending_and_saved_history(harness
     assert not (dest.root / "data.initial").exists()
     # The recipe changes both installed config and the execution-time policy.
     monkeypatch.setenv("DEPLOYMENT_DATA_ROOT", str(dest.data))
-    monkeypatch.setenv("GOVERNANCE_PERMISSIONS", '{"tools":{"fixture_store_pause":"deny"}}')
+    restored_policy = read_configuration(dest)["GOVERNANCE_PERMISSIONS"]
+    assert json.loads(restored_policy)["tools"]["fixture_store_pause"] == "deny"
+    monkeypatch.setenv("GOVERNANCE_PERMISSIONS", restored_policy)
     reload_settings()
     result = await other.execute_approved(USER, ids[0], registry=get_custom_tools(USER))
     assert result["outcome"] == "refused"

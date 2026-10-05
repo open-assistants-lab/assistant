@@ -63,7 +63,7 @@ def test_authenticated_health_and_matching_catalog(instance, monkeypatch):
     assert key not in json.dumps(dataclasses.asdict(result))
 
 
-@pytest.mark.parametrize("status,data", [(200, {"tools": []}), (302, {}), (401, {}), (200, {"wrong": "shape"})])
+@pytest.mark.parametrize("status,data", [(200, {"tools": []}), (302, {}), (401, {}), (200, {"wrong": "shape"}), (200, {"tools": [None]}), (200, {"tools": {"wrong": "shape"}})])
 def test_health_alone_or_redirect_never_ready(instance, monkeypatch, status, data):
     def handle(request):
         if request.url.path == "/health":

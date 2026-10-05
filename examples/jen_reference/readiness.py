@@ -6,6 +6,7 @@ import ipaddress
 import json
 import sqlite3
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
@@ -84,8 +85,10 @@ def check_readiness(paths: InstancePaths, *, runtime_url: str | None = None) -> 
                         catalog = client.get(base + "/tools")
                         if catalog.status_code == 200:
                             data = catalog.json()["tools"]
-                            names = {t["name"] for t in data if t.get("source") == "custom" and t.get("enabled") is True}
-                            checks["runtime"] = "ok" if names == EXPECTED_TOOLS else "catalog_mismatch"
+                            checks["runtime"] = "catalog_mismatch"
+                            if isinstance(data, list) and all(isinstance(t, dict) for t in data):
+                                names = {t["name"] for t in data if t.get("source") == "custom" and t.get("enabled") is True}
+                                checks["runtime"] = "ok" if names == EXPECTED_TOOLS else "catalog_mismatch"
             except (httpx.HTTPError, ValueError, KeyError, TypeError):
                 pass
     return ReadinessResult(all(v == "ok" for v in checks.values()), checks)
@@ -93,7 +96,7 @@ def check_readiness(paths: InstancePaths, *, runtime_url: str | None = None) -> 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--instance", type=__import__("pathlib").Path, required=True)
+    parser.add_argument("--instance", type=Path, required=True)
     parser.add_argument("--runtime-url")
     args = parser.parse_args()
     result = check_readiness(InstancePaths.at(args.instance), runtime_url=args.runtime_url)
