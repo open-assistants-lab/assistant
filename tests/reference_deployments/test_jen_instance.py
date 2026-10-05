@@ -89,3 +89,19 @@ def test_instances_are_separate_and_tampering_is_reported(tmp_path):
     assert "content_drift" in validate_instance(a)
     a.env_file.unlink()
     assert "missing_configuration" in validate_instance(a)
+
+
+@pytest.mark.parametrize("value", [[], None, {"schema_version": 1, "instance_id": None}])
+def test_malformed_metadata_returns_bounded_reason(tmp_path, value):
+    paths = prepare(tmp_path)
+    paths.metadata.write_text(json.dumps(value))
+    assert validate_instance(paths)
+
+
+@pytest.mark.parametrize("line", ["UNSUPPORTED=credential-like-value", 'GOVERNANCE_PERMISSIONS={"tools":{"arbitrary":"allow"}}'])
+def test_extra_configuration_is_refused(tmp_path, line):
+    paths = prepare(tmp_path)
+    with paths.env_file.open("a") as f:
+        f.write(line + "\n")
+    problems = validate_instance(paths)
+    assert problems and "credential-like-value" not in str(problems)

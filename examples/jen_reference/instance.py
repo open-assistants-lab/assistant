@@ -23,7 +23,7 @@ ROOT_CONTENT = ("config.yaml", "compose.yaml")
 REQUIRED = ("PROFILE.md", "domain.json", "Tools/fixture_store_read/TOOL.md",
             "Tools/fixture_store_pause/TOOL.md", "config.yaml", ".env.example")
 ENV_KEYS = {"API_KEY", "ASSISTANT_IMAGE", "INSTANCE_PORT", "SOLO_BYPASS",
-            "LANGFUSE_ENABLED", "SCHEDULING_SUBAGENT_ENABLED"}
+            "LANGFUSE_ENABLED", "SCHEDULING_SUBAGENT_ENABLED", "GOVERNANCE_PERMISSIONS"}
 
 
 @dataclass(frozen=True)
@@ -66,6 +66,14 @@ def read_configuration(paths: InstancePaths) -> dict[str, str]:
         raise ValueError("invalid_port")
     if values.get("LANGFUSE_ENABLED") != "false" or values.get("SCHEDULING_SUBAGENT_ENABLED") != "false":
         raise ValueError("unsafe_optional_services")
+    if "GOVERNANCE_PERMISSIONS" in values:
+        try:
+            policy = json.loads(values["GOVERNANCE_PERMISSIONS"])
+            if (set(policy) != {"tools"} or set(policy["tools"]) != {"fixture_store_read", "fixture_store_pause"}
+                    or any(v not in {"allow", "ask", "deny"} for v in policy["tools"].values())):
+                raise ValueError("invalid_policy")
+        except (ValueError, TypeError, AttributeError):
+            raise ValueError("invalid_policy") from None
     return values
 
 
@@ -139,6 +147,8 @@ def validate_instance(paths: InstancePaths) -> list[str]:
         problems.append("missing_configuration")
     try:
         meta = json.loads(paths.metadata.read_text())
+        if not isinstance(meta, dict):
+            raise ValueError("invalid_metadata")
         if (meta.get("schema_version") != 1 or meta.get("package_version") != PACKAGE_VERSION
                 or not ID_RE.fullmatch(meta.get("instance_id", ""))):
             problems.append("invalid_metadata")

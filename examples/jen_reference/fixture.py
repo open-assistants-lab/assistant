@@ -19,7 +19,7 @@ def initialise_state(db_path: Path, domain_path: Path) -> None:
                          [(s["id"], s["slug"], int(s["paused"]), s["revision"]) for s in stores])
 
 
-def _result(row: tuple, outcome: str) -> dict[str, object]:
+def _result(row: tuple[str, str, int, int], outcome: str) -> dict[str, object]:
     return {"ok": True, "outcome": outcome, "store_id": row[0], "paused": bool(row[2]), "revision": row[3]}
 
 
