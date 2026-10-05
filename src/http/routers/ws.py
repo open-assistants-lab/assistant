@@ -844,25 +844,32 @@ async def ws_conversation(websocket: WebSocket) -> None:
             import time
             t0 = time.monotonic()
 
-            t1 = time.monotonic()
+            import src.sdk.messages as _sdk_messages
 
-            _persist_ws_conversation_message(conversation, "user", content, session_id=session_id)
-            t2 = time.monotonic()
-
+            # RunService owns current-turn persistence: _run_stream stores the
+            # user prompt and appends it to the loaded history. The handler
+            # used to pre-write the same row first, so one user message was
+            # persisted twice AND the prompt reached the model twice - once
+            # inside the history load, once appended by RunService (#139).
             recent_messages = conversation.get_messages_with_summary(
                 session_id=session_id, limit=50
             )
             t3 = time.monotonic()
 
             sdk_messages = _messages_from_conversation(recent_messages)
+            # The current prompt is not in storage yet; carry it so the
+            # downstream prompt read (sdk_messages[-1].content) is the user's
+            # message and not the last historical turn.
+            if not sdk_messages or str(sdk_messages[-1].content) != content:
+                sdk_messages.append(_sdk_messages.Message.user(content))
 
             t4 = time.monotonic()
             logger.info(
                 "ws.pre_loop_timing",
                 {
-                    "get_store": f"{t1 - t0:.3f}s",
-                    "add_msg": f"{t2 - t1:.3f}s",
-                    "get_msgs": f"{t3 - t2:.3f}s",
+                    # The pre-write stage is gone: RunService owns the prompt
+                    # row, so only load and convert remain measurable here.
+                    "get_msgs": f"{t3 - t0:.3f}s",
                     "convert": f"{t4 - t3:.3f}s",
                     "total": f"{t4 - t0:.3f}s",
                     "user_id": user_id,
