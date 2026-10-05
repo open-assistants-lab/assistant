@@ -20,8 +20,7 @@ CONTENT = (
     "Tools/fixture_store_read/TOOL.md", "Tools/fixture_store_pause/TOOL.md",
 )
 ROOT_CONTENT = ("config.yaml", "compose.yaml")
-REQUIRED = ("PROFILE.md", "domain.json", "Tools/fixture_store_read/TOOL.md",
-            "Tools/fixture_store_pause/TOOL.md", "config.yaml", ".env.example")
+REQUIRED = (*CONTENT, *ROOT_CONTENT, ".env.example")
 ENV_KEYS = {"API_KEY", "ASSISTANT_IMAGE", "INSTANCE_PORT", "SOLO_BYPASS",
             "LANGFUSE_ENABLED", "SCHEDULING_SUBAGENT_ENABLED", "GOVERNANCE_PERMISSIONS"}
 
@@ -139,6 +138,9 @@ def validate_instance(paths: InstancePaths) -> list[str]:
         _safe_path(paths.root)
         if any(p.is_symlink() for p in paths.root.rglob("*")):
             return ["instance_symlink"]
+    except ValueError:
+        return ["instance_symlink"]
+    try:
         config = read_configuration(paths)
         if paths.env_file.stat().st_mode & 0o077:
             problems.append("insecure_configuration_permissions")
@@ -155,7 +157,7 @@ def validate_instance(paths: InstancePaths) -> list[str]:
         if config and config["ASSISTANT_IMAGE"] != meta.get("engine_image"):
             problems.append("engine_image_mismatch")
         hashes = meta["content_hashes"]
-        required_paths = {"data/" + f for f in REQUIRED if f not in {"config.yaml", ".env.example"}}
+        required_paths = {*("data/" + f for f in CONTENT), *ROOT_CONTENT}
         if not isinstance(hashes, dict) or not required_paths.issubset(hashes):
             problems.append("missing_package_content")
         else:

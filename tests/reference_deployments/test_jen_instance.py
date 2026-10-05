@@ -105,3 +105,36 @@ def test_extra_configuration_is_refused(tmp_path, line):
         f.write(line + "\n")
     problems = validate_instance(paths)
     assert problems and "credential-like-value" not in str(problems)
+
+
+@pytest.mark.parametrize("name", ["fixture.py", "compose.yaml"])
+def test_incomplete_package_refused_before_destination_creation(tmp_path, name):
+    import shutil
+    package = tmp_path / "package"
+    shutil.copytree(PACKAGE, package)
+    (package / name).unlink()
+    with pytest.raises(ValueError, match="missing_package_content"):
+        prepare_instance(package, tmp_path / "destination", instance_id="one",
+                         owner_label="fixture", engine_image=IMAGE)
+    assert not (tmp_path / "destination").exists()
+
+
+@pytest.mark.parametrize("name", ["data/fixture.py", "config.yaml", "compose.yaml"])
+def test_manifest_cannot_omit_required_immutable_content(tmp_path, name):
+    paths = prepare(tmp_path)
+    meta = json.loads(paths.metadata.read_text())
+    del meta["content_hashes"][name]
+    paths.metadata.write_text(json.dumps(meta))
+    (paths.root / name).unlink()
+    assert "missing_package_content" in validate_instance(paths)
+
+
+def test_validate_root_symlink_never_reads_target(tmp_path, monkeypatch):
+    from examples.jen_reference.instance import InstancePaths
+    paths = prepare(tmp_path)
+    link = tmp_path / "link"
+    link.symlink_to(paths.root, target_is_directory=True)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("symlink target must never be read")
+    monkeypatch.setattr(Path, "read_text", forbidden)
+    assert validate_instance(InstancePaths.at(link)) == ["instance_symlink"]

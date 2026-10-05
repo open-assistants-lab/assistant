@@ -9,7 +9,7 @@ import yaml
 
 from examples.jen_reference import readiness
 from examples.jen_reference.fixture import initialise_state
-from examples.jen_reference.instance import prepare_instance
+from examples.jen_reference.instance import InstancePaths, prepare_instance
 
 PACKAGE = Path(__file__).resolve().parents[2] / "examples/jen_reference"
 IMAGE = "example.invalid/assistant@sha256:" + "a" * 64
@@ -98,6 +98,16 @@ def test_image_or_package_mismatch(instance, field, value):
     meta[field] = value
     instance.metadata.write_text(json.dumps(meta))
     assert readiness.check_readiness(instance).checks["package"] != "ok"
+
+
+def test_readiness_symlink_never_reads_target(instance, tmp_path, monkeypatch):
+    link = tmp_path / "link"
+    link.symlink_to(instance.root, target_is_directory=True)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("symlink target must never be read")
+    monkeypatch.setattr(Path, "read_text", forbidden)
+    result = readiness.check_readiness(InstancePaths.at(link))
+    assert not result.ready
 
 
 def test_compose_offline_and_scoped():

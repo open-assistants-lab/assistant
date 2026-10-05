@@ -42,9 +42,12 @@ def _loopback_url(url: str) -> str | None:
 
 
 def check_readiness(paths: InstancePaths, *, runtime_url: str | None = None) -> ReadinessResult:
-    checks = {"package": "ok" if not validate_instance(paths) else "invalid",
+    problems = validate_instance(paths)
+    checks = {"package": "ok" if not problems else "invalid",
               "configuration": "invalid", "profile": "invalid", "tools": "invalid",
               "fixture_state": "invalid", "runtime": "not_checked"}
+    if "instance_symlink" in problems:
+        return ReadinessResult(False, checks)
     config = {}
     try:
         config = read_configuration(paths)

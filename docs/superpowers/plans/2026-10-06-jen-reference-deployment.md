@@ -241,3 +241,48 @@ backup daemon or fleet control plane was introduced.
 Main advanced to `77995db8` during execution; revalidate on the reviewed merged
 bug-fix baseline and complete broader verification before merging. No merge,
 rebase, production deployment or existing worktree cleanup was performed.
+
+### Post-merge review and verification (supersedes the integration gate above)
+
+At the user's direction, merged onto main as `e208d119` over engine baseline
+`77995db8`, using an isolated integration tree. Only owned added paths were
+synchronized into main; the staged `src/http/routers/subagents.py` change,
+working `uv.lock` change, and unrelated dirty files were preserved. Original
+untracked authored documents were checked against their first branch commit
+and backed up before installing committed versions. No stash/reset was used.
+
+Author review reproduced seven failing cases and fixed two findings:
+1. Preparation and manifest validation now require **all** immutable fixture
+   code, profile, tools, domain, config and Compose assets. The earlier
+   development-stage tolerance for absent fixture/Compose files is removed;
+   incomplete content cannot be called a valid installed package.
+2. Symlinked roots/ancestors fail validation immediately, and readiness does
+   not read profile, state, metadata or credentials through rejected links.
+   Descendant symlinks likewise stop readiness before file reads.
+
+Verification against the merged engine plus those fixes:
+- **76 reference tests passed**, scoped Ruff passed, scoped mypy passed.
+- Full collection: **3,853 tests**. The initial unfiltered guarded run exceeded
+  the wall-clock limit after reporting exactly **3,373 passed / 27 skipped**
+  for the first 3,400 tests. Verification resumed from the last started node,
+  `tests/sdk/test_tool_search.py::TestToolReloadTool::test_reload_creates_index_if_missing`;
+  the remaining **453 passed** (3,400 deselected), in 164.84 seconds.
+- Combined ordered coverage: **3,826 passed / 27 skipped**, zero reported
+  failures; every collected test has a result across the two runs. This is
+  **split-session coverage, not a completed single-process full-suite run**,
+  and therefore does not certify cross-session-order effects in the resumed
+  suffix. No specific hanging-test defect was established.
+- Verification used isolated data roots, no inherited customer credentials,
+  a temporary synthetic `.env` shadow, blocked external Python DNS/TCP, and
+  a per-test diagnostic watchdog. These guards are temporary verification
+  tooling under `/tmp`, not production code or changed test baselines.
+- Resumed-run warnings: existing pytest collection warnings (classes with
+  constructors) and deprecated workspace/path aliases. No new lint/type errors.
+- Temporary repository `.env` was removed; no verification process in this
+  lane remains running. The other agent's b12 test process was not touched.
+
+Review was **author review**, not independently delegated review: no reviewer
+launch tool is available. Optional container startup/two-runtime/restart smoke
+remains unexecuted without an operator-supplied cached digest. Compose config-only
+validation from the earlier record passed but is not container-runtime proof.
+No production deployment, cloud inference or live customer/channel call occurred.
