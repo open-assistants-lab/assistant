@@ -1,0 +1,29 @@
+# Optional offline smoke only; use a unique --project-name per instance.
+services:
+  assistant:
+    image: ${ASSISTANT_IMAGE:?digest-pinned cached image required}
+    pull_policy: never
+    user: "1000:1000"
+    command: [/app/.venv/bin/assistant, http]
+    env_file: [.env]
+    environment:
+      DEPLOYMENT_DATA_ROOT: /app/data
+      SOLO_BYPASS: "false"
+      LANGFUSE_ENABLED: "false"
+      SCHEDULING_SUBAGENT_ENABLED: "false"
+      VERIFICATION_ENABLED: "false"
+    ports:
+      - "127.0.0.1:${INSTANCE_PORT:?instance port required}:8080"
+    networks: [fixture]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    volumes:
+      - {type: bind, source: ./data, target: /app/data}
+      - {type: bind, source: ./data/PROFILE.md, target: /app/data/PROFILE.md, read_only: true}
+      - {type: bind, source: ./data/Tools, target: /app/data/Tools, read_only: true}
+      - {type: bind, source: ./data/fixture.py, target: /app/data/fixture.py, read_only: true}
+      - {type: bind, source: ./data/domain.json, target: /app/data/domain.json, read_only: true}
+      - {type: bind, source: ./config.yaml, target: /app/config.yaml, read_only: true}
+networks:
+  fixture:
+    internal: true
