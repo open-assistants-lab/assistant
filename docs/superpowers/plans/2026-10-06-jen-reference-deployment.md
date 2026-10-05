@@ -286,3 +286,54 @@ launch tool is available. Optional container startup/two-runtime/restart smoke
 remains unexecuted without an operator-supplied cached digest. Compose config-only
 validation from the earlier record passed but is not container-runtime proof.
 No production deployment, cloud inference or live customer/channel call occurred.
+
+### Independent-review closure and single-session final verification
+
+A fresh-context Pi CLI reviewer was launched with **only the read tool**,
+no extensions/skills/context discovery, and no saved session. It reviewed the
+fixture diff and specified integration seams, without write/execution access.
+The first review identified three concrete findings; all were reproduced with
+failing tests before fixes:
+- P1: nested snapshot/restore paths could recurse and introduce generated
+  credentials into preserved input. Installer/recovery now reject equal or
+  ancestor/descendant source/package/snapshot/destination paths before writes
+  or key generation. Invalid-input tests keep recursive copying bounded while
+  checking real filesystem/checksum preservation.
+- P2: installed read-command failures were success-shaped plain strings.
+  The read TOOL.md now enables pipefail; a real installed alias read produces
+  an error ToolResult with failed outcome and no fixture mutation.
+- P2: list/scalar TOOL.md metadata escaped readiness as a TypeError. Shape and
+  string-name validation now handles scalar/list and unhashable name values
+  with stable invalid checks instead of traceback output.
+
+Fix commit: `4540aed2`. Follow-up independent inspection confirmed **all three
+findings closed, with no remaining actionable blocker or fix-induced regression
+within scope**. The review also read the exact plan/spec paths after they were
+provided explicitly. Its optional UID-switching concern was withdrawn after
+checking `src/sdk/sandbox.py`: a non-root server's child inherits its UID; root
+UID/GID switching is not attempted merely because uid_mode defaults to per_user.
+No unneeded sandbox/config alteration was made.
+
+Final verification on `4540aed2`:
+- **86 reference tests passed**; scoped Ruff and mypy passed.
+- **Single-process, unfiltered full suite: 3,836 passed, 27 skipped,
+  71 warnings in 553.15 seconds**, exit 0. This supersedes the split-session
+  coverage caveat. The same temporary network/credential/data-root guards were
+  retained, with a larger session time allowance, not altered test expectations.
+- Warnings include collection/deprecation notices and
+  PytestUnhandledThreadExceptionWarning (aiosqlite worker reporting
+  `RuntimeError: Event loop is closed`) associated with the existing
+  `tests/sdk/test_subagent_schedule_migration.py::test_migration_is_reentrant`
+  and `::test_migration_marks_the_legacy_row_as_consumed` tests. These also
+  appeared in the pre-fix single-session run and were not hidden/fixed in this
+  example-only lane. Do not describe the suite as warning-free.
+- Temporary repository `.env` removed; reviewer performed no repository writes.
+- Docker daemon check failed locally. No daemon was started, no image fetched
+  or built, and no container/runtime smoke is claimed. This remains an optional
+  unperformed environment gate, not an unresolved Python-review defect.
+
+The source/test fixes are integrated forward onto main without overwriting the
+unrelated staged subagents fix, lockfile edits or other dirty work. No customer
+integration, production deployment or real LLM/tool invocation was added to the
+fixture. The reviewer used the normal coding-agent provider only for review,
+not any assistant fixture provider.
