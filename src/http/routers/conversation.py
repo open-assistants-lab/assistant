@@ -998,6 +998,27 @@ async def message_stream(req: MessageRequest, request: Request = None, _: None =
                             ai_content_parts.append(delta)
                             yield sse_raw(data)
 
+                    elif event_type == "text_start":
+                        # #142: canonical block boundaries exist so clients can
+                        # structure the stream; WS forwards them, SSE dropped them.
+                        yield sse_raw(data)
+
+                    elif event_type == "text_end":
+                        yield sse_raw(data)
+
+                    elif event_type == "reasoning_start":
+                        yield sse_raw(data)
+
+                    elif event_type == "reasoning_end":
+                        yield sse_raw(data)
+
+                    elif event_type == "tool_input_delta":
+                        # #142: streamed tool arguments never reached SSE clients.
+                        yield sse_raw(data)
+
+                    elif event_type == "tool_input_end":
+                        yield sse_raw(data)
+
                     elif event_type == "reasoning_delta":
                         delta = event_data.get("delta", "")
                         if delta:
@@ -1064,6 +1085,11 @@ async def message_stream(req: MessageRequest, request: Request = None, _: None =
                         yield sse_raw(data)
 
                     elif event_type == "response_revision_start":
+                        # #143: a revision attempt rewrites the answer — the
+                        # collected attempt-one text must not survive into the
+                        # final SSE response alongside the new attempt.
+                        ai_content_parts.clear()
+                        reasoning_parts.clear()
                         yield sse_raw(data)
 
                     elif event_type == "context_compressed":

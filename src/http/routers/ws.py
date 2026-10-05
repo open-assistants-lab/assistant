@@ -169,14 +169,18 @@ async def _run_agent_stream(
                 tool_metadata_list.append(
                     {"tool_name": tool_name, "tool_call_id": call_id}
                 )
-                if tool_name == "skills_load":
-                    skill_load_names[call_id] = (event_data.get("args", {}) or {}).get("name", "unknown")
                 await websocket.send_json(_with_workspace(data))
 
             elif event_type == "tool_input_delta":
                 await websocket.send_json(_with_workspace(data))
 
             elif event_type == "tool_input_end":
+                args = event_data.get("arguments", {}) or {}
+                # #145: ToolStartData carries no args, so a name captured at
+                # tool_input_start was always the "unknown" fallback; the
+                # arguments arrive on ToolEndData (tool_input_end).
+                if event_data.get("tool_call_id") and args.get("name"):
+                    skill_load_names[str(event_data["tool_call_id"])] = str(args["name"])
                 await websocket.send_json(_with_workspace(data))
 
             elif event_type == "reasoning_start":
@@ -213,6 +217,15 @@ async def _run_agent_stream(
             elif event_type == "usage":
                 # Forward usage events (canonical envelope) so WS clients
                 # see token accounting like SSE clients do.
+                await websocket.send_json(_with_workspace(data))
+
+            elif event_type == "response_revision_start":
+                # #143: a new revision attempt rewrites the answer. The
+                # collected attempt-one text used to survive into the flat
+                # done response as "DraftCorrect", disagreeing with the
+                # canonical result the client and persisted history carry.
+                ai_content_parts.clear()
+                reasoning_parts.clear()
                 await websocket.send_json(_with_workspace(data))
 
             elif event_type == "context_compressed":
@@ -602,6 +615,15 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     ErrorMessage(message="Invalid JSON", code="PARSE_ERROR").model_dump()
                 )
                 continue
+            if not isinstance(data, dict):
+                # A valid-JSON non-object frame ("[]", "5") used to reach
+                # data.get(...) below and kill the whole handler (#144).
+                await websocket.send_json(
+                    ErrorMessage(
+                        message="Invalid JSON", code="PARSE_ERROR"
+                    ).model_dump()
+                )
+                continue
 
             msg = parse_client_message(data)
 
@@ -616,6 +638,28 @@ async def ws_conversation(websocket: WebSocket) -> None:
 
             if isinstance(msg, PingMessage):
                 await websocket.send_json(PongMessage().model_dump())
+                continue
+
+            if isinstance(msg, SteerMessage):
+                # A steer with no active run still matters (#140): queueing it
+                # as the next user turn (Pi-style follow-up) instead of
+                # dropping it. RunService persists it exactly once.
+                text = (msg.content or "").strip()
+                if text:
+                    await websocket.send_json(
+                        SteerAckMessage(content=text).model_dump()
+                        | {"workspace_id": workspace_id}
+                    )
+                    await control_queue.put(
+                        json.dumps(
+                            {
+                                "type": "user_message",
+                                "content": text,
+                                "user_id": user_id,
+                                "session_id": session_id,
+                            }
+                        )
+                    )
                 continue
 
             if isinstance(msg, ApproveMessage):
@@ -878,6 +922,7 @@ async def ws_conversation(websocket: WebSocket) -> None:
                 channel="ws",
             )
 
+            followup_prompts: list[str] = []
             # Resolve rubric for verification
             ws_rubric = None
             ws_settings = get_settings()
@@ -931,6 +976,8 @@ async def ws_conversation(websocket: WebSocket) -> None:
                     control_data = json.loads(raw_control)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(control_data, dict):
+                    continue
                 control_msg = parse_client_message(control_data)
                 if isinstance(control_msg, CancelMessage) or control_data.get("type") == "cancel":
                     cancel_event.set()
@@ -968,11 +1015,14 @@ async def ws_conversation(websocket: WebSocket) -> None:
                                 | {"workspace_id": workspace_id}
                             )
                         else:
+                            # No active run: the steer still matters. Queue it
+                            # as a follow-up turn instead of dropping it
+                            # (#140) — a text-only steer used to be acked and
+                            # then lost, with the old prompt re-run.
+                            followup_prompts.append(steer_text)
                             await websocket.send_json(
-                                ErrorMessage(
-                                    message="No active agent run to steer",
-                                    code="NO_ACTIVE_RUN",
-                                ).model_dump()
+                                SteerAckMessage(content=steer_text).model_dump()
+                                | {"workspace_id": workspace_id}
                             )
                     continue
                 if isinstance(control_msg, PingMessage):
@@ -1150,15 +1200,47 @@ async def ws_conversation(websocket: WebSocket) -> None:
             follow_loop = stream_loop_holder.get("loop")
             # P2-1: drain ALL pending steers — each queued steer gets its own
             # follow-up turn, not just the first.
-            while follow_loop is not None and follow_loop.has_pending_steer():
-                follow_steer = follow_loop.pop_steer()
-                if not follow_steer:
-                    break
+            pending_followup: list[str] = list(followup_prompts)
+            if deferred_control is not None and pending_container[0] is None:
+                # #141: a control frame completing in the same wait as the
+                # stream was captured but only ever consumed by the approval
+                # loop — a steer here was silently dropped.
+                try:
+                    frame = json.loads(deferred_control)
+                    if isinstance(frame, dict) and frame.get("type") == "steer":
+                        text = str(frame.get("content") or "").strip()
+                        if text:
+                            # Acknowledge now: the frame was captured but never
+                            # acked on this path (it completed in the same wait
+                            # as the stream).
+                            await websocket.send_json(
+                                SteerAckMessage(content=text).model_dump()
+                                | {"workspace_id": workspace_id}
+                            )
+                            pending_followup.append(text)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                deferred_control = None
+            if follow_loop is not None:
+                while follow_loop.has_pending_steer():
+                    follow_steer = follow_loop.pop_steer()
+                    if not follow_steer:
+                        break
+                    pending_followup.append(follow_steer)
+
+            import src.sdk.messages as _sdk_messages
+
+            for prompt in pending_followup:
                 follow_msgs = _messages_from_conversation(
                     conversation.get_messages_with_summary(
                         session_id=session_id, limit=50
                     )
                 )
+                # The steer IS the follow-up prompt (#140): the reload ends
+                # with the OLD prompt, so without carrying the steer the
+                # follow-up turn re-ran the previous instruction. RunService
+                # persists it exactly once.
+                follow_msgs.append(_sdk_messages.Message.user(prompt))
                 await _run_agent_stream(
                     websocket, user_id, follow_msgs, conversation, session_id,
                     pending_ref=pending_container, workspace_id=workspace_id,
