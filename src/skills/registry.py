@@ -5,17 +5,26 @@ run. workspace_id and workspace skill directories are accepted for compatibility
 at runtime.
 """
 
+import hashlib
 import json
 import re
 import shutil
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from src.skills.models import Skill, _is_valid_skill_name
+from src.app_logging import get_logger
+from src.skills.models import (
+    Skill,
+    _is_valid_skill_name,
+    parse_skill_file_with_diagnostics,
+)
 from src.skills.storage import SkillStorage
 from src.storage.paths import DEFAULT_USER_ID
+
+logger = get_logger()
 
 _registries: dict[str, "SkillRegistry"] = {}
 _lock = threading.Lock()
@@ -48,6 +57,43 @@ def reset_skill_registries() -> None:
     """Clear all cached registries (useful for testing)."""
     with _lock:
         _registries.clear()
+
+
+def _seed_files(item: Path) -> dict[str, str]:
+    """Relative path -> sha256 for every file the seed ships (excluding our own
+    bookkeeping sidecars)."""
+    out: dict[str, str] = {}
+    for path in item.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = str(path.relative_to(item))
+        if rel.startswith(".") or rel in (".seed-hash", ".seed-manifest.json"):
+            continue
+        try:
+            out[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            continue
+    return out
+
+
+def _write_seed_manifest(
+    dest: Path,
+    item: Path,
+    content_hash: "Callable[[Path], str] | None" = None,
+    manifest: dict[str, str] | None = None,
+) -> None:
+    manifest = manifest if manifest is not None else _seed_files(item)
+    (dest / ".seed-manifest.json").write_text(
+        json.dumps(manifest, sort_keys=True), encoding="utf-8"
+    )
+
+
+def _read_seed_manifest(path: Path) -> dict[str, str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
 
 
 class SkillRegistry:
@@ -114,37 +160,78 @@ class SkillRegistry:
         def _content_hash(path: Path) -> str:
             return hashlib.sha256(path.read_bytes()).hexdigest()
 
-        for item in system_src.iterdir():
+        seed_names: set[str] = set()
+        for item in sorted(system_src.iterdir()):
             if not item.is_dir():
                 continue
             seed_file = item / "SKILL.md"
             if not seed_file.exists():
                 continue
+            seed_names.add(item.name)
             dest = self.skills_dir / item.name
             dest_file = dest / "SKILL.md"
             sidecar = dest / ".seed-hash"
-            seed_hash = _content_hash(seed_file)
+            manifest_file = dest / ".seed-manifest.json"
 
             if not dest.exists():
                 shutil.copytree(item, dest)
-                sidecar.write_text(seed_hash, encoding="utf-8")
+                _write_seed_manifest(dest, item, _content_hash)
+                sidecar.write_text(_content_hash(seed_file), encoding="utf-8")
                 continue
 
             if not dest_file.exists():
                 continue
             if not sidecar.exists():
                 # Pre-sidecar copy: leave untouched, record current seed hash
-                sidecar.write_text(seed_hash, encoding="utf-8")
+                _write_seed_manifest(dest, item, _content_hash)
+                sidecar.write_text(_content_hash(seed_file), encoding="utf-8")
                 continue
-            if sidecar.read_text(encoding="utf-8").strip() == seed_hash:
-                continue  # already up to date
-            if _content_hash(dest_file) != sidecar.read_text(encoding="utf-8").strip():
-                # User modified their copy — never overwrite; stop trying
-                sidecar.write_text(seed_hash, encoding="utf-8")
+
+            # Per-file refresh (#91). The previous whole-directory copytree
+            # refreshed only when SKILL.md changed, so a resource-only seed
+            # change was missed, and copytree(dirs_exist_ok=True) OVERWROTE
+            # resource files the user had edited. Each seeded file is compared
+            # against the manifest recorded at seed time: unchanged upstream
+            # files are refreshed, user-modified files are kept.
+            manifest = _read_seed_manifest(manifest_file)
+            if not manifest:
+                manifest = {"SKILL.md": sidecar.read_text(encoding="utf-8").strip()}
+                _write_seed_manifest(dest, item, _content_hash, manifest)
+            refreshed = False
+            for rel, upstream_hash in _seed_files(item).items():
+                target = dest / rel
+                recorded = manifest.get(rel)
+                if target.exists() and recorded and _content_hash(target) != recorded:
+                    continue  # user edited this file; never overwrite
+                if not target.exists() or _content_hash(target) != upstream_hash:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(item / rel, target)
+                    refreshed = True
+            # Files removed upstream but still recorded: drop only if untouched.
+            for rel in list(manifest):
+                if rel in _seed_files(item):
+                    continue
+                target = dest / rel
+                if target.exists() and _content_hash(target) == manifest[rel]:
+                    target.unlink()
+                    refreshed = True
+            _write_seed_manifest(dest, item, _content_hash)
+            sidecar.write_text(_content_hash(seed_file), encoding="utf-8")
+            if refreshed:
+                logger.info("skills.seed_refreshed", {"skill": item.name})
+
+        # #99 — a seed removed upstream must not return on the next reload,
+        # which it did whenever any other tracked seed kept the fast path busy.
+        for tracked in sorted(self.skills_dir.glob("*/.seed-hash")):
+            if tracked.parent.name in seed_names:
                 continue
-            # Untouched stale copy — refresh from seed
-            shutil.copytree(item, dest, dirs_exist_ok=True)
-            sidecar.write_text(seed_hash, encoding="utf-8")
+            manifest = _read_seed_manifest(tracked.parent / ".seed-manifest.json")
+            if any(
+                (tracked.parent / rel).exists() and _content_hash(tracked.parent / rel) != h
+                for rel, h in manifest.items()
+            ):
+                continue  # user edited it since seeding; keep the skill
+            shutil.rmtree(tracked.parent)
 
         seed_marker.write_text("", encoding="utf-8")
 
@@ -326,8 +413,28 @@ class SkillRegistry:
         live skill (possibly user-customized) already occupies the name.
         """
         draft_dir = self._draft_dir(name)
-        if not (draft_dir / "SKILL.md").exists():
+        draft_file = draft_dir / "SKILL.md"
+        if not draft_file.exists():
             raise FileNotFoundError(f"no draft named {name!r}")
+        # #101 — validate BEFORE moving: an unparsable draft used to be promoted
+        # into the live skills dir, where discovery skipped it, leaving the
+        # review queue empty and a dead directory behind.
+        draft_skill, draft_diagnostics = parse_skill_file_with_diagnostics(draft_file)
+        if draft_skill is None:
+            raise ValueError(
+                f"draft {name!r} is not a loadable skill (missing/empty description, "
+                "invalid frontmatter, or unreadable file): "
+                + "; ".join(str(d.get("message", "")) for d in draft_diagnostics)
+            )
+        # #93 — a live skill can live under a DIFFERENT directory with the same
+        # logical name; check the name, not just the path.
+        logical_name = str(draft_skill.get("name") or name)
+        existing = self.storage.load_skill(logical_name) if hasattr(self, "storage") else None
+        if existing is not None:
+            raise FileExistsError(
+                f"live skill {logical_name!r} already exists at "
+                f"{existing.get('path', '')}; resolve manually (reject or edit it)"
+            )
         target_dir = self.skills_dir / name
         if target_dir.exists():
             raise FileExistsError(

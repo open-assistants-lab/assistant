@@ -82,7 +82,7 @@ class SkillStorage:
 
         ignore_matcher = _IgnoreMatcher(self.base_dir)
 
-        for item in self.base_dir.iterdir():
+        for item in sorted(self.base_dir.iterdir()):
             if not item.is_dir():
                 continue
 
@@ -91,7 +91,17 @@ class SkillStorage:
                 continue
 
             skill_file = item / "SKILL.md"
-            skill, file_diagnostics = parse_skill_file_with_diagnostics(skill_file)
+            try:
+                skill, file_diagnostics = parse_skill_file_with_diagnostics(skill_file)
+            except Exception as exc:  # one bad file, not an empty catalog (#96)
+                diagnostics.append(
+                    {
+                        "type": "warning",
+                        "message": f"skipped unreadable skill: {exc}",
+                        "path": str(skill_file),
+                    }
+                )
+                continue
             diagnostics.extend(file_diagnostics)
 
             if skill:
@@ -122,10 +132,13 @@ class SkillStorage:
         # skills whose name differs from their directory stay loadable.
         if not self.base_dir.exists():
             return None
-        for item in self.base_dir.iterdir():
+        for item in sorted(self.base_dir.iterdir()):
             if not item.is_dir() or ignore_matcher.ignores(f"{item.name}/"):
                 continue
-            candidate, _ = parse_skill_file_with_diagnostics(item / "SKILL.md")
+            try:
+                candidate, _ = parse_skill_file_with_diagnostics(item / "SKILL.md")
+            except Exception:  # a broken neighbour must not break the lookup
+                continue
             if candidate and candidate["name"] == skill_name:
                 return candidate
         return None

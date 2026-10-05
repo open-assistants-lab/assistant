@@ -65,7 +65,19 @@ def parse_skill_file_with_diagnostics(
     if not skill_path.exists():
         return None, diagnostics
 
-    content = skill_path.read_text(encoding="utf-8")
+    try:
+        content = skill_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as exc:
+        # A non-UTF-8 or unreadable SKILL.md is a warning about ONE skill
+        # (issue #96); raising here emptied the whole catalog.
+        diagnostics.append(
+            {
+                "type": "warning",
+                "message": f"skipped unreadable skill: {exc}",
+                "path": str(skill_path),
+            }
+        )
+        return None, diagnostics
 
     # Split by YAML frontmatter delimiter
     if not content.startswith("---"):
@@ -102,6 +114,21 @@ def parse_skill_file_with_diagnostics(
     if name is None:
         name = parent_dir_name
     name_errors = validate_skill_name(name)
+    if name_errors and name == parent_dir_name:
+        # #97: the directory name is not a loadable name either. Sanitize it so
+        # the catalog never lists an entry that load_skill() would reject.
+        sanitized = _sanitize_skill_name(parent_dir_name)
+        if sanitized and not validate_skill_name(sanitized):
+            diagnostics.append(
+                {
+                    "type": "warning",
+                    "message": f"skill directory name {parent_dir_name!r} is not a valid "
+                    f"skill name; using {sanitized!r}",
+                    "path": str(skill_path),
+                }
+            )
+            name = sanitized
+            name_errors = validate_skill_name(name)
     if name_errors:
         if name != parent_dir_name:
             diagnostics.append(
@@ -121,6 +148,21 @@ def parse_skill_file_with_diagnostics(
                     "path": str(skill_path),
                 }
             )
+
+    # Safety net (#97): whatever the fallback chain produced, a catalog entry
+    # must be loadable by its own name - otherwise load_skill rejects it and
+    # the catalog entry is a dead end.
+    if validate_skill_name(name):
+        sanitized = _sanitize_skill_name(name)
+        if sanitized and not validate_skill_name(sanitized):
+            diagnostics.append(
+                {
+                    "type": "warning",
+                    "message": f"skill name {name!r} is not loadable; using {sanitized!r}",
+                    "path": str(skill_path),
+                }
+            )
+            name = sanitized
 
     # Description: required to load; over-long still loads with a warning.
     if description is None:
@@ -187,6 +229,18 @@ def validate_skill_description(description: str) -> list[str]:
     if len(description) > 1024:
         return [f"description exceeds 1024 characters ({len(description)})"]
     return []
+
+
+def _sanitize_skill_name(raw: str) -> str:
+    """Lowercase-hyphen form of a name, for names that are otherwise unloadable.
+
+    The loadable charset is exactly validate_skill_name's: lowercase a-z,
+    digits and single hyphens - so underscores and other characters collapse
+    to hyphens and runs collapse to one.
+    """
+    out = "".join(c if (c.isalnum() or c == "-") else "-" for c in raw.lower())
+    out = "-".join(part for part in out.split("-") if part) or ""
+    return out[:64]
 
 
 def _is_valid_skill_name(name: str) -> bool:

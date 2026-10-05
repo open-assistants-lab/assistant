@@ -105,6 +105,23 @@ def _skill_dir(user_id: str) -> Path:
     return paths.user_skills_dir()
 
 
+def _resolve_skill_file(user_id: str, workspace_id: str, skill_name: str) -> Path:
+    """The SKILL.md of a skill addressed by its LOGICAL name.
+
+    A skill's directory may differ from its frontmatter name (#94): the
+    registry resolves that, but update/delete built skills_dir/<name> and
+    404'd on a skill the API had just listed. Fall back to the path form when
+    the registry cannot resolve it (keeps 404 behaviour for unknown names).
+    """
+    skill = _get_registry(user_id, workspace_id).get_skill(skill_name)
+    if skill and skill.get("path"):
+        candidate = Path(str(skill["path"]))
+        skill_file = candidate if candidate.name == "SKILL.md" else candidate / "SKILL.md"
+        if skill_file.exists():
+            return skill_file
+    return _skill_file_path(user_id, skill_name)
+
+
 def _skill_file_path(user_id: str, skill_name: str) -> Path:
     root = _skill_dir(user_id)
     skill_file = root / skill_name / "SKILL.md"
@@ -280,7 +297,7 @@ async def update_skill(
     _validate_workspace_id(workspace_id)
     _validate_skill_name(skill_name)
 
-    skill_file = _skill_file_path(user_id, skill_name)
+    skill_file = _resolve_skill_file(user_id, workspace_id, skill_name)
     if not skill_file.exists():
         raise HTTPException(status_code=404, detail="Skill not found")
 
@@ -319,7 +336,7 @@ async def delete_skill(
     _validate_workspace_id(workspace_id)
     _validate_skill_name(skill_name)
 
-    skill_file = _skill_file_path(user_id, skill_name)
+    skill_file = _resolve_skill_file(user_id, workspace_id, skill_name)
     skill_dir = skill_file.parent
     if not skill_file.exists() or not skill_dir.is_dir():
         raise HTTPException(status_code=404, detail="Skill not found")

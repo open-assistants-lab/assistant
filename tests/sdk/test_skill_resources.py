@@ -34,7 +34,10 @@ class TestSkillResourceEnumeration:
                 })
 
                 assert "Do the thing." in result
-                assert '<skill_content name="my-skill">' in result
+                # The envelope carries the skill's own resource directory (#100) so
+        # relative scripts/references in a skill resolve.
+        assert '<skill_content name="my-skill"' in result
+        assert "base_dir=" in result
 
     def test_skills_load_not_found_returns_error(self):
         """skills_load() returns an error for non-existent skills."""

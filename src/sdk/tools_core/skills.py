@@ -14,6 +14,7 @@ Design:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from src.app_logging import get_logger
@@ -75,8 +76,11 @@ def skills_load(
     if not _skill_enabled(caps, name):
         return f"Skill '{name}' is disabled."
 
+    skill_dir = str(Path(str(skill.get("path", ""))).parent) if skill.get("path") else ""
     parts = [
-        f"<skill_content name=\"{skill.get('name', name)}\">",
+        f'<skill_content name="{skill.get("name", name)}"'
+        + (f' base_dir="{skill_dir}"' if skill_dir else "")
+        + ">",
         skill.get("content", "").strip(),
         "</skill_content>",
     ]

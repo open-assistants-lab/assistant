@@ -13,8 +13,9 @@ project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
 os.chdir(project_root)
 sys.path.insert(0, str(project_root))
 
+# utils.py lives beside this script; the old src/skills_seed path is gone (#102).
 spec = importlib.util.spec_from_file_location(
-    "utils", project_root / "src/skills_seed/skill-creator/scripts/utils.py"
+    "utils", Path(__file__).resolve().parent / "utils.py"
 )
 utils = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(utils)

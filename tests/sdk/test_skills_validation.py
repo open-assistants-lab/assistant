@@ -37,7 +37,7 @@ def _registry(base: Path) -> SkillRegistry:
 # ---------------------------------------------------------------------------
 
 
-def test_invalid_name_falls_back_to_directory_name():
+def test_invalid_name_falls_back_to_a_loadable_directory_name():
     with tempfile.TemporaryDirectory() as d:
         base = Path(d)
         _write_skill(base, "my_skill", "name: Bad Name!\ndescription: A skill\n")
@@ -45,7 +45,11 @@ def test_invalid_name_falls_back_to_directory_name():
 
         skills = registry.get_all_skills()
         assert len(skills) == 1
-        assert skills[0]["name"] == "my_skill"
+        # #97: the catalog must never list an entry that load_skill rejects.
+        # "my_skill" is not a valid skill name (underscores), so the fallback is
+        # the sanitized directory name.
+        assert skills[0]["name"] == "my-skill"
+        assert registry.get_skill("my-skill") is not None
 
         diagnostics = registry.get_diagnostics()
         assert any(diag["type"] == "warning" for diag in diagnostics)

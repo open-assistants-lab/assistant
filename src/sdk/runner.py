@@ -519,7 +519,19 @@ def _get_skills_context(user_id: str, workspace_id: str = "personal") -> str:
             entry = f"- **{name}**: {desc}"
             entry_len = len(entry) + 1  # +1 for trailing newline
             if total_chars + entry_len > SKILL_DESC_BUDGET:
-                break
+                # Issue #98: breaking on the first over-budget entry hid every
+                # LATER skill (and skills are sorted by load count, so a rarely
+                # used giant description could hide the rest of the catalog).
+                # Skip this entry and keep filling the budget with the others;
+                # an entry that cannot fit even alone is dropped.
+                if len(entry) + 1 > SKILL_DESC_BUDGET - header_overhead:
+                    continue
+                logger.info(
+                    "skills.catalog_entry_skipped",
+                    {"skill": name, "entry_chars": entry_len},
+                    user_id=user_id,
+                )
+                continue
             entries.append((name, desc))
             total_chars += entry_len
 
