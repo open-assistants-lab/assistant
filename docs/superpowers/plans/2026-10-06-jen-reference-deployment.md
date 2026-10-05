@@ -337,3 +337,25 @@ unrelated staged subagents fix, lockfile edits or other dirty work. No customer
 integration, production deployment or real LLM/tool invocation was added to the
 fixture. The reviewer used the normal coding-agent provider only for review,
 not any assistant fixture provider.
+
+### Latest-main integration verification
+
+Main advanced during the final gate to `688dc3e5` (loop/transcript fixes).
+The compare-and-swap safety check stopped the attempted old-baseline update
+without overwriting anything. That updated runtime was merged into the isolated
+integration branch, scoped acceptance was rerun, and the reviewed reference
+fixes were integrated onto main as **`ab2d17be`**. Only owned example/test/plan
+paths were synchronized; staged subagents and working lockfile changes were
+again checked byte-for-byte before/after and preserved.
+
+On combined main-equivalent **`ab2d17be`**, the unfiltered single-process suite
+completed with **3,849 passed, 27 skipped, 71 warnings in 560.19 seconds**,
+exit 0. All **86 reference tests** also passed directly in main. The known
+collection/deprecation/aiosqlite lifecycle warnings remain; no warnings were
+suppressed and no existing runtime tests were altered by this lane.
+
+Independent-review closure covers the reference fixes; the new runtime commits
+belong to their separate owner and were covered by the combined verification.
+The temporary `.env` shadow was removed. Docker remains unavailable: no cache
+inventory/startup, daemon launch, image pull/build or customer deployment was
+performed. Container smoke is the only unexecuted optional gate in this slice.
