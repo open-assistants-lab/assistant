@@ -1,0 +1,1 @@
+{"version": 1, "stores": [{"id": "fixture-alpha", "slug": "alpha", "paused": false, "revision": 1}, {"id": "fixture-beta", "slug": "beta", "paused": false, "revision": 1}], "rules": {"target": "stable ID only", "change": "match expected revision; no-op preserves revision"}}

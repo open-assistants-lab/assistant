@@ -1,0 +1,19 @@
+agent:
+  model: ollama:fixture-not-a-real-model
+  title_model: ollama:fixture-not-a-real-model
+tools:
+  native:
+    mode: none
+governance:
+  enabled: true
+  permissions:
+    tools:
+      fixture_store_read: allow
+      fixture_store_pause: ask
+scheduling:
+  subagent_enabled: false
+observability:
+  langfuse:
+    enabled: false
+verification:
+  enabled: false
