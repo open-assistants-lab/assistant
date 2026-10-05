@@ -1,13 +1,13 @@
 """Issue #23: the command cap must be configurable and must never claim success."""
 
 import subprocess
-from unittest.mock import patch
 
 import pytest
 
 from src.sdk.tool_index import _rebuild_custom_function
 from src.sdk.tools import ToolDefinition
 from src.sdk.tools_custom import _parse_tool_file
+from tests.sdk.sandbox_fakes import fake_sandbox
 
 
 def write_tool(tmp_path, annotations=""):
@@ -36,15 +36,9 @@ def test_declared_timeout_reaches_subprocess(tmp_path, mode, declared, expected)
     else:
         block = "" if declared is None else f"  {declared}"
         td = write_tool(tmp_path, block)
-    calls: list[tuple[list[str] | None, float | None]] = []
-
-    def record(*args, **kwargs):
-        calls.append((args[0] if args else None, kwargs.get("timeout", "missing")))
-        return subprocess.CompletedProcess([], 0, "ok", "")
-
-    with patch("subprocess.run", side_effect=record):
+    with fake_sandbox(results=((0, "ok", ""),)) as calls:
         td.function()
-    executed = [timeout for argv, timeout in calls if argv and argv[:2] == ["sh", "-c"]]
+    executed = [timeout for argv, timeout in calls if argv[:2] == ["sh", "-c"]]
     assert executed == [expected]
 
 
@@ -56,12 +50,7 @@ def test_cap_kill_surfaces_as_failure_not_success(tmp_path, mode, monkeypatch):
         td = write_tool(tmp_path)
     monkeypatch.setattr("src.sdk.tool_results.time.monotonic", lambda: 100.0)
 
-    def kill(*args, **kwargs):
-        if args and args[0][:2] == ["sh", "-c"]:
-            raise subprocess.TimeoutExpired("echo fixture", 300)
-        return subprocess.CompletedProcess([], 0, "", "")
-
-    with patch("subprocess.run", side_effect=kill):
+    with fake_sandbox(timeout_for=lambda argv: argv[:2] == ["sh", "-c"]):
         with pytest.raises(subprocess.TimeoutExpired) as exc:
             td.function()
     assert "timed_out" in exc.value.output
@@ -90,12 +79,7 @@ def test_timeout_raises_distinct_failure_with_elapsed(tmp_path, mode, monkeypatc
         "src.sdk.tool_results.time.monotonic", lambda: next(ticks, 142.5)
     )
 
-    def cap_kill(*args, **kwargs):
-        if args and args[0][:2] == ["sh", "-c"]:
-            raise subprocess.TimeoutExpired("echo", 300)
-        return subprocess.CompletedProcess([], 0, "", "")
-
-    with patch("subprocess.run", side_effect=cap_kill):
+    with fake_sandbox(timeout_for=lambda argv: argv[:2] == ["sh", "-c"]):
         with pytest.raises(subprocess.TimeoutExpired) as exc:
             td.function()
     detail = exc.value.output
@@ -168,15 +152,9 @@ def test_index_round_trip_preserves_declared_timeout(tmp_path):
         restored = _rebuild_custom_function(index.get_definition(td.name), index.get_reconstruct(td.name))
     finally:
         index.close()
-    calls = []
-
-    def record(*args, **kwargs):
-        calls.append((args[0] if args else None, kwargs.get("timeout", "missing")))
-        return subprocess.CompletedProcess([], 0, "ok", "")
-
-    with patch("subprocess.run", side_effect=record):
+    with fake_sandbox(results=((0, "ok", ""),)) as calls:
         restored.function()
-    executed = [timeout for argv, timeout in calls if argv and argv[:2] == ["sh", "-c"]]
+    executed = [timeout for argv, timeout in calls if argv[:2] == ["sh", "-c"]]
     assert executed == [42.0]
 
 

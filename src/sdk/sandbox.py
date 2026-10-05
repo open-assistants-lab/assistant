@@ -286,6 +286,31 @@ class NullSandboxBackend:
         return None
 
 
+def _kill_process_group(proc: Any) -> None:
+    """Kill a timed-out sandbox child AND its descendants (issue #118).
+
+    The child called setsid(), so its process group id equals its own pid -
+    which is never the server's own group (that would be this process's pid).
+    Kill the group when it is safe, then the process itself as a fallback.
+    """
+    import signal
+
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (OSError, ProcessLookupError):
+        pgid = None
+    if pgid is not None and pgid != os.getpgrp():
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+            return
+        except (OSError, ProcessLookupError):
+            pass
+    try:
+        proc.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
 class SoftSandboxBackend:
     """Phase-2 default for trusted users.
 
@@ -366,15 +391,33 @@ class SoftSandboxBackend:
 
         with operational_telemetry_span("sandbox.exec", **_sandbox_span_attrs("soft", argv)) as span:
             try:
-                proc = subprocess.run(  # noqa: S603 - argv list, no shell
+                # Issue #118: subprocess.run(timeout=...) kills only the DIRECT
+                # child. The preexec hook calls os.setsid(), so the child leads
+                # its own process group and a backgrounded descendant keeps
+                # running (and writing) after the timeout receipt. Popen plus
+                # explicit process-GROUP cleanup stops the whole tree.
+                proc = subprocess.Popen(  # noqa: S603 - argv list, no shell
                     argv,
                     cwd=str(cwd),
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
-                    timeout=lim.timeout_seconds,
                     env=env,
                     preexec_fn=_preexec,
                 )
+                try:
+                    stdout, stderr = proc.communicate(timeout=lim.timeout_seconds)
+                except subprocess.TimeoutExpired:
+                    _kill_process_group(proc)
+                    stdout, stderr = proc.communicate()
+                    raise subprocess.TimeoutExpired(
+                        cmd=argv,
+                        timeout=lim.timeout_seconds or 0.0,
+                        output=stdout,
+                        stderr=stderr,
+                    )
+                proc.stdout = stdout  # type: ignore[assignment]
+                proc.stderr = stderr  # type: ignore[assignment]
                 # Issue #15: capture a bounded headroom (8× the tool-facing
                 # limit) so the tool's spill-to-file predicate can recover the
                 # FULL output. Independent of the write budget below.
@@ -384,10 +427,10 @@ class SoftSandboxBackend:
                     span.set_attribute("sandbox.exit_code", proc.returncode)
                 return SandboxResult(
                     proc.returncode,
-                    proc.stdout[:capture_cap],
-                    proc.stderr[: lim.max_output_bytes],
+                    str(stdout)[:capture_cap],
+                    str(stderr)[: lim.max_output_bytes],
                     signalled=proc.returncode < 0,
-                    stdout_truncated=len(proc.stdout) > capture_cap,
+                    stdout_truncated=len(str(stdout)) > capture_cap,
                 )
             except subprocess.TimeoutExpired as e:
                 out = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
@@ -568,10 +611,10 @@ class BwrapSandboxBackend:
                     span.set_attribute("sandbox.exit_code", proc.returncode)
                 return SandboxResult(
                     proc.returncode,
-                    proc.stdout[:capture_cap],
-                    proc.stderr[: lim.max_output_bytes],
+                    str(proc.stdout)[:capture_cap],
+                    str(proc.stderr)[: lim.max_output_bytes],
                     signalled=proc.returncode < 0,
-                    stdout_truncated=len(proc.stdout) > capture_cap,
+                    stdout_truncated=len(str(proc.stdout)) > capture_cap,
                 )
             except subprocess.TimeoutExpired:
                 if span is not None:

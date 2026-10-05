@@ -2,13 +2,13 @@
 
 import json
 import subprocess
-from unittest.mock import patch
 
 import pytest
 
 from src.sdk.tool_index import _rebuild_custom_function
 from src.sdk.tools import ToolDefinition
 from src.sdk.tools_custom import _parse_tool_file
+from tests.sdk.sandbox_fakes import fake_sandbox
 
 
 @pytest.fixture
@@ -43,7 +43,7 @@ def make_tool(tmp_path, mode, **scope):
 def test_command_output_boundary_and_recovery(tmp_path, result_scope, mode, size):
     td = make_tool(tmp_path, mode)
     output = "A" * (size - len("END_OF_RESULT_MARKER")) + "END_OF_RESULT_MARKER" if size > 5000 else "A" * size
-    with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, output, "")) as run:
+    with fake_sandbox(results=((0, output, ""),)) as calls:
         value = td.function()
         if size <= 5000:
             assert value == (output or "(no output)")
@@ -61,16 +61,14 @@ def test_command_output_boundary_and_recovery(tmp_path, result_scope, mode, size
         assert page["end"] == len(output)
         assert page["has_more"] is False
         assert sum(
-            call.args[0] == ["sh", "-c", "echo fixture"]
-            for call in run.call_args_list
-            if call.args
+            argv == ["sh", "-c", "echo fixture"] for argv, _timeout in calls
         ) == 1
 
 
 @pytest.mark.parametrize("mode", ["parsed", "reconstructed"])
 def test_result_scope_is_bound_not_taken_from_command_arguments(tmp_path, result_scope, mode):
     td = make_tool(tmp_path, mode, user_id="alice", workspace_id="project-a")
-    with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "z" * 6000, "")):
+    with fake_sandbox(results=((0, "z" * 6000, ""),)):
         envelope = json.loads(td.function(user_id="bob", workspace_id="project-b"))
     from src.sdk.tools_core.tool_results import tool_result_read
 
@@ -86,15 +84,10 @@ def test_result_scope_is_bound_not_taken_from_command_arguments(tmp_path, result
 @pytest.mark.parametrize("mode", ["parsed", "reconstructed"])
 def test_command_errors_unchanged_and_timeout_now_fails(tmp_path, result_scope, mode):
     td = make_tool(tmp_path, mode)
-    with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 7, "oops", "!")):
+    with fake_sandbox(results=((7, "oops", "!"),)):
         assert td.function() == "Command failed (exit 7):\noops!"
     # Issue #23: a cap-killed command must fail, never return a success string.
-    def cap_kill(*args, **kwargs):
-        if args and args[0] == ["sh", "-c", "echo fixture"]:
-            raise subprocess.TimeoutExpired("echo fixture", 300)
-        return subprocess.CompletedProcess([], 0, "", "")
-
-    with patch("subprocess.run", side_effect=cap_kill):
+    with fake_sandbox(timeout_for=lambda argv: argv[:2] == ["sh", "-c"]):
         with pytest.raises(subprocess.TimeoutExpired) as exc:
             td.function()
     assert "timed_out" in exc.value.output
@@ -235,7 +228,7 @@ async def test_lazy_execution_binds_loop_scope(tmp_path, result_scope):
     index.get_reconstruct.return_value = {"command": "echo fixture", "user_id": "bob"}
     index.get_tool_type.return_value = "custom"
     loop._tool_index = index
-    with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "x" * 6000, "")):
+    with fake_sandbox(results=((0, "x" * 6000, ""),)):
         result = await loop._execute_tool(ToolCall(id="1", name="fixture_output", arguments={}))
     envelope = json.loads(result.content)
     page = tool_result_read.function(envelope["result_id"], user_id="alice", workspace_id="project-a")
@@ -265,7 +258,7 @@ def test_discovery_binds_invoking_scope(tmp_path, result_scope):
     tools_dir.mkdir()
     make_tool(tools_dir, "parsed")
     td = next(t for t in get_custom_tools("alice", "project-a") if t.name == "fixture_output")
-    with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "x" * 6000, "")):
+    with fake_sandbox(results=((0, "x" * 6000, ""),)):
         saved = json.loads(td.function())
     assert not tool_result_read.function(saved["result_id"], user_id="alice", workspace_id="project-a").is_error
     assert tool_result_read.function(saved["result_id"], user_id="alice", workspace_id="personal").is_error

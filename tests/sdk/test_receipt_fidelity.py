@@ -24,6 +24,7 @@ import src.storage.paths as paths_mod
 from src.sdk.sandbox import SandboxLimits, SandboxResult, get_sandbox_backend
 from src.sdk.tool_results import CommandKilledError, raise_command_killed
 from src.sdk.tools import ToolDefinition, ToolResult
+from tests.sdk.sandbox_fakes import fake_sandbox
 
 USER = "dave"
 
@@ -248,7 +249,6 @@ def test_custom_command_tool_raises_on_a_signal_kill(tmp_path, mode):
     the sandbox's synthetic -1 for its own timeout is why the seam there needs
     an explicit flag and this one does not.
     """
-    import subprocess as sp
 
     if mode == "parsed":
         # The primary path: a TOOL.md parsed by runner.get_custom_tools.
@@ -262,13 +262,13 @@ def test_custom_command_tool_raises_on_a_signal_kill(tmp_path, mode):
         assert td is not None
     else:
         from src.sdk.tool_index import _rebuild_custom_function
-
         td = _rebuild_custom_function(
             ToolDefinition(name="killed_tool", description="d"),
             {"command": "echo hi", "install": [], "tool_dir": ""},
         )
-    killed = sp.CompletedProcess(["echo", "hi"], returncode=-9, stdout="partial", stderr="")
-    with patch("subprocess.run", side_effect=[sp.CompletedProcess([], 0, "", ""), killed]):
+    # The which-probe runs through the real subprocess.run; the sandbox call is
+    # the first (and only) Popen, so the KILLED result is what it must return.
+    with fake_sandbox(results=((-9, "partial", ""),)):
         with pytest.raises(CommandKilledError) as exc:
             td.function()
     assert exc.value.signal_number == 9, exc.value

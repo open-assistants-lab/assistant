@@ -330,7 +330,21 @@ def message_search(
             output_parts.append(first.memory.content[:500])
             continue
 
-        lines = [f"── Session {sid[:12]} ──"]
+        # Issue #126: the retrieved anchor was replaced by the newest 50 rows,
+        # so a fact older than the window produced a successful search with no
+        # fact in it. The anchor is always rendered, and the window is labelled
+        # as the newest-N rather than presented as the whole session.
+        anchor_id = str(getattr(first.memory, "id", "") or "")
+        anchor_content = (first.memory.content or "")[:500]
+        anchor_ts = first.memory.ts.strftime("%Y-%m-%d") if first.memory.ts else "?"
+        anchor_role = first.memory.role or "?"
+        rendered_ids = {str(getattr(m, "id", "") or "") for m in session_msgs}
+        lines = [f"── Session {sid[:12]} (newest {len(session_msgs)}) ──"]
+        if anchor_id and anchor_id not in rendered_ids:
+            lines.append(
+                f"[{anchor_role}] {anchor_ts} {anchor_content}  ← matched message"
+            )
+            lines.append("… (older messages not shown) …")
         for m in session_msgs:
             content = (m.content or "")[:500]
             ts_str = m.ts.strftime("%Y-%m-%d") if m.ts else "?"

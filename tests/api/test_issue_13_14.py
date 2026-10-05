@@ -18,31 +18,16 @@ def test_unfilled_optional_placeholders_render_empty(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    fake_argv: list[list[str]] = []
+    from tests.sdk.sandbox_fakes import fake_sandbox
 
-    def fake_run(argv, **kw):
-        fake_argv.append(argv)
-
-        class R:
-            returncode = 0
-            stdout = b"ok"
-            stderr = b""
-
-        return R()
-
-    import subprocess as _sp
-
-    orig_run = _sp.run
-    _sp.run = fake_run
-    try:
-        tools = tc_mod.scan_tools_dir(tmp_path / "Tools")
-        assert len(tools) == 1
+    tools = tc_mod.scan_tools_dir(tmp_path / "Tools")
+    assert len(tools) == 1
+    # The sandbox runs the command through Popen (#118); capture that seam.
+    with fake_sandbox(results=((0, "ok", ""),)) as calls:
         asyncio.run(tools[0].ainvoke({"store": "acme"}))  # user omitted
-        rendered = str(fake_argv[-1])
-        assert "{{" not in rendered, "literal placeholder leaked into command"
-        assert "acme" in rendered
-    finally:
-        _sp.run = orig_run
+    rendered = next(argv[-1] for argv, _timeout in calls if argv[:2] == ["sh", "-c"])
+    assert "{{" not in rendered, "literal placeholder leaked into command"
+    assert "acme" in rendered
 
 
 @pytest.mark.asyncio
