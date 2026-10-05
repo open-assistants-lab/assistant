@@ -40,7 +40,9 @@ class TestConvertToolAnnotations:
         result = _convert_tool_annotations(None)
         assert isinstance(result, ToolAnnotations)
         assert result.read_only is False
-        assert result.destructive is False
+        # #108: with no annotations object, safety was never declared by the
+        # server - unknown must not be treated as non-destructive.
+        assert result.destructive is True
 
     def test_mcp_annotations(self):
         from src.sdk.tools_core.mcp_bridge import _convert_tool_annotations

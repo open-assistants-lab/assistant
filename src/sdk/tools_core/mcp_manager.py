@@ -56,6 +56,11 @@ class MCPManager:
         self._config_hash: str = ""
         self._server_config_hashes: dict[str, str] = {}
         self._lock = asyncio.Lock()
+        # Starting a server takes _lock to register the connection, so the
+        # start path must never be serialised by _lock itself: asyncio.Lock
+        # is not reentrant, and get_tools() used to hold it around
+        # _ensure_started and hang forever on a cold manager (#104).
+        self._start_lock: asyncio.Lock = asyncio.Lock()
         self._last_used: float = time.time()
         self._idle_task: asyncio.Task[Any] | None = None
         self._last_errors: dict[str, str | None] = {}
@@ -179,31 +184,40 @@ class MCPManager:
         if not self._is_enabled() or self._connections:
             return
 
-        config = load_mcp_config(self.user_id)
-        if not config:
-            logger.info("mcp.no_config", {"user_id": self.user_id})
-            return
+        # Single flight (#105): two cold callers each saw an empty
+        # _connections and both ran every server start; the second
+        # registration silently orphaned the first session. Serialised here
+        # with a lock _ensure_started owns, and re-checked after acquiring
+        # it, so exactly one caller starts each configured server.
+        async with self._start_lock:
+            if self._connections:
+                return
 
-        self._config_mtime = get_config_mtime(self.user_id)
-        self._config_hash = self._compute_config_hash(config)
-        self._server_config_hashes = self._server_hashes(config)
+            config = load_mcp_config(self.user_id)
+            if not config:
+                logger.info("mcp.no_config", {"user_id": self.user_id})
+                return
 
-        for server_name, server_config in config.mcpServers.items():
-            if not getattr(server_config, "enabled", True):
-                # Layer 5.1: an explicitly disabled server is never connected.
-                # It stays visible in health with a reason (I3) rather than
-                # silently vanishing, which would be a diagnosis dead end.
-                logger.info(
-                    "mcp.server_disabled",
-                    {"server": server_name},
-                    user_id=self.user_id,
+            self._config_mtime = get_config_mtime(self.user_id)
+            self._config_hash = self._compute_config_hash(config)
+            self._server_config_hashes = self._server_hashes(config)
+
+            for server_name, server_config in config.mcpServers.items():
+                if not getattr(server_config, "enabled", True):
+                    # Layer 5.1: an explicitly disabled server is never connected.
+                    # It stays visible in health with a reason (I3) rather than
+                    # silently vanishing, which would be a diagnosis dead end.
+                    logger.info(
+                        "mcp.server_disabled",
+                        {"server": server_name},
+                        user_id=self.user_id,
+                    )
+                    continue
+                await self._start_server(
+                    server_name, server_config, generation=self._lifecycle_generation
                 )
-                continue
-            await self._start_server(
-                server_name, server_config, generation=self._lifecycle_generation
-            )
 
-        await self._start_idle_monitor()
+            await self._start_idle_monitor()
 
     def _compute_config_hash(self, config: Any) -> str:
         if hasattr(config, "model_dump_json"):
@@ -378,6 +392,15 @@ class MCPManager:
             conn.last_used = self._last_used
             return conn
 
+        # A disabled server must never come back through the reconnect path
+        # (#106) - an idle reap or a stale connection cannot resurrect one a
+        # user turned off in .mcp.json.
+        config = load_mcp_config(self.user_id)
+        server_config = config.mcpServers.get(server_name) if config else None
+        if server_config is not None and not getattr(server_config, "enabled", True):
+            self._last_errors[server_name] = "server is disabled"
+            raise ConnectionError(f"MCP server '{server_name}' is disabled")
+
         existing = self._reconnect_tasks.get(server_name)
         if existing is not None and not existing.done():
             return await existing
@@ -389,6 +412,16 @@ class MCPManager:
             server_config = config.mcpServers.get(server_name) if config else None
             if server_config is None:
                 self._last_errors[server_name] = "server is not configured"
+                return None
+            if not getattr(server_config, "enabled", True):
+                # #106: the start path refused disabled servers; a reconnect
+                # after an idle reap must not connect one a user turned off.
+                self._last_errors[server_name] = "server is disabled"
+                logger.info(
+                    "mcp.server_disabled_reconnect_refused",
+                    {"server": server_name},
+                    user_id=self.user_id,
+                )
                 return None
 
             await self._stop_server(server_name)
@@ -532,8 +565,10 @@ class MCPManager:
             return []
 
         await self._ensure_current_config()
-        async with self._lock:
-            await self._ensure_started()
+        # No self._lock around the start path (issue #104): starting takes
+        # _lock itself to register connections, and this lock is not
+        # reentrant - holding it here deadlocked every cold call.
+        await self._ensure_started()
 
         self._last_used = time.time()
 

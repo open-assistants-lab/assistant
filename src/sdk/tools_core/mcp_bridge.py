@@ -41,7 +41,8 @@ def _parse_server(namespaced: str) -> str:
 
 def _convert_tool_annotations(mcp_annotations: Any) -> ToolAnnotations:
     if mcp_annotations is None:
-        return ToolAnnotations()
+        # No annotations at all: unknown, not safe (#108).
+        return ToolAnnotations(destructive=True)
 
     kwargs: dict[str, Any] = {}
 
@@ -50,7 +51,16 @@ def _convert_tool_annotations(mcp_annotations: Any) -> ToolAnnotations:
     if hasattr(mcp_annotations, "readOnlyHint"):
         kwargs["read_only"] = bool(mcp_annotations.readOnlyHint)
     if hasattr(mcp_annotations, "destructiveHint"):
-        kwargs["destructive"] = bool(mcp_annotations.destructiveHint)
+        # A hint the server left unset is UNKNOWN, not safe (#108): mapping
+        # None -> False classified a tool that never declared itself safe as
+        # parallel-safe. An unset hint on a tool that is not explicitly
+        # read-only is treated as destructive (sequential/interrupt path);
+        # an explicitly read-only tool stays non-destructive.
+        read_only = bool(getattr(mcp_annotations, "readOnlyHint", None) or False)
+        if mcp_annotations.destructiveHint is None:
+            kwargs["destructive"] = not read_only
+        else:
+            kwargs["destructive"] = bool(mcp_annotations.destructiveHint)
     if hasattr(mcp_annotations, "idempotentHint"):
         kwargs["idempotent"] = bool(mcp_annotations.idempotentHint)
     if hasattr(mcp_annotations, "openWorldHint"):

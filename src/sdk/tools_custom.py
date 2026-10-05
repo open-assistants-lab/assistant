@@ -169,6 +169,10 @@ def _parse_tool_file(
     else:
         parameters = _normalize_parameters_schema(parameters)
 
+    # Unknown annotations are not read-only (#80): a TOOL.md tool without an
+    # annotations block used to default read_only=True, which the duplicate
+    # guard honoured by memoizing every repeat call - a second identical call
+    # to a custom "send" tool was answered with the FIRST call's result.
     annotations = ToolAnnotations(
         title=annotations_raw.get("title") if annotations_raw else None,
         timeout_seconds=(
@@ -176,7 +180,7 @@ def _parse_tool_file(
             if annotations_raw
             else DEFAULT_COMMAND_TIMEOUT_SECONDS
         ),
-        read_only=annotations_raw.get("read_only", True) if annotations_raw else True,
+        read_only=annotations_raw.get("read_only", False) if annotations_raw else False,
         destructive=annotations_raw.get("destructive", False) if annotations_raw else False,
         idempotent=annotations_raw.get("idempotent", False) if annotations_raw else False,
         open_world=annotations_raw.get("open_world", False) if annotations_raw else False,
