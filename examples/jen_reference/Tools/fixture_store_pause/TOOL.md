@@ -11,6 +11,7 @@ parameters:
     expected_revision: {type: integer, minimum: 1}
   required: [store_id, paused, expected_revision]
 annotations:
+  pipefail: true
   read_only: false
   requires_approval: true
 ---
