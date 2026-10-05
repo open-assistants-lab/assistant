@@ -471,15 +471,26 @@ class AgentLoop:
         """
         self._steer_sink = sink
 
-    def _drain_steer(self, state: AgentState) -> bool:
-        """Inject all queued steer messages as user messages.
+    def _pending_steer_texts(self) -> list[str]:
+        """Pop every queued steer text WITHOUT adding it to the state.
 
-        Returns True if any steer was injected (callers cancel remaining
-        tool calls in the current batch).
+        Issue #76: the steer used to be appended the moment it was drained,
+        and callers then appended the CANCELLED tool results afterwards - so
+        the model saw assistant(a, b), result-a, user-steer, result-b. A user
+        turn interleaved with a pending tool result is invalid history for
+        strict providers. Callers now pop first, finish their tool results,
+        and inject the steer last.
         """
-        injected = False
+        texts: list[str] = []
         while not self._steer_queue.empty():
             message = self._steer_queue.get_nowait()
+            if message:
+                texts.append(message)
+        return texts
+
+    def _inject_steer_texts(self, state: AgentState, texts: list[str]) -> None:
+        """Add drained steer texts as user messages (with logging and sink)."""
+        for message in texts:
             state.add_message(Message.user(message))
             # P1-T11 fidelity: steer DELIVERY is model-visible — log it as an
             # injection (the queued user-role message alone loses the kind).
@@ -515,8 +526,18 @@ class AgentLoop:
                     self._steer_sink(message)
                 except Exception:
                     logger.warning("steer.sink_failed", extra={"message": message[:100]})
-            injected = True
-        return injected
+
+    def _drain_steer(self, state: AgentState) -> bool:
+        """Drain and inject in one step (kept for the streaming call sites).
+
+        Prefer the two-phase form when cancelled tool results must precede the
+        steer (issue #76).
+        """
+        texts = self._pending_steer_texts()
+        if not texts:
+            return False
+        self._inject_steer_texts(state, texts)
+        return True
 
     @staticmethod
     def _is_native_tool_definition(tool_def: ToolDefinition) -> bool:
@@ -580,7 +601,13 @@ class AgentLoop:
         """
         tool_def = self._registry.get(tc.name)
         if tool_def is None:
-            return True
+            # UNKNOWN, not safe (issue #70): classification runs before the
+            # lazy loader resolves an indexed tool, so a destructive custom or
+            # MCP tool classified as parallel on its FIRST call could run
+            # concurrently with others - and skip the interrupt path entirely.
+            # An unresolved call goes to the sequential group, where it is
+            # resolved before execution.
+            return False
         return tool_def.annotations.read_only or not tool_def.annotations.destructive
 
     def _classify_tool_calls(
@@ -752,7 +779,14 @@ class AgentLoop:
         for msg in state.messages:
             if msg.role == "assistant" and msg.tool_calls:
                 for call in msg.tool_calls:
-                    id_to_key[call.id] = self._tool_call_key(call)
+                    # Index by the EFFECTIVE (runtime-injected) call, which is
+                    # what duplicate detection keys on (issue #77): a tool with a
+                    # user_id/session_id parameter stores its history call with
+                    # model-original arguments, so the lookup never matched and
+                    # the duplicate receipt said "(result unavailable)".
+                    id_to_key[call.id] = self._tool_call_key(
+                        self._with_runtime_context(call)
+                    )
         for msg in reversed(state.messages):
             if msg.role != "tool" or not msg.tool_call_id:
                 continue
@@ -1197,6 +1231,45 @@ class AgentLoop:
         if guard_result is not None:
             return _PreparedToolCall(blocked_result=guard_result, blocked_by="governance")
         return _PreparedToolCall(call=tc_exec)
+
+    async def _finalize_cancelled_stream(
+        self, state: AgentState, all_tool_calls: list[dict[str, Any]]
+    ) -> AsyncIterator[StreamChunk]:
+        """Answer every pending tool id, run after_agent once, then `done`.
+
+        Issue #75: the streaming loop returned straight to `done` when
+        cancellation was observed between tools. The remaining tool calls
+        stayed in the transcript with NO result, which is an invalid
+        tool-call history that the next turn's providers reject, and
+        `aafter_agent` (cleanup/persistence hooks) plus the next-context
+        projection never ran.
+        """
+        answered = {
+            msg.tool_call_id for msg in state.messages if msg.role == "tool" and msg.tool_call_id
+        }
+        for msg in state.messages:
+            if msg.role != "assistant" or not msg.tool_calls:
+                continue
+            for call in msg.tool_calls:
+                if call.id in answered:
+                    continue
+                content = json.dumps({"cancelled": True, "reason": "cancel"})
+                state.add_message(
+                    Message.tool_result(tool_call_id=call.id, content=content, name=call.name)
+                )
+                answered.add(call.id)
+        # Same cleanup the normal exit performs (see _run_impl): after_agent
+        # hooks, then the next-context projection. Before, a cancelled stream
+        # skipped both, so cleanup middleware and context bookkeeping never ran.
+        try:
+            await self._run_hooks("aafter_agent", state)
+        except Exception:
+            pass
+        try:
+            self._project_next_context(state)
+        except Exception:
+            pass
+        yield StreamChunk.done(content="", tool_calls=all_tool_calls)
 
     async def _execute_single_tool(self, tc: ToolCall, state: AgentState) -> None:
         """Execute a single tool call with guardrails, hooks, and middleware, add result to state."""
@@ -2004,7 +2077,11 @@ class AgentLoop:
 
             from src.sdk.state import AgentState
 
-            for m in messages:
+            # Issue #78: the FIRST user message is the OLDEST turn in the
+            # history; the current prompt is the LAST user message. Logging the
+            # first made every replay show the conversation's opening line
+            # instead of what was just asked.
+            for m in reversed(messages):
                 if m.role == "user" and isinstance(m.content, str) and m.content:
                     _emit(UserPromptEvent, {"content": m.content})
                     break
@@ -2068,6 +2145,17 @@ class AgentLoop:
             limit_reason = cost_tracker.exceeds_limits(self.run_config)
             if limit_reason:
                 state.add_message(Message.assistant(content=f"Run limit reached: {limit_reason}"))
+                break
+
+            # Issue #71: the non-streaming path never consulted the
+            # AgentLoop's own cancel_event (only the streaming loop did, and the
+            # subagent context separately), so a cancelled run kept calling the
+            # model and executing tools. Cooperative: it stops before the next
+            # model round and before dispatching a tool.
+            if self.cancel_event and self.cancel_event.is_set():
+                state.add_message(
+                    Message.assistant(content="Run cancelled: cancellation requested.")
+                )
                 break
 
             overflow_retries = 0
@@ -2233,22 +2321,22 @@ class AgentLoop:
             # with a usable message instead of exhausting the token budget.
             from src.sdk.repetition import RepetitionLimitReached
 
+            # Only FRESH calls are checked and answered here (issue #72): the
+            # duplicate-call guard already answered the duplicates
+            # synthetically above, so including them again gave a duplicated
+            # call TWO tool results and left its fresh siblings unexecuted.
+            # The streaming path already used fresh_calls; this aligns the
+            # non-streaming one.
             try:
-                for tc in effective_tool_calls:
+                for tc in fresh_calls:
                     self._repetition_guard(state).check(tc.name, self._tool_args_key(tc))
             except RepetitionLimitReached as exc:
-                state.add_message(
-                    Message.tool_result(
-                        tool_call_id=effective_tool_calls[0].id,
-                        content=str(exc),
-                        name=effective_tool_calls[0].name,
-                    )
-                )
-                for tc in effective_tool_calls[1:]:
+                for index, tc in enumerate(fresh_calls):
                     state.add_message(
                         Message.tool_result(
                             tool_call_id=tc.id,
-                            content="Not executed: run stopped by the tool-call budget.",
+                            content=str(exc) if index == 0 else
+                            "Not executed: run stopped by the tool-call budget.",
                             name=tc.name,
                         )
                     )
@@ -2301,7 +2389,9 @@ class AgentLoop:
                 # Issue #19: recording moved into the executor (permitted
                 # calls only — blocked calls must never be recorded).
                 # A steer delivered after the batch cancels remaining tools
-                if self._drain_steer(state):
+                steer_texts = self._pending_steer_texts()
+                if steer_texts:
+                    # #76: cancelled results first, the steer user message LAST.
                     for tc in sequential:
                         state.add_message(
                             Message.tool_result(
@@ -2312,6 +2402,7 @@ class AgentLoop:
                                 name=tc.name,
                             )
                         )
+                    self._inject_steer_texts(state, steer_texts)
                     continue
 
             # Execute sequential (destructive) tools one-at-a-time
@@ -2337,8 +2428,9 @@ class AgentLoop:
                             )
                         )
                     break
-                if self._drain_steer(state):
-                    # Cancel remaining tools in this batch
+                steer_texts = self._pending_steer_texts()
+                if steer_texts:
+                    # Cancel remaining tools in this batch, then the steer (#76).
                     for remaining in sequential[idx + 1 :]:
                         state.add_message(
                             Message.tool_result(
@@ -2349,6 +2441,7 @@ class AgentLoop:
                                 name=remaining.name,
                             )
                         )
+                    self._inject_steer_texts(state, steer_texts)
                     break
             if self.subagent_ctx and self.subagent_ctx.runtime_block is not None:
                 break
@@ -2374,13 +2467,15 @@ class AgentLoop:
         state = AgentState(messages=list(messages))
         # R-SL1 P1-T11: session-log observer on the streaming path too.
         state.message_observer = self._log_session_message
-        self._log_session_header(list(messages))
         self._reset_context_telemetry()
         # Fresh per-run correlation id — mirrors run(); without this, cached
-        # loops re-emit the previous run's run_id (M1 review P1).
+        # loops re-emit the previous run's run_id (M1 review P1). It must be
+        # allocated BEFORE the session header is logged (issue #78): the header
+        # used to be stamped with the PREVIOUS run's id on the streaming path.
         import uuid as _uuid
 
         self._flow_run_id = _uuid.uuid4().hex
+        self._log_session_header(list(messages))
         self._reset_run_counters()  # H2 budget counter (issue #59)
         self.state = state
         if self.rubric:
@@ -2497,7 +2592,10 @@ class AgentLoop:
                                     )
                                 # Cooperative cancellation during token streaming
                                 if self.cancel_event and self.cancel_event.is_set():
-                                    yield StreamChunk.done(content="", tool_calls=all_tool_calls)
+                                    async for _event in self._finalize_cancelled_stream(
+                                        state, all_tool_calls
+                                    ):
+                                        yield _event
                                     return
                                 if chunk.type == "usage" and chunk.usage:
                                     # Field-wise last-nonzero replace (audit
@@ -2592,7 +2690,10 @@ class AgentLoop:
                                 )
                             # Cooperative cancellation during token streaming
                             if self.cancel_event and self.cancel_event.is_set():
-                                yield StreamChunk.done(content="", tool_calls=all_tool_calls)
+                                async for _event in self._finalize_cancelled_stream(
+                                    state, all_tool_calls
+                                ):
+                                    yield _event
                                 return
                             if chunk.type == "usage" and chunk.usage:
                                 # Same field-wise last-wins replace as the
@@ -2920,7 +3021,10 @@ class AgentLoop:
                 # Execute parallel-safe tools concurrently, emit events as they complete
                 if parallel_safe:
                     if self.cancel_event and self.cancel_event.is_set():
-                        yield StreamChunk.done(content="", tool_calls=all_tool_calls)
+                        async for _event in self._finalize_cancelled_stream(
+                            state, all_tool_calls
+                        ):
+                            yield _event
                         return
                     _t_tool = time.monotonic()
                     async for event in self._execute_tool_batch_streaming(parallel_safe, state):
@@ -2931,7 +3035,8 @@ class AgentLoop:
                     # Issue #19: recording moved into the executor (permitted
                     # calls only — blocked calls must never be recorded).
                     # A steer delivered after the batch cancels remaining tools
-                    if self._drain_steer(state):
+                    steer_texts = self._pending_steer_texts()
+                    if steer_texts:
                         for tc in sequential:
                             cancelled = json.dumps(
                                 {"cancelled": True, "reason": "steer", "tool": tc.name}
@@ -2947,6 +3052,9 @@ class AgentLoop:
                             yield StreamChunk.tool_end(
                                 tool=tc.name, call_id=tc.id, result_preview=cancelled[:2000]
                             )
+                        # #76: the steer message goes LAST, after every
+                        # cancelled result, so history is not interleaved.
+                        self._inject_steer_texts(state, steer_texts)
                         # Advance the iteration counter explicitly: this loop
                         # uses `while iteration < max` with `iteration += 1`
                         # at the end of the body, so a bare `continue` would
@@ -2957,7 +3065,10 @@ class AgentLoop:
                 # Execute sequential (destructive) tools one-at-a-time
                 for idx, tc in enumerate(sequential):
                     if self.cancel_event and self.cancel_event.is_set():
-                        yield StreamChunk.done(content="", tool_calls=all_tool_calls)
+                        async for _event in self._finalize_cancelled_stream(
+                            state, all_tool_calls
+                        ):
+                            yield _event
                         return
                     _t_tool = time.monotonic()
                     async for event in self._execute_single_tool_streaming(tc, state):
@@ -2965,7 +3076,8 @@ class AgentLoop:
                     self.timings.add(
                         "tool_exec", (time.monotonic() - _t_tool) * 1000.0
                     )
-                    if self._drain_steer(state):
+                    steer_texts = self._pending_steer_texts()
+                    if steer_texts:
                         # Cancel remaining tools in this batch
                         for remaining in sequential[idx + 1 :]:
                             cancelled = json.dumps(
@@ -2986,6 +3098,8 @@ class AgentLoop:
                                 call_id=remaining.id,
                                 result_preview=cancelled[:2000],
                             )
+                        # #76: steer last, after the cancelled results.
+                        self._inject_steer_texts(state, steer_texts)
                         break
 
                 overflow_retries = 0
@@ -3058,10 +3172,20 @@ class AgentLoop:
                     ToolCall(id=chunk.call_id or "", name=chunk.tool or "", arguments=chunk_args)
                 ).arguments
             if chunk.call_id:
+                # Issue #79: the runtime-context-normalized args were computed
+                # and then thrown away - a provider that sends complete args on
+                # tool_input_start (and no argument deltas) had them silently
+                # dropped, so the tool ran with defaults. Seed the buffer with
+                # the start args; argument DELTAS still take precedence (see
+                # tool_input_delta, which appends only when the id matches).
+                seeded = ""
+                if isinstance(chunk_args, dict) and chunk_args:
+                    seeded = json.dumps(chunk_args, sort_keys=True)
                 tool_calls_map[len(tool_calls_map)] = {
                     "id": chunk.call_id,
                     "name": chunk.tool or "",
-                    "arguments": "",
+                    "arguments": seeded,
+                    "seeded_args": bool(seeded),
                 }
             # Note: tool_input_start/tool_start events are emitted by
             # _execute_single_tool_streaming / _execute_tool_batch_streaming
