@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shlex
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -143,14 +142,17 @@ def _rebuild_custom_function(
 
         if not custom_command_tools_allowed():
             return "Custom command tools are disabled by the hard sandbox backend."
-        rendered = command_template
-        if tool_dir_str:
-            rendered = rendered.replace("{{tool_dir}}", shlex.quote(tool_dir_str))
-        for k, v in kwargs.items():
-            rendered = rendered.replace("{{" + k + "}}", shlex.quote(str(v)))
+        # One shared renderer with the parse path (#82/#83): sequential
+        # replace() re-substituted substituted values, and unfilled optional
+        # placeholders were left literally on this path.
+        from src.sdk.tools_custom import needs_path_probe, render_command_template
+
+        rendered = render_command_template(
+            command_template, kwargs, tool_dir=tool_dir_str or None
+        )
 
         tool_name = command_template.split()[0] if command_template else ""
-        if tool_name:
+        if tool_name and needs_path_probe(command_template):
             try:
                 subprocess.run(["which", tool_name], capture_output=True, timeout=10, check=True)
             except subprocess.TimeoutExpired:

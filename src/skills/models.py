@@ -83,7 +83,7 @@ def parse_skill_file_with_diagnostics(
     if not content.startswith("---"):
         return None, diagnostics
 
-    parts = content.split("---", 2)
+    parts = split_frontmatter(content)
     if len(parts) < 3:
         return None, diagnostics
 
@@ -197,6 +197,26 @@ def parse_skill_file_with_diagnostics(
         skill["allowed_tools"] = allowed_tools
 
     return skill, diagnostics
+
+
+def split_frontmatter(content: str) -> list[str]:
+    """Split a document into ["", frontmatter, body] on fence LINES.
+
+    ``content.split("---", 2)`` broke whenever a description or command
+    contained "---": the YAML was truncated, parsing failed, and the
+    document silently disappeared with no diagnostic (issue #84).
+    """
+    if not content.startswith("---"):
+        return []
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return []
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            frontmatter = "\n".join(lines[1:index])
+            body = "\n".join(lines[index + 1:])
+            return ["---", frontmatter, body]
+    return []
 
 
 def validate_skill_name(name: str) -> list[str]:

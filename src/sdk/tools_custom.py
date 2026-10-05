@@ -130,6 +130,75 @@ def run_custom_command(
     return format_output(output, user_id, workspace_id)
 
 
+def split_frontmatter(content: str) -> list[str]:
+    """Split a document into ["", frontmatter, body] on fence LINES.
+
+    ``content.split("---", 2)`` broke whenever a description or command
+    contained "---": the YAML was truncated, parsing failed, and the
+    document silently disappeared with no diagnostic (issue #84).
+    """
+    if not content.startswith("---"):
+        return []
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return []
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            frontmatter = "\n".join(lines[1:index])
+            body = "\n".join(lines[index + 1:])
+            return ["---", frontmatter, body]
+    return []
+
+
+_PLACEHOLDER = re.compile(r"\{\{([A-Za-z0-9_]+)\}\}")
+
+
+def render_command_template(
+    template: str, values: dict[str, Any], *, tool_dir: str | None = None
+) -> str:
+    """Substitute {{param}} placeholders in ONE pass over the template.
+
+    Sequential ``str.replace`` per kwarg re-substituted substituted VALUES
+    (a value of "{{b}}" for param a became b's value, and a literal token in
+    user data was expanded or deleted), because later passes rescanned text
+    that was already substituted. Only the template is rewritten here; the
+    leftover-placeholder strip (#14) applies to the TEMPLATE, never to values.
+
+    Also strips unfilled placeholders, so the lazy-load path (tool_index)
+    behaves like the parse path (issue #83).
+    """
+    mapping: dict[str, str] = {}
+    if tool_dir:
+        mapping["tool_dir"] = tool_dir
+    for key, value in values.items():
+        mapping[key] = str(value)
+
+    def _sub(match: re.Match[str]) -> str:
+        key = match.group(1)
+        if key in mapping:
+            return shlex.quote(mapping[key])
+        # Unfilled optional placeholder: render as empty (#14/#83).
+        return ""
+
+    return _PLACEHOLDER.sub(_sub, template)
+
+
+def needs_path_probe(template: str) -> bool:
+    """Whether a command template starts with a bare PATH command name.
+
+    The probe used the UNRENDERED first token, so a template starting with
+    "{{tool_dir}}/run.sh", "./x", an assignment or a shell operator probed a
+    nonsense literal and rejected a perfectly runnable command (issue #81).
+    """
+    stripped = template.strip()
+    if not stripped:
+        return False
+    first = stripped.split()[0]
+    if "{{" in first or "/" in first:
+        return False
+    return first.replace("-", "").replace("_", "").replace(".", "").isalnum()
+
+
 def _parse_tool_file(
     tool_path: Path, user_id: str = DEFAULT_USER_ID, workspace_id: str = "personal",
 ) -> ToolDefinition | None:
@@ -141,7 +210,7 @@ def _parse_tool_file(
     if not content.startswith("---"):
         return None
 
-    parts = content.split("---", 2)
+    parts = split_frontmatter(content)
     if len(parts) < 3:
         return None
 
@@ -200,44 +269,43 @@ def _parse_tool_file(
 
             if not custom_command_tools_allowed():
                 return "Custom command tools are disabled by the hard sandbox backend."
-            rendered = tmpl
-            if tool_dir:
-                rendered = rendered.replace("{{tool_dir}}", shlex.quote(str(tool_dir)))
-            for k, v in kwargs.items():
-                rendered = rendered.replace("{{" + k + "}}", shlex.quote(str(v)))
-            # Issue #14: unfilled optional placeholders must not render
-            # literally ("{{user}}" sent to the downstream API). Strip any
-            # remaining {{param}} (unfilled optional params default to empty
-            # — required-unfilled params fail validation before this point).
-            rendered = re.sub(r"\{\{[A-Za-z0-9_]+\}\}", "", rendered)
+            rendered = render_command_template(
+                tmpl, kwargs, tool_dir=str(tool_dir) if tool_dir else None
+            )
 
             tool_name = tmpl.split()[0]
-            try:
-                _subprocess.run(
-                    ["which", tool_name],
-                    capture_output=True,
-                    timeout=10,
-                    check=True,
-                )
-            except _subprocess.TimeoutExpired:
-                # An unanswered probe says nothing about the tool (see the
-                # reconstructed-wrapper twin in tool_index.py).
-                return ToolResult(
-                    content=                    f"Tool '{tool_name}' availability could not be verified: "
-                    "the PATH probe timed out.",
-                    is_error=True,
-                )
-            except (
-                _subprocess.CalledProcessError,
-                FileNotFoundError,
-                OSError,
-            ):
-                if install_cmds:
-                    return (
-                        f"Tool '{tool_name}' not found. Install it with one of:\n"
-                        + "\n".join(f"  {c}" for c in install_cmds)
+            if needs_path_probe(tmpl):
+                # Probe ONLY a bare command name (#81): "{{tool_dir}}/run.sh",
+                # "./x", "FOO=1 cmd" and shell operators are runnable commands
+                # whose first token is not a PATH lookup.
+                try:
+                    _subprocess.run(
+                        ["which", tool_name],
+                        capture_output=True,
+                        timeout=10,
+                        check=True,
                     )
-                return f"Tool '{tool_name}' not found on PATH."
+                except _subprocess.TimeoutExpired:
+                    # An unanswered probe says nothing about the tool (see the
+                    # reconstructed-wrapper twin in tool_index.py).
+                    return ToolResult(
+                        content=(
+                            f"Tool '{tool_name}' availability could not be verified: "
+                            "the PATH probe timed out."
+                        ),
+                        is_error=True,
+                    )
+                except (
+                    _subprocess.CalledProcessError,
+                    FileNotFoundError,
+                    OSError,
+                ):
+                    if install_cmds:
+                        return (
+                            f"Tool '{tool_name}' not found. Install it with one of:\n"
+                            + "\n".join(f"  {c}" for c in install_cmds)
+                        )
+                    return f"Tool '{tool_name}' not found on PATH."
 
             try:
                 return run_custom_command(
@@ -388,7 +456,7 @@ def load_tool_meta(tool_file: Path) -> dict[str, Any] | None:
     content = tool_file.read_text(encoding="utf-8")
     if not content.startswith("---"):
         return None
-    parts = content.split("---", 2)
+    parts = split_frontmatter(content)
     if len(parts) < 3:
         return None
     import yaml
