@@ -458,6 +458,18 @@ class MCPToolBridge:
                     f"mcp_bridge.call_error tool={namespaced_name}: {e}",
                     extra={"user_id": self.user_id},
                 )
+                if not annotations.idempotent:
+                    # #107: a timeout or lost response may already have run the
+                    # call server-side. Without the idempotent hint, replaying
+                    # it is a duplicate side effect - surface the failure instead.
+                    return ToolResult(
+                        content=(
+                            f"MCP call failed ({e}); the tool is not marked "
+                            "idempotent, so it was NOT retried - check the server "
+                            "before repeating this call."
+                        ),
+                        is_error=True,
+                    )
                 conn = await self._ensure_connection(manager, server_name, force_reconnect=True)
                 if conn is None:
                     return ToolResult(

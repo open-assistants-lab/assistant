@@ -253,12 +253,19 @@ class MCPManager:
         now = datetime.now(UTC).isoformat()
         tools = []
         for tool in conn.tools:
+            # #103: a real mcp.types.ToolAnnotations object is not JSON
+            # serializable, so the cache write raised for every server whose
+            # tools declare annotations - and the except path closed the
+            # already-registered connection, leaving it broken. Serialize here.
+            annotations = getattr(tool, "annotations", None)
+            if annotations is not None and hasattr(annotations, "model_dump"):
+                annotations = annotations.model_dump(mode="json")
             tools.append(
                 {
                     "name": getattr(tool, "name", ""),
                     "description": getattr(tool, "description", "") or "",
                     "inputSchema": getattr(tool, "inputSchema", {}) or {},
-                    "annotations": getattr(tool, "annotations", None),
+                    "annotations": annotations,
                 }
             )
         self._cache.put(
