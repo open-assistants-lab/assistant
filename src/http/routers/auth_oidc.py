@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import urllib.parse
+from pathlib import Path
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -89,21 +91,89 @@ def _verify_id_token(token: str, *, issuer: str, audience: str, client_secret: s
     return dict(claims)
 
 
-def _claims_to_user_id(claims: dict[str, object]) -> str:
-    """Preferred username -> email local-part -> sub, store-path safe."""
-    import re
+def _claim_bindings_path() -> Path:
+    from pathlib import Path as _Path
 
-    # T3.3 review P0: str(None) == "None" is truthy — a missing
-    # preferred_username must fall through to email/sub or EVERY such user
-    # collapses into user_id "none" (shared sessions, cross-user access).
+    from src.config.settings import get_settings as _gs
+
+    return _Path(_gs().deployment.data_path) / "oidc_user_bindings.json"
+
+
+def _claim_bindings() -> dict[str, str]:
+    """Subject -> user_id bindings. Missing file = no bindings yet."""
+    try:
+        return dict(json.loads(_claim_bindings_path().read_text(encoding="utf-8")))
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        logger.warning("oidc_bindings.unreadable", {})
+        return {}
+
+
+def _save_claim_bindings(bindings: dict[str, str]) -> None:
+    import os as _os
+
+    path = _claim_bindings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    fd = _os.open(tmp, _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o600)
+    with _os.fdopen(fd, "w") as f:
+        json.dump(bindings, f, sort_keys=True)
+    _os.replace(tmp, path)
+
+
+def claims_bind_user(claims: dict[str, object]) -> str:
+    """Map a token's claims to a stable user_id without merging accounts.
+
+    The old resolver preferred preferred_username, then the email local-part,
+    then sub — after normalisation. Distinct IdP subjects that share a
+    username or email local-part (different realms, matching display names)
+    therefore collapsed into one user scope, blending two people's data and
+    sessions (issue #120).
+
+    Now the IdP subject "sub" is the identity anchor, and the readable name
+    is only the FIRST user_id a subject was bound to:
+      - new subject -> user_id from username/email/sub (as before)
+      - same subject -> its existing user_id, even if the username changes
+      - a DIFFERENT subject claiming a name already bound to another subject
+        is refused rather than merged
+    """
+    import re as _re
+
+    sub = str(claims.get("sub") or "")
+    if not sub:
+        raise OidcError("id_token carries no stable subject claim (sub)")
+
     raw = (
         str(claims.get("preferred_username") or "")
         or str(claims.get("email") or "").split("@")[0]
-        or str(claims.get("sub") or "")
+        or sub
     )
     if not raw or raw == "None":
         raise OidcError("id_token carries no usable identity claim")
-    return re.sub(r"[^a-zA-Z0-9_-]", "_", raw).strip("_").lower() or "oidc_user"
+    candidate = _re.sub(r"[^a-zA-Z0-9_-]", "_", raw).strip("_").lower() or "oidc_user"
+
+    bindings = _claim_bindings()
+    existing_user = bindings.get(f"sub:{sub}")
+    if existing_user:
+        return existing_user
+
+    bound_subject = bindings.get(f"user:{candidate}")
+    if bound_subject is not None and bound_subject != sub:
+        raise OidcError(
+            "this account's name is already bound to a different identity; "
+            "login refused rather than merging two accounts"
+        )
+    bindings[f"sub:{sub}"] = candidate
+    bindings[f"user:{candidate}"] = sub
+    _save_claim_bindings(bindings)
+    get_logger().info("oidc.identity_bound", {"subject": "ok"}, user_id=candidate)
+    return candidate
+
+
+def _claims_to_user_id(claims: dict[str, object]) -> str:
+    """Backward-compatible name kept for import sites; binds via claims_bind_user."""
+    return claims_bind_user(claims)
 
 
 def _role_for(user_id: str) -> str:
@@ -284,6 +354,7 @@ async def _callback(request: Request) -> RedirectResponse:
         httponly=True,
         samesite="lax",
         max_age=int(cfg.session_hours * 3600),
+        secure=_cookie_secure(),  # #121: was missing - state had it, session didn't
     )
     return resp
 

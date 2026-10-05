@@ -52,9 +52,16 @@ def fake_agent_run(monkeypatch):
     return calls
 
 
-def _register_secret(client, bearer: str, trigger_id: str) -> str:
+def _register_secret(client, bearer: str, trigger_id: str, user_id: str | None = None) -> str:
+    """Mint a firing credential as an authenticated owner (#119).
+
+    The credential binds to the caller's identity, so tests register with the
+    user they intend the trigger to run as.
+    """
+    params = {"user_id": user_id} if user_id else None
     r = client.post(
         f"/webhooks/{trigger_id}/secret",
+        params=params,
         headers={"Authorization": f"Bearer {bearer}"},
     )
     assert r.status_code == 200, r.text
@@ -64,7 +71,7 @@ def _register_secret(client, bearer: str, trigger_id: str) -> str:
 def test_webhook_with_valid_secret_runs_without_bearer(
     client, monkeypatch, api_key_mode, fake_agent_run
 ):
-    secret = _register_secret(client, api_key_mode, "wh_valid")
+    secret = _register_secret(client, api_key_mode, "wh_valid", user_id="hook_user")
 
     r = client.post(
         "/webhooks/wh_valid",

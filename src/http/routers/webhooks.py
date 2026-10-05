@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -16,6 +16,7 @@ from src.http.auth import resolve_user_id
 from src.sdk.loops.events import AgentEvent, get_trigger_registry
 from src.sdk.messages import Message
 from src.sdk.runner import run_sdk_agent
+from src.storage.paths import DEFAULT_USER_ID
 
 router = APIRouter(tags=["triggers"])
 logger = get_logger()
@@ -88,11 +89,18 @@ async def manual_trigger(req: TriggerRequest, request: Request = None) -> Trigge
 class _WebhookSecretStore:
     """Persistent per-trigger secret store (audit E24-auth).
 
-    Backed by a single JSON file under the deployment data path.
-    Migration-safe: a missing file is an empty store; an unreadable one is
-    treated as empty with a warning (fail-closed for validation purposes —
-    no registered secret means unregistered triggers are rejected whenever
-    an API key is configured).
+    Each credential is bound to the server-side user identity that
+    registered it: the firing user is derived from this binding, never from
+    the firing request body (issue #119) — a trigger-secret holder could
+    otherwise fire in any user's context.
+
+    Backed by a single JSON file under the deployment data path. Migration-
+    safe: a missing file is an empty store; an unreadable one is treated as
+    empty with a warning (fail-closed for validation purposes — no
+    registered secret means unregistered triggers are rejected whenever an
+    API key is configured). Old-format entries (trigger -> secret string)
+    are honoured without an owner: they keep firing, and the user_id is
+    then taken from the body as before.
     """
 
     def __init__(self) -> None:
@@ -107,10 +115,12 @@ class _WebhookSecretStore:
             )
         return self._path
 
-    def _load(self) -> dict[str, str]:
+    def _load(self) -> dict[str, Any]:
+        """Loaded records keep their binding dict; string entries are kept as
+        loaded (pre-binding format) and normalised by :meth:`get_record`."""
         try:
             return {
-                str(k): str(v)
+                str(k): v
                 for k, v in json.loads(self._file().read_text()).items()
             }
         except FileNotFoundError:
@@ -121,12 +131,15 @@ class _WebhookSecretStore:
             )
             return {}
 
-    def register(self, trigger_id: str) -> str:
+    def register(self, trigger_id: str, user_id: str | None = None) -> str:
         import os
 
         store = self._load()
         secret = _secrets_module.token_hex(32)
-        store[trigger_id] = secret
+        entry: dict[str, str] = {"secret": secret}
+        if user_id:
+            entry["user_id"] = user_id
+        store[trigger_id] = entry
         path = self._file()
         path.parent.mkdir(parents=True, exist_ok=True)
         # Atomic + owner-only permissions: secrets at rest must not be
@@ -138,26 +151,48 @@ class _WebhookSecretStore:
         os.replace(tmp, path)
         logger.info(
             "webhook_secrets.registered",
-            {"trigger_id": trigger_id},
+            {"trigger_id": trigger_id, "bound": bool(user_id)},
         )
         return secret
 
+    def get_record(self, trigger_id: str) -> dict[str, str] | None:
+        entry = self._load().get(trigger_id)
+        if entry is None:
+            return None
+        if isinstance(entry, str):  # pre-binding format
+            return {"secret": entry}
+        return {str(k): str(v) for k, v in dict(entry).items()}
+
     def get(self, trigger_id: str) -> str | None:
-        return self._load().get(trigger_id)
+        record = self.get_record(trigger_id)
+        return record.get("secret") if record else None
+
+    def owner(self, trigger_id: str) -> str | None:
+        record = self.get_record(trigger_id)
+        return (record or {}).get("user_id")
 
 
 _secret_store = _WebhookSecretStore()
 
 
 @router.post("/webhooks/{trigger_id}/secret")
-async def create_webhook_secret(trigger_id: str) -> JSONResponse:
+async def create_webhook_secret(
+    trigger_id: str,
+    request: Request,
+    user_id: str = Query(DEFAULT_USER_ID),
+) -> JSONResponse:
     """Generate and store the firing secret for a webhook trigger.
 
     Deliberately NOT exempted from API-key auth: only authenticated owners
     may mint firing credentials. The middleware's fire-path exemption
     covers exactly ``/webhooks/{trigger_id}`` (single segment).
+
+    The credential is bound to the CALLER's authenticated user identity
+    (#119): the firing user later comes from this binding, not from the
+    firing body.
     """
-    secret = _secret_store.register(trigger_id)
+    effective_user = resolve_user_id(request, user_id)
+    secret = _secret_store.register(trigger_id, user_id=effective_user)
     return JSONResponse({"trigger_id": trigger_id, "secret": secret})
 
 
@@ -218,6 +253,19 @@ async def webhook_trigger(trigger_id: str, request: Request) -> WebhookResponse:
             trigger_id=trigger_id,
             error="user_id and message are required",
         )
+
+    # The firing identity is the credential's OWNER, not a body field (#119):
+    # a holder of one trigger's secret could otherwise run in any user's
+    # context. A body that contradicts the binding is reported, not applied.
+    bound_user = _secret_store.owner(trigger_id)
+    if bound_user:
+        if user_id != bound_user:
+            logger.warning(
+                "webhook.user_id_ignored",
+                {"trigger_id": trigger_id, "requested": user_id},
+                user_id=bound_user,
+            )
+        user_id = bound_user
 
     session_id = body.get("session_id", f"webhook_{trigger_id}")
     rubric = body.get("rubric")

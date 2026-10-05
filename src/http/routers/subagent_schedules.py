@@ -11,10 +11,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from src.app_logging import get_logger
+from src.http.auth import resolve_user_id
 from src.storage.paths import get_paths
 from src.subagent.schedules_store import SubagentScheduleStore
 
@@ -112,9 +113,11 @@ def _rejection_detail(rejected: Any) -> str:
 @router.post("/schedules", response_model=ScheduleCreateResponse)
 async def create_schedule(
     request: ScheduleCreateRequest,
+    http_request: Request,
     user_id: str = Query(default="default_user"),
 ) -> ScheduleCreateResponse:
     _require_enabled()
+    user_id = resolve_user_id(http_request, user_id)
 
     # One creation path shared with the subagent_schedule tool, so the two
     # surfaces cannot disagree about the frozen-manifest gate.
@@ -142,12 +145,14 @@ async def create_schedule(
 
 @router.get("/schedules")
 async def list_schedules(
+    request: Request,
     user_id: str = Query(default="default_user"),
     status: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
     _require_enabled()
+    user_id = resolve_user_id(request, user_id)
     store = _store()
     try:
         rows = await store.list_for_user(user_id, status=status, limit=limit, offset=offset)
@@ -159,9 +164,11 @@ async def list_schedules(
 @router.get("/schedules/{schedule_id}")
 async def get_schedule(
     schedule_id: str,
+    request: Request,
     user_id: str = Query(default="default_user"),
 ) -> dict[str, Any]:
     _require_enabled()
+    user_id = resolve_user_id(request, user_id)
     store = _store()
     row = await store.get(user_id, schedule_id)
     if row is None:
@@ -173,10 +180,12 @@ async def get_schedule(
 @router.get("/schedules/{schedule_id}/runs")
 async def list_schedule_runs(
     schedule_id: str,
+    request: Request,
     user_id: str = Query(default="default_user"),
 ) -> dict[str, Any]:
     """Schedule metadata joined with the work-queue task it last launched."""
     _require_enabled()
+    user_id = resolve_user_id(request, user_id)
     store = _store()
     row = await store.get(user_id, schedule_id)
     if row is None:
@@ -213,9 +222,11 @@ async def list_schedule_runs(
 @router.delete("/schedules/{schedule_id}")
 async def cancel_schedule(
     schedule_id: str,
+    request: Request,
     user_id: str = Query(default="default_user"),
 ) -> dict[str, Any]:
     _require_enabled()
+    user_id = resolve_user_id(request, user_id)
     try:
         from src.subagent.scheduler import cancel_schedule as cancel
 
