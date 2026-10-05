@@ -76,7 +76,9 @@ def capture_version(user_id: str, file_path: str, new_content: str, workspace_id
         ver_dir = _version_path(user_id, file_path, workspace_id)
         ver_dir.mkdir(parents=True, exist_ok=True)
 
-        timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%S")
+        # Microseconds in the version name (#88): two edits in the same second
+        # both wrote "<second>" and the second clobbered the first.
+        timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%S-%f")
         version_file = ver_dir / timestamp
 
         version_file.write_text(current_content, encoding="utf-8")

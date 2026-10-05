@@ -254,7 +254,10 @@ def files_read(path: str, offset: int = 0, limit: int = 100, user_id: str =  DEF
             lines = list(itertools.islice(handle, offset, offset + limit))
 
         total = offset + len(lines)
-        content = "\n".join(lines)
+        # Lines already carry their newline; joining again with a newline
+        # separator inserted a blank line between every line of every read
+        # (issue #87).
+        content = "".join(lines)
         return f"--- {path} ({offset}-{total}/{target.stat().st_size} bytes) ---\n{content}"
     except Exception as e:
         logger.error("files_read.error", {"path": path, "error": str(e)}, user_id=user_id)
@@ -335,10 +338,21 @@ def files_edit(path: str, old: str, new: str, user_id: str =  DEFAULT_USER_ID, w
         if not target.is_file():
             return f"Not a file: {path}"
 
-        content = target.read_text(encoding="utf-8")
+        # Raw bytes-preserving read/write (issue #86): the default universal-
+        # newlines mode translated CRLF to LF on read, so editing one line
+        # rewrote EVERY line ending in the file.
+        with target.open(encoding="utf-8", newline="") as handle:
+            content = handle.read()
 
         if old not in content:
             return f"Text not found in file: {old[:50]}..."
+
+        if old == "":
+            return (
+                "Error: files_edit requires a non-empty 'old' string. "
+                "An empty 'old' would insert the replacement between every "
+                "character of the file (issue #85)."
+            )
 
         new_content = content.replace(old, new)
 
@@ -346,7 +360,8 @@ def files_edit(path: str, old: str, new: str, user_id: str =  DEFAULT_USER_ID, w
 
         capture_version(user_id, path, new_content, workspace_id=workspace_id)
 
-        target.write_text(new_content, encoding="utf-8")
+        with target.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(new_content)
 
         logger.info("files_edit", {"path": str(target)}, user_id=user_id)
         return f"Edited {path}"

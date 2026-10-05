@@ -101,7 +101,7 @@ def files_glob_search(pattern: str = "**/*", path: str = ".", user_id: str =  DE
 
         results = []
         for m in matches[:_GLOB_RESULT_CAP]:
-            rel_path = m.relative_to(root)
+            rel_path = m.resolve().relative_to(resolved_root)
             size = m.stat().st_size if m.is_file() else 0
             results.append(f"{rel_path} ({size} bytes)")
 
@@ -202,7 +202,7 @@ def files_grep_search(
                         with file_path.open(encoding="utf-8", errors="ignore") as fh:
                             for line_num, line in enumerate(fh, 1):
                                 if regex.search(line):
-                                    rel_path = file_path.relative_to(root)
+                                    rel_path = file_path.resolve().relative_to(resolved_root)
                                     if count:
                                         matches.append(f"{rel_path}:{line_num}")
                                     else:
