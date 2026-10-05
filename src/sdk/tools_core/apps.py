@@ -126,7 +126,11 @@ def _get_app_path(app_name: str, user_id: str) -> Path:
 
 
 def _get_db(app_name: str, user_id: str) -> HybridDB:
-    key = f"{user_id}:{app_name}"
+    # Key on the SANITIZED name (issue #134): "My App", "my_app" and "my-app"
+    # are one directory with three separate cached handles otherwise, and the
+    # delete path closed one while the others kept serving the deleted file.
+    safe_key_name = _validate_app_name(app_name)
+    key = f"{user_id}:{safe_key_name}"
     if key not in _dbs:
         app_path = _get_app_path(app_name, user_id)
         _dbs[key] = HybridDB(
@@ -137,7 +141,17 @@ def _get_db(app_name: str, user_id: str) -> HybridDB:
     return _dbs[key]
 
 
+def app_exists(app_name: str, user_id: str) -> bool:
+    """True when the app directory is already on disk (never creates one)."""
+    return _resolve_app_path(app_name, user_id, create=False).exists()
+
+
 def _get_schema(app_name: str, user_id: str) -> AppSchema | None:
+    # A read must not create the app (issue #133): _get_db made the directory,
+    # so schema/query/fts/summarize on a typo'ed name all silently fabricated
+    # a phantom app.
+    if not app_exists(app_name, user_id):
+        return None
     db = _get_db(app_name, user_id)
     tables = db.list_tables()
     if not tables:
@@ -166,7 +180,7 @@ def _list_apps(user_id: str) -> list[str]:
 
 def _delete_app(app_name: str, user_id: str) -> bool:
     app_path = _resolve_app_path(app_name, user_id, create=False)
-    key = f"{user_id}:{app_name}"
+    key = f"{user_id}:{_sanitize_app_name(app_name)}"
     _dbs.pop(key, None)
     if app_path.exists():
         shutil.rmtree(app_path)
@@ -192,6 +206,30 @@ def app_create(name: str, tables: dict[str, dict[str, str]], user_id: str =  DEF
         table_schemas: dict[str, TableSchema] = {}
 
         for table_name, schema in tables.items():
+            safe_table = _sanitize_app_name(table_name) or table_name
+            existing_cols = db.get_schema(safe_table) if safe_table in set(db.list_tables()) else None
+            if existing_cols is not None:
+                if {k.lower(): v.upper() for k, v in existing_cols.items()} != {
+                    k.lower(): v.upper() for k, v in schema.items()
+                }:
+                    # Issue #137: re-creating overwrote the stored metadata
+                    # while row data kept the old columns - schema and data
+                    # then disagreed. A conflicting re-definition is refused.
+                    return (
+                        f"Error: table '{table_name}' already exists with a different "
+                        f"schema ({list(existing_cols.keys())}). Use app_column_add or "
+                        "app_import_csv instead of redefining it."
+                    )
+                # Identical schema: idempotent, nothing rewritten.
+                text_columns = [col for col, ct in schema.items() if ct.upper() in ("TEXT", "LONGTEXT")]
+                chroma_columns = [col for col, ct in schema.items() if ct.upper() == "LONGTEXT"]
+                table_schemas[table_name] = TableSchema(
+                    name=table_name,
+                    columns=schema,
+                    text_columns=text_columns,
+                    chroma_columns=chroma_columns,
+                )
+                continue
             db.create_table(table_name, schema)
             text_columns = [col for col, ct in schema.items() if ct.upper() in ("TEXT", "LONGTEXT")]
             chroma_columns = [col for col, ct in schema.items() if ct.upper() == "LONGTEXT"]
@@ -517,9 +555,10 @@ def _convert_date_in_query(query: str) -> str:
     today_epoch = str(int(datetime(now.year, now.month, now.day).timestamp() * 1000))
 
     def _rewrite(segment: str) -> str:
-        segment = re.sub(r"last month", dec_epoch, segment, flags=re.IGNORECASE)
-        segment = re.sub(r"this month", this_month_epoch, segment, flags=re.IGNORECASE)
-        segment = re.sub(r"today", today_epoch, segment, flags=re.IGNORECASE)
+        # \b so identifiers like today_total are never rewritten (#136).
+        segment = re.sub(r"\blast month\b", dec_epoch, segment, flags=re.IGNORECASE)
+        segment = re.sub(r"\bthis month\b", this_month_epoch, segment, flags=re.IGNORECASE)
+        segment = re.sub(r"\btoday\b", today_epoch, segment, flags=re.IGNORECASE)
 
         date_pattern = re.compile(r"(\d{4}-\d{2}-\d{2})")
         for match in date_pattern.finditer(segment):
@@ -533,11 +572,14 @@ def _convert_date_in_query(query: str) -> str:
 
     # Sequential walk with an in-literal flag (audit B17 fix round 1):
     # robust against SQL doubled quotes ('') — an escaped pair never flips
-    # the literal state, unlike positional even/odd parity.
+    # the literal state, unlike positional even/odd parity. Double quotes
+    # delimit SQL IDENTIFIERS; a column named today_total must survive
+    # untouched as well (issue #136).
     out_parts: list[str] = []
     buf: list[str] = []
     i = 0
     n = len(query)
+    in_dq = False
     in_literal = False
     while i < n:
         ch = query[i]
@@ -546,6 +588,14 @@ def _convert_date_in_query(query: str) -> str:
             i += 2
             continue
         buf.append(ch)
+        # Double-quoted segments are identifiers: their names (today_total,
+        # "this month" as a column) must never be rewritten (#136).
+        if ch == '"':
+            out_parts.append("".join(buf) if in_dq else _rewrite("".join(buf)))
+            buf = []
+            in_dq = not in_dq
+            i += 1
+            continue
         if ch == "'":
             out_parts.append(_rewrite("".join(buf)) if not in_literal else "".join(buf))
             buf = []
@@ -719,12 +769,24 @@ def app_import_csv(
         db = _get_db(app_name, user_id)
         key = source_key(src)
         imported: list[str] = []
+        taken: set[str] = set()
         for tbl_name, rows in sheets.items():
             if not rows:
                 continue
             sql_types = rows_to_schema(rows)
             existing = set(db.list_tables())
             tname = _sanitize_app_name(tbl_name) or "sheet1"
+            # "Sheet 1" and "sheet_1" sanitize to one name (issue #135), and
+            # the second sheet's replace-this-source delete erased the first
+            # sheet's rows. Each sheet in a run owns a distinct table.
+            # A re-IMPORT of the same file keeps its table (upsert); only a
+            # same-run collision is renamed away (#135).
+            if tname in taken:
+                suffix = 2
+                while f"{tname}_{suffix}" in taken:
+                    suffix += 1
+                tname = f"{tname}_{suffix}"
+            taken.add(tname)
             if tname not in existing:
                 db.create_table(tname, sql_types)
             else:
