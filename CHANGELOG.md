@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.6.32 — 2026-10-06
+
+### Fixed — the 2026-10-02 audit batch and its follow-ups (#50–#145, ~90 issues)
+A large audit drove this release. Every fix below was reproduced failing BEFORE the change and carries a regression test; the suite grew from ~3.4k to **3849 passed, 27 skipped**.
+
+**Governance and receipts.** Tool-authorization guards fail CLOSED (an exception in the enforcement hook used to authorize the tool). Approval execution resolves through the same live catalog as the loop — deployment ceiling, custom-over-native precedence — and refuses a tool whose definition changed since the proposal (fingerprint over schema, description, annotations, and the body's closure/const captures), with the proposal now recording its workspace. Receipts preserve every terminal outcome (`UNCERTAIN`/`CANCELLED`/`REJECTED` no longer become "succeeded"), and a tripped output guardrail removes the blocked content from returned state, the `done` chunk and reasoning.
+
+**Boundaries.** Filesystem tools resolve only inside the caller's own store plus operator-granted roots, with a post-resolution ownership check that no grant or symlink overrides (cross-user reads via the absolute-path allowlist are gone). App tools inherit the same boundary; `app_delete("")` can no longer rmtree the apps root; subagent names are validated as path segments everywhere. The soft sandbox kills the whole process GROUP on timeout, so backgrounded descendants stop writing.
+
+**MCP.** Cold `get_tools()` no longer deadlocks on its own non-reentrant lock; concurrent first use starts each server once; disabled servers are never connected on demand or by reconnect; annotated servers connect (annotations are serialized for the metadata cache); an unset `destructiveHint` is treated as unknown, not safe; a timed-out call is only replayed when the tool is declared idempotent.
+
+**Auth.** Subagent schedule routes resolve the request identity like every sibling router; webhook firing credentials are bound to the owner at registration (the body can no longer choose the user); OIDC claims are anchored on the subject with a durable binding (distinct accounts sharing a username are refused, not merged) and the session cookie is set `Secure`.
+
+**Transport.** A streamed duplicate no longer leaves unanswered tool-call ids; the read cache is scoped to the current turn and invalidated by any state change; one budget covers every dispatch path and resets per run; each skipped duplicate is answered from its OWN earlier result; SSE forwards the canonical block frames (tool arguments included); a text-only steer becomes the follow-up prompt (and a steer with no active run is run, not dropped); a same-tick control frame is consumed rather than discarded; revision attempts no longer concatenate rejected drafts into the answer; a non-object JSON frame gets a parse error instead of killing the handler.
+
+**Skills.** Discovery is per skill (one unreadable or malformed SKILL.md no longer empties the catalog); every catalog entry is loadable by its own name; an over-budget description no longer hides the rest; seed refresh is per file against a recorded manifest (user edits survive, resource-only updates apply, deleted seeds do not return); drafts are validated before promotion; the skills API and draft approval address the logical name.
+
+**Storage.** The summary branch returns the session's newest messages (a global rowid was used as a message count, dropping the current question); deletions purge vectors through the collection API and collect ids BEFORE deleting; the final answer is vector-indexed (index only — no duplicate row); `/memories/clear` invalidates the summary cache; `message_timeline` uses the pinned CoreMem `recall` API; the legacy memory migration only marks success after a committed import; corpus reindex is one transaction (a failed reindex keeps the previous data); the generated-column migration is repeatable; `message_search` always renders the retrieved anchor.
+
+**Files and custom tools.** `files_edit` refuses an empty `old` (it inserted the replacement between every character) and preserves CRLF; `files_read` no longer doubles newlines; version capture is microsecond-unique; glob/grep work through a symlinked workspace. TOOL.md rendering is one pass (values are never re-scanned), unfilled placeholders are stripped on both the parse and lazy-load paths, only bare command names are PATH-probed, and frontmatter splits on fence LINES so a `---` inside a value no longer hides the tool.
+
+**Loop.** Unknown tools are resolved before parallel classification; the non-streaming run honours cancellation; mixed duplicate/fresh batches answer each id once; streaming cancellation answers pending ids and runs cleanup; steer messages never interleave between tool results; duplicate receipts find the injected-context result; the session header logs the current prompt with the current run id; `tool_input_start` arguments are honoured.
+
+### Deliberately open
+#40 (per-tenant isolation), #41 (the receipt contract), #74 (guardrail prevention policy) are design decisions, not patches; the issues state what each needs.
+
 ## v0.6.31 — 2026-10-02
 
 ### Fixed — an abandoned provider round executes nothing; streaming retries are bounded (#68, #69)

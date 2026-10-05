@@ -122,7 +122,8 @@ def _reset_user_loops(user_id: str) -> None:
 async def list_subagents(
     user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),
-    request: Request = None,) -> dict[str, Any]:
+    request: Request = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
     if request is not None:
         user_id = resolve_user_id(request, user_id)
     from src.sdk.coordinator import get_coordinator
@@ -163,7 +164,7 @@ async def create_subagent(
     body: SubagentCreateRequest,
     user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),
-    request: Request = None,
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     if request is not None:
         user_id = resolve_user_id(request, user_id)
@@ -218,7 +219,7 @@ async def list_subagent_jobs(
     user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),
     status: TaskStatus | None = Query(None),
-    request: Request = None,
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     if request is not None:
         user_id = resolve_user_id(request, user_id)
@@ -236,7 +237,7 @@ async def get_subagent_job(
     job_id: str,
     user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),
-    request: Request = None,
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     if request is not None:
         user_id = resolve_user_id(request, user_id)
@@ -257,7 +258,7 @@ async def instruct_subagent_job(
     body: SubagentInstructionRequest,
     user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),
-    request: Request = None,
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     if request is not None:
         user_id = resolve_user_id(request, user_id)
@@ -280,7 +281,7 @@ async def cancel_subagent_job(
     job_id: str,
     user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),
-    request: Request = None,
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     if request is not None:
         user_id = resolve_user_id(request, user_id)
@@ -304,7 +305,7 @@ async def update_subagent(
     body: SubagentUpdateRequest,
     user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),
-    request: Request = None,
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     if request is not None:
         user_id = resolve_user_id(request, user_id)
@@ -348,7 +349,7 @@ async def delete_subagent(
     name: str,
     user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),
-    request: Request = None,
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     if request is not None:
         user_id = resolve_user_id(request, user_id)
@@ -371,7 +372,7 @@ async def start_subagent(
     body: SubagentStartRequest,
     user_id: str = Query(DEFAULT_USER_ID),
     workspace_id: str = Query("personal"),
-    request: Request = None,
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     if request is not None:
         user_id = resolve_user_id(request, user_id)
@@ -397,7 +398,7 @@ async def set_subagent_scope(
     name: str,
     body: dict[str, Any],
     user_id: str = Query(DEFAULT_USER_ID),
-    request: Request = None,
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     if request is not None:
         user_id = resolve_user_id(request, user_id)
