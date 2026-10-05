@@ -106,6 +106,11 @@ class HITLMiddleware(Middleware):
             # Bind the approval to the definition shown to the user (#62). The
             # loop's registry already resolved it for this call.
             definition_hash=definition_fingerprint(definition),
+            # Issue #73: record the workspace the approval was created in, so
+            # execution resolves the SAME definition the user saw.
+            workspace_id=(
+                getattr(loop, "workspace_id", None) if loop is not None else None
+            ),
         )
         return ToolResult(
             content=(

@@ -58,7 +58,12 @@ def test_async_approval_returns_accepted_without_invoking_executor(client, monke
     )
     executor = ExternalHTTPExecutor(kind="external_http", dispatch_url="https://executor.internal/run")
     monkeypatch.setattr(service, "_active_tool_definition", lambda *_args: object())
-    monkeypatch.setattr(service, "execution_mode_for_tool", lambda _user_id, _tool_name: "async")
+    # execution_mode_for_tool gained a workspace parameter (#73); accept it.
+    monkeypatch.setattr(
+        service,
+        "execution_mode_for_tool",
+        lambda _user_id, _tool_name, _workspace_id=None: "async",
+    )
     monkeypatch.setattr(service, "resolve_permission", lambda *_args: "ask")
     monkeypatch.setattr(service, "external_executor_for_tool", lambda *_args: executor)
     # Snapshot the immutable external executor at proposal creation.

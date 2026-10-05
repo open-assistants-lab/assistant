@@ -122,16 +122,47 @@ def _body_signature(function: Any) -> str:
         str(getattr(function, "__module__", "")),
         str(getattr(function, "__qualname__", "")),
     ]
+    def _describe(value: Any, depth: int = 0) -> str:
+        """Stable text for a captured value, including containers.
+
+        Issue #73: only PRIMITIVE closure values were hashed, so a body whose
+        difference lived in a list/tuple (or a helper it calls) hashed
+        identically to the original - a replacement executed as if approved.
+        Containers are now described structurally, and a captured CALLABLE is
+        identified by its own module/qualname/consts recursively so a swapped
+        helper changes the fingerprint.
+        """
+        if depth > 4:
+            return "…"
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return repr(value)
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return "[" + ",".join(_describe(item, depth + 1) for item in value) + "]"
+        if isinstance(value, dict):
+            return "{" + ",".join(
+                f"{_describe(k, depth + 1)}:{_describe(v, depth + 1)}"
+                for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))
+            ) + "}"
+        if callable(value):
+            return (
+                f"<callable {getattr(value, '__module__', '')}."
+                f"{getattr(value, '__qualname__', '')}:"
+                + ",".join(
+                    _describe(const, depth + 1)
+                    for const in getattr(getattr(value, "__code__", None), "co_consts", ()) or ()
+                )
+                + ">"
+            )
+        return f"<{type(value).__name__}>"
+
     for cell in getattr(function, "__closure__", None) or ():
         try:
             value = cell.cell_contents
         except ValueError:  # empty cell
             continue
-        if isinstance(value, (str, int, float, bool)) or value is None:
-            parts.append(repr(value))
+        parts.append(_describe(value))
     for const in getattr(getattr(function, "__code__", None), "co_consts", ()) or ():
-        if isinstance(const, (str, int, float, bool)) or const is None:
-            parts.append(repr(const))
+        parts.append(_describe(const))
     return "|".join(parts)
 
 
@@ -191,7 +222,8 @@ class GovernanceService:
                 user_id TEXT,
                 executor_json TEXT,
                 outcome TEXT,
-                definition_hash TEXT
+                definition_hash TEXT,
+                workspace_id TEXT
             )
             """
         )
@@ -204,6 +236,7 @@ class GovernanceService:
             "executor_json",
             "outcome",
             "definition_hash",
+            "workspace_id",
         ):
             try:
                 conn.execute(f"ALTER TABLE proposals ADD COLUMN {column} TEXT")
@@ -360,6 +393,7 @@ class GovernanceService:
         session_id: str | None = None,
         executor: Any | None = None,
         definition_hash: str | None = None,
+        workspace_id: str | None = None,
     ) -> str:
         proposal_id = uuid.uuid4().hex
         expiry = None
@@ -369,7 +403,7 @@ class GovernanceService:
         executor_json = json.dumps(executor.model_dump(mode="json"), sort_keys=True) if executor else None
         with self._conn(user_id) as conn:
             conn.execute(
-                "INSERT INTO proposals (proposal_id, ts, tool, arguments, permission, status, expires_at, session_id, user_id, executor_json, definition_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO proposals (proposal_id, ts, tool, arguments, permission, status, expires_at, session_id, user_id, executor_json, definition_hash, workspace_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     proposal_id,
                     datetime.now(UTC).isoformat(),
@@ -382,6 +416,7 @@ class GovernanceService:
                     user_id,
                     executor_json,
                     definition_hash,
+                    workspace_id,
                 ),
             )
             # M4-2 anti-fatigue: proposals_created per tool.
@@ -435,7 +470,7 @@ class GovernanceService:
         with self._conn(user_id) as conn:
             row = conn.execute(
                 "SELECT proposal_id, tool, arguments, permission, status, expires_at,"
-                " session_id, executor_json, outcome, definition_hash FROM proposals"
+                " session_id, executor_json, outcome, definition_hash, workspace_id FROM proposals"
                 " WHERE proposal_id = ?",
                 (proposal_id,),
             ).fetchone()
@@ -452,6 +487,7 @@ class GovernanceService:
             "executor": json.loads(row[7]) if row[7] else None,
             "outcome": row[8],
             "definition_hash": row[9],
+            "workspace_id": row[10],
         }
 
     def approve(
@@ -483,29 +519,47 @@ class GovernanceService:
                 conn.commit()
         return newly
 
-    def _active_tool_definition(self, user_id: str, tool_name: str) -> Any | None:
-        """Resolve through the runner's deployment and user capability ceiling."""
+    def _active_tool_definition(
+        self, user_id: str, tool_name: str, workspace_id: str | None = None
+    ) -> Any | None:
+        """Resolve through the runner's deployment and user capability ceiling.
+
+        Issue #73: without the workspace the resolver always looked in the
+        personal workspace, so a proposal created against a project tool
+        resolved to a different definition (or none) at approval time. The
+        proposal now records its workspace and every caller passes it through.
+        """
         from src.sdk.runner import get_active_tool_definition
 
-        return get_active_tool_definition(user_id, tool_name)
+        return get_active_tool_definition(
+            user_id, tool_name, workspace_id=workspace_id or "personal"
+        )
 
-    def execution_mode_for_tool(self, user_id: str, tool_name: str) -> str:
-        definition = self._active_tool_definition(user_id, tool_name)
+    def execution_mode_for_tool(
+        self, user_id: str, tool_name: str, workspace_id: str | None = None
+    ) -> str:
+        definition = self._active_tool_definition(user_id, tool_name, workspace_id)
         return str(getattr(getattr(definition, "annotations", None), "execution_mode", "sync"))
 
-    def external_executor_for_tool(self, user_id: str, tool_name: str) -> Any | None:
+    def external_executor_for_tool(
+        self, user_id: str, tool_name: str, workspace_id: str | None = None
+    ) -> Any | None:
         """Return the active, deployment/capability-authorized executor only."""
-        definition = self._active_tool_definition(user_id, tool_name)
+        definition = self._active_tool_definition(user_id, tool_name, workspace_id)
         return getattr(getattr(definition, "annotations", None), "executor", None)
 
     def validate_async_approval(self, user_id: str, row: dict[str, Any]) -> Any:
         """Fail closed if current policy/tool metadata no longer matches proposal."""
-        definition = self._active_tool_definition(user_id, row["tool"])
-        if definition is None or self.execution_mode_for_tool(user_id, row["tool"]) != "async":
+        workspace_id = row.get("workspace_id")
+        definition = self._active_tool_definition(user_id, row["tool"], workspace_id)
+        if (
+            definition is None
+            or self.execution_mode_for_tool(user_id, row["tool"], workspace_id) != "async"
+        ):
             raise ValueError("async tool is no longer enabled")
         if self.resolve_permission(user_id, row["tool"]) != row["permission"] or row["permission"] == "deny":
             raise ValueError("permission changed")
-        executor = self.external_executor_for_tool(user_id, row["tool"])
+        executor = self.external_executor_for_tool(user_id, row["tool"], workspace_id)
         snapshot = row.get("executor")
         if executor is None or snapshot != executor.model_dump(mode="json"):
             raise ValueError("external executor metadata changed")
@@ -710,7 +764,9 @@ class GovernanceService:
                 # Match the current live catalog, including deployment policy
                 # and custom overrides. Catalog failures must not fall back to
                 # a different (native) body for the approved name.
-                td = get_active_tool_definition(user_id, tool)
+                td = get_active_tool_definition(
+                    user_id, tool, workspace_id=row.get("workspace_id") or "personal"
+                )
             else:
                 from src.sdk.deployment_tools import filter_denied_native_tools
 
