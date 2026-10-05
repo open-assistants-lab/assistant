@@ -9,6 +9,7 @@ parameters:
     store_id: {type: string}
   required: [store_id]
 annotations:
+  pipefail: true
   read_only: true
 ---
 Only fixture-alpha and fixture-beta are valid targets. No network access.

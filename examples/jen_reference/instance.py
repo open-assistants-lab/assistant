@@ -42,6 +42,15 @@ def _safe_path(path: Path) -> None:
         raise ValueError("symlink_path")
 
 
+def reject_overlapping_paths(*paths: Path) -> None:
+    """Keep reusable content, recovery copies and generated secrets disjoint."""
+    roots = [path.resolve() for path in paths]
+    for index, left in enumerate(roots):
+        for right in roots[index + 1:]:
+            if left == right or left in right.parents or right in left.parents:
+                raise ValueError("overlapping_paths")
+
+
 def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -84,6 +93,7 @@ def prepare_instance(package_dir: Path, destination: Path, *, instance_id: str,
         raise ValueError("unpinned_engine_image")
     _safe_path(destination)
     _safe_path(package_dir)
+    reject_overlapping_paths(package_dir, destination)
     if destination.exists():
         raise ValueError("destination_exists")
     if not package_dir.is_dir() or any(not (package_dir / f).is_file() for f in REQUIRED):

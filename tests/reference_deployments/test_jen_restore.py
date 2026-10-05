@@ -96,3 +96,40 @@ def test_restore_never_overwrites_existing(harness, recipe, tmp_path):
     with pytest.raises(ValueError):
         recipe["restore_stopped"](PACKAGE, snapshot, dest, instance_id="new", owner_label="fixture", engine_image=IMAGE)
     assert (dest / "keep").read_text() == "keep"
+
+
+def test_snapshot_inside_source_refused_without_touching_source(harness, recipe, monkeypatch):
+    import shutil
+    source = harness[0]
+    before = recipe["data_checksums"](source.data)
+    destination = source.data / "snapshot"
+    # An erroneous copy here would recurse. Refuse the unsafe dependency call,
+    # then assert the actual rejection and filesystem-preservation contract.
+    def unsafe_copy(*args, **kwargs):
+        raise AssertionError("overlap must be rejected before copying")
+    monkeypatch.setattr(shutil, "copytree", unsafe_copy)
+    with pytest.raises(ValueError, match="overlapping_paths"):
+        recipe["snapshot_stopped"](source, destination)
+    assert not destination.exists()
+    assert recipe["data_checksums"](source.data) == before
+
+
+@pytest.mark.parametrize("location", ["snapshot_data", "package"])
+def test_restore_overlapping_inputs_refused_before_key_creation(harness, recipe, tmp_path, monkeypatch, location):
+    import shutil
+    snapshot = tmp_path / "snapshot"
+    recipe["snapshot_stopped"](harness[0], snapshot)
+    package = tmp_path / "package"
+    shutil.copytree(PACKAGE, package)
+    before_snapshot = recipe["data_checksums"](snapshot)
+    before_package = recipe["data_checksums"](package)
+    destination = (snapshot / "data/restored") if location == "snapshot_data" else (package / "restored")
+    def unsafe_copy(*args, **kwargs):
+        raise AssertionError("overlap must be rejected before copying")
+    monkeypatch.setattr(shutil, "copytree", unsafe_copy)
+    with pytest.raises(ValueError, match="overlapping_paths"):
+        recipe["restore_stopped"](package, snapshot, destination, instance_id="new",
+                                  owner_label="fixture", engine_image=IMAGE)
+    assert not destination.exists()
+    assert recipe["data_checksums"](snapshot) == before_snapshot
+    assert recipe["data_checksums"](package) == before_package

@@ -100,6 +100,14 @@ def test_image_or_package_mismatch(instance, field, value):
     assert readiness.check_readiness(instance).checks["package"] != "ok"
 
 
+@pytest.mark.parametrize("frontmatter", ["- name: wrong", "unexpected-scalar", "42", "name: [wrong]", "name: {value: wrong}"])
+def test_malformed_tool_metadata_returns_bounded_checks(instance, frontmatter):
+    tool = instance.data / "Tools/fixture_store_read/TOOL.md"
+    tool.write_text("---\n" + frontmatter + "\n---\ninvalid fixture tool")
+    result = readiness.check_readiness(instance)
+    assert not result.ready and result.checks["tools"] == "invalid"
+
+
 def test_readiness_symlink_never_reads_target(instance, tmp_path, monkeypatch):
     link = tmp_path / "link"
     link.symlink_to(instance.root, target_is_directory=True)

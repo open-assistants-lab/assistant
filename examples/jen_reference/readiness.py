@@ -62,7 +62,8 @@ def check_readiness(paths: InstancePaths, *, runtime_url: str | None = None) -> 
         pass  # Parser errors may include content; expose only stable reason.
     try:
         tools = [load_tool_meta(paths.data / "Tools" / name / "TOOL.md") for name in EXPECTED_TOOLS]
-        if all(t and t["name"] in EXPECTED_TOOLS for t in tools):
+        if all(isinstance(t, dict) and isinstance(t.get("name"), str)
+               and t["name"] in EXPECTED_TOOLS for t in tools):
             checks["tools"] = "ok"
     except (OSError, ValueError, KeyError):
         pass

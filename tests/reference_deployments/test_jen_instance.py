@@ -129,6 +129,16 @@ def test_manifest_cannot_omit_required_immutable_content(tmp_path, name):
     assert "missing_package_content" in validate_instance(paths)
 
 
+def test_prepare_cannot_write_instance_secrets_inside_package(tmp_path):
+    import shutil
+    package = tmp_path / "package"
+    shutil.copytree(PACKAGE, package)
+    destination = package / "instance"
+    with pytest.raises(ValueError, match="overlapping_paths"):
+        prepare_instance(package, destination, instance_id="one", owner_label="fixture", engine_image=IMAGE)
+    assert not destination.exists()
+
+
 def test_validate_root_symlink_never_reads_target(tmp_path, monkeypatch):
     from examples.jen_reference.instance import InstancePaths
     paths = prepare(tmp_path)

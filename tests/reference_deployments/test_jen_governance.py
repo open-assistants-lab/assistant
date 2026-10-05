@@ -7,6 +7,7 @@ from src.sdk.governance import GovernanceService
 from src.sdk.loop import AgentLoop, RunConfig
 from src.sdk.messages import Message
 from src.sdk.middleware_hitl import HITLMiddleware
+from src.sdk.tools import ToolResult
 from src.sdk.tools_custom import get_custom_tools
 from tests.integration.fake_provider import FakeProvider
 
@@ -36,6 +37,15 @@ async def test_read_runs_without_approval(harness):
     assert ids == []
     outputs = [m.content for m in messages if m.role == "tool"]
     assert any('"revision": 1' in str(o) and '"outcome": "read"' in str(o) for o in outputs)
+
+
+async def test_installed_read_failure_has_failed_tool_outcome(harness):
+    read = next(t for t in harness[1] if t.name == "fixture_store_read")
+    result = await read.ainvoke({"store_id": "alpha"})
+    assert isinstance(result, ToolResult)
+    assert result.is_error and result.outcome.value == "failed"
+    assert "unknown_target" in result.content
+    assert read_store(harness[3], "fixture-alpha")["revision"] == 1
 
 
 async def test_write_creates_real_pending_without_mutation(harness):

@@ -83,8 +83,9 @@ proof of HTTP roles, live integration, full customer isolation or production par
 **Stop all writers first:** engine, scripts, workers, schedulers, test processes.
 Close SQLite connections. Do not copy an actively used WAL/journal. This is an
 operator-declared stopped copy, not online backup or crash consistency. No
-command here discovers/stops another agent's runtime. Snapshot includes only
-instance data and non-secret metadata, not `.env`; keep required real secrets
+command here discovers/stops another agent's runtime. Package, source instance, snapshot and restore destination must be separate,
+non-nested paths; overlap is refused before creating directories or keys.
+Snapshot includes only instance data and non-secret metadata, not `.env`; keep required real secrets
 in a separately controlled recovery process. Checksum integrity is not a
 cryptographic authenticity boundary against an attacker who rewrites metadata.
 
@@ -100,7 +101,7 @@ from pathlib import Path
 import yaml
 from examples.jen_reference.instance import (
     CONTENT, ROOT_CONTENT, PACKAGE_VERSION, InstancePaths,
-    prepare_instance, validate_instance,
+    prepare_instance, validate_instance, reject_overlapping_paths,
 )
 
 
@@ -121,10 +122,11 @@ def data_checksums(data):
 
 def snapshot_stopped(source, snapshot):
     # Caller has stopped all writers/closed connections; never automatic.
+    reject_symlinks(snapshot)
+    reject_overlapping_paths(source.root, snapshot)
     if validate_instance(source):
         raise ValueError("invalid_source")
     reject_symlinks(source.data)
-    reject_symlinks(snapshot)
     if snapshot.exists():
         raise ValueError("snapshot_exists")
     snapshot.mkdir(parents=True)
@@ -134,7 +136,10 @@ def snapshot_stopped(source, snapshot):
 
 
 def restore_stopped(package, snapshot, destination, *, instance_id, owner_label, engine_image):
+    reject_symlinks(package)
     reject_symlinks(snapshot)
+    reject_symlinks(destination)
+    reject_overlapping_paths(package, snapshot, destination)
     meta = json.loads((snapshot / "source.json").read_text())
     if meta["package_version"] != PACKAGE_VERSION or meta["engine_image"] != engine_image:
         raise ValueError("version_or_image_mismatch")
