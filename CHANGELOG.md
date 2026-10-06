@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.6.34 — 2026-10-06
+
+### Changed — output guardrails now PREVENT, not detect (#74)
+A guardrail that trips after the bytes are on the wire is an alert system. Option (a) was chosen: model content is held until the output guardrails for the round have passed, so a tripped guard truly keeps the content off the client and out of the session log.
+
+- **Streaming:** text and reasoning events are buffered per round and flushed only on a pass. On a trip the buffer is dropped and an error is emitted; for a tool-call round the narration is dropped while the tool action still runs — the action is separately guarded. An overflow retry clears the buffer so an aborted attempt's content is not attributed to the retry.
+- **Both paths:** the check now runs *before* the message enters state. The session-log observer fires on `add_message`, so checking afterwards still wrote the blocked text to the log even though the in-memory copy was scrubbed. This was the residual named in #74 and it is now closed.
+- **Non-streaming:** the same pre-add check covers the ordinary answer, the post-nudge final answer, and tool-round narration.
+
+**Accepted cost, stated plainly:** streamed text is delivered per round rather than per token. A guardrails-enabled deployment trades token-by-token rendering for the guarantee that nothing unguarded reaches the client or the log. Deployments without output guardrails are unaffected (the check is a no-op).
+
+Regressions: `tests/sdk/test_guard_prevention.py` (8 cases; 5 fail on the previous code). Suite: 3865 passed, 27 skipped.
+
 ## v0.6.33 — 2026-10-06
 
 ### Fixed — re-land the subagent lifecycle batch (#110–#116)
