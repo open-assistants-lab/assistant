@@ -2,6 +2,17 @@
 
 This document provides guidelines for agents working on this codebase.
 
+## Product direction and documentation authority
+
+- **One shared engine, two products:** a builder platform and a future finished native product. Current non-bug priority is builder/deployer adoption; macOS product work is parked, not a prerequisite.
+- Builders own profiles, custom tools, skills, authored ontology and deterministic domain safeguards. Deployment teams apply conventions in their own repositories/environments and own identity provisioning, credentials, permissions, source access and operations. Do not modify customer deployments without separate authorisation.
+- Start with [builder/deployer conventions](docs/builder-deployment-guide.md), [runtime deployment](DEPLOYMENT.md) and the [synthetic Jen reference](examples/jen_reference/README.md). The [builder contract](docs/superpowers/specs/2026-10-06-assistant-builder-deployment-contract.md) separates the wider target from completed proof.
+- The synthetic reference is not live Jen parity, eddyave/admi adoption or an independent-builder trial. Docker smoke was skipped this round; Compose validation is not deployment proof. eddyave reuse is the recommended next candidate, not an authorised migration.
+- Runtime/storage, model inference, external tools and tracing are distinct data flows. Never promise that everything stays local merely because the runtime is local.
+- Existing native-tool policy is `all|selected|none`. The simpler exclude-shaped/globs-only policy and full email/contacts/todos deletion remain separate unimplemented work; do not invent a manifest compiler, per-tool taxonomy or fleet control plane. ConnectKit and coding remain; CoreMem remains and missing unit-of-work functionality should go upstream.
+- Park graph builders, verification graphs, forks and new messaging/Rust transports. Keep Jen's existing Telegram interface. Design documents do not authorise implementation or production access.
+- Public claim guidance: [website handoff](docs/website-handoff.md). Check current source and evidence before upgrading a roadmap item to a shipped claim.
+
 ---
 
 ## 1. Build, Lint, and Test Commands
@@ -218,10 +229,10 @@ The codebase has a **custom agent SDK** (`src/sdk/`) as its core runtime.
 
 **Key Design Decisions:**
 1. **models.dev integration**: Registry fetches from `https://models.dev/api.json`, caches locally at `data/cache/models.json` with 5-min TTL, falls back to built-in subset. 4172+ models vs. old 20 hardcoded.
-2. **Scope model (All / Selected / None)**: Replaces old per-workspace capabilities.yaml. `item_scopes` SQLite table governs tool/skill/subagent availability per workspace. Unconfigured items default to `scope=all` (available everywhere).
+2. **Capabilities and deployment ceilings**: Current user-level capabilities use booleans; `src/sdk/capabilities.py` migrates legacy workspace capabilities and `item_scopes.db` (selected migration fails closed). Native deployment policy is separately `all|selected|none`. Unconfigured availability is not action authorisation; do not restore excluded tools via user settings.
 3. **Skills directory**: Injected into system prompt as `Skills directory: {paths.user_skills_dir()}`. Agent uses `files_write` with absolute path to create SKILL.md files.
 4. **Subagents directory**: Injected as `Subagents directory: {paths.user_subagents_dir()}`.
-5. **files_write absolute paths**: Accepts absolute paths anywhere under `data_root`, not just workspace files dir.
+5. **files_write absolute paths**: Uses the caller's own store plus granted operator roots; resolved-path ownership checks reject another user's store even beneath `data_root`. See the filesystem boundary pitfall below.
 6. **Skill catalog injection**: Skill names + descriptions injected into system prompt as `<available_skills>` block. `skills_load` / `skills_reload` are the only skill tools. `skill_create` removed.
 7. **Tool availability**: Unconfigured tools default to available (`scope=all`). Destructive annotation no longer enforces disabled-by-default.
 8. **Block-structured streaming**: `text_start/delta/end`, `tool_input_start/delta/end`, `reasoning_start/delta/end`, `tool_result`, `interrupt`, `done`, `error`. Backward-compat aliases: `ai_token→text_delta`, `tool_start→tool_input_start`, `reasoning→reasoning_delta`.
@@ -229,7 +240,7 @@ The codebase has a **custom agent SDK** (`src/sdk/`) as its core runtime.
 10. **ToolResult** dual format: `content` (human-readable) + `structured_content` (machine-parseable) + `audience` (user/assistant).
 11. **Provider escape hatches**: `provider_options` on inputs (keyed by provider name), `provider_metadata` on outputs. Enables Anthropic `thinking`, Gemini `thinkingConfig`, OpenAI `logprobs` etc.
 12. **Reasoning as first-class content**: `Message.reasoning` field persists thinking tokens across turns. Anthropic `thinking` blocks handled in `to_anthropic()`/`from_anthropic_block()`.
-13. **Sequential tool execution**: AgentLoop executes tools one at a time (parallel deferred).
+13. **Tool execution safety**: AgentLoop classifies registered calls before concurrent execution; unresolved tools are not parallel-safe. Preserve interrupt, cancellation and steering ordering.
 8. **No checkpoints**: LangGraph checkpoint system was permanently disabled. Conversation history is managed by `SummarizationMiddleware`.
 9. **Parallel tool execution**: `_classify_tool_calls()` splits into `parallel_safe` (read-only or non-destructive), `sequential` (destructive but not needing HITL), and `interrupts` (destructive + not read-only). Concurrent batch via `asyncio.gather()`.
 10. **Usage tracking**: `Message.usage` (type `Usage`) carries token counts from provider responses. Providers populate `Usage` with `input_tokens`, `output_tokens`, `reasoning_tokens`, `cache_read_tokens`, `cache_creation_tokens`. `AgentLoop` extracts usage and passes to `CostTracker.add_usage()`. Streaming uses `StreamChunk.usage_event(Usage)` before `done` event.
@@ -261,24 +272,24 @@ Both SSE and WS routers now handle block-structured events (`text_start/delta/en
 
 Per-user storage is split across **two trees** (both must be backed up):
 
-1. **`data_root`** (default `~/Assistant/`, env `DEPLOYMENT_DATA_ROOT`) — bulk user data via `DataPaths`: `Conversation/messages.db`, `Memory/` (ChromaDB), `Files/`, `Email/emails.db`, `Contacts/contacts.db`, `Todos/todos.db`, `Skills/`, `Subagents/`. Non-default users under `data_root/Users/{user_id}/`; `default_user` uses the root.
-2. **`data/users/{user_id}/`** (via `data_path`, env `DEPLOYMENT_DATA_PATH`) — per-user settings/capabilities/vault: `capabilities.yaml`, `item_scopes.db`, `settings.json`, `connectkit/`, seeded prompts (`summarisation_prompt.md`).
+1. **`data_root`** (default `~/Assistant/`, env `DEPLOYMENT_DATA_ROOT`) — bulk user data via `DataPaths`: `Messages/messages.db`, `Memory/` (ChromaDB), `Files/`, `Email/emails.db`, `Contacts/contacts.db`, `Todos/todos.db`, `Skills/`, `Subagents/`. Non-default users under `data_root/Users/{user_id}/`; `default_user` uses the root.
+2. **`data_path`** (default `data/`, env `DEPLOYMENT_DATA_PATH`) — includes user capability roots (`users/{user_id}/`), legacy settings/scopes and component-specific state. Current `UserSettingsStore` writes via `DataPaths.user_settings_path()` under the user's `data_root`, with migration from the legacy settings path. Inventory actual component paths, including vaults, rather than assuming everything under `data_path` is regenerable.
 3. **`data/` root** — project-level: `cache/`, `logs/`, `jobs.db`, `templates/`, `traces/`.
 
 Decision: **SQLite + ChromaDB per-user even for team/enterprise** (not shared DB).
 
 ### Deployment
 
-Multi-user deployment has two shapes (see `DEPLOYMENT.md`): **trusted** — several users in ONE container, one OS user per tenant, soft sandbox, shared secret; **untrusted** — one container or microVM per user, per-user auth. Isolation follows the topology, not the auth strength.
-**Watch out: the trusted per-tenant OS user is specified but NOT built.** All tenants currently share one uid and their directories are separated by path name only, so `shell_execute` is the only control between them. Real 3a isolation needs a per-tenant worker process (a per-request `setuid` in an async server is unsafe). See `DEPLOYMENT.md#status`.
+Start with dedicated runtime/storage/credential boundaries for unrelated customers (see `DEPLOYMENT.md`). Trusted users may share a process, but shared-UID namespaces are not hostile-tenant isolation. Identity strength does not create filesystem/process isolation.
+**Watch out: per-tenant worker/OS-user isolation in one shared server is NOT built.** API ownership checks and filesystem-tool boundaries exist, but arbitrary code with service credentials is a separate authority path. A per-request `setuid` inside a concurrent async server is not a substitute for worker isolation. See `DEPLOYMENT.md#status`.
 
 Key facts:
-- Entry point is `uv run assistant http` (console script `assistant` — `ea` was never valid). Listens on `0.0.0.0:8000` by default (`API_HOST`/`API_PORT`).
-- Auth: `API_KEY` authenticates the *connection* only; `SOLO_BYPASS` (default true) skips auth for localhost. **There is no per-user authentication** — `user_id` is client-supplied (query/body param, default `default_user`). Multi-user deployments are container-per-user and/or trusted-network only.
+- Entry point is `uv run assistant http` (console script `assistant`, not `assistant-sdk` or `ea`). Defaults to `0.0.0.0:8080` (`API_HOST`/`API_PORT`); explicitly bind loopback for unauthenticated development.
+- Auth: shared `API_KEY` is trusted-deployment access, not an individual identity; `SOLO_BYPASS` defaults true. Opt-in `PER_USER_AUTH=true` keys and browser OIDC (`OIDC_*`) exist through `IdentityResolver`. Scoped identity must win over payload IDs via `resolve_user_id`/`enforce_user_id`. For remote edges, configure auth, disable bypass and prevent proxy/backend bypass; no native SSO or general hostile-tenant guarantee is implied.
 - **One process per user store**: in-memory per-user caches (MessageStore, AgentLoop, session registry) + single-writer SQLite/ChromaDB mean replicas serving the same user are unsupported. Multi-tenant = N isolated containers, each one user.
 - Docker (see `docker/`): image must `COPY seeds/ seeds/`; `DEPLOYMENT_DATA_ROOT`/`DEPLOYMENT_DATA_PATH` must point into the mounted volume or user data silently lands in `/root/Assistant` and is lost on recreation.
 - Client file caching (partial): `FileCache` in `http/workspace_cache.py` models `cloud_only` / `downloaded` / `pinned` statuses per path.
-- Known gaps: no OIDC/per-user tokens, teams are skeleton (`data/teams/` unused), no offline/bidirectional sync, no horizontal scaling per user.
+- Known gaps: no completed hostile-tenant shared-worker isolation, no demonstrated general organisation-sharing contract, no complete offline/bidirectional sync, no horizontal scaling per user. Browser OIDC and per-user keys are implemented, not missing features; validate each deployment's configuration and boundaries.
 - Deferred follow-ups from the 2026-08-23 audit live in `docs/audits/2026-08-24-deferred-followups.md` — check it before touching `GmailCache` (batched upsert is trigger-gated P1), the WS approval tests (known hang), or summary-cache invalidation.
 
 ---
@@ -314,8 +325,8 @@ kwargs={"thinking": {"type": "enabled"}}  # leaks to OpenAI/Gemini
 ### CRITICAL: models.dev registry uses lazy loading
 The registry (`src/sdk/registry.py`) fetches from `https://models.dev/api.json` on first access, caches to `data/cache/models.json`. If the API is unreachable, it falls back to a built-in subset. **Never hardcode model info — always use `get_model_info()` or `list_models()`.**
 
-### CRITICAL: No parallel tool execution (by design)
-The AgentLoop executes tools sequentially. This was a deliberate decision. If you need parallel execution, it requires a separate `ToolExecutor` class with async concurrency — do NOT just add `asyncio.gather()` in the loop.
+### CRITICAL: Preserve tool classification before parallel execution
+The AgentLoop already executes classified parallel-safe calls concurrently. Unknown tools remain sequential; approval-required calls follow the interrupt path. Do not bypass `_classify_tool_calls` or add concurrency that breaks cancellation, steering or tool-result ordering.
 
 ### Watch out: ToolAnnotations.auto_approval only works for non-destructive tools
 The `_should_interrupt()` method checks: if `destructive=True AND read_only=False` → interrupt. A tool that is both `destructive` AND `read_only` won't interrupt (read-only wins). This is intentional — a read-only destructive tool is a contradiction that defaults to safe.
@@ -360,8 +371,8 @@ loop = AgentLoop(
 ### CRITICAL: user data in containers — DEPLOYMENT_DATA_ROOT
 Without `DEPLOYMENT_DATA_ROOT` pointing into the mounted volume, all bulk user data (conversation, files, memory, email) goes to `/root/Assistant` inside the container and is **silently lost on recreation**. `DEPLOYMENT_DATA_PATH` alone does NOT cover `data_root`. Same split matters in tests: `data_root=tmp_path` for user-data isolation, `data_path=tmp_path` for settings/templates.
 
-### CRITICAL: no per-user auth (trust model)
-`API_KEY` authenticates the connection, not the user. `user_id` comes from the request payload and is trusted as-is. Never claim per-user security boundaries in multi-user deployments; container-per-user (or a trusted network) is the only isolation today. Adding OIDC/per-user tokens is a prerequisite for public multi-user hosting.
+### CRITICAL: Identity is not a deployment key or a payload field
+`API_KEY` alone grants trusted-deployment access; it is not individual identity. Opt-in per-user keys and browser OIDC resolve scoped identities. Use the existing identity seam to reject mismatched request IDs, and do not allow proxy loopback/bypass to replace authentication at a remote edge. Authentication does not supply hostile-user process isolation or complete business-action authorisation.
 
 ### Watch out: one process per user store
 MessageStore/AgentLoop caches and SQLite/ChromaDB writes are per-user and single-writer. Do not run multiple replicas serving the same user_id (sticky sessions do not fix Chroma or in-memory state). Horizontal scaling = a new user's own process, not another replica of an existing user.
@@ -537,7 +548,7 @@ assistant/
 ### Environment Variables
 - Use `.env` for local development
 - Use `.env.example` as template
-- All config via `src/config/settings.py`; env prefixes: `EA_` (auth: `API_KEY`, `SOLO_BYPASS`), `DEPLOYMENT_` (`DEPLOYMENT_MODE`, `DEPLOYMENT_DATA_PATH`, `DEPLOYMENT_DATA_ROOT`), `API_` (`API_HOST`, `API_PORT`), `LOGGING_` (`LOGGING_LEVEL`, `LOGGING_JSON_DIR`), `AGENT_`, `SUMMARY_`, `LANGFUSE_`, `TOOLS_` (Firecrawl), `OLLAMA_`, `MESSAGES_`
+- All config via `src/config/settings.py`; auth has no prefix (`API_KEY`, `SOLO_BYPASS`, `PER_USER_AUTH`); other prefixes include `OIDC_`, `DEPLOYMENT_` (`DEPLOYMENT_MODE`, `DEPLOYMENT_DATA_PATH`, `DEPLOYMENT_DATA_ROOT`), `API_` (`API_HOST`, `API_PORT`), `LOGGING_` (`LOGGING_LEVEL`, `LOGGING_JSON_DIR`), `AGENT_`, `SUMMARY_`, `LANGFUSE_`, `TOOLS_` (Firecrawl), `OLLAMA_`, `MESSAGES_`
 
 ### Config Priority
 1. Environment variables (highest)
@@ -578,7 +589,7 @@ assistant/
 
 ### Native App (native-sdk-experiment)
 
-Zig + Native SDK desktop app (macOS, `src/main.zig` ~5k lines + `src/app.native` markup twin). Backend contract: `http://127.0.0.1:8080`, `user_id=native_sdk_chat`, `workspace_id=personal`.
+Zig + Native SDK experimental desktop app (macOS, `src/main.zig` + `src/app.native` markup twin). Existing source supports `NATIVE_ASSISTANT_BASE_URL` and `NATIVE_ASSISTANT_LAUNCH_TOKEN`; localhost:8080 and local actor/workspace defaults are not a general remote identity contract. Product work is parked. Do not claim shipped multi-instance login, native OIDC handoff or release packaging from this configuration support.
 
 - **Sidebar**: New chat, search, chat list, then Settings + theme toggle only. Tools/Skills/Subagents rows removed — the Tools page lives **inside Settings** as a third section.
 - **Settings sections**: Models (model catalog + role toggle), General (rubric, appearance, about), Tools (built-in tool enable/disable + SaaS connectors).

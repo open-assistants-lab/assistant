@@ -1,7 +1,10 @@
 # Assistant Builder and Deployment Contract
 
 Date: 2026-10-06
-Status: Proposed written design for user review. No implementation, installation, production access, or deployment is authorised by this document.
+Status: Convention-first design; the synthetic Jen first slice is implemented and merged. Wider application adoption and production acceptance remain unproved. This document does not authorise customer access or deployment.
+Reader guide: [Builder and deployer conventions](../../builder-deployment-guide.md). Implementation/review evidence: [Jen reference plan](../plans/2026-10-06-jen-reference-deployment.md).
+
+The requirements below describe the wider target, not a checklist of features already delivered. The synthetic reference proves a bounded local package/approval/readiness/recovery harness; Docker startup was deliberately not verified this round. eddyave/admi adoption, real Jen parity and an independent-builder trial remain separate gates. Native macOS product work is parked.
 Basis: `docs/strategy/2026-10-06-platform-and-native-product-roadmap.md` and `docs/audits/2026-10-06-reference-deployment-inventory.md`.
 
 ## 1. Intent
@@ -148,17 +151,17 @@ Enumerate runtime/domain databases, artifacts, configuration and secret recovery
 
 At least two unlike workflows install under the same documented lifecycle conventions with no customer-specific engine edits. An independent builder then attempts the procedure; record setup time, failures and every manual intervention. Do not claim external reuse from copying our own installations alone.
 
-## 11. Native acceptance boundary
+## 11. Native acceptance boundary — parked
 
-The parallel native product proves: install -> configure model -> grant file access -> ask about a CSV/spreadsheet -> receive a checked answer and saved analysis artifact -> reopen without losing results.
+The finished native product remains a separate goal on the same engine, not a prerequisite for builder adoption. Existing macOS app configuration does not prove finished remote identity, native SSO, multiple-instance operation or distribution.
 
-Use a known-answer dataset and explicit checks. A nontechnical user completes it without terminal/developer assistance. This is an acceptance definition, not a UI implementation design or an iPhone/remote-connectivity commitment.
+The earlier install/model/file-analysis acceptance idea was a target, not completed proof. Revisit native acceptance through its own reviewed client/server design before implementation. Do not turn this builder contract into a requirement for a new client component or mandatory local runtime.
 
-## 12. First implementation slice after review
+## 12. First slice and remaining adoption gates
 
-1. A reproducible Jen fixture/staging deployment and readiness checks using existing formats.
-2. A contrasting eddyave reference using the same conventions; admi's authored ontology requirements shape the contract even before its package conversion.
-3. Only then a thin shared validator/operator layer for demonstrated repetition.
+1. **Completed, bounded proof:** synthetic Jen package and independent local instances, fixture approval tests, readiness and stopped-copy recovery using existing formats. See the example and implementation evidence; not real staging/production parity.
+2. **Recommended next candidate:** contrasting eddyave adoption using explicit runtime/auth/profile configuration and safe report fixtures. Its application team applies the conventions in its repository; assistance or migration needs separate authorisation. admi's authored ontology and source-authority requirements remain a contrasting adoption gate.
+3. **Only if repetition warrants it:** extract small shared validator/operator helpers. A universal installer, manifest or fleet layer is not required now.
 
 ### Selected first-slice environment and proof boundary
 
@@ -174,9 +177,9 @@ No production credentials need to enter the reference package.
 
 ## 13. Concurrency and exclusions
 
-Active bug work at inspection: `.worktrees/b11-storage`, touching storage/history, memory/message surfaces, tests and uv.lock. Main also contains other staged/uncommitted work.
+At the original inspection, bug work included `.worktrees/b11-storage` and main had other staged/uncommitted changes. That is historical context, not a current ownership inventory. Recheck HEAD, worktrees and file ownership before any change; preserve unrelated work and lockfile edits.
 
-This lane writes new documentation only. Do not change storage, identity, dependencies, existing runtime code or customer deployments. Do not invoke reference modules/tests that may initialise services or contact production. Revalidate source contracts against reviewed merged fixes before implementation.
+The current convention/documentation update changes no runtime, identity, dependencies or customer deployments. Any next application migration or platform feature requires its own reviewed scope and access approval. Revalidate source contracts against the selected merged release before adoption.
 
 Excluded: generic ontology editor/compiler, new messaging channels, Rust relay, graph builder, complete fleet SaaS, billing automation, native remote client and clinical deployment.
 
@@ -187,4 +190,4 @@ Excluded: generic ontology editor/compiler, new messaging channels, Rust relay, 
 - **Safety:** production mutation, secret copying and unsafe restored schedules are excluded; declarations never substitute for actual enforcement.
 - **Evidence:** current inventory distinguishes local code, historical docs, proposed work and unverified deployed behaviour.
 - **Self-review correction:** selected an offline synthetic first slice; separated harness proof from real integration; documented existing kit/deployment mechanisms and why they cannot be reused unchanged.
-- **Next gate:** user authorised plan writing after this review; execution still requires review of the written plan and selection of an execution method. No implementation or deployment is authorised by plan creation.
+- **Current gate:** the separately reviewed/executed synthetic Jen plan is complete. Further application adoption, platform features and live deployment work need separate approval; neither this contract nor a documentation update authorises those changes.

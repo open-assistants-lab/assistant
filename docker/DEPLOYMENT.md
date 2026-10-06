@@ -1,12 +1,21 @@
 # Docker Deployment Guide — multi-user trusted deployment
 
-**Source of truth for Docker deployment.** Other docs (repo-root `DEPLOYMENT.md`,
-per-project guides) are instances of this one — update here first, then sync copies.
+This guide includes the existing shared-key trusted-user recipe and legacy
+operator scripts. Use [builder/deployer conventions](../docs/builder-deployment-guide.md)
+for application packaging and [root deployment guidance](../DEPLOYMENT.md) for
+current identity/isolation boundaries. These recipes are not production
+attestations or a universal installer.
 
-> **Model:** single container, several **trusted** users, per-user data planes.
-> This is the "Multi-tenant, **trusted (vetted) users**" mode — no container-per-user,
-> no per-user passwords. **Trust prerequisite: users must not be adversarial** (§5).
-> Untrusted users require container-per-user (roadmap Phase 3) — not this guide.
+> **Main recipe:** one container, several trusted users, one shared deployment
+> key and client-selected namespaces. It does not enable per-user keys or OIDC,
+> although both integrations exist. Users must not be adversarial (§5).
+> For unrelated customers start with dedicated runtimes/storage/credentials.
+> A shared uid is not hostile-tenant isolation; see also the dedicated-runtime
+> generator below. Container security depends on operator configuration.
+
+For reproducible adoption, record the reviewed image digest; `latest` examples
+below are acquisition conveniences, not compatibility pins. No Docker startup
+was verified in the synthetic-reference round.
 
 ---
 
@@ -108,8 +117,10 @@ no rebuild).
 
 ## 4. User onboarding — each user gets a namespace
 
-Every user picks a **`user_id`** and uses it in every request. That one parameter
-gives them an isolated data plane:
+In this **shared-key trusted recipe**, each client selects a `user_id` for its
+namespace. That is not an authenticated account or a security boundary. With
+scoped identity enabled, server-resolved identity takes precedence and mismatched
+request IDs must be refused. The current shared-key recipe organises content as:
 
 | Per-`user_id` | Where |
 |---|---|
@@ -143,24 +154,28 @@ You are Alice's operations assistant. Be concise; flag anything financial for re
 Apply profile changes without downtime:
 
 ```bash
-curl -X POST "http://localhost:8080/profile/reload?user_id=alice"
+curl -X POST "http://localhost:8080/profile/reload?user_id=alice" \
+  -H 'Authorization: Bearer <API_KEY>'
 ```
 
 ## 5. The trust contract — read before onboarding
 
-Isolation is **by convention** (everything keyed by `user_id`), not by authentication.
-Be explicit with users:
+This recipe uses **client-selected namespaces**, not individual authentication.
+Be explicit about its limits:
 
-| Guaranteed | NOT guaranteed (yet) |
+| Present in this recipe | Not established by this recipe |
 |---|---|
-| Users never *accidentally* see each other's data | A user **can** send a different `user_id` and read/write another's data — no per-user password yet |
-| Per-user audit trail (who did what) | Per-user cost quotas (shared key = shared LLM bill) |
-| Per-user profiles/models | Per-user key revocation (rotate = rotate for all) |
-| OS-level separation from other apps | Process isolation between users (one container, one process) |
+| Content organised by requested `user_id` | Individual ownership enforcement: shared-key holders can select another namespace |
+| Audit records keyed by namespace | Proof that the namespace identifies an authenticated person |
+| Per-user profiles/models | Individual key revocation: rotating this shared key affects all holders |
+| A configured container boundary | Process/OS-user isolation between users inside its shared server |
 
-**Rule of thumb:** family and vetted teammates = fine. Adversarial users = wait for
-Phase 2 per-user keys (the enforcement sweep is already wired and activates
-automatically when a per-user resolver is plugged in) or use one container per user.
+Per-user keys and browser OIDC are implemented options, not future phases.
+Configure and test scoped identity if users require individual access. Do not
+hand out the privileged shared deployment key as though it were a user account.
+Identity enforcement does not supply separate workers or contain arbitrary code
+with service credentials. Use separately configured runtime boundaries for
+unrelated customers; review mounts, privileges, credentials and egress.
 
 **Trusted-intermediary pattern (recommended for bot front ends):** run a bot/service
 that authenticates users itself (whitelist, SSO, Telegram IDs) and **maps each
@@ -212,11 +227,11 @@ their Bearer token; data is unaffected).
 
 ## 9. What this mode is not
 
-- Not multi-tenant in the **security** sense — one shared key, `user_id` is
-  client-declared (per-user keys land in Phase 2; the enforcement sweep is already
-  wired and will activate automatically)
-- Not horizontally scalable — one container per deployment, ever (single-writer
-  stores); more users = this same container until Phase 3 tenancy
+- Not hostile-tenant isolation — this recipe uses a shared key and client-selected
+  namespaces. Opt-in scoped identity is available but does not create OS isolation.
+- Not horizontally scalable for one user's store — never run multiple runtime
+  replicas against the same mutable store. Separate user/customer runtimes are
+  possible; they need independent data and credential boundaries.
 - Browser automation (`agent-browser`) is not in the image — disable browser tools
   per user via capabilities, or add Chromium to a custom image
 ## Ollama daemon on the host (`ollama:` provider)
@@ -268,9 +283,16 @@ boundary is the isolation tier.
 
 ## 10. Partner deployment packaging (T3.7)
 
-**Partners ship an agent, not code.** The only artifact is the published
-Docker image plus the partner's own `PROFILE.md` (agent definition:
-frontmatter + body). No pip install path exists or is planned.
+**Partners supply application content, not customer-specific engine forks.**
+Content may include profiles, custom tools, skills, domain definitions, process
+safeguards and service configuration. The legacy helper below handles a narrower
+profile-oriented recipe; it is not the full builder contract or a general
+installer. Source installation with `uv` is also documented in the root README.
+
+Do not run this helper unchanged against a customer. Review its paths, secret
+handling, ports and version pinning against the current conventions first. Use
+the [synthetic Jen reference](../examples/jen_reference/README.md) for a tested
+local packaging example, not proof of live customer compatibility.
 
 ### Onboard a partner (scripted)
 
@@ -279,10 +301,10 @@ scripts/partner_deploy.sh -t <tenant_name> -p /path/to/PROFILE.md \
   -i ghcr.io/open-assistants-lab/assistant:vX.Y.Z -k <api_key>
 ```
 
-The script: renders a compose file → mounts the partner PROFILE.md at
-`/app/profile/PROFILE.md` → `compose up` → waits for health → calls
-`POST /profile/reload?user_id=default_user` (the K1 profile bootstrap) →
-prints the loopback URL and auth options.
+The legacy script renders Compose, mounts a profile, starts services and invokes
+profile reload. Its `/app/profile/PROFILE.md` mount is not the engine's generic
+`DataPaths` profile location; verify installation against the selected release.
+Health alone does not prove the intended profile/tools/domain content was loaded.
 
 ### Versioned images
 
@@ -299,37 +321,32 @@ Partners choose the auth tier at deployment time; all ride the same
 |--------|-----|--------------------|
 | Shared secret | `API_KEY` | one deployment key; `user_id` accepted as-is (solo/trusted) |
 | Per-user keys | `PER_USER_AUTH=true` | Bearer per-user keys → `(user_id, scopes)` via `/auth/keys` |
-| OIDC SSO | OIDC settings (`/auth/oidc/login`) | IdP token → org + role via the local tenancy store |
+| Browser OIDC | `OIDC_*` settings (`/auth/oidc/login`) | Server-side identity/session resolution; not finished native SSO or a complete organisation-sharing contract |
 
-### Exact fresh-clone steps
+### Adoption gate
 
-1. `curl -sO .../docker/docker-compose.yaml && curl -sO .../config.yaml`
-2. Replace `build:` with the pinned image (or use `scripts/partner_deploy.sh`)
-3. Set `.env` (API_KEY + provider key)
-4. `docker compose up -d` → mount partner PROFILE.md → `/profile/reload`
-5. Health + round-trip: `/health`, then a chat round-trip
+Follow the [deployment-team checklist](../docs/builder-deployment-guide.md#adoption-checklist-for-deployment-teams).
+Pin the package/runtime, configure explicit paths and identity, validate actual
+loaded content, exercise safe fixture workflows and prove separate-location
+recovery. A health check plus one chat round-trip is not the full acceptance gate.
 
-## Product tracing (subject to user acceptance)
+## Tracing and data flows
 
-Hosted deployments can send traces to our own observability, so we can see
-what the product is doing in the field. Two sinks, wired but **off by
-default**:
+Deployers choose observability destinations and obtain the required acceptance
+for their payloads; there is no requirement to send customer traces to the
+project's infrastructure. Runtime location, inference, tools and tracing are
+separate data flows. Do not promise that a local runtime keeps all data local.
 
-| sink | contents | acceptance switch |
-|---|---|---|
-| Langfuse (`langfuse.openassistants.org`) | semantic: full message payloads, generations, tool calls | `LANGFUSE_ENABLED=1` |
-| ClickStack (`clickstack.openassistants.org`) | operational: allowlisted attributes only, **no prompts** | set `OBSERVABILITY__CLICKSTACK__ENDPOINT` (+ `...HEADERS`) |
+- **Semantic tracing:** Langfuse can receive message content, generations and
+  tool spans. Review effective configuration, credentials and the explicit host.
+  `LANGFUSE_ENABLED=false` overrides YAML enablement. An enabled, credentialed
+  Langfuse configuration without an explicit host refuses startup.
+- **Operational tracing:** configure `OTEL_ENDPOINT` and optional `OTEL_HEADERS`
+  for the chosen OTLP collector. Operational spans use allowlisted runtime
+  attributes, not prompt/completion/tool-result payloads. This is separate from
+  Langfuse semantic content.
 
-Acceptance is per-sink and explicit: setting the switch is the consent.
-`LANGFUSE_ENABLED` beats every other source, including the `config.yaml`
-baked into the image — an explicit `=0` closes the gate even where yaml says
-`enabled: true`, and yaml can no longer force it open. Nothing is sent while
-a sink's switch is off — verified by test, not assumed (and the verification
-caught a real bug the first time: yaml's `enabled: true` was silently
-overriding the env opt-out the moment credentials appeared).
-
-Credentials never enter the repo: they live only in the gitignored
-`docker/.env` (compose `env_file`). `docker/.env.example` documents the shape
-with placeholders. ClickStack's OTLP ingest takes a **plain** `authorization:
-<OTLP_AUTH_TOKEN>` header — the UI/MCP bearer key is a different credential
-and is rejected.
+See [root observability guidance](../DEPLOYMENT.md#observability-ob-0ob-1).
+Keep exporter credentials out of packages, logs and version control. Review the
+selected release's configuration rather than copying a historical sink URL or
+assuming a tracing switch alone constitutes the customer's consent.

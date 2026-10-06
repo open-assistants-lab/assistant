@@ -3,17 +3,26 @@
 [![Stars](https://img.shields.io/github/stars/open-assistants-lab/assistant)](https://github.com/open-assistants-lab/assistant)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-Your personal AI assistant that runs on your machine. Chat, email, tasks, research, files — all through an HTTP API, powered by your choice of LLM (OpenAI, Anthropic, Ollama, Gemini).
+**Build your assistant, not its infrastructure.**
+
+Assistant is a self-hostable engine for assistants that work with your files and tools—not just your questions. Build an application with profiles, custom tools, skills and your own domain rules, using shared agent execution, persistence, APIs and model-provider integrations.
+
+Operate it on your machine or your own server. Builders own application behaviour; deployment teams own identity, credentials, data and operations. A finished native product remains a separate goal on the same engine; macOS product work is currently parked.
 
 Learn more at [openassistants.org](https://openassistants.org) — including [why this stack exists](https://openassistants.org/story).
 
-## Features
+## For builders and deployment teams
+
+Start with the [builder/deployer conventions and adoption checklist](docs/builder-deployment-guide.md), then the [runtime deployment guide](DEPLOYMENT.md).
+
+The [synthetic Jen reference](examples/jen_reference/README.md) is an executable example of independent instance preparation, fixture approvals, readiness and stopped-copy recovery. It is not a production Jen deployment or proof that eddyave/admi have adopted these conventions. Docker smoke was deferred for this round; configuration validation is not startup proof.
+
+## Engine capabilities
 
 | What | How |
 |------|-----|
-| **Chat** | Conversational AI with memory across sessions. It remembers who you are, your preferences, and your work. |
-| **Email** | Connect Gmail, Outlook, iCloud, or any IMAP account. Read, search, send, reply — hands-free. |
-| **Tasks & Contacts** | Add todos, manage contacts. The assistant can extract them from conversation automatically. |
+| **Chat & History** | Session history, streaming responses and configurable memory/search. |
+| **Application Content** | Package `PROFILE.md`, custom `TOOL.md` tools and `SKILL.md` skills; retain authored domain rules and ontology. |
 | **Web Research** | Search the web, scrape pages, crawl documentation. Ask a question and get an answer with sources. |
 | **Files** | Read, write, edit files in your workspace. Version history for every change. |
 | **Skills** | Load specialized skill packs for specific tasks — browser automation, code review, debugging, and more. |
@@ -21,11 +30,13 @@ Learn more at [openassistants.org](https://openassistants.org) — including [wh
 | **App Builder** | Build simple database apps with structured data and hybrid search. |
 | **Browser Automation** | Control a browser to fill forms, take screenshots, test web apps, or automate logins. |
 | **MCP Integration** | Connect any Model Context Protocol server to add custom tools. |
-| **Native App** | A native macOS desktop client (`native-sdk-experiment/`) with chat, a Tools page (enable/disable built-in tools, connect SaaS services via API key or OAuth), and Settings. |
+| **Native Experiment** | Existing Zig + Native SDK macOS client (`native-sdk-experiment/`); not a finished distributed product or proof of remote-instance interoperability. |
+
+Availability depends on deployment policy, credentials and optional dependencies. Legacy email, contacts and todos code still exists; its planned removal is separate work, not part of this documentation update.
 
 ## Configuration
 
-Your API keys go in `.env` — no config files to edit:
+For local development, put provider credentials in `.env` (never commit them):
 
 ```bash
 # Pick your provider and add your key
@@ -34,11 +45,13 @@ OPENAI_API_KEY=sk-...
 # or OLLAMA_API_KEY=...
 ```
 
-Everything else (model, memory, sync intervals) is pre-configured with sensible defaults. Change them in `config.yaml` if you want, but you don't need to.
+Choose the model/provider and review `config.yaml`. Deployments must explicitly configure runtime/data paths, access policy and required integrations. Server access credentials (`API_KEY` or per-user tokens) are distinct from model-provider credentials. See the [deployment guide](DEPLOYMENT.md) before exposing a server beyond loopback.
 
 ## Data Privacy
 
-Everything runs locally on your machine. Your data lives at `~/Assistant/` — no cloud, no telemetry, no accounts. You control the model, the keys, and the data.
+You choose where the runtime and storage live (local or your server) and whether inference uses a local or cloud provider. Cloud inference sends selected context to that provider; external tools and configured tracing are separate data flows. **A local runtime does not mean everything stays local.**
+
+User data defaults to `~/Assistant/`; some settings and operational state also live under the configured project data path. Inventory and back up both. Deployment teams choose identity/account provisioning and observability destinations. See [the data-flow and operations conventions](docs/builder-deployment-guide.md#operation-and-data-flows).
 
 ## For Developers
 
@@ -46,8 +59,8 @@ Everything runs locally on your machine. Your data lives at `~/Assistant/` — n
 # Install
 uv sync --extra dev
 
-# Run the server
-uv run assistant http
+# Run a loopback-only development server (default port: 8080)
+API_HOST=127.0.0.1 uv run assistant http
 
 # Tests
 uv run pytest
@@ -63,7 +76,7 @@ uv run mypy src/
 # Optional extras install from source via uv (no PyPI path):
 uv sync --extra memory-vector      # + ChromaDB + sentence-transformers (semantic memory/embeddings)
 uv sync --extra analytics          # + DuckDB analytics mirror
-assistant http                      # zero-config first run
+API_HOST=127.0.0.1 assistant http    # local development; configure your model
 ```
 
 Heavy optional features (vector search, semantic embeddings, analytics) live in
@@ -72,7 +85,7 @@ when the matching extra is missing.
 
 ### Build
 
-The backend is the API server — run with `uv run assistant http`.
+The backend is the API server — for local development, run with `API_HOST=127.0.0.1 uv run assistant http`. The unmodified host default is `0.0.0.0`; do not mistake it for loopback-only binding.
 
 The **native desktop app** lives in `native-sdk-experiment/` (Zig + Native SDK):
 

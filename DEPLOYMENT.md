@@ -1,21 +1,24 @@
 # Assistant — Deployment Guide
 
-This guide covers the four supported deployment shapes and the operational
-basics (data layout, backups, secrets, observability) that apply to all of them.
+This guide describes deployment topologies and operational basics. Not every
+isolation design below is implemented. For application packaging, ownership and
+adoption, start with [builder/deployer conventions](docs/builder-deployment-guide.md).
+Use dedicated runtime/storage/credential boundaries for unrelated customers;
+a shared process is a trusted-user arrangement, not hostile-tenant isolation.
 
 - **Mode 1 — Local**: one user, one machine, terminal or desktop app.
 - **Mode 2 — Solo WAN**: one user, many devices. Sessions (and files) stay in
   sync because there is exactly one server.
-- **Mode 3a — Multi-tenant, trusted**: several users in **one container**, one
-  **OS user per tenant**, soft sandbox, one shared secret. Isolation is the OS
-  user boundary inside the container — **and it is not built yet**, see
-  [Status](#status).
-- **Mode 3b — Multi-tenant, untrusted**: **one container (or microVM) per
-  user**, per-user authentication. Isolation is the container/VM boundary.
+- **Mode 3a — Multi-user, trusted**: several trusted users in **one container**.
+  The shared server currently uses a shared uid. Per-tenant worker/OS-user
+  isolation is a design target, **not built**, see [Status](#status).
+- **Mode 3b — Dedicated runtime**: **one container (or microVM) per user or
+  customer boundary**, with separately configured authentication. Container/VM
+  isolation still depends on host configuration, mounts, privileges and egress.
 
-> **Docker deployment source of truth:** [`docker/DEPLOYMENT.md`](docker/DEPLOYMENT.md)
-> (3a/3b). This file covers the four deployment shapes and
-> host/VPS specifics. **No clone needed:** `docker pull
+> **Docker recipes and legacy scripts:** [`docker/DEPLOYMENT.md`](docker/DEPLOYMENT.md).
+> Read those alongside this guide's identity/isolation limits and the builder
+> adoption checklist; not every recipe meets the wider contract unchanged. **No clone needed:** `docker pull
 > ghcr.io/open-assistants-lab/assistant:latest` — published on every release tag
 > (multi-arch amd64+arm64).
 
@@ -28,36 +31,37 @@ users can share a boundary*, not in how strong the authentication is.
 |---|---|---|---|---|---|
 | 1 — Local | none | 1 | soft | none | the user's own OS account |
 | 2 — Solo WAN | 1 | 1 | soft | shared `API_KEY` | the user's OS account |
-| **3a — trusted** | **1** | **one per tenant** | soft | shared secret | **the OS user boundary** |
-| 3b — untrusted | one per user | 1 | hard | per-user keys | the container / VM |
+| **3a — trusted** | **1** | **shared uid today** | soft | shared key or configured scoped identity | **API/tool ownership checks, not a hostile-user OS boundary** |
+| 3b — dedicated | one per user/customer boundary | configured per runtime | operator-configured | deployment key or scoped identity | the configured container / VM |
 
-In 3a every tenant's store and files belong to that tenant's OS account, so the
-kernel refuses a cross-tenant read with no policy involved. In 3b the container
-itself is the boundary.
+In 3a per-user paths and identity-aware API/tool checks are not separate OS
+accounts. Arbitrary code with equivalent service credentials remains a distinct
+authority path. In 3b the configured container/VM provides an additional boundary;
+shared mounts, privileged access or exposed backend ports can undermine it.
 
 ### Status
 
 | | |
 |---|---|
-| **Per-tenant OS user (real 3a isolation)** | **not built.** Every tenant's directories are created by the same process under the same uid — no per-tenant user, `chown` or `chmod` anywhere in the codebase. Until it exists, 3a runs on a shared uid. |
+| **Per-tenant worker/OS user (real 3a isolation)** | **not built for the shared API server.** Per-user paths and sandbox subprocess uid handling do not provide independent server workers, store ownership or service credentials per tenant. |
 | Detection + `shell_execute` cap | built. Fires only when one process serves several users. |
-| Mode 3b (container per user) | works today, no code required. |
+| Mode 3b (dedicated container) | Existing recipe/generator; startup and isolation must be validated in the chosen environment. |
 
 Building 3a properly needs a **per-tenant worker process**, so the uid is dropped
 at process creation. That is not optional polish: `setuid` per request inside an
 async server handling every tenant is unsafe — one missed switch is a full
 compromise, and it is not safe under concurrency.
 
-Until then the cap is the only control between tenants in 3a, and it should be
-read as a stopgap rather than a fix. The server records which users it has
+The shell cap is a stopgap, not complete isolation. Identity-aware API checks and
+filesystem-tool ownership checks also exist, but do not contain arbitrary code
+with the runtime's credentials. The server records which users it has
 served; once one process has served more than one, an `allow` for
 `shell_execute` resolves to `ask`. If your isolation comes from outside the
 process entirely (a VM, a separate host), set
 `governance.allow_shell_when_multi_user: true` — deliberately and audibly.
 
-The cap applies to the **capability**, not to access: every tenant keeps working,
-which is what a shared container needs. It only stops the one setting that turns
-a shared container into a shared filesystem.
+The cap narrows shell approval policy; it does not provide per-tenant workers,
+separate service credentials or hostile-user containment.
 
 ## Architecture in 30 seconds
 
@@ -66,10 +70,11 @@ a shared container into a shared filesystem.
 - **Clients are thin viewers** — they pull history and stream events
   (REST/SSE/WebSocket). Multi-device sync is a property of having one server,
   not of any client-side sync engine.
-- **User data is isolated per user** under `data_root` (default `~/Assistant/`),
-  e.g. `~/Assistant/Conversation/messages.db`, `~/Assistant/Files/`,
-  `~/Assistant/Memory/`. Project data (cache, logs, jobs) lives under
-  `data/`.
+- **User data is namespaced per user** under `data_root` (default `~/Assistant/`),
+  e.g. `~/Assistant/Messages/messages.db`, `~/Assistant/Files/`,
+  `~/Assistant/Memory/`. Non-default users are under `Users/{user_id}/`.
+  Settings/vaults and project state also use `data_path` (default `data/`);
+  inventory and back up both trees. Namespaces alone are not OS isolation.
 - **One process per user store.** The server keeps per-user in-memory state
   (message store caches, agent loops, session registry) and SQLite/ChromaDB
   are single-writer per user. Do **not** run multiple replicas serving the
@@ -81,11 +86,11 @@ a shared container into a shared filesystem.
 
 | Scenario | Use | Notes |
 |---|---|---|
-| Single user, desktop only | **Mode 1 — Local** | Zero configuration. Data is local files — other apps can access them directly. |
+| Single user, local API clients | **Mode 1 — Local** | Explicit loopback binding; choose your model. Other local apps may access local files. |
 | Single user, multiple devices (phone, laptop, desktop) | **Mode 2 — Solo WAN** | One server = sessions **and** files in sync everywhere. |
-| Several users sharing one host (family, small team) | **Mode 3a — trusted** | One container, one OS user per tenant. Isolation is not built yet — see [Status](#status). |
-| Several users, per-user auth (SSO, per-user keys) | **Mode 3b — untrusted** | One container per user. Works today. |
-| Enterprise teams (SSO, shared workspaces) | **Not available yet** | See [Known gaps](#known-gaps). The data model has team skeletons but no identity layer. |
+| Several trusted users sharing one host | **Mode 3a — trusted** | Shared uid; configure actor identity. No hostile-tenant isolation — see [Status](#status). |
+| Separate user/customer boundaries with configured auth | **Mode 3b — dedicated** | Existing container recipe/generator; validate host, mounts, privileges and identity. |
+| Enterprise teams (SSO, shared workspaces) | **Requires application/deployment review** | Browser OIDC exists; it does not establish a complete organisation-sharing or hostile-tenant contract. See [Known gaps](#known-gaps-as-of-this-document). |
 
 ---
 
@@ -136,10 +141,11 @@ The CLI must be listed in `shell_tool.allowed_commands` in `config.yaml` (alread
 
 ## Mode 1 — Local
 
-One user, one machine, `localhost` only. Zero configuration.
+One user, one machine, explicitly bound to loopback. Choose your model/provider.
+The unmodified host default is `0.0.0.0`, not localhost-only.
 
 ```bash
-uv run assistant-sdk http
+API_HOST=127.0.0.1 uv run assistant http
 ```
 
 - **URL**: `http://localhost:8080`
@@ -163,17 +169,20 @@ there is nothing to "sync".
 2. Generate an API key and start the server:
 
 ```bash
-export API_KEY=$(openssl rand -hex 32)
-echo "Your API key: $API_KEY"   # save this!
-uv run assistant-sdk http              # binds 0.0.0.0:8080 by default
+export API_KEY=$(openssl rand -hex 32)  # store securely; do not log the value
+export SOLO_BYPASS=false
+uv run assistant http                  # binds 0.0.0.0:8080 by default
 ```
 
-3. On each client device: Settings → Connection → Host
-   `http://<server-tailscale-ip>:8080`, enter the API key.
+3. Configure your API client for `http://<server-tailscale-ip>:8080` and the
+   deployment key, within the encrypted mesh. This is not a claim of finished
+   native remote-login support.
 
 **How it works:** Tailscale provides an encrypted mesh network between your
-devices. `API_KEY` protects remote connections; `SOLO_BYPASS=true`
-(default) keeps `localhost` requests on the server itself unauthenticated.
+devices. `API_KEY` gates remote connections but does not identify an individual
+actor. Disable bypass on remote deployments; prevent direct backend access and
+proxy-loopback bypass. Use HTTPS when exposing an endpoint outside this explicitly
+trusted encrypted mesh.
 
 ### Steps B: Public VPS with Docker
 
@@ -235,9 +244,10 @@ services:
 
   alice:
     build: { context: .., dockerfile: docker/Dockerfile }
-    command: ["uv", "run", "assistant-sdk", "http"]
+    command: ["uv", "run", "assistant", "http"]
     environment:
       - API_KEY=${ALICE_KEY}
+      - SOLO_BYPASS=false
       - DEPLOYMENT_DATA_ROOT=/app/data        # user data → volume
       - DEPLOYMENT_DATA_PATH=/app/data      # project data → volume
       - API_PORT=8080
@@ -246,9 +256,10 @@ services:
 
   bob:
     build: { context: .., dockerfile: docker/Dockerfile }
-    command: ["uv", "run", "assistant-sdk", "http"]
+    command: ["uv", "run", "assistant", "http"]
     environment:
       - API_KEY=${BOB_KEY}
+      - SOLO_BYPASS=false
       - DEPLOYMENT_DATA_ROOT=/app/data
       - DEPLOYMENT_DATA_PATH=/app/data
       - API_PORT=8080
@@ -304,8 +315,8 @@ per-vertical variation, not user-defined ad-hoc bars.
 | What | Where | Back up |
 |---|---|---|
 | User data (conversation, files, memory, email, todos, contacts, skills, subagents) | `data_root` (`~/Assistant/`, or `DEPLOYMENT_DATA_ROOT`) | **Yes** |
-| Project data (cache, logs, jobs.db, templates, traces) | `data/` (`DEPLOYMENT_DATA_PATH`) | Optional (regenerable) |
-| Per-user DBs | `data_root/Conversation/messages.db`, `Memory/…`, `Email/emails.db`, `Contacts/contacts.db`, `Todos/todos.db`, `Subagents/work_queue.db` | **Yes** |
+| Settings, scopes, connector vaults and project state | `data/` (`DEPLOYMENT_DATA_PATH`), including per-user settings trees | **Yes** for non-regenerable configuration/credentials/jobs; classify caches/logs separately |
+| Per-user DBs | `data_root/Messages/messages.db`, `Memory/…`, `Email/emails.db`, `Contacts/contacts.db`, `Todos/todos.db`, `Subagents/work_queue.db` (under each user's root) | **Yes** |
 | Vector index | `data_root/Memory/` (ChromaDB dirs) | Yes — but see below |
 | File versions | `data_root/.versions/`, `data_root/Files/` | **Yes** |
 
@@ -314,7 +325,7 @@ The server is the single copy of truth — **backups are not optional**.
 ### SQLite databases (WAL-safe online backup)
 
 ```bash
-sqlite3 "$DATA_ROOT/Conversation/messages.db" ".backup '$BACKUP_DIR/messages-$(date +%F).db'"
+sqlite3 "$DATA_ROOT/Messages/messages.db" ".backup '$BACKUP_DIR/messages-$(date +%F).db'"
 ```
 
 Repeat for each `*.db` you want to protect. `.backup` is consistent even
@@ -333,9 +344,15 @@ to copy live. Either:
 
 ### Restore
 
-Replace the DB files / `data_root` tree with the backup, then start the
-server. Keep the whole `data_root` consistent — mixing DBs from different
-backup points produces a valid but inconsistent assistant.
+Restore consistent copies of both configured data trees into a separate test
+location first. Review restored identity/credential records, keep writers and
+schedules disabled, and validate before enabling work. Never automatically replay
+an uncertain external action. Mixing stores from different backup points can
+produce a valid but inconsistent assistant. Code rollback is not database
+recovery or reversal of a business action; document each separately.
+
+The [synthetic Jen stopped-copy recipe](examples/jen_reference/README.md#stopped-backup-and-restore)
+is a worked local example, not a universal online/production backup service.
 
 ---
 
@@ -428,7 +445,8 @@ only in the immutable dispatch envelope; do not log it.
 
 ## Production hardening checklist
 
-- [ ] `API_KEY` set on any server reachable beyond localhost
+- [ ] Authentication configured on any server reachable beyond localhost; shared deployment key is not individual identity
+- [ ] `SOLO_BYPASS=false`; proxy/backend bypass prevented; scoped actor ownership checks exercised
 - [ ] TLS terminated by Caddy/ingress (never plain HTTP on a public IP)
 - [ ] Per-user container/volume isolation (Mode 3)
 - [ ] Run containers as non-root; rootfs read-only where possible
@@ -438,13 +456,17 @@ only in the immutable dispatch envelope; do not log it.
 
 ## Known gaps (as of this document)
 
-- **No per-user authentication yet.** `user_id` is supplied by the client
-  (default `default_user`); `API_KEY` authenticates the *connection*, not
-  the *user*. Multi-tenant deployments must therefore be container-per-user
-  and/or trusted-network only. Public multi-user hosting needs an identity
-  layer (per-user tokens or OIDC) before `user_id` can be trusted from auth.
-- **Teams are a skeleton.** `data/teams/{team_id}/` paths exist but nothing
-  populates them — no SSO, no team scoping, no admin API.
+- **Authentication is opt-in and deployment-sensitive.** Per-user keys
+  (`PER_USER_AUTH=true`, `/auth/keys`) and browser OIDC (`OIDC_*`,
+  `/auth/oidc/login`) exist through `IdentityResolver`. Shared `API_KEY`
+  access remains trusted-deployment access, not a scoped individual identity.
+  Keep that privileged key with operators/trusted intermediaries and test
+  unauthorised and mismatched-user requests. Native OIDC handoff is not shipped.
+- **General organisation/team sharing is not established by authentication.**
+  Existing tenancy surfaces are not proof of complete membership, conversation,
+  source, credential or business-approval isolation.
+- **Shared-server per-tenant worker/uid isolation is not built.** Governed tools
+  and API identities do not contain arbitrary code with service credentials.
 - **Container-per-user does not scale past tens of users** on one host; the
   planned shape at that scale is an auth front + per-user workers, not more
   containers.
@@ -455,8 +477,8 @@ only in the immutable dispatch envelope; do not log it.
 
 ## Troubleshooting
 
-- **Container won't start** → check the command is `uv run assistant-sdk http`
-  (older docs/image references said `ea`, which was never the entry point).
+- **Container won't start** → check the command is `uv run assistant http`
+  (`assistant-sdk` and `ea` are not the current console script).
 - **Port mismatch** → the server listens on **8080** (the canonical port).
 - **Data "disappears" after container recreation** → `DEPLOYMENT_DATA_ROOT`
   must point into the mounted volume (see Mode 3).
