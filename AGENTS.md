@@ -187,7 +187,7 @@ except Exception as e:
 
 The codebase has a **custom agent SDK** (`src/sdk/`) as its core runtime.
 
-**SDK Core (~17,200 lines, 66 files, 832+ tests):**
+**SDK Core (38,445 lines across 116 Python files; 2,367 tests under `tests/sdk/`):**
 
 | Module | Lines | Purpose |
 |--------|-------|---------|
@@ -214,7 +214,7 @@ The codebase has a **custom agent SDK** (`src/sdk/`) as its core runtime.
 | `agent_scheduler.py` | 308 | Background agent scheduling (proactive check-ins) |
 | `research.py` | 293 | Deep research orchestration |
 | `state.py` | 78 | `AgentState` — simplified agent state |
-| `tools_core/` (32 files) | ~11,000 | ★ SDK-native tool implementations (60 registered tools) |
+| `tools_core/` (41 files) | 10,440 | ★ SDK-native tool implementations (72 registered tools) |
 
 **Key Design Decisions:**
 1. **models.dev integration**: Registry fetches from `https://models.dev/api.json`, caches locally at `data/cache/models.json` with 5-min TTL, falls back to built-in subset. 4172+ models vs. old 20 hardcoded.
@@ -366,6 +366,39 @@ Without `DEPLOYMENT_DATA_ROOT` pointing into the mounted volume, all bulk user d
 ### Watch out: one process per user store
 MessageStore/AgentLoop caches and SQLite/ChromaDB writes are per-user and single-writer. Do not run multiple replicas serving the same user_id (sticky sessions do not fix Chroma or in-memory state). Horizontal scaling = a new user's own process, not another replica of an existing user.
 
+### CRITICAL: authorization guards fail CLOSED
+The loop's guard hook (`Middleware.guard_tool_call` → `AgentLoop._run_guards` in `src/sdk/loop.py`) is the ENFORCEMENT point for `ask`/`deny`. If it raises, the loop must return a non-executed error result — swallowing the exception authorizes the tool. Emit-only, best-effort telemetry belongs in `_emit_audit()`, never in the guard hook. Regression: `tests/sdk/test_guard_fail_closed.py`.
+
+### CRITICAL: approvals are bound to the definition the approver saw
+`proposals` stores a `definition_hash` (schema + description + annotations + a body signature from the callable's module/qualname, captured closure values and constants — recursively, so container captures and helper callables count) and the proposal's `workspace_id`. The execution leg resolves through `runner.get_active_tool_definition(user, tool, workspace_id=...)` and REFUSES on mismatch. Never resolve an approved tool by any other means, and always pass the proposal's workspace. Tests: `test_approval_resolution.py`, `test_loop_fidelity_b12.py`.
+
+### CRITICAL: store ownership outranks every filesystem grant
+`_resolve_path` (`src/sdk/tools_core/filesystem.py`) allows the caller's own `user_dir` plus operator roots, then runs `_reject_other_user_data` on the RESOLVED path: no configured root, symlink or relative base re-opens another user's store. `DEFAULT_USER_ID` owns the data root but not the `Users/` tree beneath it. App tools share this boundary (`app_import_csv`), and subagent names are validated as path segments (`_agent_dir`). Tests: `test_filesystem_tenant_boundary.py`, `test_name_boundary_b1.py`, `test_apps_correctness_b8.py`.
+
+### CRITICAL: identity comes from the seam, never the payload alone
+`resolve_user_id(request, user_id)` is the identity seam: a resolved per-user identity wins. Routes must call it (schedules, subagents, conversation). Webhook firing credentials are bound to their registering owner — a firing body may not name the user. OIDC claims anchor on `sub` through a durable binding, and a different subject claiming a bound name is refused rather than merged. Tests: `test_auth_binding_b3.py`, `test_identity_resolver.py`.
+
+### Watch out: the sandbox uses Popen — fake THAT seam in tests
+`SoftSandboxBackend.run` runs commands with `subprocess.Popen` + `communicate(timeout=...)` and kills the whole process GROUP on timeout (`_kill_process_group`: killpg unless it is our own group). `subprocess.run(timeout=)` kills only the direct child and leaks backgrounded descendants (#118). Tests that fake the process call use `tests/sdk/sandbox_fakes.py::fake_sandbox`, which patches only `src.sdk.sandbox.subprocess` so unrelated `subprocess.run` users (e.g. the `which` probe) keep working.
+
+### Watch out: unknown tools are sequential; lazy loads are audited
+The classification predicate is a safety boundary: a tool that is NOT in the registry is not parallel-safe (#70) — classification runs before the lazy loader resolves a definition, and an unresolved destructive tool must not enter the concurrent batch (nor skip the interrupt path). The lazy dispatch path charges the same budget and emits the same audit events as the registered one (#59).
+
+### Watch out: streaming cancellation and steering have strict ordering
+A cancel between tools must go through `_finalize_cancelled_stream`: it answers every pending tool-call id (strict providers reject a dangling id), runs `aafter_agent` once and projects next context before `done` (#75). Steer delivery is two-phase — `_pending_steer_texts()` first, the cancelled tool results next, `_inject_steer_texts()` LAST — so a user message never lands between an assistant tool call and its result (#76).
+
+### Watch out: duplicate receipts key on the EFFECTIVE call
+Duplicate detection and `_last_result_for_call` must both key on the `_with_runtime_context`-normalized call, otherwise a tool with a runtime-injected `user_id`/`session_id` reports "(result unavailable)" for a duplicate that did succeed (#77). The read cache is scoped to the current turn, any state-changing call invalidates it, and only tools annotated `read_only` are memoized at all (#58, #66).
+
+### Watch out: text handling in files and TOOL.md rendering
+`files_edit` refuses an empty `old` (it would insert the replacement between every character) and reads/writes with `newline=""` via `Path.open` — `Path.read_text(newline=)` is Python 3.13+, and the project floor is 3.11. `files_read` joins lines with `""` because they already carry their newline. TOOL.md rendering is ONE regex pass (`render_command_template`) with unfilled placeholders stripped on the parse AND lazy-load paths; frontmatter splits on fence LINES (`split_frontmatter`), so a `---` inside a value cannot truncate the document.
+
+### Watch out: skills discovery is per-file isolated and the catalog must be loadable
+One unreadable or malformed `SKILL.md` yields a diagnostic for THAT skill only — a parse error must never escape the discovery loop. Any resolved name failing `validate_skill_name` is sanitized, so `skills_load(name)` always works for a name the catalog lists. Seed refresh is per file against `.seed-manifest.json`: user-edited files are never overwritten, upstream deletions drop untouched files only. Tests: `test_skills_discovery_b9.py`, `test_skills_seed_and_api_b9.py`.
+
+### Watch out: storage APIs pinned by the dependency, and transaction rules
+CoreMem 0.13.1 exposes `recall(query, strategy=..., limit=...)`; `search_enhanced` does not exist (#127). Vector cleanup goes through the COLLECTION API (`client.get_collection(name).delete(ids=...)`) — a chromadb Client has no `delete()` (#123) — and ids must be collected BEFORE rows are deleted. `persist_run` indexes the final answer with a collection upsert: index only, never `ingest` (which inserts a second row). `CorpusStore.index` replaces canonical rows and the FTS mirror in ONE transaction. The summary branch selects the session's newest messages — never bound rows by `summary_sequence + limit` (#122). `PRAGMA table_xinfo` is required to see VIRTUAL generated columns (#130).
+
 ---
 
 ## 5. Logging Best Practices
@@ -445,7 +478,7 @@ assistant/
 │   │   ├── subagent_models.py   # AgentDef, SubagentResult, TaskCancelledError, TaskStatus
 │   │   ├── work_queue.py        # SubagentWorkQueueDB (aiosqlite, per-user SQLite)
 │   │   ├── coordinator.py       # SubagentCoordinator (PROFILE.md, capabilities filtering)
-│   │   ├── tools_core/          # ★ SDK-native tool implementations (60 registered tools)
+│   │   ├── tools_core/          # ★ SDK-native tool implementations (72 registered tools)
 │   │   │   ├── time.py, shell.py, filesystem.py, file_search.py
 │   │   │   ├── file_versioning.py, todos.py, contacts.py, message.py
 │   │   │   ├── memory.py, browser.py
@@ -527,7 +560,7 @@ assistant/
 | **5** | ✅ Done | +63 new | Structured Streaming + Tool Annotations |
 | **6** | ✅ Done | (in 5) | Guardrails, Handoffs, Tracing, RunConfig, CostTracker |
 | **models.dev** | ✅ Done | +22 | Dynamic model registry (4172+ models) |
-| **7** | ✅ Done | — | Tool Migration (all 81 tools SDK-native) |
+| **7** | ✅ Done | — | Tool Migration (all tools SDK-native) |
 | **10.1** | ✅ Done | — | Bug fixes |
 | **10.3** | ✅ Done | — | Discovery-based skills |
 | **10.4** | ✅ Done | +8 | Parallel tool execution |
@@ -540,6 +573,8 @@ assistant/
 | **13** | ✅ Done | ~943 SDK+unit | Skills/subagents scoping UI, ScopePicker, API CRUD, workspace isolation |
 | **14** | ✅ Done | +14 frontend | Tools page Phase A — built-in tools + connector catalog, api-key connect, OAuth flow (native app) |
 | **15** | ✅ Done | — | Tools folded into Settings as a section; sidebar drops Tools/Skills/Subagents rows; high-end settings redesign |
+| **16** | ✅ Done | 3,857 total | 2026-10-02 audit batch (v0.6.32): governance fail-closed + definition-bound approvals, ownership-checked boundaries, MCP lifecycle + annotation defaults, identity binding, WS/SSE transport fidelity, resilient skills discovery + seed refresh, storage correctness, files/TOOL.md rendering, loop classification/cancel/ordering |
+| **17** | ✅ Done | +8 | v0.6.33: re-land the subagent lifecycle batch (#110–#116) after it fell out of `main` during concurrent history merges |
 
 ### Native App (native-sdk-experiment)
 
@@ -599,11 +634,11 @@ SQLite work_queue-backed coordination with supervisor pattern. Full design in `d
 - [x] `CostTracker.add_usage()` receives actual token counts from `Message.usage`
 - [x] `RunConfig.provider_options` wired through `AgentLoop` to all provider calls
 - [ ] Integration test: reasoning model returns thinking content (need live API)
-- [x] 470+ SDK tests passing
+- [x] 3,857 tests passing (2,570 under `tests/sdk/`)
 
 ### Phase 7: Tool Migration Status
 
-**All tools migrated to `src/sdk/tools_core/` (32 files, ~8,500 lines):**
+**All tools migrated to `src/sdk/tools_core/` (41 files, 10,440 lines):**
 
 | Module | Tools | Count |
 |--------|-------|-------|
@@ -684,3 +719,34 @@ The project extracts reusable components into separate OSS repos:
 | CoreMem | `open-assistants-lab/CoreMem` | Zero-LLM conversation memory |
 | HybridDB | `open-assistants-lab/HybridDB` | Hybrid SQLite + FTS5 + ChromaDB storage |
 | AgentProfile | `open-assistants-lab/AgentProfile` | Portable agent definition (PROFILE.md) |
+
+---
+
+## 11. The 2026-10-02 Audit Batch (v0.6.32 / v0.6.33)
+
+An external audit filed roughly ninety issues (#50–#145). Every fix was reproduced failing BEFORE the change and carries a regression; the suite grew from ~3.4k to **3,857 passed, 27 skipped**. The invariants those fixes established are listed as pitfalls in section 4 — the table below is the map of what changed, by area.
+
+| Area | What is now enforced |
+|------|----------------------|
+| Governance | guards fail closed; approvals resolve through the live catalog and are refused when the definition drifted; proposals record their workspace and a definition fingerprint; every terminal outcome survives into the receipt; blocked output is removed from state, `done` and reasoning |
+| Boundaries | filesystem/app tools resolve only inside the caller's own store plus granted roots (no grant or symlink overrides); subagent names validated as path segments everywhere; the soft sandbox kills the process group on timeout |
+| MCP | cold `get_tools()` does not deadlock; single-flight server start; disabled servers are never connected; annotated servers connect (annotations serialize for the cache); unset `destructiveHint` means unknown, not safe; non-idempotent calls are never auto-replayed |
+| Identity | schedule routes use the identity resolver; webhook firing credentials are owner-bound; OIDC anchors on subject with collision refusal; session cookie is `Secure` |
+| Transport | WS persists one prompt per message; a text-only steer becomes the follow-up prompt; every tool-call id is answered; revision attempts do not concatenate; a non-object frame gets a parse error; SSE forwards canonical block frames |
+| Skills | discovery is per-file isolated; every catalog name is loadable; per-file seed refresh that respects user edits; validated draft promotion; API/draft operations address the logical name |
+| Storage | the summary branch returns the newest session messages; vector purge via the collection API before row deletion; the final answer is indexed (index only); atomic corpus reindex; pinned CoreMem `recall` API; retryable migration |
+| Apps | degenerate names refused (no rmtree of the apps root); handles keyed by the sanitized name; same-run sheet collisions renamed; date words rewritten with word boundaries and never inside identifiers; conflicting schema redefinition refused |
+| Loop | unknown tools are sequential; non-stream runs honour cancellation; cancellation finalizes ids + cleanup; steer ordering; effective-call duplicate receipts; session header logs the current prompt with the current run id; `tool_input_start` args honoured |
+
+### Open by design (decisions, not patches)
+
+- **#40 — tool-level governance boundary.** Still not enforced: an ungated shell with interpreters can reach key-gated write endpoints using the container credential. 3a (one container, one OS user/process per trusted tenant) is specified but NOT built; all tenants share one uid and are separated by path name only. Needs the per-tenant worker/uid/provisioning design.
+- **#41 — receipt-fidelity contract.** Delivered around it: terminal-outcome fidelity, output-block removal, definition-bound approvals, per-call duplicate receipts, lazy-path audit events. Remaining: capability-level governance, first-class async for the sync tool path, built-in action evidence, explicit `unknown` as a contract value.
+- **#74 — guardrail prevention policy.** Choose between buffering output until guardrails pass (prevention, at latency cost) and declaring output guardrails detection-only (partly documented).
+
+### Process lessons
+
+- **Verify commit ancestry before claiming a fix shipped.** The subagent lifecycle batch was merged, then `main` was reset past that merge during concurrent history work; later batches chained from the earlier point and the commit became unreachable while its issues stayed closed. `git merge-base --is-ancestor <sha> main` before closing an issue, and again before a release. (#110–#116 were re-landed in v0.6.33.)
+- **One writer per worktree; never `git stash` across unrelated paths.** A stash pop left conflict markers inside `src/sdk/subagent_work_queue.py` and briefly corrupted the working tree.
+- **Fake the narrowest seam.** Global `subprocess.run` / `subprocess.Popen` patches break unrelated callers once the sandbox changes; `tests/sdk/sandbox_fakes.py` patches only the sandbox module's view.
+- **Release cadence.** Batches merge to `main` with the suite run on the combined tree; a tag then publishes the image (`release: vX.Y.Z` commit + tag + docker-publish workflow + registry manifest check). v0.6.33 is the image that contains the subagent lifecycle fixes; v0.6.32 does not.
