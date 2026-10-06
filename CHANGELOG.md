@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.6.33 — 2026-10-06
+
+### Fixed — re-land the subagent lifecycle batch (#110–#116)
+The seven lifecycle fixes shipped in this entry had been merged once and were then
+lost from `main`: while several histories were being merged concurrently, `main` was
+reset past the merge and every later batch chained from the earlier point, so the
+commit ended up unreachable while its issues stayed closed. The work is re-applied
+here, verified against the tests that came with it.
+
+- `subagent_instruct` routes through `coordinator.instruct`, so the instruction
+  reaches the live `SubagentContext` queue, not just the DB column (#110).
+- Deleting a subagent sets the `cancel_event` of its running tasks — the check the
+  loop actually polls — instead of only flipping DB rows (#111).
+- `_extract_output` returns the LAST non-empty assistant message (the answer), not
+  a slice of older narration (#112).
+- `PATCH /subagents/{name}` maps the API `output_schema` dict onto the profile's
+  `output_schema_def`, so the schema can be set over the API (#113).
+- The completion bus isolates per-callback failures and keeps a bounded delivery
+  ledger: one throwing subscriber no longer causes duplicate deliveries to the
+  healthy ones on retry (#114).
+- `_run_job` releases its `_active` registry entry in `finally` (#115).
+- `delegate()` claims its task with an owner and heartbeats, so the run is visible
+  as RUNNING and sweepable after a crash (#116).
+
+Suite: 3857 passed, 27 skipped.
+
 ## v0.6.32 — 2026-10-06
 
 ### Fixed — the 2026-10-02 audit batch and its follow-ups (#50–#145, ~90 issues)
