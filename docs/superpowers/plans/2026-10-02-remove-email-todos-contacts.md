@@ -2,13 +2,56 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Delete the `email_*`, `contacts_*`, and `todos_*` tool families and their supporting code, replacing them with the existing `apps_*` structured-data family plus seeded template apps, without weakening any governance assertion.
+**Goal:** Delete the `email_*`, `contacts_*`, and `todos_*` tool families and their supporting code, replacing them with the existing `app_*` structured-data family plus seeded template apps, without weakening any governance assertion.
 
 **Architecture:** A single deletion branch. The families are removed from the tool registry, their storage and HTTP routers are deleted, configuration and path accessors are removed, and the now-childless `_desktop_excluded` filter is deleted. A test-only external-executor fixture tool replaces the Gmail-send vertical slice as the end-to-end evidence that durable governed operations work, and that fixture must land before the suite is declared green.
 
 **Tech Stack:** Python 3.11+, `AgentLoop` / `ToolRegistry` / `ToolAnnotations`, `governance_operations.py` external executors, pytest + pytest-asyncio, existing seed-refresh pattern with `.seed-hash` sidecars.
 
 **Spec:** [`docs/superpowers/specs/2026-10-02-remove-email-todos-contacts-design.md`](../specs/2026-10-02-remove-email-todos-contacts-design.md)
+
+## Execution record — 2026-10-06
+
+**Status:** Tasks 1–9 implemented and verified in isolated branch
+`refactor/remove-legacy-families`; not merged, pushed, released or deployed.
+Baseline: `de478f49`. Final runtime/test/package tree: `497172a9`.
+The original task instructions below are retained for reproduction; this record
+and the worktree's ignored progress ledger record actual execution.
+
+- Full suite: **3,810 passed, 27 skipped, 70 warnings in 534.95s**, process **exit 0**.
+- Opt-in Phase 0: **4 passed**, exit 0. Governance final slice: **38 passed**, exit 0.
+- Source Ruff clean. Scoped mypy clean across five changed non-router modules
+  with `--no-incremental --follow-imports=silent`; a subsequent cached subset
+  check echoed inherited dependency diagnostics, while the fresh check was clean.
+  Whole-source mypy is **not clean**: 26 inherited errors versus 34 at baseline,
+  with **zero new errors**. Three inherited non-router diagnostics remain in
+  `sandbox.py` and `mcp_config.py`; the original router-only exception assumption
+  was inaccurate. No unrelated typing changes were made.
+- Collection: **3,897 baseline → 3,837 current**. At the original reviewed tree,
+  114 node IDs were removed/renamed and 46 added/renamed; eight more review
+  regressions were then added. Retired fixed-domain CRUD/parsing assertions leave
+  with their subjects; generic platform/governance invariants are re-homed, not
+  silently claimed as preserved legacy feature behavior.
+- Independent read-only review found three Important template issues (derived
+  state symlinks, mkdir-before-ancestor-check, missing wheel assets) and an
+  already-current validation gap. Eight RED cases reproduced them; all fixed and
+  closed by scoped follow-up review. Extracted-wheel smoke builds offline with
+  already-cached dependencies and loads/materialises all three templates; no
+  installation/download occurs.
+- First full attempt hit an outer 900s timeout before summary and is **not** a
+  pass. A diagnostic run at `efc11d0a` completed with one elapsed-time assertion
+  failure in unchanged `test_custom_tool_timeout.py`; baseline/current isolated
+  runs passed (30 each). The exact final-tree rerun above passed. Existing
+  collection/deprecation/aiosqlite closed-loop warnings remain unsuppressed; no
+  unrelated timing/shutdown fix is claimed.
+- Fresh/retained-store lifespan tests, actual app insert/query, user-state
+  preservation, global API/module removal and fixture governance are verified.
+  Template seeding is **explicit operator use on an initial/stopped store**;
+  no automatic legacy import, startup seeding, fixture deployment mode or
+  first-party mail replacement was added. Generic ConnectKit, file-sync,
+  coding/browser and CoreMem remain.
+- Docker/native/live customer/vendor tests remain outside this slice. Main's
+  concurrent changes and dirty files were not integrated or overwritten.
 
 ## Global Constraints
 

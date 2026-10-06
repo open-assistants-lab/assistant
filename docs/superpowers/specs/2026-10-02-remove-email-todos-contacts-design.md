@@ -1,7 +1,7 @@
 # Remove Email, Contacts, and Todos
 
 **Date:** 2026-10-02
-**Status:** Implementation design; breaking change implemented in an isolated branch, pending final verification/review and integration. Existing user data must remain untouched.
+**Status:** Breaking change implemented and verified in isolated branch `refactor/remove-legacy-families` (runtime/test/package tree `497172a9`); independent review findings closed. Not merged, released or deployed. Existing user data remains untouched; execution evidence is recorded in the [implementation plan](../plans/2026-10-02-remove-email-todos-contacts.md).
 
 **Source corrections:** Tool names use `app_*` (singular). Generic ConnectKit connector specs/router and file-sync remain; the historical claim below that the experimental Connections panel is absent is not current UI evidence. Templates are optional explicit operator installation into an initial/stopped store, with user-state-preserving additive refresh—not unsolicited startup writes or automatic legacy-data conversion. External fixtures prove durable terminal operation evidence; separate local approval/invocation checks preserve the execution outcome/receipt path without inventing a unified receipt bridge.
 **Type:** deletion with a replacement path
