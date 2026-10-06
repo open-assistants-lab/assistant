@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.6.35 — 2026-10-06
+
+### Fixed — two residuals of the previous batch
+- **Deferred control frames are answered (#146, follows #141).** A control frame completing in the same wait as the stream was captured, and the #141 fix consumed only a steer — a deferred **ping** got no pong, so a client could treat the connection as dead. Deferred frames now go through the same client-message dispatch as the mid-stream path: ping → pong, steer → ack + follow-up turn, an unparsable frame is logged.
+- **Session delete purges its vectors (#147, follows #123).** `session_id` was passed inside CoreMem's `metadata=` filter, but CoreMem exposes it as a **column** and ingestion never writes it into the metadata JSON — so the lookup returned nothing and `delete_session` purged zero vectors while reporting the delete. Deleted session messages stayed recallable. First-class filter keys are now mapped to `fetch`'s named parameters; genuine metadata keys (like `workspace_id`) still filter metadata. The real CoreMem semantics are pinned by a regression (`metadata={session_id:…}` → 0 rows, `session_id=…` → 1 row) rather than by a mock.
+
+Also carries the guardrail polish from #74: a blocked round emits no empty block marker.
+
+Suite: 3870 passed, 27 skipped.
+
 ## v0.6.34 — 2026-10-06
 
 ### Changed — output guardrails now PREVENT, not detect (#74)
