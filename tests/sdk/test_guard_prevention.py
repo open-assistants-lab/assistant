@@ -14,7 +14,7 @@ import pytest
 
 from src.sdk.guardrails import GuardrailResult
 from src.sdk.loop import AgentLoop
-from src.sdk.messages import Message, StreamChunk, ToolCall
+from src.sdk.messages import Message, StreamChunk
 from src.sdk.tools import tool
 from tests.sdk.test_sdk_loop import MockProvider
 

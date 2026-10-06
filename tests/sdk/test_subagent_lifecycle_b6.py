@@ -143,7 +143,6 @@ class TestPatchOutputSchema:
         router_mod.get_coordinator = lambda *a, **k: SimpleNamespace(
             load_def=load_def, update=update
         )
-        base = SimpleNamespace(base_path=None)
         # run the handler logic pieces directly: emulate its mapping
         update_data = {"output_schema": {"type": "object", "properties": {}}}
         candidate_data = current_profile.model_dump()

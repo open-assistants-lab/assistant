@@ -2263,12 +2263,12 @@ class AgentLoop:
             # calls answers; a tool round's narration is model output too and
             # is checked as well.
             output_text = response.content if isinstance(response.content, str) else ""
-            round_blocked = False
             if output_text:
                 try:
                     await self._check_output_guardrails(output_text, state)
                 except GuardrailTripwire as e:
-                    round_blocked = True
+                    # The message is not in state yet, so the block replaces its
+                    # content before the observer can ever see the original.
                     self._block_output_in_place(response, e, state)
 
             state.add_message(response)
