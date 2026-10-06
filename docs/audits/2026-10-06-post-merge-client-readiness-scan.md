@@ -18,7 +18,8 @@ The changelog reports 3,857 passed / 27 skipped for v0.6.33. That is the release
 owner's evidence, **not a fresh full-suite run in this scan**.
 
 At inspection main had dirty hygiene/docs/task changes and an unrelated uv.lock
-edit; these were not reset, stashed, committed or changed. Prior Jen worktrees
+edit; a later concurrent main commit `2769f3df` updated AGENTS.md only, without
+changing this scan's runtime baseline; these were not reset, stashed, committed or changed. Prior Jen worktrees
 were retained. New documentation is isolated on `docs/native-client-contract`
 in `.worktrees/native-client-contract`, based on the inspected release commit.
 Docker smoke is skipped for this round at the user's direction. Other agents'
@@ -61,6 +62,12 @@ Shared-secret mode deliberately cannot bind individual users; it may accept a
 caller-selected namespace. It is a trusted deployment mode, not public-client
 multi-user authorization. Solo/localhost bypass must not become a remote client
 fallback. Deployer per-user keys fit an initial native bearer connection.
+
+Some older AGENTS.md deployment/pitfall text still says there is no per-user
+authentication/OIDC, despite the implemented resolvers and the newer identity
+invariants in that same file. Treat current source/tests as evidence and reconcile
+those statements in a targeted documentation change; auth availability does not
+imply hostile-user tool containment or resolve #40.
 
 OIDC's existing browser session cookie is not automatically available inside a
 native HTTP client. No browser-to-native handoff was proved. A future standards-
