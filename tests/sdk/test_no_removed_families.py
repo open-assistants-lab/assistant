@@ -5,6 +5,13 @@ import importlib.util
 import pytest
 
 
+def test_bundled_subagent_reference_does_not_recommend_removed_tools():
+    from pathlib import Path
+    reference = Path(__file__).resolve().parents[2] / "seeds" / "skills" / "subagent-creation" / "SKILL.md"
+    text = reference.read_text()
+    assert not any(f"`{prefix}" in text for prefix in ("email_", "connector_gmail_", "todos_", "contacts_"))
+
+
 @pytest.mark.parametrize("mode", ["solo", "desktop-server", "multi-tenant"])
 def test_removed_tools_unavailable_in_every_mode(monkeypatch, mode):
     from src.sdk.native_tools import get_native_tools, reset_native_tools

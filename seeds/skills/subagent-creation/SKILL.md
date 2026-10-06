@@ -65,8 +65,7 @@ Choose tools that match the subagent's responsibility. Guidelines:
 - **Research/read subagents**: `files_read`, `files_glob_search`, `files_grep_search`, `web_search`, `web_scrape`, `memory_search`
 - **Write/create subagents**: `files_write`, `files_edit`, `files_delete`, `files_mkdir`
 - **Shell/task subagents**: `shell_execute`
-- **Email subagents**: `email_list`, `email_get`, `email_search`, `email_send`
-- **Todo subagents**: `todos_list`, `todos_add`, `todos_update`, `todos_delete`
+- **Structured-data subagents**: `app_query`, `app_insert`, `app_update`, `app_delete_row` against user-owned apps (e.g. an explicitly installed tasks template). These are general app tools, not app-specific authorization or dedicated todo APIs.
 
 Subagent tools (`subagent_*`) and dangerous memory tools are automatically blocked. Memory search tools and `skills_load` are available as needed.
 
