@@ -20,9 +20,7 @@ from src.http.routers import (
     audit_router,
     billing_router,
     capabilities,
-    contacts_router,
     conversation_router,
-    email_router,
     health_router,
     improvements_router,
     mcp_router,
@@ -32,7 +30,6 @@ from src.http.routers import (
     subagent_schedules_router,
     subagents_router,
     tenancy_router,
-    todos_router,
     tools_router,
     usage_router,
     user_prompt_router,
@@ -408,10 +405,6 @@ app.include_router(mcp_router)
 app.include_router(conversation_router)
 app.include_router(memories_router)
 app.include_router(user_prompt_router)
-if not desktop_mode_active():
-    app.include_router(email_router)
-    app.include_router(contacts_router)
-    app.include_router(todos_router)
 app.include_router(workspace_router)
 app.include_router(workspaces_router)
 app.include_router(sync_router)

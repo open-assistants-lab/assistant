@@ -42,3 +42,17 @@ def test_removed_tools_unavailable_in_every_mode(monkeypatch, mode):
 def test_removed_module_is_not_available(module):
     # find_spec avoids treating an unrelated import failure as successful removal.
     assert importlib.util.find_spec(module) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/emails", "/contacts", "/todos"])
+async def test_removed_http_api_returns_not_found(path):
+    import httpx
+    from src.http.main import app
+
+    # No lifespan: exercise real routing without starting background services.
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://localhost"
+    ) as client:
+        response = await client.get(path)
+    assert response.status_code == 404
