@@ -14,7 +14,7 @@ from pathlib import Path
 
 from src.sdk import HybridDB
 from src.sdk.tools_core.apps import EMBEDDING_MODEL
-from src.storage.paths import DataPaths
+from src.storage.paths import DEFAULT_USER_ID, DataPaths
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,8 @@ def _digest(content: str) -> str:
 
 def load_app_templates(seed_dir: Path | None = None) -> list[AppTemplate]:
     directory = seed_dir or Path(__file__).resolve().parents[2] / "seeds" / "apps"
+    if not directory.is_dir():
+        raise FileNotFoundError(f"App template directory is missing: {directory}")
     templates = []
     seen = set()
     for path in sorted(directory.glob("*.json")):
@@ -81,7 +83,9 @@ def seed_app_templates(
     templates = load_app_templates(seed_dir)
     boundary = data_root.expanduser().resolve()
     paths = DataPaths(user_id=user_id, data_root=str(boundary), data_path=str(boundary))
-    root = paths.user_dir / "Apps"
+    # user_dir creates directories: derive its canonical layout before touching it.
+    user_root = boundary if paths.user_id == DEFAULT_USER_ID else boundary / "Users" / paths.user_id
+    root = user_root / "Apps"
     for component in (root, *root.parents):
         if component == boundary:
             break
@@ -111,19 +115,23 @@ def seed_app_templates(
         for name in (".seed-hash", ".seed-template.json", "app.db", "app.db-wal", "app.db-shm"):
             if (path / name).is_symlink():
                 raise ValueError(f"Refuse symlink app template state: {template.name}")
-        if not marker.is_file() or not snapshot.is_file():
+        if not marker.is_file() or not snapshot.is_file() or not (path / "app.db").is_file():
             continue
+        # HybridDB initializes SQLite, vector and optional analytics state on open.
+        # Reject every nested link before allowing a writable backend constructor.
+        if any(component.is_symlink() for component in path.rglob("*")):
+            raise ValueError(f"Refuse symlink app template state: {template.name}")
         old_content = snapshot.read_text(encoding="utf-8")
         if marker.read_text(encoding="utf-8") != _digest(old_content):
-            continue
-        if old_content == content:
-            installed.append(template.name)
             continue
         old = AppTemplate(**json.loads(old_content))
         db = HybridDB(str(path), embedding_model_name=EMBEDDING_MODEL)
         try:
             actual = {table: db.get_schema(table) for table in db.list_tables()}
             if actual != old.tables:
+                continue
+            if old_content == content:
+                installed.append(template.name)
                 continue
             if any(db.count(table) for table in old.tables):
                 continue

@@ -92,6 +92,7 @@ packages = ["src"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "seeds/prompts/grader_prompt.md" = "seeds/prompts/grader_prompt.md"
+"seeds/apps" = "seeds/apps"
 
 [tool.ruff]
 target-version = "py311"
