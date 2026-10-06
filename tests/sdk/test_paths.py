@@ -27,41 +27,6 @@ def test_user_prompt_path():
     assert str(dp.user_prompt_path()) == f"{USER_ROOT}/AGENTS.md"
 
 
-def test_email_dir():
-    dp = DataPaths(user_id="tester", data_root="/tmp/ea-test-root")
-    assert str(dp.email_dir()) == f"{USER_ROOT}/Email"
-
-
-def test_email_db():
-    dp = DataPaths(user_id="tester", data_root="/tmp/ea-test-root")
-    assert str(dp.email_db()) == f"{USER_ROOT}/Email/emails.db"
-
-
-def test_gmail_cache_dir():
-    dp = DataPaths(user_id="tester", data_root="/tmp/ea-test-root")
-    assert str(dp.gmail_cache_dir()) == f"{USER_ROOT}/Email/gmail_cache"
-
-
-def test_contacts_dir():
-    dp = DataPaths(user_id="tester", data_root="/tmp/ea-test-root")
-    assert str(dp.contacts_dir()) == f"{USER_ROOT}/Contacts"
-
-
-def test_contacts_db():
-    dp = DataPaths(user_id="tester", data_root="/tmp/ea-test-root")
-    assert str(dp.contacts_db()) == f"{USER_ROOT}/Contacts/contacts.db"
-
-
-def test_todos_dir():
-    dp = DataPaths(user_id="tester", data_root="/tmp/ea-test-root")
-    assert str(dp.todos_dir()) == f"{USER_ROOT}/Todos"
-
-
-def test_todos_db():
-    dp = DataPaths(user_id="tester", data_root="/tmp/ea-test-root")
-    assert str(dp.todos_db()) == f"{USER_ROOT}/Todos/todos.db"
-
-
 def test_conversation_dir():
     dp = DataPaths(user_id="tester", data_root="/tmp/ea-test-root")
     assert str(dp.conversation_dir()) == f"{USER_ROOT}/Messages"
@@ -214,17 +179,6 @@ def test_deprecated_user_config_dir_warns():
         dp.user_config_dir()
         assert len(w) >= 1
         assert "deprecated" in str(w[0].message).lower()
-
-
-def test_deprecated_gmail_cache_warns():
-    import warnings
-    dp = DataPaths(user_id="tester", data_root="/tmp/ea-test-root")
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        result = dp.gmail_cache()
-        assert len(w) >= 1
-        assert "deprecated" in str(w[0].message).lower()
-    assert str(result) == f"{USER_ROOT}/Email/gmail_cache"
 
 
 def test_deprecated_mcp_config_path_warns():

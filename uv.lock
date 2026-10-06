@@ -188,7 +188,6 @@ dependencies = [
     { name = "html2text" },
     { name = "httpx" },
     { name = "hybriddb" },
-    { name = "imap-tools" },
     { name = "langfuse" },
     { name = "mcp" },
     { name = "mistune" },
@@ -267,7 +266,6 @@ requires-dist = [
     { name = "html2text", specifier = ">=2025.4.15" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "hybriddb", specifier = ">=0.6.0" },
-    { name = "imap-tools", specifier = ">=1.0.0" },
     { name = "langfuse", specifier = ">=4.0" },
     { name = "mcp", specifier = ">=1.0.0" },
     { name = "mistune", specifier = ">=3.2.1" },
@@ -1272,15 +1270,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/2e/3e/0248fd00746731074ca01365a25d8aa3c4d54642c8a14490d94f7550bda9/ijson-3.5.1-pp311-pypy311_pp73-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:aa7a2c94e43c02e0482088e6ff997e2bd7b9a76e6f1d0fd70891b4b5ff51318f", size = 71335, upload-time = "2026-07-06T17:37:39.965Z" },
     { url = "https://files.pythonhosted.org/packages/7a/b9/1f1259546cc875adad240c468515f428d3a79b3def3ced17be3cdfe29146/ijson-3.5.1-pp311-pypy311_pp73-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:69b5eef70240e9734c5a2fb5cc3742cae411fc833a66b9a50722b9eedb1e27de", size = 68728, upload-time = "2026-07-06T17:37:40.928Z" },
     { url = "https://files.pythonhosted.org/packages/ea/02/aafbf0c3e1468c7c0f607065363b49c381de7e4bb43ae6674684a3fafe92/ijson-3.5.1-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:4b75b6bf4b0dbb0df24947db6722cd5723ce8d6e6b13fddbfc98db312ba82237", size = 54922, upload-time = "2026-07-06T17:37:41.879Z" },
-]
-
-[[package]]
-name = "imap-tools"
-version = "1.11.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/9a/eb/de91770dc8f34691c33355f7b6277500db32f68ce039c08e2a40ad5a0536/imap_tools-1.11.1.tar.gz", hash = "sha256:e3aa02ff3415a2b50a47707eacbf7386bb79aabc34e370c6bb95f9ad20504389", size = 46562, upload-time = "2026-01-15T08:25:47.357Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/64/bb/94eca066102559a20953475779a4d4d6b39712985014bceba726e1f65aab/imap_tools-1.11.1-py3-none-any.whl", hash = "sha256:0749d0a1f2b9041be1533ea98cc3e9f7977ba86ad3669c1fcf89c27969dcfb0a", size = 35291, upload-time = "2026-01-15T08:25:42.773Z" },
 ]
 
 [[package]]

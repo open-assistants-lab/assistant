@@ -1,6 +1,30 @@
 """Test-only governed tool definitions; never imported by production registration."""
 
-from src.sdk.tools import ExternalHTTPExecutor, ToolAnnotations, ToolDefinition
+from pathlib import Path
+
+from src.sdk.tools import ExternalHTTPExecutor, ToolAnnotations, ToolDefinition, ToolResult
+
+
+def local_fixture(target: Path) -> ToolDefinition:
+    async def write_payload(payload: str, user_id: str = "default_user") -> ToolResult:
+        target.write_text(payload, encoding="utf-8")
+        return ToolResult(
+            content="Fixture applied",
+            structured_content={"result_id": "fixture-1", "actor": user_id},
+        )
+
+    return ToolDefinition(
+        name="governance_local_fixture",
+        description="Write only a test-owned fixture file.",
+        parameters={
+            "type": "object", "properties": {
+                "payload": {"type": "string"}, "user_id": {"type": "string"},
+            },
+            "required": ["payload"],
+        },
+        annotations=ToolAnnotations(read_only=False, destructive=True, requires_approval=True),
+        function=write_payload,
+    )
 
 
 def external_fixture() -> ToolDefinition:

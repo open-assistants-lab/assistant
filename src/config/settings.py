@@ -496,26 +496,6 @@ class FilesystemConfig(_BaseSettings):
     model_config = SettingsConfigDict(env_prefix="FILESYSTEM_")
 
 
-class EmailConfig(_BaseSettings):
-    """Email configuration for Gmail/Outlook via the GmailClient OAuth path.
-
-    Gmail OAuth client credentials are entered via the ConnectKit connect form
-    (gmail.yaml required_fields client_id/client_secret) and stored in the
-    vault. EMAIL_GWS_CLIENT_ID / EMAIL_GWS_CLIENT_SECRET are retained for
-    backward compatibility (legacy gws config) but are NOT consumed by the
-    GmailClient path — a deployment that sets only these env vars and skips
-    the connect form will have empty OAuth client creds (roadmap G4).
-    """
-
-    enabled: bool = True
-    gws_client_id: str = Field(default="")
-    gws_client_secret: str = Field(default="")
-    m365_client_id: str = Field(default="")
-    sync_interval_minutes: int = Field(default=15)
-
-    model_config = SettingsConfigDict(env_prefix="EMAIL_")
-
-
 class ConnectKitConfig(_BaseSettings):
     """ConnectKit OAuth vault configuration.
 
@@ -599,17 +579,6 @@ class ShellToolConfig(_BaseSettings):
     max_write_mb: int = 64
 
     model_config = SettingsConfigDict(env_prefix="SHELL_TOOL_")
-
-
-class EmailSyncConfig(_BaseSettings):
-    """Email sync configuration."""
-
-    enabled: bool = True
-    interval_minutes: int = 5
-    batch_size: int = 100
-    backfill_limit: int = 1000
-
-    model_config = SettingsConfigDict(env_prefix="EMAIL_SYNC_")
 
 
 class MCPConfig(_BaseSettings):
@@ -768,7 +737,6 @@ class AppConfig(_BaseSettings):
     filesystem: FilesystemConfig = Field(default_factory=FilesystemConfig)
     shell_tool: ShellToolConfig = Field(default_factory=ShellToolConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
-    email_sync: EmailSyncConfig = Field(default_factory=EmailSyncConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     scheduling: SchedulingConfig = Field(default_factory=SchedulingConfig)
     metering: MeteringConfig = Field(default_factory=MeteringConfig)
@@ -776,7 +744,6 @@ class AppConfig(_BaseSettings):
 
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     pricing: PricingConfig = Field(default_factory=PricingConfig)
-    email: EmailConfig = Field(default_factory=EmailConfig)
     connectkit: ConnectKitConfig = Field(default_factory=ConnectKitConfig)
     auth: AuthConfig = Field(default_factory=AuthConfig)
     oidc: OidcConfig = Field(default_factory=OidcConfig)

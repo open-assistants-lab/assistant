@@ -1,4 +1,4 @@
-"""Permission-gated connector vertical slice."""
+"""Permission-gated generic external fixture; no first-party email connector."""
 
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ from src.sdk.governance import GovernanceService
 from src.sdk.governance_dispatcher import GovernedOperationDispatcher
 from src.sdk.governance_operations import OperationStatus
 from src.sdk.middleware_hitl import HITLMiddleware
-from src.sdk.tools import ExternalHTTPExecutor, ToolAnnotations, ToolDefinition
+from src.sdk.tools import ToolRegistry
+from tests.sdk.governance_fixture import external_fixture
 
 
 @pytest.mark.asyncio
@@ -20,28 +21,12 @@ async def test_permission_gated_connector_flows_to_idempotent_dispatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service = GovernanceService(data_root=str(tmp_path))
-    executor = ExternalHTTPExecutor(
-        kind="external_http",
-        dispatch_url="https://connector.internal/gmail/send",
-        manifest_hash="gmail-send-v1",
-    )
-    connector = ToolDefinition(
-        name="connector_gmail_send",
-        description="Send a Gmail message through the connected service.",
-        parameters={"type": "object", "properties": {"to": {"type": "string"}}},
-        annotations=ToolAnnotations(
-            requires_approval=True,
-            execution_mode="async",
-            executor=executor,
-        ),
-        function=lambda **_: None,
-    )
-
-    class Registry:
-        def get(self, name: str) -> ToolDefinition | None:
-            return connector if name == connector.name else None
-
-    loop = SimpleNamespace(_registry=Registry(), _flow_session_id="session-1")
+    connector = external_fixture()
+    executor = connector.annotations.executor
+    assert executor is not None
+    registry = ToolRegistry()
+    registry.register(connector)
+    loop = SimpleNamespace(_registry=registry, _flow_session_id="session-1")
     monkeypatch.setattr("src.sdk.governance.get_governance_service", lambda _user_id: service)
     monkeypatch.setattr("src.sdk.governance.governance_enabled", lambda: True)
     monkeypatch.setattr(
@@ -55,7 +40,7 @@ async def test_permission_gated_connector_flows_to_idempotent_dispatch(
     )
     monkeypatch.setattr(
         "src.sdk.governance_operations.GovernanceOperationStore._external_executor_allowed_hosts",
-        staticmethod(lambda: ["connector.internal"]),
+        staticmethod(lambda: ["executor.invalid"]),
     )
 
     from src.sdk.loop import _current_agent_loop
@@ -63,7 +48,7 @@ async def test_permission_gated_connector_flows_to_idempotent_dispatch(
     token = cast(Any, _current_agent_loop).set(loop)
     try:
         pending = await HITLMiddleware(user_id="alice").guard_tool_call(
-            connector.name, {"to": "person@example.com"}
+            connector.name, {"payload": "synthetic-action"}
         )
     finally:
         cast(Any, _current_agent_loop).reset(token)
@@ -115,7 +100,7 @@ async def test_permission_gated_connector_flows_to_idempotent_dispatch(
     assert len(sent) == 1
     assert sent[0][0] == executor.dispatch_url
     assert sent[0][1]["tool_name"] == connector.name
-    assert sent[0][1]["arguments"] == {"to": "person@example.com"}
+    assert sent[0][1]["arguments"] == {"payload": "synthetic-action"}
     assert sent[0][2]["Idempotency-Key"] == created.operation.dispatch_idempotency_key
     dispatch = service.operations.get_dispatch("alice", created.operation.operation_id)
     assert dispatch is not None
@@ -130,7 +115,7 @@ async def test_permission_gated_connector_flows_to_idempotent_dispatch(
         tool_name=connector.name,
         arguments_hash=created.operation.arguments_hash,
         manifest_hash=executor.manifest_hash,
-        result={"provider_message_id": "gmail-message-1"},
+        result={"fixture_result_id": "fixture-result-1"},
     )
     assert finished.status is OperationStatus.SUCCEEDED
-    assert finished.result == {"provider_message_id": "gmail-message-1"}
+    assert finished.result == {"fixture_result_id": "fixture-result-1"}

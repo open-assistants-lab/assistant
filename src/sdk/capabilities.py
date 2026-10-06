@@ -20,7 +20,6 @@ PROFESSIONAL_SERVICE_TOOLS = frozenset(
         "app_import_csv",
         "app_summarize",
         "code_execute",
-        "email_draft",
     }
 )
 

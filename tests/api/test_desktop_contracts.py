@@ -301,15 +301,8 @@ def test_non_desktop_key_persistence_still_works(client):
 # ---------------------------------------------------------------------------
 
 
-def test_desktop_tool_listing_excludes_the_registered_family_tool(client, desktop_env):
-    """The desktop registry filter must be visible in the tool listing.
-
-    `email_draft` is the only registered tool in a desktop-excluded family
-    (the previously asserted names are registered in no mode, so asserting
-    them could never fail). The registry is rebuilt under the desktop
-    environment first: it is populated lazily at first use, so a process that
-    built it earlier would otherwise mask a filter regression.
-    """
+def test_desktop_tool_listing_keeps_surviving_tools_without_removed_families(client, desktop_env):
+    """Removed families stay absent; surviving coding/browser tools remain listed."""
     from src.config import reload_settings
     from src.sdk import native_tools
 
@@ -328,9 +321,10 @@ def test_desktop_tool_listing_excludes_the_registered_family_tool(client, deskto
         reload_settings()
         native_tools.reset_native_tools()
 
-    # control: the same registry build admits the tool outside desktop mode
+    # Removal is global, not just a desktop capability exclusion.
     control_names = {tool.name for tool in native_tools.get_native_tools()}
-    assert "email_draft" in control_names
+    assert "email_draft" not in control_names
+    assert "shell_execute" in control_names and "browser_open" in control_names
 
 
 def test_skills_and_subagents_listings_remain_reachable_in_desktop_mode(

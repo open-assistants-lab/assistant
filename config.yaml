@@ -31,14 +31,6 @@ api:
   # Local dev binds 8080 = the native-app (Zig) client contract. Docker
   # deployments override with API_PORT=8000 env (env beats yaml for api.*).
   port: 8080
-email_sync:
-  backfill_limit: 100
-  batch_size: 50
-  cooldown_minutes: 15
-  enabled: true
-  interval_minutes: 5
-  max_retries: 3
-  retry_delay: 30
 filesystem:
   enabled: true
 mcp:
