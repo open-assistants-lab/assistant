@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.6.36 — 2026-10-06
+
+### Fixed — three residuals of the guardrail work
+- **Reasoning is checked too (#148, follows #74).** The prevention buffer held text *and* reasoning, but the guard only saw the answer: a clean answer flushed SECRET reasoning to the client, and a reasoning-only round skipped the check entirely. Both run paths now check every part of the round's model output — answer text and reasoning, including reasoning-only rounds — and a trip blocks the round (content replaced, reasoning scrubbed, held events dropped). The streaming check reads the message's reasoning, so a provider-side reasoning fallback is covered.
+- **Unguarded runs keep token-by-token delivery (#150, follows #74).** The hold buffer ran unconditionally, so a deployment with no output guardrails paid the buffering cost for a check that did not exist. The hold is now enabled only when output guardrails are configured; both timing behaviours are pinned by tests.
+- **A deferred second user message opens the next turn (#149, follows #141/#146).** The deferred drain handled ping and steer; a second `user_message` captured in the same wait as the stream was dropped. It is now parked for the outer dispatch and taken ahead of newer queued frames, keeping its parameters. Deferred ping and steer remain covered as controls.
+
+Suite: 3877 passed, 27 skipped.
 ## v0.6.35 — 2026-10-06
 
 ### Fixed — two residuals of the previous batch
