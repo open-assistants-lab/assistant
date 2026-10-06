@@ -106,3 +106,51 @@ async def test_deferred_steer_is_still_acked_and_queued(monkeypatch):
     acks = [m for m in websocket.sent if m.get("type") == "steer_ack"]
     assert acks, "the deferred steer stopped being acknowledged"
     assert "change plan" in prompts_seen
+
+
+@pytest.mark.asyncio
+async def test_deferred_second_user_message_opens_the_next_turn(monkeypatch):
+    """#149: a user message captured with the stream is a turn, not litter.
+
+    The deferred drain handled ping and steer; a second user_message had no
+    branch and was discarded when the slot was cleared, so the client's next
+    instruction silently never ran.
+    """
+    _settings(monkeypatch)
+    prompts_seen: list[str] = []
+
+    async def chunk_gen(**kwargs):
+        yield StreamChunk.text_delta(content="ok")
+        yield StreamChunk.done(content="ok")
+
+    base_fake = make_run_event_factory(chunk_gen)
+
+    async def fake_execute_stream(service_self, **kwargs):
+        prompts_seen.append(kwargs.get("prompt"))
+        if release is not None and len(prompts_seen) >= 2:
+            release.set()
+        async for e in base_fake(service_self, **kwargs):
+            yield e
+
+    conversation = FakeConversation()
+    monkeypatch.setattr(
+        ws_router, "aget_message_store", AsyncMock(return_value=conversation)
+    )
+    monkeypatch.setattr(ws_router.RunService, "execute_stream", fake_execute_stream)
+
+    release = asyncio.Event()
+    websocket = FakeWebSocket(
+        [
+            json.dumps({"type": "user_message", "content": "go", "user_id": "t"}),
+            json.dumps({"type": "user_message", "content": "change plan", "user_id": "t"}),
+        ],
+        release,
+    )
+    try:
+        await asyncio.wait_for(ws_router.ws_conversation(websocket), timeout=5)
+    except (TimeoutError, WebSocketDisconnect):
+        pass
+
+    assert prompts_seen[:2] == ["go", "change plan"], (
+        f"the deferred user message was discarded: {prompts_seen}"
+    )

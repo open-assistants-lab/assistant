@@ -42,6 +42,7 @@ from src.http.ws_protocol import (
     RejectMessage,
     SteerAckMessage,
     SteerMessage,
+    UserMessage,
     parse_client_message,
 )
 from src.sdk.messages import Message, ToolCall
@@ -602,9 +603,19 @@ async def ws_conversation(websocket: WebSocket) -> None:
 
     reader_task = asyncio.create_task(_ws_reader())
 
+    # A control frame captured by the deferred drain that needs the FULL outer
+    # dispatch (a user message opening the next turn) is parked here and taken
+    # before the queue, so it keeps its position and its parameters (#149).
+    pending_deferred_dispatch: str | None = None
+
     try:
         while True:
-            raw_data = await control_queue.get()
+            raw_data: str | None
+            if pending_deferred_dispatch is not None:
+                raw_data = pending_deferred_dispatch
+                pending_deferred_dispatch = None
+            else:
+                raw_data = await control_queue.get()
             if raw_data is None:
                 break
 
@@ -1229,6 +1240,12 @@ async def ws_conversation(websocket: WebSocket) -> None:
                                 | {"workspace_id": workspace_id}
                             )
                             pending_followup.append(text)
+                    elif isinstance(deferred_msg, UserMessage):
+                        # #149: a second user message is a valid frame that
+                        # opens the next turn. It is parked for the outer
+                        # dispatch (ahead of newer queued frames) rather than
+                        # silently discarded with the deferred slot.
+                        pending_deferred_dispatch = deferred_control
                     elif deferred_msg is None:
                         logger.warning(
                             "ws.deferred_frame_unparsed",
