@@ -32,7 +32,7 @@ The [synthetic Jen reference](examples/jen_reference/README.md) is an executable
 | **MCP Integration** | Connect any Model Context Protocol server to add custom tools. |
 | **Native Experiment** | Existing Zig + Native SDK macOS client (`native-sdk-experiment/`); not a finished distributed product or proof of remote-instance interoperability. |
 
-Availability depends on deployment policy, credentials and optional dependencies. Legacy email, contacts and todos code still exists; its planned removal is separate work, not part of this documentation update.
+Availability depends on deployment policy, credentials and optional dependencies. The legacy built-in email, contacts and todos families and their APIs have been removed (breaking change). Existing data is retained, not automatically migrated or deleted. Use the generic `app_*` tools for structured data and optional [starter templates](DEPLOYMENT.md#retired-stores-and-optional-app-templates); ConnectKit remains a general integration seam, not a first-party mail replacement.
 
 ## Configuration
 
@@ -100,7 +100,7 @@ bash tests/frontend_suite.sh --all  # automation suite (51 tests)
 
 - **Agent**: Custom SDK `AgentLoop` (ReAct) with tool calling
 - **Backend**: Python FastAPI server (REST + SSE + WebSocket)
-- **Storage**: SQLite for messages, contacts, todos, email. ChromaDB for vector search.
+- **Storage**: SQLite-backed messages and application state; optional hybrid/vector search. Legacy email/contacts/todos stores are retained unread for deliberate operator export.
 - **LLM Providers**: OpenAI, Anthropic, Gemini, Ollama (local & cloud)
 
 ### Acknowledgments

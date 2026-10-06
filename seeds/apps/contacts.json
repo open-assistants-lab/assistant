@@ -1,0 +1,5 @@
+{
+  "name": "contacts",
+  "description": "A starting people table, not a dedicated contacts API.",
+  "tables": {"people": {"name": "TEXT", "email": "TEXT", "org": "TEXT"}}
+}

@@ -17,7 +17,6 @@ dependencies = [
     "prompt-toolkit>=3.0.0",
     "sqlite-vec>=0.1.6",
     "cryptography>=41.0.0",
-    "imap-tools>=1.0.0",
     "mcp>=1.0.0",
     "apscheduler>=3.11.2",
     "pyyaml>=6.0",
@@ -93,6 +92,7 @@ packages = ["src"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "seeds/prompts/grader_prompt.md" = "seeds/prompts/grader_prompt.md"
+"seeds/apps" = "seeds/apps"
 
 [tool.ruff]
 target-version = "py311"

@@ -165,26 +165,6 @@ class DataPaths:
     def user_grader_prompt_path(self) -> Path:
         return self.user_dir / "grader_prompt.md"
 
-    def email_dir(self) -> Path:
-        p = self.user_dir / "Email"
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-
-    def gmail_cache_dir(self) -> Path:
-        p = self.user_dir / "Email" / "gmail_cache"
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-
-    def contacts_dir(self) -> Path:
-        p = self.user_dir / "Contacts"
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-
-    def todos_dir(self) -> Path:
-        p = self.user_dir / "Todos"
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-
     def conversation_dir(self) -> Path:
         """Return the canonical conversation/message storage directory."""
         p = self.user_dir / "Messages"
@@ -298,15 +278,6 @@ class DataPaths:
     def conversation_db(self) -> Path:
         return self.conversation_dir() / "messages.db"
 
-    def email_db(self) -> Path:
-        return self.email_dir() / "emails.db"
-
-    def contacts_db(self) -> Path:
-        return self.contacts_dir() / "contacts.db"
-
-    def todos_db(self) -> Path:
-        return self.todos_dir() / "todos.db"
-
     def work_queue_db(self) -> Path:
         return self.user_subagents_dir() / "work_queue.db"
 
@@ -401,14 +372,6 @@ class DataPaths:
         )
         return self.user_prompt_path()
 
-    def gmail_cache(self) -> Path:
-        warnings.warn(
-            "gmail_cache() is deprecated, use gmail_cache_dir()",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.gmail_cache_dir()
-
     def mcp_config_path(self) -> Path:
         warnings.warn(
             "mcp_config_path() is deprecated, use user_mcp_config()",
@@ -462,16 +425,6 @@ class DataPaths:
         if not self.team_id:
             return None
         return self.base / "teams" / self.team_id / "apps"
-
-    def team_contacts_dir(self) -> Path | None:
-        if not self.team_id:
-            return None
-        return self.base / "teams" / self.team_id / "contacts"
-
-    def team_todos_dir(self) -> Path | None:
-        if not self.team_id:
-            return None
-        return self.base / "teams" / self.team_id / "todos"
 
     def team_memory_dir(self) -> Path | None:
         if not self.team_id:

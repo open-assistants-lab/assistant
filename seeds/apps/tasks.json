@@ -1,0 +1,5 @@
+{
+  "name": "tasks",
+  "description": "A starting task table; customise the schema for your workflow.",
+  "tables": {"items": {"title": "TEXT", "status": "TEXT", "due": "TEXT"}}
+}

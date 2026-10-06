@@ -9,7 +9,7 @@ This document provides guidelines for agents working on this codebase.
 - Start with [builder/deployer conventions](docs/builder-deployment-guide.md), [runtime deployment](DEPLOYMENT.md) and the [synthetic Jen reference](examples/jen_reference/README.md). The [builder contract](docs/superpowers/specs/2026-10-06-assistant-builder-deployment-contract.md) separates the wider target from completed proof.
 - The synthetic reference is not live Jen parity, eddyave/admi adoption or an independent-builder trial. Docker smoke was skipped this round; Compose validation is not deployment proof. eddyave reuse is the recommended next candidate, not an authorised migration.
 - Runtime/storage, model inference, external tools and tracing are distinct data flows. Never promise that everything stays local merely because the runtime is local.
-- Existing native-tool policy is `all|selected|none`. The simpler exclude-shaped/globs-only policy and full email/contacts/todos deletion remain separate unimplemented work; do not invent a manifest compiler, per-tool taxonomy or fleet control plane. ConnectKit and coding remain; CoreMem remains and missing unit-of-work functionality should go upstream.
+- Existing native-tool policy is `all|selected|none`; the simpler exclude-shaped/globs-only policy remains separate unimplemented work. Legacy built-in email/contacts/todos code and APIs are removed, not disabled; retain existing data unread and never auto-delete or migrate it. Use generic `app_*` tools and optional operator-installed templates. Do not invent a manifest compiler, per-tool taxonomy or fleet control plane. ConnectKit and coding remain; CoreMem remains and missing unit-of-work functionality should go upstream.
 - Park graph builders, verification graphs, forks and new messaging/Rust transports. Keep Jen's existing Telegram interface. Design documents do not authorise implementation or production access.
 - Public claim guidance: [website handoff](docs/website-handoff.md). Check current source and evidence before upgrading a roadmap item to a shipped claim.
 
@@ -145,16 +145,8 @@ def find_item(name: Optional[str]) -> Item | None:
 ### Tool Naming Pattern
 All tools must follow `category_{verb}` pattern:
 ```python
-# Email tools
-email_connect, email_disconnect, email_accounts
-email_list, email_get, email_search
-email_send, email_sync
-
-# Contacts tools
-contacts_list, contacts_get, contacts_add, contacts_update, contacts_delete, contacts_search
-
-# Todos tools
-todos_list, todos_add, todos_update, todos_delete, todos_extract
+# Structured data (user-defined tasks, people, or other schemas)
+app_create, app_insert, app_update, app_query, app_search_fts, app_delete_row
 
 # File tools
 files_glob_search, files_grep_search, files_list, files_read, files_write, files_edit, files_delete
@@ -225,7 +217,7 @@ The codebase has a **custom agent SDK** (`src/sdk/`) as its core runtime.
 | `agent_scheduler.py` | 308 | Background agent scheduling (proactive check-ins) |
 | `research.py` | 293 | Deep research orchestration |
 | `state.py` | 78 | `AgentState` — simplified agent state |
-| `tools_core/` (41 files) | 10,440 | ★ SDK-native tool implementations (72 registered tools) |
+| `tools_core/` | — | ★ SDK-native tool implementations (70 native registrations after legacy-family removal) |
 
 **Key Design Decisions:**
 1. **models.dev integration**: Registry fetches from `https://models.dev/api.json`, caches locally at `data/cache/models.json` with 5-min TTL, falls back to built-in subset. 4172+ models vs. old 20 hardcoded.
@@ -272,7 +264,7 @@ Both SSE and WS routers now handle block-structured events (`text_start/delta/en
 
 Per-user storage is split across **two trees** (both must be backed up):
 
-1. **`data_root`** (default `~/Assistant/`, env `DEPLOYMENT_DATA_ROOT`) — bulk user data via `DataPaths`: `Messages/messages.db`, `Memory/` (ChromaDB), `Files/`, `Email/emails.db`, `Contacts/contacts.db`, `Todos/todos.db`, `Skills/`, `Subagents/`. Non-default users under `data_root/Users/{user_id}/`; `default_user` uses the root.
+1. **`data_root`** (default `~/Assistant/`, env `DEPLOYMENT_DATA_ROOT`) — bulk user data via `DataPaths`: `Messages/messages.db`, `Memory/` (ChromaDB), `Files/`, `Apps/`, `Skills/`, `Subagents/`. Non-default users under `data_root/Users/{user_id}/`; `default_user` uses the root.
 2. **`data_path`** (default `data/`, env `DEPLOYMENT_DATA_PATH`) — includes user capability roots (`users/{user_id}/`), legacy settings/scopes and component-specific state. Current `UserSettingsStore` writes via `DataPaths.user_settings_path()` under the user's `data_root`, with migration from the legacy settings path. Inventory actual component paths, including vaults, rather than assuming everything under `data_path` is regenerable.
 3. **`data/` root** — project-level: `cache/`, `logs/`, `jobs.db`, `templates/`, `traces/`.
 
@@ -369,7 +361,7 @@ loop = AgentLoop(
 ```
 
 ### CRITICAL: user data in containers — DEPLOYMENT_DATA_ROOT
-Without `DEPLOYMENT_DATA_ROOT` pointing into the mounted volume, all bulk user data (conversation, files, memory, email) goes to `/root/Assistant` inside the container and is **silently lost on recreation**. `DEPLOYMENT_DATA_PATH` alone does NOT cover `data_root`. Same split matters in tests: `data_root=tmp_path` for user-data isolation, `data_path=tmp_path` for settings/templates.
+Without `DEPLOYMENT_DATA_ROOT` pointing into the mounted volume, all bulk user data (conversation, files, memory, apps) goes to `/root/Assistant` inside the container and is **silently lost on recreation**. `DEPLOYMENT_DATA_PATH` alone does NOT cover `data_root`. Same split matters in tests: `data_root=tmp_path` for user-data isolation, `data_path=tmp_path` for settings/templates.
 
 ### CRITICAL: Identity is not a deployment key or a payload field
 `API_KEY` alone grants trusted-deployment access; it is not individual identity. Opt-in per-user keys and browser OIDC resolve scoped identities. Use the existing identity seam to reject mismatched request IDs, and do not allow proxy loopback/bypass to replace authentication at a remote edge. Authentication does not supply hostile-user process isolation or complete business-action authorisation.
@@ -492,16 +484,15 @@ assistant/
 │   │   ├── subagent_models.py   # AgentDef, SubagentResult, TaskCancelledError, TaskStatus
 │   │   ├── work_queue.py        # SubagentWorkQueueDB (aiosqlite, per-user SQLite)
 │   │   ├── coordinator.py       # SubagentCoordinator (PROFILE.md, capabilities filtering)
-│   │   ├── tools_core/          # ★ SDK-native tool implementations (72 registered tools)
+│   │   ├── tools_core/          # ★ SDK-native tool implementations (70 native registrations)
 │   │   │   ├── time.py, shell.py, filesystem.py, file_search.py
-│   │   │   ├── file_versioning.py, todos.py, contacts.py, message.py
+│   │   │   ├── file_versioning.py, message.py
 │   │   │   ├── memory.py, browser.py
 │   │   │   ├── subagent.py, apps.py, research.py, summarize.py
 │   │   │   ├── web.py, user_prompt.py, skills.py
 │   │   │   ├── mcp.py, mcp_bridge.py, mcp_manager.py, mcp_config.py
 │   │   │   ├── skills.py, research.py, shell.py, cli_adapter.py
-│   │   │   ├── todos_storage.py, contacts_storage.py, agent_scheduler_db.py
-│   │   │   ├── email_db.py, email_sync.py
+│   │   │   ├── agent_scheduler_db.py
 │   │   └── providers/
 │   │       ├── base.py           # LLMProvider ABC, ModelInfo, ModelCost
 │   │       ├── ollama.py         # OllamaLocal + OllamaCloud
@@ -652,7 +643,9 @@ SQLite work_queue-backed coordination with supervisor pattern. Full design in `d
 
 ### Phase 7: Tool Migration Status
 
-**All tools migrated to `src/sdk/tools_core/` (41 files, 10,440 lines):**
+**Surviving native tools live in `src/sdk/tools_core/`; generic `app_*` tools replace fixed task/contact schemas.**
+
+Optional starter templates are installed explicitly with `src/storage/app_templates.py`; see `DEPLOYMENT.md`. Never seed over populated/user-modified apps or convert retained legacy records implicitly. Registration/module inventory is authoritative; older line/test counts in this file are historical snapshots.
 
 | Module | Tools | Count |
 |--------|-------|-------|
@@ -661,8 +654,7 @@ SQLite work_queue-backed coordination with supervisor pattern. Full design in `d
 | `filesystem.py` | `files_list`, `files_read`, `files_write`, `files_edit`, `files_delete`, `files_mkdir`, `files_rename` | 7 |
 | `file_search.py` | `files_glob_search`, `files_grep_search` | 2 |
 | `file_versioning.py` | `files_versions_list`, `files_versions_restore`, `files_versions_delete`, `files_versions_clean` | 4 |
-| `todos.py` | `todos_list`, `todos_add`, `todos_update`, `todos_delete` | 4 |
-| `contacts.py` | `contacts_list`, `contacts_add`, `contacts_update`, `contacts_delete`, `contacts_search` | 5 |
+
 | `memory.py` | `memory_profile` | 1 |
 | `browser.py` | `browser_open`, `browser_snapshot`, `browser_click`, `browser_fill`, `browser_screenshot`, `browser_eval` | 6 |
 | `subagent.py` | `subagent_create`, `subagent_update`, `subagent_start`, `subagent_check`, `subagent_tasks`, `subagent_list`, `subagent_instruct`, `subagent_cancel`, `subagent_delete`, `subagent_delegate` | 10 |

@@ -199,63 +199,57 @@ class TestVersioningTools:
         assert isinstance(str(result), str)
 
 
-# ─── Todos ───
+# ─── Structured-data replacement contracts ───
 
 
-class TestTodosTools:
-    def test_todos_add_and_list(self):
-        from src.sdk.tools_core.todos import todos_add, todos_list
+class TestStructuredAppContracts:
+    def _create(self, tmp_path, monkeypatch):
+        from src.sdk.tools_core import apps
 
-        result = todos_add.invoke(
-            {"content": "Contract test todo", "user_id": "test_contract_todos"}
-        )
-        assert isinstance(str(result), str)
-        list_result = todos_list.invoke({"user_id": "test_contract_todos"})
-        assert isinstance(str(list_result), str)
+        monkeypatch.setattr(apps, "_get_base_path", lambda _: tmp_path)
+        monkeypatch.setattr(apps, "_dbs", {})
+        result = apps.app_create.invoke({
+            "name": "contract", "tables": {"items": {"title": "TEXT", "status": "TEXT"}},
+            "user_id": "contract-user",
+        })
+        assert not getattr(result, "is_error", False), str(result)
+        assert "created successfully" in str(result)
+        return apps
 
-    def test_todos_update(self):
-        from src.sdk.tools_core.todos import todos_add
+    def test_create_and_list(self, tmp_path, monkeypatch):
+        apps = self._create(tmp_path, monkeypatch)
+        assert "contract" in str(apps.app_list.invoke({"user_id": "contract-user"}))
 
-        add_result = todos_add.invoke(
-            {"content": "Update test todo", "user_id": "test_contract_todos"}
-        )
-        assert isinstance(str(add_result), str)
+    def test_insert_and_query(self, tmp_path, monkeypatch):
+        apps = self._create(tmp_path, monkeypatch)
+        inserted = apps.app_insert.invoke({"app": "contract", "table": "items", "data": {"title": "persisted"}, "user_id": "contract-user"})
+        assert not getattr(inserted, "is_error", False), str(inserted)
+        assert "persisted" in str(apps.app_query.invoke({"app": "contract", "query": "SELECT title FROM items", "user_id": "contract-user"}))
 
-# ─── Contacts ───
+    def test_update_persists(self, tmp_path, monkeypatch):
+        apps = self._create(tmp_path, monkeypatch)
+        apps.app_insert.invoke({"app": "contract", "table": "items", "data": {"title": "before"}, "user_id": "contract-user"})
+        result = apps.app_update.invoke({"app": "contract", "table": "items", "id": 1, "data": {"title": "after"}, "user_id": "contract-user"})
+        assert "Updated row" in str(result)
+        assert "after" in str(apps.app_query.invoke({"app": "contract", "query": "SELECT title FROM items", "user_id": "contract-user"}))
 
+    def test_search_finds_inserted_content(self, tmp_path, monkeypatch):
+        apps = self._create(tmp_path, monkeypatch)
+        apps.app_insert.invoke({"app": "contract", "table": "items", "data": {"title": "findable"}, "user_id": "contract-user"})
+        result = apps.app_search_fts.invoke({"app": "contract", "table": "items", "column": "title", "query": "findable", "user_id": "contract-user"})
+        assert "findable" in str(result)
 
-class TestContactsTools:
-    def test_contacts_add_and_list(self):
-        from src.sdk.tools_core.contacts import contacts_add, contacts_list
+    def test_update_missing_row_is_reported(self, tmp_path, monkeypatch):
+        apps = self._create(tmp_path, monkeypatch)
+        result = apps.app_update.invoke({"app": "contract", "table": "items", "id": 99, "data": {"title": "missing"}, "user_id": "contract-user"})
+        assert "not found" in str(result)
 
-        result = contacts_add.invoke(
-            {"email": "contract@test.com", "name": "Contract Test", "user_id": "test_contract_ct"}
-        )
-        assert isinstance(str(result), str)
-        list_result = contacts_list.invoke({"user_id": "test_contract_ct"})
-        assert isinstance(str(list_result), str)
-
-    def test_contacts_search(self):
-        from src.sdk.tools_core.contacts import contacts_search
-
-        result = contacts_search.invoke({"query": "test", "user_id": "test_contract_ct"})
-        assert isinstance(str(result), str)
-
-    def test_contacts_update(self):
-        from src.sdk.tools_core.contacts import contacts_update
-
-        result = contacts_update.invoke(
-            {"contact_id": "nonexistent", "name": "Updated", "user_id": "test_contract_ct"}
-        )
-        assert isinstance(str(result), str)
-
-    def test_contacts_delete(self):
-        from src.sdk.tools_core.contacts import contacts_delete
-
-        result = contacts_delete.invoke(
-            {"contact_id": "nonexistent", "user_id": "test_contract_ct"}
-        )
-        assert isinstance(str(result), str)
+    def test_delete_removes_row(self, tmp_path, monkeypatch):
+        apps = self._create(tmp_path, monkeypatch)
+        apps.app_insert.invoke({"app": "contract", "table": "items", "data": {"title": "remove-me"}, "user_id": "contract-user"})
+        result = apps.app_delete_row.invoke({"app": "contract", "table": "items", "id": 1, "user_id": "contract-user"})
+        assert "Deleted row" in str(result)
+        assert "remove-me" not in str(apps.app_query.invoke({"app": "contract", "query": "SELECT title FROM items", "user_id": "contract-user"}))
 
     def test_message_search(self):
         from src.sdk.tools_core.message import message_search
