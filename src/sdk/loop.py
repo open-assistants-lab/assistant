@@ -2263,13 +2263,21 @@ class AgentLoop:
             # calls answers; a tool round's narration is model output too and
             # is checked as well.
             output_text = response.content if isinstance(response.content, str) else ""
-            if output_text:
+            # #148: reasoning is model output too. Checking only the answer let
+            # a clean answer carry SECRET reasoning through, and a
+            # reasoning-only round skipped the check entirely.
+            reasoning_text = response.reasoning if isinstance(response.reasoning, str) else ""
+            for part in (output_text, reasoning_text):
+                if not part:
+                    continue
                 try:
-                    await self._check_output_guardrails(output_text, state)
+                    await self._check_output_guardrails(part, state)
                 except GuardrailTripwire as e:
                     # The message is not in state yet, so the block replaces its
-                    # content before the observer can ever see the original.
+                    # content (and scrubs reasoning) before the observer can
+                    # ever see the original.
                     self._block_output_in_place(response, e, state)
+                    break
 
             state.add_message(response)
 
@@ -2542,6 +2550,12 @@ class AgentLoop:
         # alert, not a guardrail. Text and reasoning events accumulate here and
         # are flushed only after the check, so blocked content never reaches the
         # client or the session-log observer.
+        #
+        # The hold exists to make guarding possible, so it is enabled ONLY when
+        # output guardrails are configured (#150): an unguarded deployment keeps
+        # token-by-token delivery instead of paying the buffering cost for a
+        # check that does not exist.
+        hold_content = bool(self.output_guardrails)
         pending_round_events: list[StreamChunk] = []
 
         try:
@@ -2653,7 +2667,7 @@ class AgentLoop:
                                     in_text_block,
                                     in_reasoning_block,
                                 ):
-                                    if event.canonical_type in _HELD_STREAM_TYPES:
+                                    if hold_content and event.canonical_type in _HELD_STREAM_TYPES:
                                         pending_round_events.append(event)
                                     else:
                                         yield event
@@ -2749,7 +2763,7 @@ class AgentLoop:
                                 in_text_block,
                                 in_reasoning_block,
                             ):
-                                if event.canonical_type in _HELD_STREAM_TYPES:
+                                if hold_content and event.canonical_type in _HELD_STREAM_TYPES:
                                     pending_round_events.append(event)
                                 else:
                                     yield event
@@ -2813,9 +2827,15 @@ class AgentLoop:
                 # hold buffer (#74), so a blocked round does not emit an empty
                 # block marker for content that was never delivered.
                 if in_text_block:
-                    pending_round_events.append(StreamChunk.text_end())
+                    if hold_content:
+                        pending_round_events.append(StreamChunk.text_end())
+                    else:
+                        yield StreamChunk.text_end()
                 if in_reasoning_block:
-                    pending_round_events.append(StreamChunk.reasoning_end())
+                    if hold_content:
+                        pending_round_events.append(StreamChunk.reasoning_end())
+                    else:
+                        yield StreamChunk.reasoning_end()
 
                 # An in-band provider error (overload, truncation) means the
                 # round is abandoned: executing its calls would run an action
@@ -2881,14 +2901,22 @@ class AgentLoop:
                 # every round that produced model content - a tool round's
                 # narration is model output too, and must not reach the client
                 # unguarded.
+                #
+                # #148: reasoning is checked with the answer. Guarding only the
+                # answer let a clean answer flush SECRET reasoning, and a
+                # reasoning-only round skipped the check altogether.
                 output_text = assistant_content
+                reasoning_text = assistant_msg.reasoning or reasoning_content or ""
                 round_block: GuardrailTripwire | None = None
-                if output_text:
+                for part in (output_text, reasoning_text):
+                    if not part:
+                        continue
                     try:
-                        await self._check_output_guardrails(output_text, state)
+                        await self._check_output_guardrails(part, state)
                     except GuardrailTripwire as e:
                         round_block = e
                         self._block_output_in_place(assistant_msg, e, state)
+                        break
 
                 state.add_message(assistant_msg)
 
