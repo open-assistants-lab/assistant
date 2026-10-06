@@ -1,0 +1,5 @@
+{
+  "name": "reading-list",
+  "description": "An example of another user-chosen structured-data shape.",
+  "tables": {"entries": {"title": "TEXT", "url": "TEXT", "status": "TEXT"}}
+}
