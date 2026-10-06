@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Breaking — remove fixed email, contacts and todos subsystems
+
+- Remove the built-in families, storage adapters, configuration, IMAP dependency and `/emails`, `/contacts`, `/todos` APIs, plus the obsolete Gmail demo. Removal is global, not desktop-only exclusion.
+- Retain existing user stores unread; no automatic export, migration or deletion. Fresh server startup creates none of the retired directories.
+- Use existing `app_*` tools for user-defined structured data. Optional tasks, contacts and reading-list templates can be explicitly installed into an initial/stopped store; populated or user-edited apps are not refreshed, and legacy records are not imported.
+- Keep generic ConnectKit OAuth/connectors, file-sync adapters, coding, browser capabilities and CoreMem. No first-party mail replacement is added.
+- Preserve governance/invocation assertions with test-only local and external fixtures, including approval, dispatch, callback authentication and durable terminal evidence. No fixture tool or new deployment mode is shipped to normal agents.
+- Review dependent applications/clients before upgrading. This is not a production deployment or a new backup/recovery guarantee.
+
 ## v0.6.35 — 2026-10-06
 
 ### Fixed — two residuals of the previous batch

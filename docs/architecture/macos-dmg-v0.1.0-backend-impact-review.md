@@ -1,6 +1,8 @@
 # macOS DMG v0.1.0 — Backend Impact Review Memo
 
-> **Status:** Final for the desktop v0.1.0 D1 gate (2026-09-21). The remaining review questions are answered in §8, §2 records which current-state gaps D1 closed, and §5 carries the canonical bootstrap payload. This records confirmed product direction and the backend changes it implies; it is not an implementation plan and does not authorize code changes.
+> **Current boundary note:** This is a historical local-sidecar/D1 memo, not authority for a finished native product. MacOS product work is parked. The legacy email/contacts/todos exclusion requirement below is now satisfied by global code/API deletion; remaining local identity/migration safeguards still apply. See [current builder/deployer conventions](../builder-deployment-guide.md).
+>
+> **Historical status:** Final for the desktop v0.1.0 D1 gate (2026-09-21). The remaining review questions are answered in §8, §2 records which current-state gaps D1 closed, and §5 carries the canonical bootstrap payload. This records confirmed product direction and the backend changes it implies; it is not an implementation plan and does not authorize code changes.
 >
 > **Audience:** Backend, security, release-engineering, and product reviewers.
 
@@ -115,18 +117,19 @@ Migration requirements:
 7. Existing data is never copied into the app bundle or a CWD-relative `data/` directory.
 8. Do not discover or import legacy source-checkout `data/users/...` configuration by scanning the filesystem. Desktop `.system/` settings start fresh; credentials are restored through first-run/Keychain. A later release may offer an explicit user-selected import flow.
 
-The local release profile must also disable email synchronization before startup, otherwise background jobs can recreate excluded email state.
+The former email synchronization requirement is satisfied by deletion of the legacy subsystem. Existing user data is retained, not migrated or deleted.
 
-### 3.3 Capability policy
+### 3.3 Capability policy — removal supersedes family exclusions
 
-The desktop build needs a fixed v0.1.0 baseline capability profile:
+The legacy email, contacts and todos tools, routers, storage adapters and
+configuration are removed globally. `DESKTOP_EXCLUDED_FAMILIES` and its childless
+registry filter are gone; no client toggle can restore absent native modules.
+Fresh normal/desktop starts must not create retired stores, and existing records
+are left in place for deliberate operator export/retention.
 
-- Force `email_*`, `contacts_*`, and `todos_*` to `none` before tool registration.
-- Ensure the three excluded families are absent from model-visible tools and `GET /tools` responses for the desktop identity.
-- Ensure email/contact/todo store and scheduler modules are lazy enough not to create `Email/`, `Contacts/`, or `Todos/` just because the server starts.
-- Do not expose a client control that can re-enable these product-excluded tools.
-
-This is deliberately stronger than hiding UI. It prevents agent invocation and creates a reproducible support surface.
+Generic `app_*` tools and optional templates provide configurable structured data,
+not dedicated task/contact APIs. ConnectKit and the remaining desktop capability,
+authentication and migration restrictions stay separate from this deletion.
 
 ### 3.4 Managed browser automation
 

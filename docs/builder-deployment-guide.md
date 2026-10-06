@@ -100,10 +100,13 @@ introspection alone cannot supply them.
 
 Current deployment native-tool selection is documented in
 [Native tool policy](../DEPLOYMENT.md#native-tool-policy). A proposed simpler
-exclude-shaped policy is not a shipped configuration format. Email, contacts and
-todos code still exists; its planned deletion is separate work. Do not infer
-that disabling tools performs a data migration or deletion. ConnectKit and
-coding/browser capabilities are not being removed by this documentation pass.
+exclude-shaped policy is not a shipped configuration format. Legacy built-in
+email, contacts and todos code/APIs are removed by a breaking change; existing
+stores are retained unread, not automatically converted or deleted. Generic
+`app_*` tools and optional operator-installed templates provide structured data.
+See [retired stores and template installation](../DEPLOYMENT.md#retired-stores-and-optional-app-templates).
+ConnectKit and coding/browser capabilities remain; no first-party mail tool is
+being rebuilt.
 
 ## Operation and data flows
 

@@ -45,7 +45,7 @@ def test_removed_module_is_not_available(module):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["/emails", "/contacts", "/todos"])
+@pytest.mark.parametrize("path", ["/emails", "/contacts", "/todos", "/dev/gmail-demo"])
 async def test_removed_http_api_returns_not_found(path):
     import httpx
     from src.http.main import app

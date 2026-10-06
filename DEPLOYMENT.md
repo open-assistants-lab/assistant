@@ -66,7 +66,7 @@ separate service credentials or hostile-user containment.
 ## Architecture in 30 seconds
 
 - The **server is the single source of truth**: conversation history, memory,
-  email, todos, contacts, files all live server-side in per-user stores.
+  app data and files live server-side in per-user stores. Retired mail/contact/todo stores are not automatically read or migrated.
 - **Clients are thin viewers** — they pull history and stream events
   (REST/SSE/WebSocket). Multi-device sync is a property of having one server,
   not of any client-side sync engine.
@@ -108,7 +108,7 @@ tools:
       - files_glob_*
 ```
 
-- `all` (the default) exposes all shipped native tools permitted by the active deployment profile; for example, desktop-server still excludes its desktop-incompatible families.
+- `all` (the default) exposes all shipped native tools permitted by the active deployment profile; desktop-server retains its remaining capability restrictions; the retired families no longer exist in any mode.
 - `selected` exposes only native names matching `enabled` patterns.
 - `none` exposes no shipped native tools, including shipped meta-tools.
 - Environment overrides are `TOOLS_NATIVE__MODE` and
@@ -310,13 +310,53 @@ per-vertical variation, not user-defined ad-hoc bars.
 
 ---
 
+## Retired stores and optional app templates
+
+**Breaking change:** the built-in email, contacts and todos tools, storage
+adapters, configuration and `/emails`, `/contacts`, `/todos` APIs are removed.
+The legacy Gmail demo is removed too. Generic ConnectKit OAuth, file-sync
+adapters, coding and browser capabilities remain; there is no first-party mail
+replacement.
+
+Existing `Email/`, `Contacts/` and `Todos/` directories under each user root are
+left in place, unread by the retired subsystems. New server starts do not create
+them. No automatic data export, migration or deletion runs. Operators may retain
+backups, deliberately export with appropriate legacy tooling, or delete data only
+under their own approved retention procedure. Do not upgrade a client/application
+that depends on the removed APIs without reviewing the breaking change.
+
+Use `app_*` tools for user-defined structured data. Optional templates in
+`seeds/apps/` provide tasks, contacts and a reading list, but do **not** restore
+dedicated APIs or automatic conversation-to-todo extraction. Template installation
+is explicit, for an initial/stopped store—not an unconditional startup action:
+
+```bash
+# Set DEPLOYMENT_DATA_ROOT to the intended instance root first.
+# Run in the installed engine checkout/environment; no dependency sync here.
+uv run --no-sync python - <<'PY'
+import os
+from pathlib import Path
+from src.storage.app_templates import seed_app_templates
+
+names = seed_app_templates("default_user", data_root=Path(os.environ["DEPLOYMENT_DATA_ROOT"]))
+print("Installed/already-current templates:", names)
+PY
+```
+
+Select the intended user ID for non-default users. Apps are created under their
+real `Apps/` directory; no legacy records are imported. Seed refresh uses a
+canonical definition hash and baseline snapshot. Unmarked/user-modified apps,
+populated tables, changed markers and non-additive schema changes are skipped,
+not overwritten. Review skipped names rather than assuming all templates were
+applied. This helper is not a general transactional installer or recovery service.
+
 ## Data layout and backups
 
 | What | Where | Back up |
 |---|---|---|
-| User data (conversation, files, memory, email, todos, contacts, skills, subagents) | `data_root` (`~/Assistant/`, or `DEPLOYMENT_DATA_ROOT`) | **Yes** |
+| User data (conversation, files, memory, apps, skills, subagents) | `data_root` (`~/Assistant/`, or `DEPLOYMENT_DATA_ROOT`) | **Yes** |
 | Settings, scopes, connector vaults and project state | `data/` (`DEPLOYMENT_DATA_PATH`), including per-user settings trees | **Yes** for non-regenerable configuration/credentials/jobs; classify caches/logs separately |
-| Per-user DBs | `data_root/Messages/messages.db`, `Memory/…`, `Email/emails.db`, `Contacts/contacts.db`, `Todos/todos.db`, `Subagents/work_queue.db` (under each user's root) | **Yes** |
+| Per-user DBs | `data_root/Messages/messages.db`, `Memory/…`, `Apps/<app>/app.db`, `Subagents/work_queue.db` (under each user's root) | **Yes** |
 | Vector index | `data_root/Memory/` (ChromaDB dirs) | Yes — but see below |
 | File versions | `data_root/.versions/`, `data_root/Files/` | **Yes** |
 
@@ -371,7 +411,6 @@ image.
 | `FIRECRAWL_API_KEY`, `FIRECRAWL_BASE_URL` | Web search/scraping (self-hosted base URL needs no key) |
 | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`, `LANGFUSE_ENVIRONMENT` | Trace/observability backend |
 | `CONNECTKIT_VAULT_KEY` | Set to persist OAuth tokens (Gmail/Outlook) across restarts |
-| `EMAIL_GWS_CLIENT_ID`, `EMAIL_GWS_CLIENT_SECRET`, `EMAIL_M365_CLIENT_ID` | OAuth desktop client credentials |
 
 `OLLAMA_BASE_URL` configures the `ollama-cloud:` provider and defaults to
 `https://ollama.com`; it does **not** configure the local `ollama:` provider.

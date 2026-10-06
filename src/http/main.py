@@ -43,7 +43,6 @@ from src.http.routers.bootstrap import router as bootstrap_router
 from src.http.routers.connectors import router as connectors_router
 from src.http.routers.dashboard import router as dashboard_router
 from src.http.routers.desktop_providers import router as desktop_providers_router
-from src.http.routers.dev import router as dev_router
 from src.http.routers.governance import router as governance_router
 from src.http.routers.review import router as review_router
 from src.http.routers.settings import router as settings_router
@@ -284,7 +283,6 @@ _PUBLIC_PATHS = {
     "/auth/login",
     "/auth/callback",
     # Dev demo page — static HTML, no Bearer token from the browser.
-    "/dev/gmail-demo",
 }
 
 
@@ -499,11 +497,6 @@ except Exception:
 if not desktop_mode_active():
     app.include_router(connectors_router)
 app.include_router(bootstrap_router)
-# Desktop v0.1 (D0 Q7 decision): the dev router is stripped entirely in
-# desktop-server mode — /dev/gmail-demo is unauthenticated and dev-only.
-if not os.environ.get("DEPLOYMENT_MODE") == "desktop-server":
-    app.include_router(dev_router)
-
 # P0-T5: /v1 aliases for the stable partner surface (same handlers, no
 # redirect; auth middleware is path-agnostic and applies identically).
 include_v1_aliases(app)

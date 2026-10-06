@@ -62,8 +62,12 @@ has not established real Jen parity; Docker smoke was deferred for that round.
   sharing/roles, or containment of arbitrary code with service credentials.
 - A universal package compiler, fleet dashboard, automatic crash recovery,
   general online backup service or completed external-builder trial.
-- Email/contacts/todos removal or the proposed exclude-shaped policy as completed.
-  Those are separate work; ConnectKit, coding and CoreMem remain.
+- The proposed exclude-shaped policy as completed; it remains separate work.
+- Automatic legacy email/contacts/todos data migration or a first-party mail
+  replacement. Their built-in families/APIs are removed by an unreleased breaking
+  change; only advertise removal for a release that actually contains it.
+  Generic `app_*` tools and optional starter templates provide structured data;
+  ConnectKit, coding and CoreMem remain.
 
 ## Next evidence gate
 
