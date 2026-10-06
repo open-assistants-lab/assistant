@@ -2809,10 +2809,13 @@ class AgentLoop:
                     yield StreamChunk.error(message=str(e))
                     break
 
+                # Close any block the provider left open — through the same
+                # hold buffer (#74), so a blocked round does not emit an empty
+                # block marker for content that was never delivered.
                 if in_text_block:
-                    yield StreamChunk.text_end()
+                    pending_round_events.append(StreamChunk.text_end())
                 if in_reasoning_block:
-                    yield StreamChunk.reasoning_end()
+                    pending_round_events.append(StreamChunk.reasoning_end())
 
                 # An in-band provider error (overload, truncation) means the
                 # round is abandoned: executing its calls would run an action
