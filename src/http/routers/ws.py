@@ -1202,13 +1202,24 @@ async def ws_conversation(websocket: WebSocket) -> None:
             # follow-up turn, not just the first.
             pending_followup: list[str] = list(followup_prompts)
             if deferred_control is not None and pending_container[0] is None:
-                # #141: a control frame completing in the same wait as the
+                # #141/#146: a control frame completing in the same wait as the
                 # stream was captured but only ever consumed by the approval
-                # loop — a steer here was silently dropped.
+                # loop. The #141 fix handled a deferred steer and dropped every
+                # other frame - a deferred ping got no pong, so a client could
+                # treat the connection as dead. Frames are parsed with the same
+                # dispatch the mid-stream path uses.
                 try:
                     frame = json.loads(deferred_control)
-                    if isinstance(frame, dict) and frame.get("type") == "steer":
-                        text = str(frame.get("content") or "").strip()
+                except (json.JSONDecodeError, TypeError):
+                    frame = None
+                if isinstance(frame, dict):
+                    deferred_msg = parse_client_message(frame)
+                    if isinstance(deferred_msg, PingMessage):
+                        await websocket.send_json(
+                            PongMessage().model_dump() | {"workspace_id": workspace_id}
+                        )
+                    elif isinstance(deferred_msg, SteerMessage):
+                        text = str(getattr(deferred_msg, "content", "") or "").strip()
                         if text:
                             # Acknowledge now: the frame was captured but never
                             # acked on this path (it completed in the same wait
@@ -1218,8 +1229,12 @@ async def ws_conversation(websocket: WebSocket) -> None:
                                 | {"workspace_id": workspace_id}
                             )
                             pending_followup.append(text)
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                    elif deferred_msg is None:
+                        logger.warning(
+                            "ws.deferred_frame_unparsed",
+                            {"frame_type": frame.get("type")},
+                            user_id=user_id,
+                        )
                 deferred_control = None
             if follow_loop is not None:
                 while follow_loop.has_pending_steer():

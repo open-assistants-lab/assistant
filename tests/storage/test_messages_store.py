@@ -1186,3 +1186,42 @@ def test_get_turns_turn_with_tool_messages() -> None:
     assert turns[0]["run_id"] == "run-1"
     assert len(turns[0]["messages"]) == 3
     assert turns[0]["messages"][1].role == "tool"
+
+
+def test_session_delete_collects_vectors_via_the_session_column() -> None:
+    """#147: session_id is a CoreMem COLUMN, not a metadata JSON key.
+
+    `_collect_vector_ids` passed it inside `metadata=`, which filters the
+    metadata JSON — where ingestion never writes session_id — so the lookup
+    returned nothing and delete_session purged zero vectors while reporting the
+    delete. Verified against real CoreMem 0.13.1 semantics.
+    """
+    store = _store()
+    store.add_message("user", "session scoped message", session_id="sess-col")
+
+    # The trap this pins: the metadata filter finds nothing, the column finds it.
+    assert store._core.fetch(limit=100, metadata={"session_id": "sess-col"}) == []
+    assert len(store._core.fetch(limit=100, session_id="sess-col")) == 1
+
+    ids = store._collect_vector_ids({"session_id": "sess-col"})
+    assert ids, "session delete collected no vector ids - the purge would be a no-op"
+    assert len(store._core.fetch(limit=100, session_id="sess-col")) == 1
+
+
+def test_workspace_filter_still_uses_metadata() -> None:
+    """workspace_id IS written into metadata; the mapping must not break it."""
+    store = _store()
+    store.add_message(
+        "user", "workspace scoped", session_id="sess-ws",
+        metadata={"workspace_id": "personal"},
+    )
+    assert store._collect_vector_ids({"workspace_id": "personal"}), (
+        "workspace purge id collection broke"
+    )
+
+
+def test_clear_collects_every_message() -> None:
+    store = _store()
+    store.add_message("user", "one", session_id="s1")
+    store.add_message("assistant", "two", session_id="s2")
+    assert len(store._collect_vector_ids({})) >= 2
