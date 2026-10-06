@@ -314,6 +314,20 @@ def _is_json_object(raw: str) -> bool:
         return False
 
 
+#: Events carrying the model's own generated content. They are held until the
+#: round's output guardrails pass (issue #74) — see run_stream.
+_HELD_STREAM_TYPES = frozenset(
+    {
+        "text_start",
+        "text_delta",
+        "text_end",
+        "reasoning_start",
+        "reasoning_delta",
+        "reasoning_end",
+    }
+)
+
+
 class AgentLoop:
     """ReAct agent loop.
 
@@ -2243,6 +2257,20 @@ class AgentLoop:
             if not llm_success:
                 break
 
+            # Output guardrails run BEFORE the message enters state (#74):
+            # the session-log observer fires on add_message, so checking
+            # afterwards still logged the blocked text. A round with no tool
+            # calls answers; a tool round's narration is model output too and
+            # is checked as well.
+            output_text = response.content if isinstance(response.content, str) else ""
+            round_blocked = False
+            if output_text:
+                try:
+                    await self._check_output_guardrails(output_text, state)
+                except GuardrailTripwire as e:
+                    round_blocked = True
+                    self._block_output_in_place(response, e, state)
+
             state.add_message(response)
 
             await self._run_hooks("aafter_model", state)
@@ -2254,11 +2282,6 @@ class AgentLoop:
                 if response.tool_calls:
                     response.tool_calls = []
                 output_text = response.content if isinstance(response.content, str) else ""
-                try:
-                    await self._check_output_guardrails(output_text, state)
-                except GuardrailTripwire as e:
-                    self._block_output_in_place(response, e, state)
-                    output_text = str(response.content or "")
                 break
 
             # FR-4: text bundled with a tool call is held back — it must not
@@ -2269,11 +2292,6 @@ class AgentLoop:
 
             if not response.tool_calls:
                 output_text = response.content if isinstance(response.content, str) else ""
-                try:
-                    await self._check_output_guardrails(output_text, state)
-                except GuardrailTripwire as e:
-                    self._block_output_in_place(response, e, state)
-                    output_text = str(response.content or "")
                 break
 
             effective_tool_calls = [self._with_runtime_context(tc) for tc in response.tool_calls]
@@ -2519,6 +2537,13 @@ class AgentLoop:
         except Exception:
             guardrail_task = None
 
+        # Model content is HELD until this round's output guardrails pass
+        # (issue #74): a guard that trips after the deltas were emitted is an
+        # alert, not a guardrail. Text and reasoning events accumulate here and
+        # are flushed only after the check, so blocked content never reaches the
+        # client or the session-log observer.
+        pending_round_events: list[StreamChunk] = []
+
         try:
             iteration = 0
             overflow_retries = 0
@@ -2628,7 +2653,10 @@ class AgentLoop:
                                     in_text_block,
                                     in_reasoning_block,
                                 ):
-                                    yield event
+                                    if event.canonical_type in _HELD_STREAM_TYPES:
+                                        pending_round_events.append(event)
+                                    else:
+                                        yield event
                                     if event.canonical_type == "error":
                                         round_error = str(event.content or "provider error")
                                     if event.type == "text_start":
@@ -2721,7 +2749,10 @@ class AgentLoop:
                                 in_text_block,
                                 in_reasoning_block,
                             ):
-                                yield event
+                                if event.canonical_type in _HELD_STREAM_TYPES:
+                                    pending_round_events.append(event)
+                                else:
+                                    yield event
                                 if event.canonical_type == "error":
                                     round_error = str(event.content or "provider error")
                                 if event.type == "text_start":
@@ -2766,6 +2797,9 @@ class AgentLoop:
 
                     result = await self.compress_context(CompressionReason.PROVIDER_OVERFLOW)
                     if result.compressed and overflow_retries < 3:
+                        # The retry re-runs the round: drop this attempt's held
+                        # content so it cannot be attributed to the next one.
+                        pending_round_events.clear()
                         continue
 
                     yield StreamChunk.error(message="Context too large after summarization attempt.")
@@ -2838,7 +2872,36 @@ class AgentLoop:
                     if provider_reasoning:
                         assistant_msg.reasoning = provider_reasoning
 
+                # Output guardrails run BEFORE the message enters state (#74):
+                # the session-log observer fires on add_message, so checking
+                # afterwards still logged the blocked text. The check covers
+                # every round that produced model content - a tool round's
+                # narration is model output too, and must not reach the client
+                # unguarded.
+                output_text = assistant_content
+                round_block: GuardrailTripwire | None = None
+                if output_text:
+                    try:
+                        await self._check_output_guardrails(output_text, state)
+                    except GuardrailTripwire as e:
+                        round_block = e
+                        self._block_output_in_place(assistant_msg, e, state)
+
                 state.add_message(assistant_msg)
+
+                if round_block is not None:
+                    # Nothing from this round is delivered: the held events are
+                    # dropped. For a tool round the run continues (the action
+                    # itself is separately guarded); for a final answer it ends
+                    # here with the block signal.
+                    pending_round_events.clear()
+                    yield StreamChunk.error(
+                        message=f"Output blocked: {round_block.result.message}"
+                    )
+                else:
+                    for held_event in pending_round_events:
+                        yield held_event
+                pending_round_events.clear()
 
                 await self._run_hooks("aafter_model", state)
 
@@ -2852,27 +2915,16 @@ class AgentLoop:
                         # local variable alone leaves dangling tool_call ids.
                         stream_tool_calls = []
                         assistant_msg.tool_calls = []
-                    output_text = assistant_content
-                    try:
-                        await self._check_output_guardrails(output_text, state)
-                    except GuardrailTripwire as e:
-                        self._block_output_in_place(assistant_msg, e, state)
-                        yield StreamChunk.error(message=f"Output blocked: {e.result.message}")
                     break
 
                 # FR-4: text bundled with a tool call is held back from the
-                # model context (the streaming client still saw the deltas,
-                # but the next LLM call must not see a partial answer).
+                # model context (its deltas may still have been streamed when
+                # the guards passed, but the next LLM call must not see a
+                # partial answer).
                 if stream_tool_calls and assistant_msg.content:
                     assistant_msg.content = ""
 
                 if not stream_tool_calls:
-                    output_text = assistant_content
-                    try:
-                        await self._check_output_guardrails(output_text, state)
-                    except GuardrailTripwire as e:
-                        self._block_output_in_place(assistant_msg, e, state)
-                        yield StreamChunk.error(message=f"Output blocked: {e.result.message}")
                     break
 
                 # Deduplicate identical tool calls within a single LLM response.

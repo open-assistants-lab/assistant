@@ -384,6 +384,9 @@ The loop's guard hook (`Middleware.guard_tool_call` → `AgentLoop._run_guards` 
 ### Watch out: unknown tools are sequential; lazy loads are audited
 The classification predicate is a safety boundary: a tool that is NOT in the registry is not parallel-safe (#70) — classification runs before the lazy loader resolves a definition, and an unresolved destructive tool must not enter the concurrent batch (nor skip the interrupt path). The lazy dispatch path charges the same budget and emits the same audit events as the registered one (#59).
 
+### CRITICAL: output guardrails PREVENT; model content is held until they pass
+A guardrail that trips after the bytes were emitted is an alert, not a guardrail. In both `run()` and `run_stream()`, the model's own generated content — text AND reasoning, including the narration attached to a tool-call round — is HELD until the round's output guardrails have run: `_run_stream_inner` buffers the streamed content events (`_HELD_STREAM_TYPES`) and flushes them only on a pass; the non-streaming path checks before `state.add_message(response)`. That ordering matters because the session-log observer fires on `add_message`, so a check placed after the add still wrote the blocked text to the log. Consequences to preserve: nothing unguarded reaches the client or the observer; a blocked final answer emits an error and a block notice in history; a blocked tool-round narration is dropped while the tool action still runs (the action is separately guarded); an overflow retry clears the held buffer so the retry's content is not attributed to the aborted attempt. Cost (accepted): streamed text is delivered per round rather than per token. Tests: `tests/sdk/test_guard_prevention.py`.
+
 ### Watch out: streaming cancellation and steering have strict ordering
 A cancel between tools must go through `_finalize_cancelled_stream`: it answers every pending tool-call id (strict providers reject a dangling id), runs `aafter_agent` once and projects next context before `done` (#75). Steer delivery is two-phase — `_pending_steer_texts()` first, the cancelled tool results next, `_inject_steer_texts()` LAST — so a user message never lands between an assistant tool call and its result (#76).
 
@@ -742,7 +745,7 @@ An external audit filed roughly ninety issues (#50–#145). Every fix was reprod
 
 - **#40 — tool-level governance boundary.** Still not enforced: an ungated shell with interpreters can reach key-gated write endpoints using the container credential. 3a (one container, one OS user/process per trusted tenant) is specified but NOT built; all tenants share one uid and are separated by path name only. Needs the per-tenant worker/uid/provisioning design.
 - **#41 — receipt-fidelity contract.** Delivered around it: terminal-outcome fidelity, output-block removal, definition-bound approvals, per-call duplicate receipts, lazy-path audit events. Remaining: capability-level governance, first-class async for the sync tool path, built-in action evidence, explicit `unknown` as a contract value.
-- **#74 — guardrail prevention policy.** Choose between buffering output until guardrails pass (prevention, at latency cost) and declaring output guardrails detection-only (partly documented).
+- ~~**#74 — guardrail prevention policy.**~~ **Decided and shipped:** option (a), prevention. Model content (text and reasoning, including tool-round narration) is buffered until the round's output guardrails pass, so nothing unguarded reaches the client or the session-log observer; the accepted cost is per-round rather than per-token delivery. See the pitfall in §4 and `tests/sdk/test_guard_prevention.py`.
 
 ### Process lessons
 
