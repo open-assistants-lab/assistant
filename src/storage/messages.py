@@ -61,6 +61,13 @@ class _StoredMessage:
     session_id: str
 
 
+#: Filter keys CoreMem exposes as COLUMNS on fetch(). Anything else filters the
+#: metadata JSON. Getting this wrong makes a purge a silent no-op (#147).
+_COREMEM_FIRST_CLASS_FILTERS = frozenset(
+    {"role", "session_id", "user_id", "agent_id", "ts_after", "ts_before"}
+)
+
+
 class MessageStore:
     """Manages message storage via MemoryCore.
 
@@ -1649,7 +1656,7 @@ class MessageStore:
             "metadata": metadata,
         }
 
-    def _collect_vector_ids(self, metadata_filter: dict[str, Any]) -> list[str]:
+    def _collect_vector_ids(self, filters: dict[str, Any] | None = None) -> list[str]:
         """Ids to purge from the vector store BEFORE rows are deleted.
 
         #123: the delete paths removed SQLite rows first and then asked
@@ -1657,9 +1664,25 @@ class MessageStore:
         called ``client.delete(...)`` on a chromadb Client, which has no such
         method (the AttributeError was swallowed), so vectors survived every
         session/workspace/memory deletion.
+
+        #147: `session_id` (and role/user_id/agent_id/timestamps) are CoreMem
+        COLUMNS, not metadata keys - ingestion never writes session_id into the
+        metadata JSON. Passing it inside `metadata=` matched nothing, so the
+        session purge was still a silent no-op and deleted session messages
+        stayed recallable. First-class keys are mapped to `fetch`'s named
+        parameters; genuine metadata keys (like workspace_id) still filter the
+        metadata JSON.
         """
+        filters = dict(filters or {})
+        named = {k: v for k, v in filters.items() if k in _COREMEM_FIRST_CLASS_FILTERS}
+        metadata = {
+            k: v for k, v in filters.items() if k not in _COREMEM_FIRST_CLASS_FILTERS
+        }
+        kwargs: dict[str, Any] = {"limit": 10000, **named}
+        if metadata:
+            kwargs["metadata"] = metadata
         try:
-            memories = self._core.fetch(limit=10000, metadata=metadata_filter)
+            memories = self._core.fetch(**kwargs)
         except Exception:
             return []
         ids: list[str] = []
