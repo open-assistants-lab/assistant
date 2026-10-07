@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.6.37 — 2026-10-07
+
+### Fixed — trigger runs are session runs (#151)
+- **No more concurrent trigger runs on a live session.** A webhook, cron or file-change run drove the same cached `AgentLoop` as an interactive turn with no mutual exclusion: both executed at once, `loop.state` was replaced under the running turn, and the trigger's `finally` unregistered the live run's loop, so a `steer` silently degraded into a follow-up turn. Trigger runs now take the session claim and **queue** behind an active run (the loop-3 design's own test), bounded by a timeout that reports a clear `SessionBusyError` instead of hanging. The interactive path still fails fast — a human can retry; a trigger cannot.
+- **Registration is refcounted.** A finishing trigger run can no longer evict a registration another live run still owns.
+- **The trigger source gets the answer.** `TriggerRegistry.fire` returns the handler's result, the default handler returns the agent's final answer, and `/webhooks/{trigger_id}` (and the manual `/trigger` handler path) surface it in `response` — the "optional callback to the trigger source" the event-driven-agent spec described, previously unreachable. A run that gives up while queued reports a retryable `busy` error.
+
+Deliberately unchanged: a trigger run stays headless — it does not append to the chat transcript. Feeding a session (steer a live loop, or leave a durable note for the next turn) already exists for subagent completions and is the right seam if proactive delivery is wanted later.
+
+Suite: 3823 passed, 27 skipped. 6 new tests, 5 red before the fix.
 ## Unreleased
 
 ### Breaking — remove fixed email, contacts and todos subsystems
