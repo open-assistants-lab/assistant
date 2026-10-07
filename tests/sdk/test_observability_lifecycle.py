@@ -204,7 +204,7 @@ async def test_lifespan_orders_configure_before_logger(obs_reset, monkeypatch):
         lambda *a, **k: (order.append("logger"), real_get_logger())[1],
     )
 
-    async with main_mod.lifespan(app=SimpleNamespace()):
+    async with main_mod.lifespan(app=SimpleNamespace(state=SimpleNamespace())):
         pass
 
     assert order[0] == "configure"
@@ -269,7 +269,7 @@ async def test_real_lifespan_disabled_makes_no_exporter_and_enabled_inits_once(
     monkeypatch.delenv("OTEL_ENDPOINT", raising=False)
     monkeypatch.setenv("LANGFUSE_ENABLED", "false")
     _reload_settings_cache()
-    async with main_mod.lifespan(app=SimpleNamespace()):
+    async with main_mod.lifespan(app=SimpleNamespace(state=SimpleNamespace())):
         pass
     assert configure_calls["n"] == 1
     assert shutdown_calls["n"] == 1
@@ -281,7 +281,7 @@ async def test_real_lifespan_disabled_makes_no_exporter_and_enabled_inits_once(
     obs._reset_for_tests()
     configure_calls["n"] = 0
     shutdown_calls["n"] = 0
-    async with main_mod.lifespan(app=SimpleNamespace()):
+    async with main_mod.lifespan(app=SimpleNamespace(state=SimpleNamespace())):
         pass
     assert configure_calls["n"] == 1
     assert shutdown_calls["n"] == 1

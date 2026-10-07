@@ -10,17 +10,21 @@ synchronous SQLite + lock, append-mostly (revoke = timestamped update).
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 import sqlite3
 import threading
 from datetime import UTC, datetime
+from pathlib import Path
 
+from src.http.auth.resolver import UserIdentity
 from src.storage.paths import DataPaths, get_paths
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS api_keys (
     key_hash TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
+    instance_id TEXT,
     scopes TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     revoked_at TEXT
@@ -38,20 +42,33 @@ class KeyStore:
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
         self._lock = threading.Lock()
+        path = Path(db_path)
+        if path.is_file():
+            # Inspect without recovering/writing retained legacy state. No ALTER,
+            # guessing historical company ownership or migration of old keys.
+            with sqlite3.connect(path.resolve().as_uri() + "?mode=ro&immutable=1", uri=True) as old:
+                columns = {row[1] for row in old.execute("PRAGMA table_info(api_keys)")}
+                if not columns or "instance_id" not in columns:
+                    raise ValueError("incompatible key store; use a fresh qualified store")
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute(_SCHEMA)
         self._conn.commit()
 
-    def generate(self, user_id: str, scopes: str = "") -> str:
-        """Generate a key for user_id; return the plaintext exactly once."""
+    def generate(
+        self, user_id: str, scopes: str = "", *, instance_id: str | None = None
+    ) -> str:
+        """Generate once; only explicitly bound keys resolve to instance authority."""
+        if instance_id is not None and not re.fullmatch(r"[0-9a-f]{32}", instance_id):
+            raise ValueError("expected provisioned instance identifier")
         plaintext = "oak_" + secrets.token_urlsafe(32)
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO api_keys (key_hash, user_id, scopes, created_at)"
-                " VALUES (?, ?, ?, ?)",
+                "INSERT INTO api_keys (key_hash, user_id, instance_id, scopes, created_at)"
+                " VALUES (?, ?, ?, ?, ?)",
                 (
                     _hash_key(plaintext),
                     user_id,
+                    instance_id,
                     scopes,
                     datetime.now(UTC).isoformat(),
                 ),
@@ -70,6 +87,22 @@ class KeyStore:
         if row is None or row["revoked_at"] is not None:
             return None
         return row["user_id"], row["scopes"]
+
+    def verify_identity(self, key: str) -> UserIdentity | None:
+        """Resolve actual key-instance binding, never an instance from a header/body."""
+        with self._lock:
+            self._conn.row_factory = sqlite3.Row
+            row = self._conn.execute(
+                "SELECT user_id, instance_id, scopes, revoked_at FROM api_keys WHERE key_hash=?",
+                (_hash_key(key),),
+            ).fetchone()
+        if row is None or row["revoked_at"] is not None or row["instance_id"] is None:
+            return None
+        return UserIdentity(
+            user_id=row["user_id"], key_id=_hash_key(key), trust_domain="untrusted",
+            instance_id=row["instance_id"], issuer="assistant-api-key", subject=row["user_id"],
+            scopes=tuple(scope.strip() for scope in row["scopes"].split(",") if scope.strip()),
+        )
 
     def revoke(self, key: str) -> bool:
         """Revoke a key by plaintext. Returns True if a live key was revoked."""

@@ -32,6 +32,11 @@ class UserIdentity:
     # "staff"); shared-secret/operator identity is owner-equivalent ("" here,
     # admin gates treat trust_domain != "untrusted" as owner-equivalent).
     role: str = "staff"
+    # Version-2 authority requires issuer/subject and an explicit instance binding
+    # produced by a credential resolver, never copied from client roles/headers.
+    instance_id: str | None = None
+    issuer: str | None = None
+    subject: str | None = None
 
 
 @runtime_checkable

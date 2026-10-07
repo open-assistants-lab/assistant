@@ -33,7 +33,13 @@ class PerUserKeyResolver:
 
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
-            verified = get_key_store().verify(auth_header[7:])
+            store = get_key_store()
+            bound_identity = store.verify_identity(auth_header[7:])
+            if bound_identity is not None:
+                # Company grants/roles are resolved by InstanceState, not the
+                # legacy hierarchical membership lookup or caller declarations.
+                return bound_identity
+            verified = store.verify(auth_header[7:])
             if verified is not None:
                 user_id, scopes = verified
                 # T3.2: role from the org-tree membership (staff default).

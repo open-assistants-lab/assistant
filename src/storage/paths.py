@@ -9,14 +9,45 @@ User data lives under data_root (defaults to ~/Assistant/).
 Project data lives under data/ (cache, templates, logs, traces, jobs).
 """
 
+import os
 import re
 import warnings
 from collections import OrderedDict
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.sdk.authority_models import Actor
 
 from src.config import get_settings
 
 DEFAULT_USER_ID = "default_user"
+
+
+def instance_user_paths(actor: "Actor") -> "DataPaths":
+    """Explicit fresh-layout paths; never use the legacy default-user namespace.
+
+    This maps already resolved authority, not a caller's payload. Actual arbitrary
+    code filesystem/process containment is provided by qualified worker boundaries.
+    """
+    from src.sdk.authority_models import Actor as ActorModel
+
+    actor = ActorModel.model_validate(actor)
+    configured = os.environ.get("DEPLOYMENT_DATA_ROOT") or get_settings().deployment.data_root
+    if not configured:
+        raise ValueError("explicit data root required for instance authority")
+    root = Path(configured).resolve()
+    instance_root = root / "Instances" / actor.instance_id
+    user_root = instance_root / "Users" / actor.user_id
+    for path in (root / "Instances", instance_root, instance_root / "Users", user_root):
+        if path.is_symlink():
+            raise ValueError("instance user paths cannot traverse a symlink")
+    return DataPaths(
+        user_id=actor.user_id,
+        data_root=str(instance_root),
+        data_path=str(user_root / ".state"),
+    )
+
 _PATH_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 

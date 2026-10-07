@@ -16,6 +16,7 @@ from src.config import get_settings
 from src.config.settings import REPO_ROOT, warn_unknown_model_providers
 from src.http import auth as _auth_module
 from src.http.auth import desktop_mode_active
+from src.http.authority import InstanceAuthorityGate
 from src.http.routers import (
     audit_router,
     billing_router,
@@ -57,6 +58,9 @@ load_dotenv(REPO_ROOT / ".env")
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Lifespan context manager — SDK runtime."""
+    if getattr(app.state, "instance_state", None) is not None:
+        # Never run legacy initialization/migrations on staged fresh-state authority.
+        raise RuntimeError("Version-2 runtime is not yet qualified for startup")
     # OB-0: own the OTel provider slot BEFORE any logger/Langfuse construction
     # (write-once; ordering-independent degradation if someone else won it).
     from src.sdk import observability as _observability
@@ -500,6 +504,9 @@ app.include_router(bootstrap_router)
 # P0-T5: /v1 aliases for the stable partner surface (same handlers, no
 # redirect; auth middleware is path-agnostic and applies identically).
 include_v1_aliases(app)
+
+# Last registered: before legacy auth/OAuth/telemetry; includes WS and aliases.
+app.add_middleware(InstanceAuthorityGate, server=app)
 
 
 def run() -> None:

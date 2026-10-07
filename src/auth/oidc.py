@@ -9,6 +9,7 @@ change.
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 import threading
 import time
@@ -66,12 +67,25 @@ class OidcSessions:
 
     # -- sessions ----------------------------------------------------------
 
-    def create_session(self, user_id: str, role: str) -> str:
+    def create_session(
+        self, user_id: str, role: str, *, instance_id: str | None = None,
+        issuer: str | None = None, subject: str | None = None,
+    ) -> str:
+        """Record issuer/subject only after trusted OIDC token verification.
+
+        Legacy unbound sessions are not valid version-2 instance authority.
+        Configuration/grants are resolved separately by the protected store.
+        """
+        if instance_id is not None and (not issuer or not subject):
+            raise ValueError("bound OIDC sessions require verified issuer and subject")
         sid = secrets.token_urlsafe(32)
         with self._lock:
             self._sessions[sid] = {
                 "user_id": user_id,
                 "role": role,
+                "instance_id": instance_id or "",
+                "issuer": issuer or "",
+                "subject": subject or "",
                 "expires": _now() + self.session_hours * 3600,
             }
         return sid
@@ -130,9 +144,12 @@ class OidcResolver:
             if session is not None:
                 return UserIdentity(
                     user_id=str(session["user_id"]),
-                    key_id="oidc",
+                    key_id=hashlib.sha256(sid.encode()).hexdigest(),
                     trust_domain="untrusted",
                     role=str(session["role"]),
+                    instance_id=str(session.get("instance_id", "")) or None,
+                    issuer=str(session.get("issuer", "")) or None,
+                    subject=str(session.get("subject", "")) or None,
                 )
         # No/expired session: the deployment's base auth applies (shared
         # secret for admins, per-user keys, localhost solo bypass).
