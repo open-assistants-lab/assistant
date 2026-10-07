@@ -1,30 +1,49 @@
-# Linux boundary feasibility probe — blocked preflight
+# Linux boundary feasibility probe — blocked dependency prerequisite
 
 Plan: [MT execution boundaries, Task 1](../superpowers/plans/2026-10-07-mt-execution-boundaries.md).
-Authorization: user approved an isolated Linux Docker probe and cached build dependency reuse.
+Authorization: user approved isolated Docker execution/cached build dependencies,
+then approved Docker Desktop startup with automatic-container-restoration risk disclosed.
+No package download/image build/pull authorization is inferred.
 
-## Observed preflight
+## Actual target and observations
 
-- Docker client exists at `/usr/local/bin/docker`.
-- Selected context: `desktop-linux`.
-- Docker API connection failed: configured Unix socket is absent; daemon is not running.
-- Docker Desktop is installed. No available Colima/Lima/OrbStack CLI was found.
-- Container/image inventory, Linux kernel/backend discovery and real boundary tests
-  could not run without a usable engine. No test was counted as passing/skipped proof.
+Initial preflight found no daemon socket. After further authorization,
+`docker desktop start --timeout 120` reported **already running**. Actual inventory:
+Docker 29.8.0, Linux aarch64, Linuxkit kernel 7.0.12. All nine unrelated containers
+were stopped before and after the probes; none was started/stopped/modified by us.
+
+Cached public image: assistant 0.6.37, immutable local image ID
+`sha256:5a14a72ed183851752e631650b5d838c4396644def08c88dddf410545df300f6`.
+Each probe used a random name/recorded ID and `assistant.authority.probe` label,
+`--pull=never`, no host mounts/ports/socket, network none, read-only image,
+UID/GID 20001, all capabilities dropped, no-new-privileges, a writable disposable
+`/tmp`, overridden entrypoint and `env -i`. No image .env/application was loaded.
+Cleanup was restricted to the recorded labelled ID. Final labelled-container
+inventory was empty and no containers were running.
+
+Actual opt-in preflight: **2 passed, 1 failed, exit 1**:
+
+- Non-root Linux execution and scrubbed environment passed.
+- Intentionally uncontained same-process read of a synthetic sentinel passed as
+  a positive control. This is not the eight-case negative-control qualification.
+- Candidate dependency test failed: `bwrap --version` exited **127** with
+  `/bin/sh: 1: bwrap: not found`. No actual bubblewrap namespace launch occurred.
+
+Retained tests: `tests/refactor/linux/`, invoked explicitly with `--linux-probe`
+and an explicitly selected local Docker Unix socket. Default unit execution skips
+these three tests and performs no Docker actions; those skips are not qualification.
+Logs: execution ledger `linux-preflight-actual.log`.
 
 ## Status: BLOCKED, not qualified
 
-Starting a shared Docker Desktop daemon may restart existing containers according
-to their restart policies. Those containers could not be inventoried while the
-daemon was unavailable. The isolated-probe authorization does not override the
-requirement to leave unrelated services/customer operations untouched.
+The usable Linux target is available, but the cached image lacks bubblewrap.
+This is a missing prerequisite, not proof that the candidate's security mechanisms
+fail or succeed. No fallback, root-refusal bypass, privileged helper, seccomp
+relaxation, dependency install, image build/pull or permanent worker layout was added.
+The eight required isolation/egress/restart/termination cases remain unrun.
 
-No daemon/application/container/image/network/volume was started, modified or
-removed. No image/dependency download, OS provisioning or sandbox fallback occurred.
-Bubblewrap/root refusal/egress requirements were not weakened. The Linux worker
-layout is not qualified, and permanent hardened-MT implementation remains gated.
-
-Next prerequisite: a user-started intended Docker engine/dedicated Linux target,
-or explicit approval to start Docker Desktop with awareness of automatic container
-restoration. Then inventory resources, create uniquely labelled fixtures and run
-the planned negative controls and actual isolation/egress/termination probes.
+Next prerequisite: authorize a disposable image build and acquisition of bubblewrap
+from the base distribution's signed package repositories, or supply a prepared
+cached image with it installed. Then prepare the curated rootfs/synthetic fixtures,
+observe intentional negative controls and run the real candidate boundary tests.
+Failure of required mechanisms stops for reviewed backend/design selection.
