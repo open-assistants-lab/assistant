@@ -39,10 +39,14 @@ packages or write to the source operator cache. UV/PIP offline flags remain set.
 The copy/reference tests were observed RED before implementation; the real wheel
 check then passed using only cached packages.
 
-Latest complete command: `python3 scripts/verify_refactor.py --build-cache
+Complete foundation command before Linux probe fixtures: `python3 scripts/verify_refactor.py --build-cache
 /Users/eddy/.cache/uv -- -q`. Result: **3,864 passed, 27 skipped, 69 warnings,
 254.37 seconds, process exit 0**, including the real wheel check. This verifies
 this staged foundation, not the remaining execution/native product contract.
+After the failed actual Linux gate and retained opt-in tests, the same full offline
+command yielded **3,864 passed, 31 skipped, 69 warnings, 264.34 seconds, exit 0**.
+Four additional default skips are the explicitly opted-in Docker gate tests; their
+actual authorized run was **3 passed, 1 failed** and does not qualify MT.
 
 The first full run produced many intermittent macOS child-process SIGSEGVs; no
 product workaround was introduced. A later run exposed verifier/test-fixture
