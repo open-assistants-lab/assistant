@@ -30,10 +30,19 @@ warning, exit 0.
 
 Whole Python suite **excluding exactly `tests/config/test_packaging.py`**:
 **3,860 passed, 27 skipped, 69 warnings, 272.86 seconds, exit 0**.
-This is not a full-suite pass. The offline wheel check has **1 failed, 1 passed**:
-Hatchling is absent from the fresh build cache/project venv. It must not silently
-fetch dependencies. Cache reuse or separately authorized dependency acquisition
-is still required to close that gate.
+That initial command was not a full-suite pass. Its offline wheel check had
+**1 failed, 1 passed** because the fresh cache lacked Hatchling. The user then
+explicitly authorized cached dependency reuse. The verifier now selectively
+copies cached public Hatchling/build dependencies and their version indices into
+an owned temporary cache, rebinding archive references; it does not copy private
+packages or write to the source operator cache. UV/PIP offline flags remain set.
+The copy/reference tests were observed RED before implementation; the real wheel
+check then passed using only cached packages.
+
+Latest complete command: `python3 scripts/verify_refactor.py --build-cache
+/Users/eddy/.cache/uv -- -q`. Result: **3,864 passed, 27 skipped, 69 warnings,
+254.37 seconds, process exit 0**, including the real wheel check. This verifies
+this staged foundation, not the remaining execution/native product contract.
 
 The first full run produced many intermittent macOS child-process SIGSEGVs; no
 product workaround was introduced. A later run exposed verifier/test-fixture
@@ -52,6 +61,7 @@ explicit dependency install/sync, version bump or lockfile change was performed.
 Task 1 and the wider refactor are **not complete**. Qualified runtime/context
 provisioning integration, policies/resources, conversation model semantics,
 admission/fencing, receipt fidelity/recovery, native flows and actual boundaries
-remain planned. Linux Docker, dependency acquisition, signing/notarization and
-publication each require their stated authorization. No customer access, Docker
+remain planned. The user authorized an isolated Linux Docker probe, but the
+daemon was unavailable; see the [blocked preflight](2026-10-07-linux-boundary-probe.md).
+Dependency downloads, signing/notarization and publication remain separately gated. No customer access, Docker
 startup, merge, push or release. Fresh whole-branch review remains pending.

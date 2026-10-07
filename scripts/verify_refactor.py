@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -35,6 +36,47 @@ def verification_environment(
     return env
 
 
+def copy_cached_build_dependencies(source: Path, destination: Path) -> None:
+    """Copy approved public build packages into an owned offline cache.
+
+    No operator cache writes or transitive copying of editable/private packages.
+    """
+    source = source.resolve(strict=True)
+    destination.mkdir(parents=True, exist_ok=False)
+    for package in ("hatchling", "packaging", "pathspec", "pluggy", "tomlkit", "tomli", "trove-classifiers", "editables"):
+        wheel_root = source / "wheels-v5" / "pypi" / package
+        if not wheel_root.is_dir():
+            continue
+        if wheel_root.is_symlink():
+            raise ValueError("build-package index must not be a symlink")
+        index = source / "simple-v18" / "pypi" / f"{package}.rkyv"
+        if index.is_symlink():
+            raise ValueError("build-package version index must not be a symlink")
+        if index.is_file():
+            copied_index = destination / "simple-v18" / "pypi" / index.name
+            copied_index.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(index, copied_index)
+        copied_root = destination / "wheels-v5" / "pypi" / package
+        copied_root.mkdir(parents=True)
+        for entry in wheel_root.iterdir():
+            if entry.is_symlink():
+                archive = entry.resolve(strict=True)
+                relative = archive.relative_to(source) if archive.is_relative_to(source) else None
+                if relative is None or relative.parts[0] != "archive-v0":
+                    raise ValueError("build package points outside cached archives")
+                for item in archive.rglob("*"):
+                    if item.is_symlink() and not item.resolve(strict=True).is_relative_to(archive):
+                        raise ValueError("cached archive contains an escaping reference")
+                copied_archive = destination / relative
+                if not copied_archive.exists():
+                    shutil.copytree(archive, copied_archive)
+                (copied_root / entry.name).symlink_to(copied_archive, target_is_directory=True)
+            elif entry.is_file():
+                shutil.copy2(entry, copied_root / entry.name)
+            else:
+                raise ValueError("unexpected cached build-package entry")
+
+
 def _python(root: Path) -> str:
     candidates = [root / ".venv/bin/python"]
     if root.parent.name == ".worktrees":
@@ -48,6 +90,7 @@ def _python(root: Path) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout", type=int, default=1800)
+    parser.add_argument("--build-cache", type=Path, help="copy approved cached build packages offline")
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.timeout <= 0:
@@ -66,6 +109,10 @@ def main() -> int:
         with tempfile.TemporaryDirectory(prefix="ar-", dir="/tmp") as temporary:
             scratch = Path(temporary)
             env = verification_environment(root, scratch, os.environ)
+            if args.build_cache is not None:
+                cached = scratch / "build-cache"
+                copy_cached_build_dependencies(args.build_cache, cached)
+                env["UV_CACHE_DIR"] = str(cached)
             for key in (
                 "HOME",
                 "XDG_CACHE_HOME",
