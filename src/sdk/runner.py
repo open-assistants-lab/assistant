@@ -41,6 +41,7 @@ from src.sdk.messages import Message, StreamChunk
 from src.sdk.middleware_summarization import SummarizationMiddleware
 from src.sdk.native_tools import get_native_tools
 from src.sdk.providers.factory import get_cached_model_provider
+from src.sdk.session_worker import SessionBusyError, get_session_registry, session_key
 from src.sdk.tools import ToolDefinition
 from src.sdk.user_prompt import load_user_prompt
 from src.storage.paths import DEFAULT_USER_ID, DataPaths
@@ -57,6 +58,17 @@ _loop_cache: collections.OrderedDict[str, AgentLoop] = collections.OrderedDict()
 _loop_lock = asyncio.Lock()
 
 _user_loops: dict[str, AgentLoop] = {}
+# Registration is refcounted (#151): a run that finishes may not unregister a
+# registration another live run still owns. The trigger path used to empty a
+# session's registration while the interactive turn was still streaming, so a
+# WS steer silently degraded into a follow-up turn.
+_user_loop_refs: dict[str, int] = {}
+
+# How long a trigger run queues behind an active run for the same session
+# before giving up with SessionBusyError (#151). Trigger runs must not run
+# beside a live interactive turn, but an HTTP caller must not hang forever
+# either.
+TRIGGER_SESSION_WAIT_SECONDS = 120.0
 
 
 def _normalize_session_id(session_id: str | None) -> str:
@@ -71,16 +83,34 @@ def _active_loop_key(user_id: str, session_id: str | None = None) -> str:
 
 
 def register_user_loop(user_id: str, loop: AgentLoop, session_id: str | None = None) -> None:
-    _user_loops[_active_loop_key(user_id, session_id)] = loop
+    key = _active_loop_key(user_id, session_id)
+    if _user_loops.get(key) is loop:  # second concurrent run, same loop object
+        _user_loop_refs[key] = _user_loop_refs.get(key, 1) + 1
+        return
+    if key in _user_loops:
+        logger.warning(
+            "runner.user_loop_replaced",
+            {"session_id": _normalize_session_id(session_id)},
+            user_id=user_id,
+        )
+    _user_loops[key] = loop
+    _user_loop_refs[key] = 1
 
 
 def unregister_user_loop(
     user_id: str, loop: AgentLoop | None = None, session_id: str | None = None
 ) -> None:
     key = _active_loop_key(user_id, session_id)
-    if loop is not None and _user_loops.get(key) is not loop:
-        return
+    if loop is not None:
+        if _user_loops.get(key) is not loop:
+            return
+        refs = _user_loop_refs.get(key, 1)
+        if refs > 1:  # another live run still owns this registration
+            _user_loop_refs[key] = refs - 1
+            return
+    # loop=None keeps the historical force-clear semantics.
     _user_loops.pop(key, None)
+    _user_loop_refs.pop(key, None)
 
 
 def get_user_loop(user_id: str, session_id: str | None = None) -> AgentLoop | None:
@@ -1813,24 +1843,51 @@ async def run_sdk_agent(
         session_id: Optional session ID for per-session loop isolation.
         rubric: Optional rubric for verification (overrides user default).
 
+    The SESSION CLAIM is taken here (#151): this is the trigger entry point, so
+    it queues behind an active run for the same session (up to
+    ``TRIGGER_SESSION_WAIT_SECONDS``, then ``SessionBusyError``) instead of
+    driving the same cached AgentLoop beside a live turn. A caller that already
+    holds the claim must use ``run_sdk_agent_stream`` instead.
+
     Returns:
         Final message list from the agent.
     """
     runtime_session_id = _normalize_session_id(session_id)
-    loop = await get_sdk_loop(
-        user_id,
-        workspace_id,
-        model=model,
-        provider_keys=provider_keys,
-        session_id=runtime_session_id,
-    )
-    register_user_loop(user_id, loop, session_id=runtime_session_id)
-    loop.rubric = rubric
-    loop._flow_user_id = user_id  # type: ignore[attr-defined]
-    loop._flow_session_id = runtime_session_id  # type: ignore[attr-defined]
-    loop._flow_model = loop.model_id  # type: ignore[attr-defined]
-    loop._flow_attempt = 1  # type: ignore[attr-defined]
+    # #151: this is the trigger entry point (webhook / cron / file change /
+    # the manual-trigger fallback). It must take the session claim like every
+    # other run and QUEUE behind a live one, instead of driving the same cached
+    # AgentLoop concurrently. The streaming primitive below deliberately does
+    # NOT acquire: its callers (RunService, the SSE route) already hold the
+    # claim for the whole run.
+    registry = get_session_registry()
+    claim_key = session_key(user_id, runtime_session_id)
     try:
+        await registry.acquire_waiting(
+            claim_key, timeout=TRIGGER_SESSION_WAIT_SECONDS
+        )
+    except SessionBusyError:
+        logger.warning(
+            "runner.trigger_session_busy",
+            {"session_id": runtime_session_id, "waited_s": TRIGGER_SESSION_WAIT_SECONDS},
+            user_id=user_id,
+        )
+        raise
+
+    loop = None
+    try:
+        loop = await get_sdk_loop(
+            user_id,
+            workspace_id,
+            model=model,
+            provider_keys=provider_keys,
+            session_id=runtime_session_id,
+        )
+        register_user_loop(user_id, loop, session_id=runtime_session_id)
+        loop.rubric = rubric
+        loop._flow_user_id = user_id  # type: ignore[attr-defined]
+        loop._flow_session_id = runtime_session_id  # type: ignore[attr-defined]
+        loop._flow_model = loop.model_id  # type: ignore[attr-defined]
+        loop._flow_attempt = 1  # type: ignore[attr-defined]
         # Run-level trace root: agent_run and grader_run both nest under it.
         from src.sdk.langfuse_tracer import LangfuseTracer
 
@@ -1852,16 +1909,18 @@ async def run_sdk_agent(
         return result
     finally:
         # Store verification verdict on loop before unregister so router can read it
-        if loop.state and loop.state.extra.get("_rubric_status"):
-            loop._verification_verdict = {  # type: ignore[attr-defined]
-                "status": loop.state.extra.get("_rubric_status"),
-                "iterations": loop.state.extra.get("_rubric_iterations", 0),
-                "evaluations": loop.state.extra.get("_rubric_evaluations", []),
-            }
-        else:
-            loop._verification_verdict = None  # type: ignore[attr-defined]
-        loop.rubric = None
-        unregister_user_loop(user_id, loop, session_id=runtime_session_id)
+        if loop is not None:
+            if loop.state and loop.state.extra.get("_rubric_status"):
+                loop._verification_verdict = {  # type: ignore[attr-defined]
+                    "status": loop.state.extra.get("_rubric_status"),
+                    "iterations": loop.state.extra.get("_rubric_iterations", 0),
+                    "evaluations": loop.state.extra.get("_rubric_evaluations", []),
+                }
+            else:
+                loop._verification_verdict = None  # type: ignore[attr-defined]
+            loop.rubric = None
+            unregister_user_loop(user_id, loop, session_id=runtime_session_id)
+        await registry.release(claim_key)
 
 
 async def run_sdk_agent_stream(
@@ -1874,6 +1933,9 @@ async def run_sdk_agent_stream(
     session_id: str | None = None,
     rubric: str | None = None,
 ) -> Any:
+    # The session claim is NOT taken here (#151): every caller of this
+    # streaming primitive (RunService, the SSE approve/retry route) already
+    # holds it for the whole run, and the registry is not reentrant.
     runtime_session_id = _normalize_session_id(session_id)
     loop = await get_sdk_loop(
         user_id,

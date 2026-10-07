@@ -33,7 +33,7 @@ class AgentEvent:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-EventHandler = Callable[[AgentEvent], Awaitable[None]]
+EventHandler = Callable[[AgentEvent], Awaitable[Any]]
 
 
 class TriggerRegistry:
@@ -49,7 +49,13 @@ class TriggerRegistry:
     def unregister(self, trigger_type: str) -> None:
         self._handlers.pop(trigger_type, None)
 
-    async def fire(self, event: AgentEvent) -> None:
+    async def fire(self, event: AgentEvent) -> Any:
+        """Run the handler for this event and return what it produced.
+
+        The return value is the trigger source's "callback": the webhook and
+        manual-trigger endpoints surface it to the caller (#151). Handlers that
+        only prepare work (e.g. ``rerun``) return ``None``.
+        """
         handler = self._handlers.get(event.trigger_type)
         if handler is None:
             raise KeyError(f"No handler registered for trigger type: {event.trigger_type}")
@@ -58,7 +64,7 @@ class TriggerRegistry:
             {"trigger_type": event.trigger_type, "trigger_id": event.trigger_id, "user_id": event.user_id},
             user_id=event.user_id,
         )
-        await handler(event)
+        return await handler(event)
 
 
 # Global registry singleton
@@ -73,7 +79,7 @@ def get_trigger_registry() -> TriggerRegistry:
     return _global_registry
 
 
-async def default_trigger_handler(event: AgentEvent) -> None:
+async def default_trigger_handler(event: AgentEvent) -> str | None:
     """Default handler that runs the agent via run_sdk_agent.
 
     Used by all trigger types (cron, webhook, file_change, manual, rerun).
@@ -81,6 +87,11 @@ async def default_trigger_handler(event: AgentEvent) -> None:
     existing conversation; the EXECUTOR owns the re-run (in its own
     streaming or non-streaming mode) after this handler returns — this
     handler only prepares the rerun, it never executes the agent.
+
+    Everything else runs through ``run_sdk_agent``, which takes the session
+    claim (#151): a trigger queues behind a live run for the same session
+    instead of driving the same AgentLoop beside it. The agent's answer is
+    returned so the trigger source can receive it.
     """
     from src.sdk.messages import Message
     from src.sdk.runner import run_sdk_agent
@@ -99,7 +110,7 @@ async def default_trigger_handler(event: AgentEvent) -> None:
             {"trigger_id": event.trigger_id, "user_id": event.user_id},
             user_id=event.user_id,
         )
-        return
+        return None
 
     messages = [Message.user(event.message)]
     result = await run_sdk_agent(
@@ -126,3 +137,4 @@ async def default_trigger_handler(event: AgentEvent) -> None:
         },
         user_id=event.user_id,
     )
+    return response
