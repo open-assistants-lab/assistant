@@ -62,8 +62,9 @@ Task 1 and the wider refactor are **not complete**. Qualified runtime/context
 provisioning integration, policies/resources, conversation model semantics,
 admission/fencing, receipt fidelity/recovery, native flows and actual boundaries
 remain planned. The user authorized an isolated Linux Docker probe, but the
-daemon was initially unavailable. Following explicit Desktop-start approval, actual
-non-root preflight ran, but the cached image lacks bubblewrap. See the
-[blocked dependency prerequisite](2026-10-07-linux-boundary-probe.md).
+daemon was initially unavailable. Following explicit Desktop-start and disposable
+image/dependency-build approvals, actual non-root bubblewrap launch failed under
+the tested Docker restrictions. The [failed launch gate](2026-10-07-linux-boundary-probe.md)
+requires backend/deployment design review; no security relaxation was made.
 Dependency downloads, signing/notarization and publication remain separately gated. No customer access, Docker
 startup, merge, push or release. Fresh whole-branch review remains pending.

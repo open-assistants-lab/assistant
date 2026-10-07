@@ -1,0 +1,16 @@
+# Throwaway gate fixture only. No customer stores, mounts or application startup.
+# Caller verifies this locally cached tag's immutable ID before building.
+FROM ghcr.io/open-assistants-lab/assistant:0.6.37
+USER 0:0
+RUN /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin DEBIAN_FRONTEND=noninteractive \
+    /bin/sh -ec 'apt-get update; apt-get install -y --no-install-recommends bubblewrap; rm -rf /var/lib/apt/lists/*'
+# Minimal curated shell rootfs: no /app, credentials, config or host root bind.
+RUN /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin /bin/sh -ec '\
+    mkdir -p /probe-rootfs/bin /probe-rootfs/proc /probe-rootfs/dev \
+      /probe-rootfs/tmp /probe-rootfs/run /probe-rootfs/var/run /probe-rootfs/workspace; \
+    cp -L /bin/sh /probe-rootfs/bin/sh; \
+    ldd /bin/sh | grep -oE "/[^ ]+" | while read -r library; do \
+      mkdir -p "/probe-rootfs$(dirname "$library")"; \
+      cp -L "$library" "/probe-rootfs$library"; \
+    done'
+USER 20001:20001

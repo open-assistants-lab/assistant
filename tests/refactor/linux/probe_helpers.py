@@ -9,7 +9,7 @@ from pathlib import Path
 IMAGE = "sha256:5a14a72ed183851752e631650b5d838c4396644def08c88dddf410545df300f6"
 
 
-def run_probe(script: str, *, docker_host: str) -> subprocess.CompletedProcess[str]:
+def run_probe(script: str, *, docker_host: str, image: str = IMAGE) -> subprocess.CompletedProcess[str]:
     if not docker_host.startswith("unix:///"):
         raise ValueError("preflight requires an explicitly selected local Docker Unix socket")
     docker = ["docker", "--host", docker_host]
@@ -23,7 +23,7 @@ def run_probe(script: str, *, docker_host: str) -> subprocess.CompletedProcess[s
             "--user=20001:20001", "--cap-drop=ALL",
             "--security-opt=no-new-privileges:true",
             "--tmpfs", "/tmp:rw,nosuid,nodev", "--entrypoint", "/usr/bin/env",
-            IMAGE, "-i", "PATH=/usr/local/bin:/usr/bin:/bin",
+            image, "-i", "PATH=/usr/local/bin:/usr/bin:/bin",
             "/bin/sh", "-c", script,
         ]
         try:
