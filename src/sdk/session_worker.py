@@ -77,9 +77,8 @@ class SessionWorkerRegistry:
         self._lease_timeout_seconds = max(1.0, float(lease_timeout_seconds))
         self._stale_requested: set[str] = set()
 
-    async def acquire(self, session_id: str) -> SessionLock:
-        """Acquire exclusive session lock. Raises SessionBusy if held."""
-        await self.reap_stale(self._lease_timeout_seconds)
+    async def _acquire_locked(self, session_id: str) -> SessionLock:
+        """Mutual-exclusion step only — no stale reaping, no retry."""
         async with self._mutex:
             if session_id in self._locks:
                 raise SessionBusyError(f"Session {session_id} already has an active run")
@@ -87,6 +86,41 @@ class SessionWorkerRegistry:
             self._locks[session_id] = lock
             self._stale_requested.discard(session_id)
             return lock
+
+    async def acquire(self, session_id: str) -> SessionLock:
+        """Acquire exclusive session lock. Raises SessionBusy if held."""
+        await self.reap_stale(self._lease_timeout_seconds)
+        return await self._acquire_locked(session_id)
+
+    async def acquire_waiting(
+        self, session_id: str, timeout: float | None = None
+    ) -> SessionLock:
+        """Acquire, QUEUEING behind the current holder instead of failing (#151).
+
+        The interactive path refuses a second run (``acquire`` raises
+        ``SessionBusyError``) because a human is waiting and can retry. A
+        trigger run has no human behind it, and the loop-3 design requires
+        triggers for one session to "queue correctly" — so this variant waits
+        for the holder to release and then takes the claim.
+
+        Ordering under contention is not promised. ``timeout`` bounds the wait
+        so a stuck session becomes a clear ``SessionBusyError`` instead of an
+        unbounded HTTP hang.
+        """
+        # Reap once up front, then poll the mutex step only: a waiter must not
+        # rescan every held lock on its way to its own.
+        await self.reap_stale(self._lease_timeout_seconds)
+        deadline = None if timeout is None else monotonic() + max(0.0, float(timeout))
+        delay = 0.05
+        while True:
+            try:
+                return await self._acquire_locked(session_id)
+            except SessionBusyError:
+                remaining = None if deadline is None else deadline - monotonic()
+                if remaining is not None and remaining <= 0:
+                    raise
+                await asyncio.sleep(delay if remaining is None else min(delay, remaining))
+                delay = min(delay * 2, 0.5)
 
     async def reap_stale(self, max_idle_seconds: float) -> list[str]:
         """Request cancellation for idle locks without releasing ownership."""

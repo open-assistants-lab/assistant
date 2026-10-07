@@ -16,6 +16,7 @@ from src.http.auth import resolve_user_id
 from src.sdk.loops.events import AgentEvent, get_trigger_registry
 from src.sdk.messages import Message
 from src.sdk.runner import run_sdk_agent
+from src.sdk.session_worker import SessionBusyError
 from src.storage.paths import DEFAULT_USER_ID
 
 router = APIRouter(tags=["triggers"])
@@ -61,8 +62,10 @@ async def manual_trigger(req: TriggerRequest, request: Request = None) -> Trigge
     )
     try:
         registry = get_trigger_registry()
-        await registry.fire(event)
-        return TriggerResponse(status="completed")
+        answer = await registry.fire(event)
+        return TriggerResponse(
+            status="completed", response=answer if isinstance(answer, str) else None
+        )
     except KeyError:
         # No handler — run directly
         messages = [Message.user(req.message)]
@@ -235,6 +238,11 @@ async def webhook_trigger(trigger_id: str, request: Request) -> WebhookResponse:
     middleware; instead it requires the per-trigger ``X-Webhook-Secret``
     issued by ``POST /webhooks/{trigger_id}/secret``. Unregistered
     triggers are rejected while an API key is configured (fail-closed).
+
+    Delivery (#151): the agent's answer comes back in ``response``. The run
+    queues behind an active run for the same session and gives up with a
+    retryable ``busy`` error after the wait budget, so a request never runs
+    beside a live turn (and never hangs indefinitely either).
     """
     if not _webhook_secret_authorized(trigger_id, request):
         raise HTTPException(
@@ -284,8 +292,16 @@ async def webhook_trigger(trigger_id: str, request: Request) -> WebhookResponse:
     )
     try:
         registry = get_trigger_registry()
-        await registry.fire(event)
-        return WebhookResponse(status="completed", trigger_id=trigger_id)
+        answer = await registry.fire(event)
+        return WebhookResponse(
+            status="completed",
+            trigger_id=trigger_id,
+            response=answer if isinstance(answer, str) else None,
+        )
+    except SessionBusyError as e:
+        # The run queued behind an active run for this session and the wait
+        # budget expired (#151). Retryable: the caller keeps the session intact.
+        return WebhookResponse(status="error", trigger_id=trigger_id, error=str(e))
     except Exception as e:
         return WebhookResponse(status="error", trigger_id=trigger_id, error=str(e))
 
