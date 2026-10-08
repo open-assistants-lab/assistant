@@ -119,7 +119,13 @@ before launch. No retry if it does not reproduce. Stop data collection rather th
 run the entire95-failure cascade. This is additional discriminating state evidence,
 **not a C backtrace or general verification**, and needs separate explicit approval.
 
-No implementation of that recipe in this review. Any actual native image acquisition
+No implementation of that recipe occurred in the author review itself. User later
+restarted the Mac and approved resuming the one60-second capture; the old identity
+was absent, no SIGSEGV occurred before deadline, tracked cleanup was confirmed.
+See [post-reboot observations and incomplete-run limits](2026-10-09-post-reboot-state-capture.md).
+This does not establish the native cause or satisfy independent review.
+
+Any actual native image acquisition
 must first be source-qualified to avoid secret values, memory reads or code loading.
 If cleanup/support/privacy bounds cannot be established, no-go: retain evidence and
 seek an independent native specialist on a reviewer-capable session. No production
