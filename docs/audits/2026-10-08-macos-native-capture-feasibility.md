@@ -39,7 +39,7 @@ spawn/vfork modes, acquire entitlements, disable SIP/NNP, change system sysctls 
 use root to obtain a superficially successful capture. Those would alter semantics
 or exceed scope; no such operation was performed.
 
-## Next narrowly bounded preflight — separate permission required
+## Preflight proposed at this checkpoint — subsequently approved
 
 Before another SDK/full-suite launch, verify whether this installed debugger can
 actually follow an **owned benign fork child** on Darwin:
@@ -64,6 +64,11 @@ strict PID association, privacy/retention and aggregate disk/process bounds.
 If unsupported, stop and seek independent native-runtime review rather than enable
 unbounded memory dumps or keep guessing passing component combinations.
 
-No new debugger/test execution budget is silently implied by these metadata checks.
-No production fix, full verification pass, integration/release/customer readiness
-or independent-review claim. Original95 failures remain unresolved.
+No new debugger/test execution budget was implied by the metadata checks themselves.
+User subsequently approved one30-second preflight. It reached the benign child
+checkpoint but did not yield a child stop/backtrace before timeout; one recorded
+parent remained visible as a zombie after exact-owned cleanup. See the
+[negative method result and cleanup limitation](2026-10-09-macos-debugger-preflight-result.md).
+No retry or supported native capture method is established. No production fix,
+full verification pass, integration/release/customer readiness or independent-
+review claim. Original95 failures remain unresolved.

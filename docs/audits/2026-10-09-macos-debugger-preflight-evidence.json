@@ -1,0 +1,119 @@
+{
+  "approval_budget": {
+    "approval": "User proceed afterab236693 one benign30s debugger preflight",
+    "budget": 1,
+    "deadline_seconds": 30,
+    "time_ns": 1791470526876707000,
+    "core_soft_limit": 0
+  },
+  "result": {
+    "argv": [
+      "/usr/bin/lldb",
+      "--no-lldbinit",
+      "--batch",
+      "-o",
+      "settings set symbols.enable-external-lookup false",
+      "-o",
+      "settings set target.process.follow-fork-mode child",
+      "-o",
+      "settings set frame-format \"frame #${frame.index}: ${module.file.basename}`${function.name}\\n\"",
+      "-o",
+      "target create /Users/eddy/Developer/Python/assistant/.venv/bin/python",
+      "-o",
+      "settings set target.run-args /Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/debugger_fork_child.py",
+      "-o",
+      "run",
+      "-o",
+      "process status",
+      "-o",
+      "thread backtrace -c 12",
+      "-o",
+      "continue",
+      "-o",
+      "quit"
+    ],
+    "debugger_pid": 58389,
+    "returncode": -9,
+    "timeout": true,
+    "duration_seconds": 30.386,
+    "markers": [
+      {
+        "marker": "owned-parent",
+        "pid": 58406,
+        "ppid": 58407
+      },
+      {
+        "marker": "owned-child-checkpoint",
+        "pid": 58452,
+        "ppid": 58406
+      }
+    ],
+    "tracked_processes": {
+      "58389": {
+        "ppid": 58388,
+        "pgid": 58389,
+        "start": "Fri Oct  9 01:42:06 2026    "
+      },
+      "58391": {
+        "ppid": 58389,
+        "pgid": 58389,
+        "start": "Fri Oct  9 01:42:06 2026    "
+      },
+      "58406": {
+        "ppid": 58389,
+        "pgid": 58406,
+        "start": "Fri Oct  9 01:42:08 2026    "
+      },
+      "58407": {
+        "ppid": 58389,
+        "pgid": 58407,
+        "start": "Fri Oct  9 01:42:08 2026    "
+      },
+      "58452": {
+        "ppid": 58406,
+        "pgid": 58406,
+        "start": "Fri Oct  9 01:42:13 2026    "
+      }
+    },
+    "exact_owned_kills": [
+      58452,
+      58407,
+      58406,
+      58389,
+      58406
+    ],
+    "leftovers": [
+      58406
+    ],
+    "core_soft_limit": 0,
+    "no_app_sdk_requests_or_memory_dumps": true
+  },
+  "cleanup_followup": {
+    "scope": "Exact recorded PID status only; no signal, retry, debugger target or global cleanup",
+    "checks": [
+      {
+        "time_ns": 1791470603720095000,
+        "returncode": 0,
+        "stdout": "58406     1 58406 Fri Oct  9 01:42:08 2026     Z   \n",
+        "stderr": ""
+      },
+      {
+        "time_ns": 1791470604781673000,
+        "returncode": 0,
+        "stdout": "58406     1 58406 Fri Oct  9 01:42:08 2026     Z   \n",
+        "stderr": ""
+      },
+      {
+        "time_ns": 1791470605847773000,
+        "returncode": 0,
+        "stdout": "58406     1 58406 Fri Oct  9 01:42:08 2026     Z   \n",
+        "stderr": ""
+      }
+    ]
+  },
+  "core_metadata": [],
+  "child_follow_qualified": false,
+  "native_backtrace_obtained": false,
+  "complete_pid_absence_confirmed": false,
+  "no_retry_or_permission_change": true
+}
