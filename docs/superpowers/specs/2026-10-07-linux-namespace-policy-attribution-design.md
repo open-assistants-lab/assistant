@@ -1,6 +1,7 @@
 # Option A — Linux namespace-policy attribution design
 
-Status: **written proposal awaiting user review**. This spec is the first bounded
+Status: **user approved for planning**; concrete JSON/diff and changed-policy
+execution remain separately gated. This spec is the first bounded
 security-review stage of Option A, not a production seccomp profile or MT approval.
 
 Context: [deployment review](../../audits/2026-10-07-linux-boundary-design-review.md),
@@ -59,8 +60,9 @@ moving branch, scraped approximation, reconstructed allowlist or another engine'
 profile is not acceptable as an undocumented replacement. No raw web text becomes
 executable policy. If exact installed-default mapping cannot be established,
 explicitly report that limitation and obtain user approval for the substitute
-baseline before applying it. No profile synthesis or application until this gate
-and the concrete JSON/diff review are satisfied.
+baseline before applying it. Profile synthesis waits for the provenance gate;
+profile application additionally waits for concrete JSON/diff review and explicit
+execution authorization.
 
 The review artifacts include the complete B/P JSON, hashes, exact structural diff,
 launch argv and expected assertions. Generating/checking these files is not authority
