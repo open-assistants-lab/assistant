@@ -1,8 +1,8 @@
-# Namespace policy artifact review — baseline awaiting approval
+# Namespace policy artifact review — accepted baseline; candidate awaiting execution review
 
 Plan: [namespace attribution](../superpowers/plans/2026-10-07-linux-namespace-policy-attribution.md).
-Status: **Task 1 partial implementation; source baseline approval and full-suite
-qualification remain pending. No candidate P has been generated/applied.**
+Status: **baseline accepted after author self-review; Task 1 complete. Candidate P
+prepared and checksum-verified; custom Docker policy execution remains gated.**
 
 ## Installed target and pinned public source
 
@@ -25,9 +25,10 @@ Source: [vendored default JSON at the pinned engine commit](https://github.com/m
 - Raw length: **13,470 bytes**; **33 syscall rules**.
 - Raw SHA-256:
   `536529b665dd0972c37bfb569f5d4ac8a53592e7b00752bc39ff063ca9864c74`.
-- Exact unapproved bytes retained at
-  `.superpowers/sdd/2026-10-07-linux-namespace-policy-attribution/baseline.json`.
-  Nothing is copied into approved fixture storage until the provenance gate passes.
+- Following user acceptance of the documented limitation, exact B bytes are frozen
+  at `tests/refactor/linux/fixtures/seccomp/docker-29.8.0-baseline.json` with
+  `baseline-provenance.json`, commit `37b07acf`. Original acquisition remains in
+  the plan execution workspace; no runtime policy application occurred.
 - Default action is `SCMP_ACT_ERRNO`; arch map includes `SCMP_ARCH_AARCH64`/ARM.
 - Baseline namespace-related ALLOW group (including unshare/mount) is conditional
   on bounding `CAP_SYS_ADMIN`. The probe drops all capabilities.
@@ -45,10 +46,11 @@ export of the installed kernel filter. A matching release commit and fourteen-ca
 behavioral comparison do not independently prove complete runtime/binary/filter
 equivalence. Do not label it a byte-exact export or an authenticated approval.
 
-**Proposed decision:** accept this pinned version-linked JSON as the explicitly
-reviewed comparison baseline, with that limitation recorded (`substitute-reviewed`
-only after actual user acceptance). Then synthesize the sole no-op rule and present
-complete B/P hashes/diff for the separate policy-execution gate.
+**Accepted decision:** user proceeded after the baseline self-review, accepting
+this pinned version-linked JSON for comparison with that limitation. Recorded as
+`substitute-reviewed`, not an exact live-filter export. The sole no-op candidate
+and complete B/P hashes/diff are now in the [execution review](2026-10-07-namespace-noop-policy-review.md);
+no custom policy has been applied.
 
 ## Implemented pure checks and verification
 
@@ -98,8 +100,8 @@ No baseline acceptance, candidate synthesis or policy application was inferred.
 
 ## Outstanding gates
 
-Approve/reject the proposed baseline provenance/limitation above. A concrete P
-profile, structural diff, profile comparison implementation and explicit execution
-permission are still pending. The latest full Python suite passed, but prior
-intermittent failures remain unresolved; final whole-branch review is pending; no Task 1 completion, namespace-policy qualification,
-hardened MT readiness or release claim. No Docker policy was changed in this task.
+Review exact prepared B/P bytes/diff and authorize the no-op comparison if desired.
+Task 3 comparison implementation/actual execution and final whole-branch review
+remain pending. Latest full suite after Task 2: **3,933 passed, 31 skipped, 69 warnings,
+266.78s, exit0**; prior intermittent failures remain unresolved. No namespace-policy
+qualification, hardened MT/native readiness or release claim. No Docker policy changed.

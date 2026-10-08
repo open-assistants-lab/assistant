@@ -1,0 +1,22 @@
+--- B canonical REVIEW ONLY (execute original byte-frozen B)
++++ P canonical candidate
+@@ -870,6 +870,19 @@
+       "names": [
+         "perf_event_open"
+       ]
++    },
++    {
++      "action": "SCMP_ACT_ALLOW",
++      "args": [
++        {
++          "index": 0,
++          "op": "SCMP_CMP_EQ",
++          "value": 0
++        }
++      ],
++      "names": [
++        "unshare"
++      ]
+     }
+   ]
+ }

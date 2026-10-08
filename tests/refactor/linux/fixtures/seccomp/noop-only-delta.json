@@ -1,0 +1,19 @@
+[
+  {
+    "op": "add",
+    "path": "/syscalls/33",
+    "value": {
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        {
+          "index": 0,
+          "op": "SCMP_CMP_EQ",
+          "value": 0
+        }
+      ],
+      "names": [
+        "unshare"
+      ]
+    }
+  }
+]

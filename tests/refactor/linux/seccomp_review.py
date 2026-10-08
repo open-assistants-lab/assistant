@@ -1,5 +1,6 @@
 """Pure developer-review checks; not a policy compiler or authority service."""
 
+import copy
 import hashlib
 import json
 import math
@@ -62,6 +63,65 @@ def load_baseline(raw: bytes, expected_sha256: str) -> dict[str, object]:
             if field in rule and not isinstance(rule[field], dict):
                 raise ValueError("rule conditions must be objects")
     return cast(dict[str, object], parsed)
+
+
+def _canonical(profile: dict[str, object]) -> str:
+    return json.dumps(profile, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def make_noop_unshare_profile(baseline: dict[str, object]) -> dict[str, object]:
+    raw = _canonical(baseline).encode()
+    load_baseline(raw, hashlib.sha256(raw).hexdigest())
+    rules = cast(list[dict[str, object]], baseline["syscalls"])
+    for rule in rules:
+        if "unshare" not in cast(list[str], rule["names"]):
+            continue
+        if rule["action"] != "SCMP_ACT_ALLOW":
+            raise ValueError("explicit unshare denial conflicts with diagnostic")
+        guarded = False
+        for field in ("includes", "excludes"):
+            condition = cast(dict[str, object], rule.get(field, {}))
+            if set(condition) - {"caps", "arches", "minKernel"}:
+                raise ValueError("unknown unshare condition")
+            for key in ("caps", "arches"):
+                if key in condition:
+                    values = condition[key]
+                    if not isinstance(values, list) or any(
+                        not isinstance(value, str) or not value.strip() for value in values
+                    ):
+                        raise ValueError("invalid unshare condition list")
+                    guarded |= bool(values)
+            if "minKernel" in condition:
+                kernel = condition["minKernel"]
+                if not isinstance(kernel, str) or not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", kernel):
+                    raise ValueError("invalid unshare kernel condition")
+                guarded = True
+        if not guarded:
+            raise ValueError("unconditional unshare allowance already present")
+    candidate = copy.deepcopy(baseline)
+    cast(list[dict[str, object]], candidate["syscalls"]).append({
+        "names": ["unshare"], "action": "SCMP_ACT_ALLOW",
+        "args": [{"index": 0, "value": 0, "op": "SCMP_CMP_EQ"}],
+    })
+    return candidate
+
+
+def assert_noop_only_delta(baseline: dict[str, object], candidate: dict[str, object]) -> None:
+    # Recheck baseline eligibility; independently compare all original fields
+    # and the literal sole appended rule. JSON comparison distinguishes 0/False/0.0.
+    make_noop_unshare_profile(baseline)
+    rules = candidate.get("syscalls")
+    original_rules = cast(list[object], baseline["syscalls"])
+    if not isinstance(rules, list) or len(rules) != len(original_rules) + 1:
+        raise ValueError("candidate needs exactly one additional rule")
+    expected = {"names": ["unshare"], "action": "SCMP_ACT_ALLOW",
+                "args": [{"index": 0, "value": 0, "op": "SCMP_CMP_EQ"}]}
+    if json.dumps(rules[-1], sort_keys=True, allow_nan=False) != json.dumps(expected, sort_keys=True):
+        raise ValueError("candidate rule is not the exact no-op addition")
+    unchanged = copy.deepcopy(candidate)
+    unchanged["syscalls"] = rules[:-1]
+    if _canonical(unchanged) != _canonical(baseline):
+        raise ValueError("candidate alters baseline fields or rules")
 
 
 def validate_provenance_record(
