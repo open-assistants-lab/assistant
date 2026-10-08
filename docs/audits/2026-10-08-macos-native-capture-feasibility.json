@@ -1,0 +1,16 @@
+{
+  "scope": "Tool metadata and exact observed-helper core file stat only; no attach/target/run/core-body access",
+  "lldb": "2103.0.34.103",
+  "lldb_default_follow_fork_mode": "parent",
+  "darwin_child_follow_support_verified": false,
+  "lldb_core_target_option_available": true,
+  "kernel_corefile": "/cores/core.%P",
+  "kernel_coredump": 1,
+  "current_shell_soft_core_limit": 0,
+  "current_shell_hard_core_limit": "unlimited",
+  "historical_run_core_limit_measured": false,
+  "exact_historical_helper_paths_checked": 1544,
+  "existing_core_metadata": [],
+  "no_execution_settings_changed": true,
+  "risk": "Enabling parent core dumps across1544 helper faults risks many sensitive large files; no such run is authorized or safe by default."
+}
