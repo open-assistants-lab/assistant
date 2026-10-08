@@ -1,6 +1,7 @@
 # Bounded macOS subprocess crash investigation
 
-Status: **evidence indexed; controlled probes pending. No product fix selected.**
+Status: **bounded probes complete; native crash not reproduced, cause inconclusive.
+No product fix selected; latest full-suite verification remains blocked.**
 Plan: [bounded investigation](../superpowers/plans/2026-10-07-macos-subprocess-crash-investigation.md).
 User approved native/inline execution and keeping observability access offline.
 
@@ -79,3 +80,58 @@ credentials; no external Langfuse/ClickStack connection. All timeout cleanup mus
 track exact owned processes, including SoftBackend's separate sessions; uncertainty
 stops further launches. Only investigation evidence is authorized. A lasting fix
 requires an observed RED regression and separate bounded-design review.
+
+## Task 2 — actual bounded results
+
+[Complete structured outcomes](2026-10-07-macos-spawn-bounded-results.json) preserve
+exact argv, PID/start-time ownership records, guard/start/finish markers, return
+codes, duration and every slice failure. Full per-run stdout/stderr remains in
+this plan's ignored workspace. This is not a test pass used to erase prior failures.
+
+All **16/16** fresh processes completed with exit0, no native fatal signature,
+no timeout and no tracked owned leftovers. Each checked external DNS denial before
+SDK/project imports. Two fresh repetitions of each serial/threaded case:
+stdlib platform.platform; installed SDK get_platform; synthetic client constructor/
+close with no request; unchanged SoftSandboxBackend `/bin/echo spawn-sentinel`.
+No crash occurred to justify a cold/warm reduction; no extra probe was launched.
+No parent credentials, deployments or external observability service accessed.
+
+|Slice: explicit execution selection (all use120-second verifier deadline)|Observed outcome|
+|---|---|
+|1: desktop-server file → sandbox file|59 passed,4 skipped,3 warnings,19.78s,exit0|
+|2: sandbox file → desktop-server file|59 passed,4 skipped,3 warnings,16.36s,exit0|
+|3: whole tests collection, `-k 'test_second_launch_exits_when_lock_held or test_runs_argv'`|2 passed,4000 deselected,3 warnings,2.89s,exit0|
+|4: API agent-loop file → sandbox file|41 passed,4 skipped,1 warning,19.10s,exit0|
+|5: API family → NullBackend ordinary-argv sentinel|**2 failed**,637 passed,6 skipped,16 warnings,41.05s,exit1|
+|6: whole tests collection, `-k 'api or test_sandbox'`|715 passed,10 skipped,3277 deselected,18 warnings,102.97s,exit0|
+
+**No native fatal/SIGSEGV signature appeared in any of the six slices.** These
+are keyword/path-selected slices, not a full-suite rerun. Whole collection alone
+also did not reproduce the issue in the two-sentinel run.
+
+### New ordinary failures — retained, not repaired
+
+Slice5 produced404 where200 was expected in:
+
+- `tests/api/test_subagents.py::TestSubagentV1Invocations::test_create_start_list_detail_and_instruct_subagent_job`
+- `tests/api/test_subagents.py::TestSubagentV1Invocations::test_subagent_jobs_are_user_level_across_workspace_ids`
+
+They are not native crashes and not among the historical95. The broader selection
+in slice6 passed; different collection/selected execution contexts prevent treating
+that pass as a fix or attributing the difference to any specific fixture. No
+unrelated API repair or extra retry performed.
+
+### Investigation limits and harness correction
+
+A diagnostic-only setup import initially resolved `scripts` to an unrelated
+installed editable package at HybridDB rather than this repo's namespace folder.
+It failed before any probe launched or `.env` shadow was created. The throwaway
+driver now loads the exact local verifier file via importlib; the verifier/product
+code was not changed. A summary parser also initially expected plural warnings;
+corrected to retain the singular-warning slice4 result, without rerunning tests.
+
+The budget is exhausted: **16/16 probes and6/6 slices**. No seventh slice, full
+rerun, dependency change, telemetry disablement, sandbox limit/UID weakening,
+Docker change or speculative cache-warming fix. All earlier95 full failures remain
+current unresolved evidence. Task3 must recommend the next discriminating step,
+not infer a root cause from successful controls.

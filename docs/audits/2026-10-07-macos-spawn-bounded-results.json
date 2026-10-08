@@ -1,0 +1,602 @@
+{
+  "probes": [
+    {
+      "number": 1,
+      "case": "platform",
+      "mode": "serial",
+      "repeat": 1,
+      "pid": 45893,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/probe_child.py",
+        "platform",
+        "serial"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "45893": {
+          "ppid": 45892,
+          "pgid": 45893,
+          "start": "Thu Oct  8 18:27:18 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.177
+    },
+    {
+      "number": 2,
+      "case": "platform",
+      "mode": "serial",
+      "repeat": 2,
+      "pid": 45898,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/probe_child.py",
+        "platform",
+        "serial"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "45898": {
+          "ppid": 45892,
+          "pgid": 45898,
+          "start": "Thu Oct  8 18:27:18 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.175
+    },
+    {
+      "number": 3,
+      "case": "platform",
+      "mode": "threaded",
+      "repeat": 1,
+      "pid": 45903,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/probe_child.py",
+        "platform",
+        "threaded"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "45903": {
+          "ppid": 45892,
+          "pgid": 45903,
+          "start": "Thu Oct  8 18:27:18 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.174
+    },
+    {
+      "number": 4,
+      "case": "platform",
+      "mode": "threaded",
+      "repeat": 2,
+      "pid": 45908,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/probe_child.py",
+        "platform",
+        "threaded"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "45908": {
+          "ppid": 45892,
+          "pgid": 45908,
+          "start": "Thu Oct  8 18:27:18 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.176
+    },
+    {
+      "number": 5,
+      "case": "sdk_platform",
+      "mode": "serial",
+      "repeat": 1,
+      "pid": 45913,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/probe_child.py",
+        "sdk_platform",
+        "serial"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "45913": {
+          "ppid": 45892,
+          "pgid": 45913,
+          "start": "Thu Oct  8 18:27:18 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.731
+    },
+    {
+      "number": 6,
+      "case": "sdk_platform",
+      "mode": "serial",
+      "repeat": 2,
+      "pid": 45922,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/probe_child.py",
+        "sdk_platform",
+        "serial"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "45922": {
+          "ppid": 45892,
+          "pgid": 45922,
+          "start": "Thu Oct  8 18:27:19 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.593
+    },
+    {
+      "number": 7,
+      "case": "sdk_platform",
+      "mode": "threaded",
+      "repeat": 1,
+      "pid": 45931,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/probe_child.py",
+        "sdk_platform",
+        "threaded"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "45931": {
+          "ppid": 45892,
+          "pgid": 45931,
+          "start": "Thu Oct  8 18:27:20 2026    "
+        },
+        "45937": {
+          "ppid": 45931,
+          "pgid": 45931,
+          "start": "Thu Oct  8 18:27:20 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.648
+    },
+    {
+      "number": 8,
+      "case": "sdk_platform",
+      "mode": "threaded",
+      "repeat": 2,
+      "pid": 45939,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/probe_child.py",
+        "sdk_platform",
+        "threaded"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "45939": {
+          "ppid": 45892,
+          "pgid": 45939,
+          "start": "Thu Oct  8 18:27:20 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.596
+    },
+    {
+      "number": 9,
+      "case": "client",
+      "mode": "serial",
+      "repeat": 1,
+      "pid": 45947,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/probe_child.py",
+        "client",
+        "serial"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "45947": {
+          "ppid": 45892,
+          "pgid": 45947,
+          "start": "Thu Oct  8 18:27:21 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.593
+    },
+    {
+      "number": 10,
+      "case": "client",
+      "mode": "serial",
+      "repeat": 2,
+      "pid": 45955,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/probe_child.py",
+        "client",
+        "serial"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "45955": {
+          "ppid": 45892,
+          "pgid": 45955,
+          "start": "Thu Oct  8 18:27:21 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.599
+    },
+    {
+      "number": 11,
+      "case": "client",
+      "mode": "threaded",
+      "repeat": 1,
+      "pid": 45961,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/probe_child.py",
+        "client",
+        "threaded"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "45961": {
+          "ppid": 45892,
+          "pgid": 45961,
+          "start": "Thu Oct  8 18:27:22 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.586
+    },
+    {
+      "number": 12,
+      "case": "client",
+      "mode": "threaded",
+      "repeat": 2,
+      "pid": 45967,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/probe_child.py",
+        "client",
+        "threaded"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "45967": {
+          "ppid": 45892,
+          "pgid": 45967,
+          "start": "Thu Oct  8 18:27:23 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.589
+    },
+    {
+      "number": 13,
+      "case": "soft",
+      "mode": "serial",
+      "repeat": 1,
+      "pid": 45973,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/probe_child.py",
+        "soft",
+        "serial"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "45973": {
+          "ppid": 45892,
+          "pgid": 45973,
+          "start": "Thu Oct  8 18:27:23 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 1.599
+    },
+    {
+      "number": 14,
+      "case": "soft",
+      "mode": "serial",
+      "repeat": 2,
+      "pid": 45987,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/probe_child.py",
+        "soft",
+        "serial"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "45987": {
+          "ppid": 45892,
+          "pgid": 45987,
+          "start": "Thu Oct  8 18:27:25 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 1.151
+    },
+    {
+      "number": 15,
+      "case": "soft",
+      "mode": "threaded",
+      "repeat": 1,
+      "pid": 45998,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/probe_child.py",
+        "soft",
+        "threaded"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "45998": {
+          "ppid": 45892,
+          "pgid": 45998,
+          "start": "Thu Oct  8 18:27:26 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 1.287
+    },
+    {
+      "number": 16,
+      "case": "soft",
+      "mode": "threaded",
+      "repeat": 2,
+      "pid": 46010,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/probe_child.py",
+        "soft",
+        "threaded"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "46010": {
+          "ppid": 45892,
+          "pgid": 46010,
+          "start": "Thu Oct  8 18:27:27 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 1.14
+    }
+  ],
+  "slices": [
+    {
+      "number": 1,
+      "argv": [
+        "python3",
+        "scripts/verify_refactor.py",
+        "--timeout",
+        "120",
+        "--",
+        "tests/api/test_desktop_server.py",
+        "tests/sdk/test_sandbox.py",
+        "-vv"
+      ],
+      "exit": 0,
+      "summary": "================== 59 passed, 4 skipped, 3 warnings in 19.78s ==================",
+      "fatal_signature": false,
+      "failed_names": []
+    },
+    {
+      "number": 2,
+      "argv": [
+        "python3",
+        "scripts/verify_refactor.py",
+        "--timeout",
+        "120",
+        "--",
+        "tests/sdk/test_sandbox.py",
+        "tests/api/test_desktop_server.py",
+        "-vv"
+      ],
+      "exit": 0,
+      "summary": "================== 59 passed, 4 skipped, 3 warnings in 16.36s ==================",
+      "fatal_signature": false,
+      "failed_names": []
+    },
+    {
+      "number": 3,
+      "argv": [
+        "python3",
+        "scripts/verify_refactor.py",
+        "--timeout",
+        "120",
+        "--",
+        "tests",
+        "-k",
+        "test_second_launch_exits_when_lock_held or test_runs_argv",
+        "-vv"
+      ],
+      "exit": 0,
+      "summary": "================ 2 passed, 4000 deselected, 3 warnings in 2.89s ================",
+      "fatal_signature": false,
+      "failed_names": []
+    },
+    {
+      "number": 4,
+      "argv": [
+        "python3",
+        "scripts/verify_refactor.py",
+        "--timeout",
+        "120",
+        "--",
+        "tests/api/test_agent_loop.py",
+        "tests/sdk/test_sandbox.py",
+        "-vv"
+      ],
+      "exit": 0,
+      "summary": "================== 41 passed, 4 skipped, 1 warning in 19.10s ===================",
+      "fatal_signature": false,
+      "failed_names": []
+    },
+    {
+      "number": 5,
+      "argv": [
+        "python3",
+        "scripts/verify_refactor.py",
+        "--timeout",
+        "120",
+        "--",
+        "tests/api",
+        "tests/sdk/test_sandbox.py::TestNullBackend::test_runs_argv",
+        "-vv"
+      ],
+      "exit": 1,
+      "summary": "============ 2 failed, 637 passed, 6 skipped, 16 warnings in 41.05s ============",
+      "fatal_signature": false,
+      "failed_names": [
+        "tests/api/test_subagents.py::TestSubagentV1Invocations::test_create_start_list_detail_and_instruct_subagent_job",
+        "tests/api/test_subagents.py::TestSubagentV1Invocations::test_subagent_jobs_are_user_level_across_workspace_ids"
+      ]
+    },
+    {
+      "number": 6,
+      "argv": [
+        "python3",
+        "scripts/verify_refactor.py",
+        "--timeout",
+        "120",
+        "--",
+        "tests",
+        "-k",
+        "api or test_sandbox",
+        "-vv"
+      ],
+      "exit": 0,
+      "summary": "== 715 passed, 10 skipped, 3277 deselected, 18 warnings in 102.97s (0:01:42) ===",
+      "fatal_signature": false,
+      "failed_names": []
+    }
+  ],
+  "probe_budget_used": 16,
+  "slice_budget_used": 6,
+  "native_crash_reproduced": false,
+  "conclusion": "Inconclusive for native cause; all fixed probes succeed, two ordinary API404 assertion failures in slice5 retained, not native faults."
+}
