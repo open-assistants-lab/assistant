@@ -1,0 +1,213 @@
+{
+  "approval": {
+    "approval": "User plz proceed after recommendation of one instrumented full-suite pass",
+    "budget": 1,
+    "deadline_seconds": 1800,
+    "start_time_ns": 1791447269548479000,
+    "argv": [
+      "python3",
+      "scripts/verify_refactor.py",
+      "--timeout",
+      "1800",
+      "--build-cache",
+      "/Users/eddy/.cache/uv",
+      "--",
+      "-o",
+      "pythonpath=/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation",
+      "-p",
+      "native_full_capture",
+      "-vv"
+    ],
+    "instrumentation_timing_effects": true,
+    "privacy": "No argv/env/exception/test-parameter values in event capture"
+  },
+  "head_at_launch": "c78409ff",
+  "result": "95 failed,3875 passed,32 skipped,69 warnings,284.18s,exit1",
+  "full_launch_count": 1,
+  "parent_pid": 48731,
+  "event_count": 12650,
+  "unique_sigsegv_helper_count": 1544,
+  "observed_subprocess_exit_codes": {
+    "0": 1,
+    "-11": 1544
+  },
+  "sigsegv_categories": {
+    "uname": 1,
+    "file": 1,
+    "git": 1432,
+    "python": 22,
+    "other": 76,
+    "uv": 1,
+    "echo": 6,
+    "sh": 4,
+    "sleep": 1
+  },
+  "first_three_helper_sequences": [
+    {
+      "event": "spawn-start",
+      "pid": 48731,
+      "time_ns": 1791447273381345000,
+      "thread_id": 6153121792,
+      "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+      "token": 1,
+      "category": "git",
+      "argv_count": 2,
+      "cwd_supplied": true,
+      "preexec_supplied": false,
+      "new_session": false,
+      "explicit_env": false
+    },
+    {
+      "event": "spawn-ready",
+      "pid": 48731,
+      "time_ns": 1791447273391347000,
+      "thread_id": 6153121792,
+      "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+      "token": 1,
+      "helper_pid": 48732,
+      "spawn_node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+      "category": "git"
+    },
+    {
+      "event": "spawn-exit",
+      "pid": 48731,
+      "time_ns": 1791447273755836000,
+      "thread_id": 6153121792,
+      "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+      "token": 1,
+      "helper_pid": 48732,
+      "returncode": 0,
+      "spawn_node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+      "category": "git"
+    },
+    {
+      "event": "spawn-start",
+      "pid": 48731,
+      "time_ns": 1791447286173469000,
+      "thread_id": 6169948160,
+      "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+      "token": 2,
+      "category": "uname",
+      "argv_count": 2,
+      "cwd_supplied": false,
+      "preexec_supplied": false,
+      "new_session": false,
+      "explicit_env": false
+    },
+    {
+      "event": "spawn-ready",
+      "pid": 48731,
+      "time_ns": 1791447286191204000,
+      "thread_id": 6169948160,
+      "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+      "token": 2,
+      "helper_pid": 48739,
+      "spawn_node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+      "category": "uname"
+    },
+    {
+      "event": "spawn-exit",
+      "pid": 48731,
+      "time_ns": 1791447286191460000,
+      "thread_id": 6169948160,
+      "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+      "token": 2,
+      "helper_pid": 48739,
+      "returncode": -11,
+      "spawn_node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+      "category": "uname"
+    },
+    {
+      "event": "spawn-start",
+      "pid": 48731,
+      "time_ns": 1791447286192139000,
+      "thread_id": 6169948160,
+      "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+      "token": 3,
+      "category": "file",
+      "argv_count": 3,
+      "cwd_supplied": false,
+      "preexec_supplied": false,
+      "new_session": false,
+      "explicit_env": true
+    },
+    {
+      "event": "spawn-ready",
+      "pid": 48731,
+      "time_ns": 1791447286203549000,
+      "thread_id": 6169948160,
+      "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+      "token": 3,
+      "helper_pid": 48741,
+      "spawn_node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+      "category": "file"
+    },
+    {
+      "event": "spawn-exit",
+      "pid": 48731,
+      "time_ns": 1791447286203835000,
+      "thread_id": 6169948160,
+      "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+      "token": 3,
+      "helper_pid": 48741,
+      "returncode": -11,
+      "spawn_node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+      "category": "file"
+    }
+  ],
+  "first_three_failed_helpers": [
+    {
+      "event": "spawn-exit",
+      "pid": 48731,
+      "time_ns": 1791447286191460000,
+      "thread_id": 6169948160,
+      "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+      "token": 2,
+      "helper_pid": 48739,
+      "returncode": -11,
+      "spawn_node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+      "category": "uname"
+    },
+    {
+      "event": "spawn-exit",
+      "pid": 48731,
+      "time_ns": 1791447286203835000,
+      "thread_id": 6169948160,
+      "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+      "token": 3,
+      "helper_pid": 48741,
+      "returncode": -11,
+      "spawn_node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+      "category": "file"
+    },
+    {
+      "event": "spawn-exit",
+      "pid": 48731,
+      "time_ns": 1791447322492607000,
+      "thread_id": 481425436672,
+      "node": "tests/api/test_billing.py::TestBudgetEnforcement::test_unaffiliated_user_not_blocked",
+      "token": 4,
+      "helper_pid": 48744,
+      "returncode": -11,
+      "spawn_node": "tests/api/test_billing.py::TestBudgetEnforcement::test_unaffiliated_user_not_blocked",
+      "category": "git"
+    }
+  ],
+  "session_finish": [
+    {
+      "event": "session-finish",
+      "pid": 48731,
+      "time_ns": 1791447555300940000,
+      "thread_id": 8427552640,
+      "node": "tests/unit/test_tools_core_misc.py::test_sweep_missing_directory_is_noop",
+      "exitstatus": 1
+    }
+  ],
+  "instrumentation_restored": true,
+  "failure_identities_match_previous_95": true,
+  "matched_native_reports": 0,
+  "report_metadata_candidates": 39,
+  "privacy": "No argv/environment/exception-message/test-parameter values in PID events. Unmatched report bodies not read/copied.",
+  "limitations": "Instrumentation may change timing; helper exit/copy-Python stacks do not establish native C cause or minimal trigger; no ownedPID native report match.",
+  "owned_shadow_absent": true
+}

@@ -1,7 +1,9 @@
 # Bounded macOS subprocess crash investigation
 
-Status: **bounded probes complete; native crash not reproduced, cause inconclusive.
-No product fix selected; latest full-suite verification remains blocked.**
+Status: **isolated controls complete; subsequent single instrumented full-suite
+run reproduced native helper failures. Cause/minimal trigger unresolved; no fix.**
+See [PID-linked full-run result](2026-10-08-macos-instrumented-full-crash.md).
+The stages below retain their original negative/inconclusive findings.
 Plan: [bounded investigation](../superpowers/plans/2026-10-07-macos-subprocess-crash-investigation.md).
 User approved native/inline execution and keeping observability access offline.
 
@@ -236,3 +238,15 @@ This broader diagnostic run and its instrumentation need a reviewed bounded scop
 before execution. No native crash or demonstrated regression currently justifies
 an exact production fix. General verification and hardened MT remain blocked;
 final fresh-context whole-branch review and authority foundation completion remain.
+
+## Subsequent single-full-run permission and result
+
+User plz proceed approved the proposed one-run capture. Actual run:
+**95 failed,3,875 passed,32 skipped,69 warnings,284.18s,exit1**, exact prior95 failure
+identities. Parent survived; sanitized capture linked1,544 SIGSEGV helper exits,
+starting with uname/file during the first API agent-loop test after one successful
+git helper. Metadata-only native-report correlation found no ownedPID/time match;
+no unmatched report body was copied. No second full run or fix. Detailed outcome,
+privacy/timing limits and the next proposed two-launch reduction are in the
+[full-run audit](2026-10-08-macos-instrumented-full-crash.md), with every failure and
+sanitized structured evidence linked. General verification remains blocked.
