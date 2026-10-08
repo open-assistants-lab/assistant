@@ -100,7 +100,7 @@ def test_valid_baseline_bytes_unchanged():
 
 def provenance():
     return {
-        "source_url": "https://github.com/moby/moby/blob/" + "a" * 40 + "/vendor/example/default.json",
+        "source_url": "https://github.com/moby/moby/blob/" + "a" * 40 + "/vendor/github.com/moby/profiles/seccomp/default.json",
         "source_revision": "a" * 40,
         "profile_sha256": "b" * 64,
         "engine_version": "29.8.0",

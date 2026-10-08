@@ -78,6 +78,13 @@ def validate_provenance_record(
             raise ValueError("missing provenance field")
     if not _REVISION.fullmatch(record["source_revision"]):
         raise ValueError("source revision must be a full pinned commit")
+    revision = record["source_revision"]
+    known_sources = {
+        f"https://github.com/moby/moby/blob/{revision}/vendor/github.com/moby/profiles/seccomp/default.json",
+        f"https://github.com/moby/profiles/blob/{revision}/seccomp/default.json",
+    }
+    if record["source_url"] not in known_sources:
+        raise ValueError("source link must identify the same pinned official baseline")
     if not _HASH.fullmatch(profile_sha256) or not _HASH.fullmatch(record["profile_sha256"]):
         raise ValueError("invalid profile SHA-256")
     for field, expected in (("engine_version", engine_version), ("engine_commit", engine_commit),

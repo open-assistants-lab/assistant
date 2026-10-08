@@ -62,7 +62,7 @@ Observed initial RED: **41 missing-implementation failures**. Initial GREEN:
 refusal gap: **1 failed, 41 passed**, followed by finite-float rejection. Final new
 validation tests: **42 passed** within the final targeted selection.
 
-Whole-suite commands are not green:
+Initial whole-suite commands were not green (retained evidence):
 
 - First full run: **95 failed, 3,811 passed, 31 skipped, 69 warnings**, exit1;
   repeated native subprocess SIGSEGV stacks. First stack includes PostHog consumer,
@@ -86,10 +86,20 @@ workspace. Similar historical native crashes/order sensitivity are recorded in t
 foundation audit; their exact root cause is unresolved. No unrelated product fix,
 process cleanup or test suppression was applied.
 
+## Subsequent author self-review
+
+The [checkpoint review](2026-10-07-namespace-baseline-code-review.md) found/fixed a
+provenance gap: source URLs were not bound to their claimed pinned revision/repository.
+Eight refusal cases were observed RED before canonical pinned-source enforcement.
+Targeted tests now **52 passed**, exit0. Fresh full offline rerun:
+**3,916 passed, 31 skipped, 69 warnings, 270.72s, exit0**. Earlier failures above are
+not erased or claimed fixed; their exact causes remain unresolved.
+No baseline acceptance, candidate synthesis or policy application was inferred.
+
 ## Outstanding gates
 
 Approve/reject the proposed baseline provenance/limitation above. A concrete P
 profile, structural diff, profile comparison implementation and explicit execution
-permission are still pending. Full-suite qualification and final whole-branch
-review also remain pending; no Task 1 completion, namespace-policy qualification,
+permission are still pending. The latest full Python suite passed, but prior
+intermittent failures remain unresolved; final whole-branch review is pending; no Task 1 completion, namespace-policy qualification,
 hardened MT readiness or release claim. No Docker policy was changed in this task.
