@@ -1,0 +1,110 @@
+{
+  "scope": "Read-only artifact/source analysis; no test/probe execution",
+  "head": "7780cf7f",
+  "source_hashes": [
+    {
+      "path": "tests/sdk/test_subagent_v1.py",
+      "sha256": "28daa6348025401157882ee72a67302d3f6991b7a983325bb111b4a19f504874"
+    },
+    {
+      "path": "tests/sdk/test_subagent_scheduled_firing.py",
+      "sha256": "c07e643c6473b4339bc64c7f7dc6304a05ad70f6e1dc8db25ab3394ce82b95b1"
+    },
+    {
+      "path": "tests/api/conftest.py",
+      "sha256": "9b49d237bc153b5bdb1f1014219637f35c17f22535476bc1d42a0a349db05ad1"
+    },
+    {
+      "path": "tests/api/test_agent_loop.py",
+      "sha256": "ef3018c9e4329d18b9cd51dba67869f91fd092d97c07f48ad295dfa735a642bb"
+    },
+    {
+      "path": "config.yaml",
+      "sha256": "641630a858f2e0081ef664f9b58ae9d4f0248f02d9cd9b7747234da552abee7b"
+    },
+    {
+      "path": "src/config/settings.py",
+      "sha256": "8bebd8ccdcf312036f97bbccfba26f125a505093587a13ca7011b23f7219daa7"
+    },
+    {
+      "path": "src/sdk/providers/factory.py",
+      "sha256": "153d4df66e9cc4be1de84216ccaa195fcc83dba246a9938cc76379370d3602c8"
+    },
+    {
+      "path": "src/sdk/governance_dispatcher.py",
+      "sha256": "bdc52b40de98113656ddee92e8eba33119e8fac14b22f4117ea5f3b777514d0f"
+    },
+    {
+      "path": "src/http/main.py",
+      "sha256": "5f6e5527c02e08ff1ce2d3fd104780cc5da079f387596ce67e7b1b2e9ee1fdc6"
+    },
+    {
+      "path": "scripts/verify_refactor.py",
+      "sha256": "7a65951fc62877db7d462aee9caeb80a59017104e70a2cd2d5fba489ef677393"
+    },
+    {
+      "path": "tests/refactor/offline_guard.py",
+      "sha256": "152b056d11eb1af393a9c7a197ec2b9fdf02f4031f53d590ec7277ddcbd08b9e"
+    }
+  ],
+  "first_three_fault_frame_indices": [
+    {
+      "fatal_start_line": 11,
+      "selected_frames": [
+        {
+          "line": 23,
+          "frame": "File \"/Users/eddy/.local/share/uv/python/cpython-3.13.10-macos-aarch64-none/lib/python3.13/subprocess.py\", line 1921 in _execute_child"
+        },
+        {
+          "line": 34,
+          "frame": "File \"/Users/eddy/Developer/Python/assistant/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 2102 in get_platform"
+        },
+        {
+          "line": 42,
+          "frame": "File \"/Users/eddy/.local/share/uv/python/cpython-3.13.10-macos-aarch64-none/lib/python3.13/urllib/request.py\", line 2676 in getproxies_macosx_sysconf"
+        },
+        {
+          "line": 43,
+          "frame": "File \"/Users/eddy/.local/share/uv/python/cpython-3.13.10-macos-aarch64-none/lib/python3.13/urllib/request.py\", line 2694 in getproxies"
+        },
+        {
+          "line": 44,
+          "frame": "File \"/Users/eddy/Developer/Python/assistant/.venv/lib/python3.13/site-packages/httpx/_utils.py\", line 37 in get_environment_proxies"
+        },
+        {
+          "line": 47,
+          "frame": "File \"/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/src/sdk/governance_dispatcher.py\", line 91 in dispatch_once"
+        },
+        {
+          "line": 48,
+          "frame": "File \"/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/src/sdk/governance_dispatcher.py\", line 57 in _run"
+        }
+      ]
+    },
+    {
+      "fatal_start_line": 109,
+      "selected_frames": [
+        {
+          "line": 121,
+          "frame": "File \"/Users/eddy/.local/share/uv/python/cpython-3.13.10-macos-aarch64-none/lib/python3.13/subprocess.py\", line 1921 in _execute_child"
+        },
+        {
+          "line": 129,
+          "frame": "File \"/Users/eddy/Developer/Python/assistant/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 2102 in get_platform"
+        }
+      ]
+    },
+    {
+      "fatal_start_line": 279,
+      "selected_frames": [
+        {
+          "line": 288,
+          "frame": "File \"/Users/eddy/.local/share/uv/python/cpython-3.13.10-macos-aarch64-none/lib/python3.13/subprocess.py\", line 1921 in _execute_child"
+        }
+      ]
+    }
+  ],
+  "effective_model_not_measured": true,
+  "native_proxy_fork_causality_not_established": true,
+  "new_execution_authorized": false
+}
