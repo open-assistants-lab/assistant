@@ -8,10 +8,19 @@ from tests.refactor.linux.probe_helpers import IMAGE, run_probe
 
 
 def pytest_addoption(parser):
-    parser.addoption("--linux-probe", action="store_true", default=False,
-                     help="explicitly run isolated cached-image Docker preflight")
+    parser.addoption(
+        "--linux-probe",
+        action="store_true",
+        default=False,
+        help="explicitly run isolated cached-image Docker preflight",
+    )
     parser.addoption("--docker-host", default="", help="explicit local Docker Unix socket")
-    parser.addoption("--probe-image", default=IMAGE, help="locally prepared disposable probe image ID")
+    parser.addoption(
+        "--probe-image", default=IMAGE, help="locally prepared disposable probe image ID"
+    )
+    parser.addoption("--namespace-policy-comparison", action="store_true", default=False)
+    for name in ("baseline-seccomp", "baseline-sha256", "noop-seccomp", "noop-sha256"):
+        parser.addoption("--" + name, default="")
 
 
 @pytest.fixture(autouse=True)
@@ -22,5 +31,8 @@ def authorized_linux_probe(request):
 
 @pytest.fixture
 def probe(request):
-    return partial(run_probe, docker_host=request.config.getoption("--docker-host"),
-                   image=request.config.getoption("--probe-image"))
+    return partial(
+        run_probe,
+        docker_host=request.config.getoption("--docker-host"),
+        image=request.config.getoption("--probe-image"),
+    )

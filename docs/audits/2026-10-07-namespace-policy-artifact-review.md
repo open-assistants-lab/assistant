@@ -1,8 +1,9 @@
-# Namespace policy artifact review — accepted baseline; candidate awaiting execution review
+# Namespace policy artifact review — accepted baseline; exact diagnostic checkpoint
 
 Plan: [namespace attribution](../superpowers/plans/2026-10-07-linux-namespace-policy-attribution.md).
-Status: **baseline accepted after author self-review; Task 1 complete. Candidate P
-prepared and checksum-verified; custom Docker policy execution remains gated.**
+Status: **baseline accepted after author self-review; Task 1 complete. Exact no-op
+P authorized and compared in owned containers; diagnostic matrix passed. Latest
+whole-suite verification blocked; no namespace-capable backend qualified.**
 
 ## Installed target and pinned public source
 
@@ -50,7 +51,8 @@ equivalence. Do not label it a byte-exact export or an authenticated approval.
 this pinned version-linked JSON for comparison with that limitation. Recorded as
 `substitute-reviewed`, not an exact live-filter export. The sole no-op candidate
 and complete B/P hashes/diff are now in the [execution review](2026-10-07-namespace-noop-policy-review.md);
-no custom policy has been applied.
+no custom policy had been applied at that preparation checkpoint. Subsequent
+explicit user permission and exact disposable comparison are recorded below.
 
 ## Implemented pure checks and verification
 
@@ -100,8 +102,9 @@ No baseline acceptance, candidate synthesis or policy application was inferred.
 
 ## Outstanding gates
 
-Review exact prepared B/P bytes/diff and authorize the no-op comparison if desired.
-Task 3 comparison implementation/actual execution and final whole-branch review
-remain pending. Latest full suite after Task 2: **3,933 passed, 31 skipped, 69 warnings,
-266.78s, exit0**; prior intermittent failures remain unresolved. No namespace-policy
-qualification, hardened MT/native readiness or release claim. No Docker policy changed.
+User subsequently authorized exact D/B/P comparison: actual42 observations and
+confirmed cleanups passed. See [actual result/checkpoint](2026-10-07-namespace-comparison-result.md).
+Task3 final general verification remains blocked: latest full95 failures match
+historical named failures; causes unresolved. No broader namespace policy, hardened
+MT/native readiness, whole-task completion or release claim. Only exact owned
+throwaway container policies changed; daemon/customer policies were untouched.

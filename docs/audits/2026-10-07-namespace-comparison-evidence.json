@@ -1,0 +1,467 @@
+{
+  "actual_result": "1 passed in4.48s,exit0",
+  "baseline_sha256": "536529b665dd0972c37bfb569f5d4ac8a53592e7b00752bc39ff063ca9864c74",
+  "candidate_sha256": "6a744f09389794f4de85126a9c853d90a73226823270ac34cb1186a3ba3c5a42",
+  "engine": "29.8.0 aarch64 7.0.12-linuxkit",
+  "historical_failure_name_overlap": 95,
+  "inventory_count": 9,
+  "inventory_sha256": "ee5bf854107accd63b96ec6ba56f1da73a758c2bb65b9ce5d0b28a7822f26513",
+  "isolated_triage": "126 passed,4 skipped,3 warnings,12.83s,exit0",
+  "latest_full_result": "95 failed,3875 passed,32 skipped,69 warnings,274.03s,exit1",
+  "permission": {
+    "baseline_sha256": "536529b665dd0972c37bfb569f5d4ac8a53592e7b00752bc39ff063ca9864c74",
+    "candidate_sha256": "6a744f09389794f4de85126a9c853d90a73226823270ac34cb1186a3ba3c5a42",
+    "excludes": "No namespace-policy widening, privileged/root/SYS_ADMIN/unconfined execution, daemon/customer changes, integration or publication",
+    "image": "sha256:5a14a72ed183851752e631650b5d838c4396644def08c88dddf410545df300f6",
+    "kind": "operator-recorded-diagnostic-permission-not-authentication",
+    "request_context": "Reply to permission request to implement and run disposable baseline/candidate comparison of exact reviewed profiles after416410ad",
+    "review": "docs/audits/2026-10-07-namespace-noop-policy-review.md",
+    "scope": "Owned disposable D then B then P no-op diagnostic only; D/B must match before P; confirmed cleanup; stop on mismatch or uncertain cleanup",
+    "user_request": "plz proceed"
+  },
+  "phases": {
+    "B": {
+      "metadata": {
+        "architecture": "aarch64",
+        "argv": [
+          "docker",
+          "--host",
+          "unix:///Users/eddy/.docker/run/docker.sock",
+          "create",
+          "--pull=never",
+          "--name",
+          "authority-probe-c16ec132cbd9",
+          "--label",
+          "assistant.authority.probe=authority-probe-c16ec132cbd9",
+          "--network=none",
+          "--read-only",
+          "--user=20001:20001",
+          "--cap-drop=ALL",
+          "--security-opt=no-new-privileges:true",
+          "--tmpfs",
+          "/tmp:rw,nosuid,nodev",
+          "--security-opt",
+          "seccomp=/private/tmp/ar-2grglw31/tmp/pytest-of-eddy/pytest-0/test_reviewed_default_baseline0/reviewed-profiles/baseline.json",
+          "--entrypoint",
+          "/usr/bin/env",
+          "sha256:5a14a72ed183851752e631650b5d838c4396644def08c88dddf410545df300f6",
+          "-i",
+          "PATH=/usr/local/bin:/usr/bin:/bin",
+          "/bin/sh",
+          "-c",
+          "python - <<'WRITE_FIXED_DIAGNOSTIC'\nfrom pathlib import Path\nPath('/tmp/namespace_diagnostic.py').write_text('\"\"\"Throwaway syscall diagnostic under unchanged container policy; no security toggles.\"\"\"\\n\\nimport ctypes\\nimport errno\\nimport json\\nimport os\\nimport platform\\nimport subprocess\\nimport sys\\n\\nFLAGS = {\\n    \"none\": 0,\\n    \"newuser\": 0x10000000,\\n    \"newmount\": 0x00020000,\\n    \"newpid\": 0x20000000,\\n    \"newnet\": 0x40000000,\\n    \"newipc\": 0x08000000,\\n    \"bwrap_namespaces\": 0x10000000 | 0x00020000 | 0x20000000 | 0x40000000 | 0x08000000,\\n}\\n\\n\\ndef child(operation: str, flags: int) -> None:\\n    libc = ctypes.CDLL(None, use_errno=True)\\n    ctypes.set_errno(0)\\n    if operation == \"unshare\":\\n        libc.unshare.argtypes = [ctypes.c_int]\\n        libc.unshare.restype = ctypes.c_int\\n        result = libc.unshare(flags)\\n    else:\\n        # Linux native clone ABI on the observed aarch64 target only.\\n        if platform.machine() != \"aarch64\":\\n            raise RuntimeError(\"diagnostic clone syscall number is aarch64-only\")\\n        libc.syscall.restype = ctypes.c_long\\n        result = libc.syscall(\\n            ctypes.c_long(220),\\n            ctypes.c_ulong(flags | 17),\\n            ctypes.c_void_p(0),\\n            ctypes.c_void_p(0),\\n            ctypes.c_void_p(0),\\n            ctypes.c_ulong(0),\\n        )\\n        if result == 0:\\n            os._exit(0)\\n        if result > 0:\\n            _, status = os.waitpid(result, 0)\\n            if status != 0:\\n                raise RuntimeError(\"owned diagnostic child did not exit cleanly\")\\n    error = ctypes.get_errno() if result < 0 else 0\\n    print(\\n        json.dumps(\\n            {\\n                \"operation\": operation,\\n                \"flags\": hex(flags),\\n                \"succeeded\": result >= 0,\\n                \"errno\": error,\\n                \"reason\": errno.errorcode.get(error, \"OK\"),\\n            }\\n        )\\n    )\\n\\n\\nif __name__ == \"__main__\":\\n    if len(sys.argv) == 3:\\n        child(sys.argv[1], int(sys.argv[2]))\\n    else:\\n        if platform.machine() != \"aarch64\":\\n            raise RuntimeError(\"diagnostic is aarch64-only\")\\n        from pathlib import Path\\n\\n        status = dict(\\n            line.split(\":\", 1)\\n            for line in Path(\"/proc/self/status\").read_text().splitlines()\\n            if \":\" in line\\n        )\\n        print(\\n            \"policy-facts \"\\n            + json.dumps(\\n                {\\n                    \"architecture\": platform.machine(),\\n                    \"uid\": os.getuid(),\\n                    \"gid\": os.getgid(),\\n                    \"cap_effective\": int(status[\"CapEff\"].strip(), 16),\\n                    \"no_new_privileges\": int(status[\"NoNewPrivs\"].strip()),\\n                    \"seccomp_mode\": int(status[\"Seccomp\"].strip()),\\n                }\\n            )\\n        )\\n        for operation in (\"clone\", \"unshare\"):\\n            for label, flags in FLAGS.items():\\n                result = subprocess.run(\\n                    [sys.executable, __file__, operation, str(flags)],\\n                    capture_output=True,\\n                    text=True,\\n                    timeout=5,\\n                )\\n                print(label, result.stdout.strip(), result.stderr.strip())\\n                if result.returncode != 0:\\n                    raise SystemExit(result.returncode)\\n')\nWRITE_FIXED_DIAGNOSTIC\npython /tmp/namespace_diagnostic.py"
+        ],
+        "cleanup_confirmed": true,
+        "container_id": "fbfc93f729f7876a9a85dd3c38baee7aa24d3be59f9b54fe62b80f123d0d3435",
+        "image_id": "sha256:5a14a72ed183851752e631650b5d838c4396644def08c88dddf410545df300f6",
+        "requested_image": "sha256:5a14a72ed183851752e631650b5d838c4396644def08c88dddf410545df300f6"
+      },
+      "run": {
+        "architecture": "aarch64",
+        "cap_effective": 0,
+        "cleanup_confirmed": true,
+        "gid": 20001,
+        "image_id": "sha256:5a14a72ed183851752e631650b5d838c4396644def08c88dddf410545df300f6",
+        "no_new_privileges": 1,
+        "observations": [
+          {
+            "errno": 0,
+            "flags": "0x0",
+            "operation": "clone",
+            "reason": "OK",
+            "succeeded": true
+          },
+          {
+            "errno": 1,
+            "flags": "0x10000000",
+            "operation": "clone",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x20000",
+            "operation": "clone",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x20000000",
+            "operation": "clone",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x40000000",
+            "operation": "clone",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x8000000",
+            "operation": "clone",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x78020000",
+            "operation": "clone",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x0",
+            "operation": "unshare",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x10000000",
+            "operation": "unshare",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x20000",
+            "operation": "unshare",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x20000000",
+            "operation": "unshare",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x40000000",
+            "operation": "unshare",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x8000000",
+            "operation": "unshare",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x78020000",
+            "operation": "unshare",
+            "reason": "EPERM",
+            "succeeded": false
+          }
+        ],
+        "process_exit": 0,
+        "seccomp_mode": 2,
+        "uid": 20001
+      }
+    },
+    "D": {
+      "metadata": {
+        "architecture": "aarch64",
+        "argv": [
+          "docker",
+          "--host",
+          "unix:///Users/eddy/.docker/run/docker.sock",
+          "create",
+          "--pull=never",
+          "--name",
+          "authority-probe-5466647ac5fd",
+          "--label",
+          "assistant.authority.probe=authority-probe-5466647ac5fd",
+          "--network=none",
+          "--read-only",
+          "--user=20001:20001",
+          "--cap-drop=ALL",
+          "--security-opt=no-new-privileges:true",
+          "--tmpfs",
+          "/tmp:rw,nosuid,nodev",
+          "--entrypoint",
+          "/usr/bin/env",
+          "sha256:5a14a72ed183851752e631650b5d838c4396644def08c88dddf410545df300f6",
+          "-i",
+          "PATH=/usr/local/bin:/usr/bin:/bin",
+          "/bin/sh",
+          "-c",
+          "python - <<'WRITE_FIXED_DIAGNOSTIC'\nfrom pathlib import Path\nPath('/tmp/namespace_diagnostic.py').write_text('\"\"\"Throwaway syscall diagnostic under unchanged container policy; no security toggles.\"\"\"\\n\\nimport ctypes\\nimport errno\\nimport json\\nimport os\\nimport platform\\nimport subprocess\\nimport sys\\n\\nFLAGS = {\\n    \"none\": 0,\\n    \"newuser\": 0x10000000,\\n    \"newmount\": 0x00020000,\\n    \"newpid\": 0x20000000,\\n    \"newnet\": 0x40000000,\\n    \"newipc\": 0x08000000,\\n    \"bwrap_namespaces\": 0x10000000 | 0x00020000 | 0x20000000 | 0x40000000 | 0x08000000,\\n}\\n\\n\\ndef child(operation: str, flags: int) -> None:\\n    libc = ctypes.CDLL(None, use_errno=True)\\n    ctypes.set_errno(0)\\n    if operation == \"unshare\":\\n        libc.unshare.argtypes = [ctypes.c_int]\\n        libc.unshare.restype = ctypes.c_int\\n        result = libc.unshare(flags)\\n    else:\\n        # Linux native clone ABI on the observed aarch64 target only.\\n        if platform.machine() != \"aarch64\":\\n            raise RuntimeError(\"diagnostic clone syscall number is aarch64-only\")\\n        libc.syscall.restype = ctypes.c_long\\n        result = libc.syscall(\\n            ctypes.c_long(220),\\n            ctypes.c_ulong(flags | 17),\\n            ctypes.c_void_p(0),\\n            ctypes.c_void_p(0),\\n            ctypes.c_void_p(0),\\n            ctypes.c_ulong(0),\\n        )\\n        if result == 0:\\n            os._exit(0)\\n        if result > 0:\\n            _, status = os.waitpid(result, 0)\\n            if status != 0:\\n                raise RuntimeError(\"owned diagnostic child did not exit cleanly\")\\n    error = ctypes.get_errno() if result < 0 else 0\\n    print(\\n        json.dumps(\\n            {\\n                \"operation\": operation,\\n                \"flags\": hex(flags),\\n                \"succeeded\": result >= 0,\\n                \"errno\": error,\\n                \"reason\": errno.errorcode.get(error, \"OK\"),\\n            }\\n        )\\n    )\\n\\n\\nif __name__ == \"__main__\":\\n    if len(sys.argv) == 3:\\n        child(sys.argv[1], int(sys.argv[2]))\\n    else:\\n        if platform.machine() != \"aarch64\":\\n            raise RuntimeError(\"diagnostic is aarch64-only\")\\n        from pathlib import Path\\n\\n        status = dict(\\n            line.split(\":\", 1)\\n            for line in Path(\"/proc/self/status\").read_text().splitlines()\\n            if \":\" in line\\n        )\\n        print(\\n            \"policy-facts \"\\n            + json.dumps(\\n                {\\n                    \"architecture\": platform.machine(),\\n                    \"uid\": os.getuid(),\\n                    \"gid\": os.getgid(),\\n                    \"cap_effective\": int(status[\"CapEff\"].strip(), 16),\\n                    \"no_new_privileges\": int(status[\"NoNewPrivs\"].strip()),\\n                    \"seccomp_mode\": int(status[\"Seccomp\"].strip()),\\n                }\\n            )\\n        )\\n        for operation in (\"clone\", \"unshare\"):\\n            for label, flags in FLAGS.items():\\n                result = subprocess.run(\\n                    [sys.executable, __file__, operation, str(flags)],\\n                    capture_output=True,\\n                    text=True,\\n                    timeout=5,\\n                )\\n                print(label, result.stdout.strip(), result.stderr.strip())\\n                if result.returncode != 0:\\n                    raise SystemExit(result.returncode)\\n')\nWRITE_FIXED_DIAGNOSTIC\npython /tmp/namespace_diagnostic.py"
+        ],
+        "cleanup_confirmed": true,
+        "container_id": "b23442c8a25f9ad25949796f9e0cf65bd57efe4f477724e7adcd0865fcf9a0d1",
+        "image_id": "sha256:5a14a72ed183851752e631650b5d838c4396644def08c88dddf410545df300f6",
+        "requested_image": "sha256:5a14a72ed183851752e631650b5d838c4396644def08c88dddf410545df300f6"
+      },
+      "run": {
+        "architecture": "aarch64",
+        "cap_effective": 0,
+        "cleanup_confirmed": true,
+        "gid": 20001,
+        "image_id": "sha256:5a14a72ed183851752e631650b5d838c4396644def08c88dddf410545df300f6",
+        "no_new_privileges": 1,
+        "observations": [
+          {
+            "errno": 0,
+            "flags": "0x0",
+            "operation": "clone",
+            "reason": "OK",
+            "succeeded": true
+          },
+          {
+            "errno": 1,
+            "flags": "0x10000000",
+            "operation": "clone",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x20000",
+            "operation": "clone",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x20000000",
+            "operation": "clone",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x40000000",
+            "operation": "clone",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x8000000",
+            "operation": "clone",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x78020000",
+            "operation": "clone",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x0",
+            "operation": "unshare",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x10000000",
+            "operation": "unshare",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x20000",
+            "operation": "unshare",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x20000000",
+            "operation": "unshare",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x40000000",
+            "operation": "unshare",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x8000000",
+            "operation": "unshare",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x78020000",
+            "operation": "unshare",
+            "reason": "EPERM",
+            "succeeded": false
+          }
+        ],
+        "process_exit": 0,
+        "seccomp_mode": 2,
+        "uid": 20001
+      }
+    },
+    "P": {
+      "metadata": {
+        "architecture": "aarch64",
+        "argv": [
+          "docker",
+          "--host",
+          "unix:///Users/eddy/.docker/run/docker.sock",
+          "create",
+          "--pull=never",
+          "--name",
+          "authority-probe-6055cfc6fac4",
+          "--label",
+          "assistant.authority.probe=authority-probe-6055cfc6fac4",
+          "--network=none",
+          "--read-only",
+          "--user=20001:20001",
+          "--cap-drop=ALL",
+          "--security-opt=no-new-privileges:true",
+          "--tmpfs",
+          "/tmp:rw,nosuid,nodev",
+          "--security-opt",
+          "seccomp=/private/tmp/ar-2grglw31/tmp/pytest-of-eddy/pytest-0/test_reviewed_default_baseline0/reviewed-profiles/candidate.json",
+          "--entrypoint",
+          "/usr/bin/env",
+          "sha256:5a14a72ed183851752e631650b5d838c4396644def08c88dddf410545df300f6",
+          "-i",
+          "PATH=/usr/local/bin:/usr/bin:/bin",
+          "/bin/sh",
+          "-c",
+          "python - <<'WRITE_FIXED_DIAGNOSTIC'\nfrom pathlib import Path\nPath('/tmp/namespace_diagnostic.py').write_text('\"\"\"Throwaway syscall diagnostic under unchanged container policy; no security toggles.\"\"\"\\n\\nimport ctypes\\nimport errno\\nimport json\\nimport os\\nimport platform\\nimport subprocess\\nimport sys\\n\\nFLAGS = {\\n    \"none\": 0,\\n    \"newuser\": 0x10000000,\\n    \"newmount\": 0x00020000,\\n    \"newpid\": 0x20000000,\\n    \"newnet\": 0x40000000,\\n    \"newipc\": 0x08000000,\\n    \"bwrap_namespaces\": 0x10000000 | 0x00020000 | 0x20000000 | 0x40000000 | 0x08000000,\\n}\\n\\n\\ndef child(operation: str, flags: int) -> None:\\n    libc = ctypes.CDLL(None, use_errno=True)\\n    ctypes.set_errno(0)\\n    if operation == \"unshare\":\\n        libc.unshare.argtypes = [ctypes.c_int]\\n        libc.unshare.restype = ctypes.c_int\\n        result = libc.unshare(flags)\\n    else:\\n        # Linux native clone ABI on the observed aarch64 target only.\\n        if platform.machine() != \"aarch64\":\\n            raise RuntimeError(\"diagnostic clone syscall number is aarch64-only\")\\n        libc.syscall.restype = ctypes.c_long\\n        result = libc.syscall(\\n            ctypes.c_long(220),\\n            ctypes.c_ulong(flags | 17),\\n            ctypes.c_void_p(0),\\n            ctypes.c_void_p(0),\\n            ctypes.c_void_p(0),\\n            ctypes.c_ulong(0),\\n        )\\n        if result == 0:\\n            os._exit(0)\\n        if result > 0:\\n            _, status = os.waitpid(result, 0)\\n            if status != 0:\\n                raise RuntimeError(\"owned diagnostic child did not exit cleanly\")\\n    error = ctypes.get_errno() if result < 0 else 0\\n    print(\\n        json.dumps(\\n            {\\n                \"operation\": operation,\\n                \"flags\": hex(flags),\\n                \"succeeded\": result >= 0,\\n                \"errno\": error,\\n                \"reason\": errno.errorcode.get(error, \"OK\"),\\n            }\\n        )\\n    )\\n\\n\\nif __name__ == \"__main__\":\\n    if len(sys.argv) == 3:\\n        child(sys.argv[1], int(sys.argv[2]))\\n    else:\\n        if platform.machine() != \"aarch64\":\\n            raise RuntimeError(\"diagnostic is aarch64-only\")\\n        from pathlib import Path\\n\\n        status = dict(\\n            line.split(\":\", 1)\\n            for line in Path(\"/proc/self/status\").read_text().splitlines()\\n            if \":\" in line\\n        )\\n        print(\\n            \"policy-facts \"\\n            + json.dumps(\\n                {\\n                    \"architecture\": platform.machine(),\\n                    \"uid\": os.getuid(),\\n                    \"gid\": os.getgid(),\\n                    \"cap_effective\": int(status[\"CapEff\"].strip(), 16),\\n                    \"no_new_privileges\": int(status[\"NoNewPrivs\"].strip()),\\n                    \"seccomp_mode\": int(status[\"Seccomp\"].strip()),\\n                }\\n            )\\n        )\\n        for operation in (\"clone\", \"unshare\"):\\n            for label, flags in FLAGS.items():\\n                result = subprocess.run(\\n                    [sys.executable, __file__, operation, str(flags)],\\n                    capture_output=True,\\n                    text=True,\\n                    timeout=5,\\n                )\\n                print(label, result.stdout.strip(), result.stderr.strip())\\n                if result.returncode != 0:\\n                    raise SystemExit(result.returncode)\\n')\nWRITE_FIXED_DIAGNOSTIC\npython /tmp/namespace_diagnostic.py"
+        ],
+        "cleanup_confirmed": true,
+        "container_id": "72789d08ddc6e34357d4b1acc9ea2a1df0c34969a91887e1eed2b8b80c865f3e",
+        "image_id": "sha256:5a14a72ed183851752e631650b5d838c4396644def08c88dddf410545df300f6",
+        "requested_image": "sha256:5a14a72ed183851752e631650b5d838c4396644def08c88dddf410545df300f6"
+      },
+      "run": {
+        "architecture": "aarch64",
+        "cap_effective": 0,
+        "cleanup_confirmed": true,
+        "gid": 20001,
+        "image_id": "sha256:5a14a72ed183851752e631650b5d838c4396644def08c88dddf410545df300f6",
+        "no_new_privileges": 1,
+        "observations": [
+          {
+            "errno": 0,
+            "flags": "0x0",
+            "operation": "clone",
+            "reason": "OK",
+            "succeeded": true
+          },
+          {
+            "errno": 1,
+            "flags": "0x10000000",
+            "operation": "clone",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x20000",
+            "operation": "clone",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x20000000",
+            "operation": "clone",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x40000000",
+            "operation": "clone",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x8000000",
+            "operation": "clone",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x78020000",
+            "operation": "clone",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 0,
+            "flags": "0x0",
+            "operation": "unshare",
+            "reason": "OK",
+            "succeeded": true
+          },
+          {
+            "errno": 1,
+            "flags": "0x10000000",
+            "operation": "unshare",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x20000",
+            "operation": "unshare",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x20000000",
+            "operation": "unshare",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x40000000",
+            "operation": "unshare",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x8000000",
+            "operation": "unshare",
+            "reason": "EPERM",
+            "succeeded": false
+          },
+          {
+            "errno": 1,
+            "flags": "0x78020000",
+            "operation": "unshare",
+            "reason": "EPERM",
+            "succeeded": false
+          }
+        ],
+        "process_exit": 0,
+        "seccomp_mode": 2,
+        "uid": 20001
+      }
+    }
+  },
+  "unrelated_inventory_unchanged": true
+}

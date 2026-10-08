@@ -1,6 +1,8 @@
 # No-op namespace attribution — exact artifact execution review
 
-Status: **baseline accepted; candidate prepared; custom-policy execution NOT authorized/run**.
+Status: **exact B/P no-op comparison authorized and executed successfully in owned
+containers; latest general verification blocked**. See [actual result and limits](2026-10-07-namespace-comparison-result.md).
+The preparation/execution request below is preserved historically.
 User accepted the version-linked baseline after checkpoint `dda6bb3c`; raw B and
 `baseline-provenance.json` frozen in `37b07acf`. It is not a live-filter export.
 

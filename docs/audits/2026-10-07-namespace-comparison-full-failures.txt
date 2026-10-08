@@ -1,0 +1,97 @@
+FAILED tests/api/test_desktop_server.py::TestDesktopServerMode::test_second_launch_exits_when_lock_held
+FAILED tests/api/test_issue_13_14.py::test_unfilled_optional_placeholders_render_empty
+FAILED tests/config/test_packaging.py::test_wheel_contains_exact_grader_prompt_seed
+FAILED tests/reference_deployments/test_jen_fixture.py::test_cli_spaced_paths_and_redacted_error
+FAILED tests/reference_deployments/test_jen_governance.py::test_read_runs_without_approval
+FAILED tests/reference_deployments/test_jen_governance.py::test_installed_read_failure_has_failed_tool_outcome
+FAILED tests/reference_deployments/test_jen_governance.py::test_approval_executes_once
+FAILED tests/reference_deployments/test_jen_governance.py::test_state_changed_after_proposal_refuses_write
+FAILED tests/sdk/test_custom_tool_output_ceiling.py::test_custom_command_above_capture_ceiling_is_explicitly_truncated
+FAILED tests/sdk/test_custom_tool_pipefail.py::test_pipefail_opt_in_reports_early_pipeline_failure
+FAILED tests/sdk/test_custom_tool_pipefail.py::test_default_pipeline_semantics_remain_compatible
+FAILED tests/sdk/test_custom_tool_results.py::test_command_output_boundary_and_recovery[0-parsed]
+FAILED tests/sdk/test_custom_tool_results.py::test_command_output_boundary_and_recovery[0-reconstructed]
+FAILED tests/sdk/test_custom_tool_results.py::test_command_output_boundary_and_recovery[4999-parsed]
+FAILED tests/sdk/test_custom_tool_results.py::test_command_output_boundary_and_recovery[4999-reconstructed]
+FAILED tests/sdk/test_custom_tool_results.py::test_command_output_boundary_and_recovery[5000-parsed]
+FAILED tests/sdk/test_custom_tool_results.py::test_command_output_boundary_and_recovery[5000-reconstructed]
+FAILED tests/sdk/test_custom_tool_results.py::test_command_output_boundary_and_recovery[5001-parsed]
+FAILED tests/sdk/test_custom_tool_results.py::test_command_output_boundary_and_recovery[5001-reconstructed]
+FAILED tests/sdk/test_custom_tool_results.py::test_command_output_boundary_and_recovery[5002-parsed]
+FAILED tests/sdk/test_custom_tool_results.py::test_command_output_boundary_and_recovery[5002-reconstructed]
+FAILED tests/sdk/test_custom_tool_results.py::test_command_output_boundary_and_recovery[6000-parsed]
+FAILED tests/sdk/test_custom_tool_results.py::test_command_output_boundary_and_recovery[6000-reconstructed]
+FAILED tests/sdk/test_custom_tool_results.py::test_result_scope_is_bound_not_taken_from_command_arguments[parsed]
+FAILED tests/sdk/test_custom_tool_results.py::test_result_scope_is_bound_not_taken_from_command_arguments[reconstructed]
+FAILED tests/sdk/test_custom_tool_results.py::test_command_errors_unchanged_and_timeout_now_fails[parsed]
+FAILED tests/sdk/test_custom_tool_results.py::test_command_errors_unchanged_and_timeout_now_fails[reconstructed]
+FAILED tests/sdk/test_custom_tool_results.py::test_real_command_large_output_round_trip
+FAILED tests/sdk/test_custom_tool_results.py::test_recovery_in_fresh_process_without_files_read
+FAILED tests/sdk/test_custom_tool_results.py::test_lazy_execution_binds_loop_scope
+FAILED tests/sdk/test_custom_tool_results.py::test_discovery_binds_invoking_scope
+FAILED tests/sdk/test_custom_tool_sandbox.py::test_custom_command_receives_explicit_sandbox_secret_allowlist
+FAILED tests/sdk/test_custom_tool_sandbox.py::test_custom_command_goes_through_the_seam_as_one_shell_argv[parsed]
+FAILED tests/sdk/test_custom_tool_sandbox.py::test_custom_command_goes_through_the_seam_as_one_shell_argv[reconstructed]
+FAILED tests/sdk/test_custom_tool_sandbox.py::test_custom_command_cannot_exceed_the_write_budget[parsed]
+FAILED tests/sdk/test_custom_tool_sandbox.py::test_custom_command_cannot_exceed_the_write_budget[reconstructed]
+FAILED tests/sdk/test_custom_tool_sandbox.py::test_unbounded_timeout_declaration_still_executes[parsed]
+FAILED tests/sdk/test_custom_tool_sandbox.py::test_unbounded_timeout_declaration_still_executes[reconstructed]
+FAILED tests/sdk/test_custom_tool_timeout.py::test_declared_timeout_reaches_subprocess[None-300.0-parsed]
+FAILED tests/sdk/test_custom_tool_timeout.py::test_declared_timeout_reaches_subprocess[None-300.0-reconstructed]
+FAILED tests/sdk/test_custom_tool_timeout.py::test_declared_timeout_reaches_subprocess[timeout_seconds: 42-42.0-parsed]
+FAILED tests/sdk/test_custom_tool_timeout.py::test_declared_timeout_reaches_subprocess[timeout_seconds: 42-42.0-reconstructed]
+FAILED tests/sdk/test_custom_tool_timeout.py::test_declared_timeout_reaches_subprocess[timeout_seconds: 7.5-7.5-parsed]
+FAILED tests/sdk/test_custom_tool_timeout.py::test_declared_timeout_reaches_subprocess[timeout_seconds: 7.5-7.5-reconstructed]
+FAILED tests/sdk/test_custom_tool_timeout.py::test_declared_timeout_reaches_subprocess[timeout_seconds: none-None-parsed]
+FAILED tests/sdk/test_custom_tool_timeout.py::test_declared_timeout_reaches_subprocess[timeout_seconds: none-None-reconstructed]
+FAILED tests/sdk/test_custom_tool_timeout.py::test_cap_kill_surfaces_as_failure_not_success[parsed]
+FAILED tests/sdk/test_custom_tool_timeout.py::test_cap_kill_surfaces_as_failure_not_success[reconstructed]
+FAILED tests/sdk/test_custom_tool_timeout.py::test_timeout_raises_distinct_failure_with_elapsed[parsed]
+FAILED tests/sdk/test_custom_tool_timeout.py::test_timeout_raises_distinct_failure_with_elapsed[reconstructed]
+FAILED tests/sdk/test_custom_tool_timeout.py::test_index_round_trip_preserves_declared_timeout
+FAILED tests/sdk/test_kit.py::TestFactoryRoundTrip::test_factory_stamps_valid_kit
+FAILED tests/sdk/test_loop_fidelity_b12.py::TestSandboxTimeoutKillsDescendants::test_descendant_writer_is_stopped
+FAILED tests/sdk/test_mcp_start_lifecycle.py::test_cold_get_tools_returns_without_deadlock
+FAILED tests/sdk/test_mcp_start_lifecycle.py::test_concurrent_first_use_starts_a_server_once
+FAILED tests/sdk/test_mcp_stdio_lifecycle.py::test_real_stdio_server_discovers_calls_and_caches
+FAILED tests/sdk/test_operational_telemetry.py::test_sandbox_span_records_backend_class_exit_never_command
+FAILED tests/sdk/test_operational_telemetry.py::test_sandbox_timeout_records_negative_exit_code
+FAILED tests/sdk/test_operational_telemetry.py::test_no_sandbox_spans_when_observability_inactive
+FAILED tests/sdk/test_operational_telemetry_routing.py::test_empty_endpoint_disables_http_sandbox_provider_and_audit_instrumentation
+FAILED tests/sdk/test_pipeline_signal_death.py::test_last_pipeline_member_killed_is_a_failure[parsed]
+FAILED tests/sdk/test_pipeline_signal_death.py::test_last_pipeline_member_killed_is_a_failure[reconstructed]
+FAILED tests/sdk/test_pipeline_signal_death.py::test_ordinary_non_zero_exit_still_returns_its_message[parsed]
+FAILED tests/sdk/test_pipeline_signal_death.py::test_ordinary_non_zero_exit_still_returns_its_message[reconstructed]
+FAILED tests/sdk/test_pipeline_signal_death.py::test_a_successful_pipeline_is_untouched[parsed]
+FAILED tests/sdk/test_pipeline_signal_death.py::test_a_successful_pipeline_is_untouched[reconstructed]
+FAILED tests/sdk/test_pipeline_signal_death.py::test_signal_statuses_map_to_their_signal[129-1]
+FAILED tests/sdk/test_pipeline_signal_death.py::test_signal_statuses_map_to_their_signal[137-9]
+FAILED tests/sdk/test_pipeline_signal_death.py::test_signal_statuses_map_to_their_signal[143-15]
+FAILED tests/sdk/test_pipeline_signal_death.py::test_signal_statuses_map_to_their_signal[192-64]
+FAILED tests/sdk/test_pipeline_signal_death.py::test_statuses_outside_the_signal_band_stay_ordinary_failures[126]
+FAILED tests/sdk/test_pipeline_signal_death.py::test_statuses_outside_the_signal_band_stay_ordinary_failures[127]
+FAILED tests/sdk/test_pipeline_signal_death.py::test_statuses_outside_the_signal_band_stay_ordinary_failures[128]
+FAILED tests/sdk/test_pipeline_signal_death.py::test_statuses_outside_the_signal_band_stay_ordinary_failures[193]
+FAILED tests/sdk/test_pipeline_signal_death.py::test_statuses_outside_the_signal_band_stay_ordinary_failures[255]
+FAILED tests/sdk/test_pipeline_signal_death.py::test_a_deliberate_128_plus_n_exit_is_indistinguishable
+FAILED tests/sdk/test_receipt_fidelity.py::test_sandbox_ordinary_non_zero_exit_is_not_signalled
+FAILED tests/sdk/test_receipt_fidelity.py::test_custom_command_tool_raises_on_a_signal_kill[parsed]
+FAILED tests/sdk/test_receipt_fidelity.py::test_custom_command_tool_raises_on_a_signal_kill[reconstructed]
+FAILED tests/sdk/test_run_tests.py::test_it_runs_a_suite_and_reports_pass - A...
+FAILED tests/sdk/test_run_tests.py::test_it_reports_failure_honestly_and_points_at_the_test
+FAILED tests/sdk/test_sandbox.py::TestNullBackend::test_runs_argv - Assertion...
+FAILED tests/sdk/test_sandbox.py::TestNullBackend::test_timeout - AssertionEr...
+FAILED tests/sdk/test_sandbox.py::TestSoftBackend::test_run_enforces_timeout
+FAILED tests/sdk/test_sandbox.py::TestSoftBackend::test_run_scrubs_env_into_child
+FAILED tests/sdk/test_sandbox.py::TestSoftBackend::test_run_output_capped - A...
+FAILED tests/sdk/test_sandbox.py::TestUidDrop::test_subprocess_never_runs_as_root
+FAILED tests/sdk/test_sandbox_write_budget.py::test_a_write_above_the_old_output_derived_cap_succeeds
+FAILED tests/sdk/test_sandbox_write_budget.py::test_write_budget_is_independent_of_the_output_budget
+FAILED tests/sdk/test_shared_tools_wiring.py::test_rebuild_with_a_command_still_runs
+FAILED tests/sdk/test_shell_output_spill.py::test_truncated_output_spills_to_file
+FAILED tests/sdk/test_shell_output_spill.py::test_small_output_not_truncated_no_spill
+FAILED tests/sdk/test_tool_contracts.py::TestShellExecute::test_simple_command
+FAILED tests/sdk/test_tool_contracts.py::TestShellExecute::test_default_user_id
+FAILED tests/unit/test_other_tools.py::TestShellTool::test_shell_execute_with_command
+95 failed, 3875 passed, 32 skipped, 69 warnings in 274.03s (0:04:34)
+Verification process exit: 1
