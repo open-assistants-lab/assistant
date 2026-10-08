@@ -150,7 +150,7 @@ trigger the native fault? Current probes exercised those components independentl
 SDK async request source performs metadata detection after client initialization.
 No API request is needed to examine this boundary.
 
-### Proposed follow-up: eight fresh guarded processes, not authorized/run here
+### Follow-up proposed at the prior checkpoint (subsequently approved/executed below)
 
 New proposed budget: **8 processes maximum,20-second deadline each**, sequential;
 no additional pytest slices or full-suite run in this follow-up. Four fixed cases,
@@ -190,4 +190,49 @@ fault was observed in this pass, so native-cause/fix claims would be unjustified
 No runtime/test/library source changed; durable changes are investigation evidence.
 The latest general full run remains95 failures; neither Linux namespace Task3 nor
 the original authority foundation is cleared. No merge/push/release/customer use.
-Please review/approve the proposed eight-process follow-up before another launch.
+The proposed eight-process follow-up required separate approval, subsequently
+received and executed as recorded below. No additional launch is authorized.
+
+## Approved eight-process composition follow-up
+
+User **“approve”** accepted the exact proposed experiment after `8ad82891`.
+[Complete composition outcomes](2026-10-07-macos-spawn-composition-results.json)
+preserve the separate8-process budget, argv, exact owned PID/start-time records,
+guard/client/detection/closure markers, return codes and cleanup observations.
+Original16-probe/6-slice evidence was not overwritten or rerun.
+
+|Client open during SDK get_platform|Two fresh cold processes|Two fresh prewarmed processes|
+|---|---|---|
+|Serial detection|2 completed,exit0,MacOS|2 completed,exit0,MacOS|
+|One joined detection worker|2 completed,exit0,MacOS|2 completed,exit0,MacOS|
+
+All8 denied external DNS before SDK imports, kept the fake-key/local-closed-port
+client open until detection finished, closed it in finally, and completed within
+the20-second deadline. Actual worker names and warm-before-construction ordering
+were checked from phase records, not inferred from case labels. No native fatal/
+SIGSEGV stderr, timeout or tracked owned leftovers; owned .env shadow absent.
+No API requests, Docker change, spawn-mode override, dependency installation,
+telemetry suppression, product/library/test source change or cache-warming cure.
+No owned crash occurred, so no macOS native reports were sought or unrelated
+reports scanned. Author evidence self-review only; no branch-readiness claim.
+
+**Conclusion remains inconclusive.** These cases did not support client construction
+plus cold/threaded platform detection as a sufficient trigger in the tested fresh
+processes. They do not rule out other runtime state, timing, framework initialization,
+combined test sequence or native-runtime defects. Historical95 full failures and
+two ordinary API404 failures remain unresolved.
+
+### Recommended next step — separate scope, not run
+
+Stop guessing with more isolated component combinations. If further debugging is
+wanted, capture **one instrumented full-suite reproduction**, retaining exact
+parent/helper PID associations, test-node boundaries and PID/time-matched macOS
+native crash reports. Proposed limit: one full verifier launch, at most1800seconds,
+using already approved offline build-cache reuse; no rerun-to-green. Instrumentation
+must preserve actual spawn/security semantics and redact environment/argument
+secrets; disclose its timing effects. A missing crash is still inconclusive.
+
+This broader diagnostic run and its instrumentation need a reviewed bounded scope
+before execution. No native crash or demonstrated regression currently justifies
+an exact production fix. General verification and hardened MT remain blocked;
+final fresh-context whole-branch review and authority foundation completion remain.

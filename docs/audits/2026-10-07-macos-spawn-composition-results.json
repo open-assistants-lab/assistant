@@ -1,0 +1,306 @@
+{
+  "approval": "User approve in response to eight-process composition follow-up from8ad82891",
+  "budget": 8,
+  "deadline_seconds": 20,
+  "cases": [
+    {
+      "number": 1,
+      "case": "cold",
+      "mode": "serial",
+      "repeat": 1,
+      "pid": 47646,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/composition_child.py",
+        "cold",
+        "serial"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "construct-start",
+        "construct-finish",
+        "detection-start",
+        "detection-finish",
+        "client-closed",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "47646": {
+          "ppid": 47645,
+          "pgid": 47646,
+          "start": "Thu Oct  8 18:59:39 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.898
+    },
+    {
+      "number": 2,
+      "case": "cold",
+      "mode": "serial",
+      "repeat": 2,
+      "pid": 47665,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/composition_child.py",
+        "cold",
+        "serial"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "construct-start",
+        "construct-finish",
+        "detection-start",
+        "detection-finish",
+        "client-closed",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "47665": {
+          "ppid": 47645,
+          "pgid": 47665,
+          "start": "Thu Oct  8 18:59:40 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.605
+    },
+    {
+      "number": 3,
+      "case": "cold",
+      "mode": "threaded",
+      "repeat": 1,
+      "pid": 47673,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/composition_child.py",
+        "cold",
+        "threaded"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "construct-start",
+        "construct-finish",
+        "detection-start",
+        "detection-finish",
+        "client-closed",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "47673": {
+          "ppid": 47645,
+          "pgid": 47673,
+          "start": "Thu Oct  8 18:59:41 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.6
+    },
+    {
+      "number": 4,
+      "case": "cold",
+      "mode": "threaded",
+      "repeat": 2,
+      "pid": 47681,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/composition_child.py",
+        "cold",
+        "threaded"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "construct-start",
+        "construct-finish",
+        "detection-start",
+        "detection-finish",
+        "client-closed",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "47681": {
+          "ppid": 47645,
+          "pgid": 47681,
+          "start": "Thu Oct  8 18:59:41 2026    "
+        },
+        "47685": {
+          "ppid": 47681,
+          "pgid": 47681,
+          "start": "Thu Oct  8 18:59:42 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.602
+    },
+    {
+      "number": 5,
+      "case": "warm",
+      "mode": "serial",
+      "repeat": 1,
+      "pid": 47689,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/composition_child.py",
+        "warm",
+        "serial"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "prewarm-start",
+        "prewarm-finish",
+        "construct-start",
+        "construct-finish",
+        "detection-start",
+        "detection-finish",
+        "client-closed",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "47689": {
+          "ppid": 47645,
+          "pgid": 47689,
+          "start": "Thu Oct  8 18:59:42 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.609
+    },
+    {
+      "number": 6,
+      "case": "warm",
+      "mode": "serial",
+      "repeat": 2,
+      "pid": 47697,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/composition_child.py",
+        "warm",
+        "serial"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "prewarm-start",
+        "prewarm-finish",
+        "construct-start",
+        "construct-finish",
+        "detection-start",
+        "detection-finish",
+        "client-closed",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "47697": {
+          "ppid": 47645,
+          "pgid": 47697,
+          "start": "Thu Oct  8 18:59:43 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.605
+    },
+    {
+      "number": 7,
+      "case": "warm",
+      "mode": "threaded",
+      "repeat": 1,
+      "pid": 47705,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/composition_child.py",
+        "warm",
+        "threaded"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "prewarm-start",
+        "prewarm-finish",
+        "construct-start",
+        "construct-finish",
+        "detection-start",
+        "detection-finish",
+        "client-closed",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "47705": {
+          "ppid": 47645,
+          "pgid": 47705,
+          "start": "Thu Oct  8 18:59:43 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.601
+    },
+    {
+      "number": 8,
+      "case": "warm",
+      "mode": "threaded",
+      "repeat": 2,
+      "pid": 47713,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/composition_child.py",
+        "warm",
+        "threaded"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "markers": [
+        "start",
+        "guard-denied",
+        "prewarm-start",
+        "prewarm-finish",
+        "construct-start",
+        "construct-finish",
+        "detection-start",
+        "detection-finish",
+        "client-closed",
+        "finish"
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "47713": {
+          "ppid": 47645,
+          "pgid": 47713,
+          "start": "Thu Oct  8 18:59:44 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.596
+    }
+  ],
+  "native_crash_reproduced": false,
+  "all_platform_results": "MacOS",
+  "all_client_detection_order_checks_passed": true,
+  "all_guards_verified": true,
+  "owned_shadow_absent": true,
+  "interpretation": "No native crash reproduced in these8 composed controls; original full-suite failures and separate API404 failures remain unresolved. No runtime fix or cache-warming cure justified."
+}
