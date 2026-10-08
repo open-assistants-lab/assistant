@@ -82,7 +82,7 @@ attached to these captured helpers within the searched metadata/window.
 Do not borrow another process's report to explain this failure. No debugger attach,
 security toggle, global diagnostic cleanup or scan of unrelated customer contents.
 
-## Next bounded reduction — proposed, not authorized/run here
+## Bounded reduction proposed at this checkpoint — subsequently approved
 
 The first crashing helper already occurs in the first agent-loop test, before the
 later95 failed assertions. Reduce around that **observed first node**, rather than
@@ -101,6 +101,11 @@ in a later separately bounded step. If neither reproduces, report uncertainty an
 review the timing/runtime-context difference rather than prescribe a speculative
 fix. Native-stack acquisition, if needed, requires a separately reviewed owned-PID
 method, not privileged attachment or an unrelated report.
+
+User subsequently approved both launches. Neither reproduced the native fault;
+only the full-collection single-node run exercised uname/file helpers. Detailed
+[reduction outcomes and limits](2026-10-08-macos-first-node-reduction.md) preserve
+this coverage difference. The two-launch budget is exhausted; no further launch.
 
 No current evidence justifies a production change. A lasting fix still requires
 an observed RED regression and reviewed semantics; original authority foundation,

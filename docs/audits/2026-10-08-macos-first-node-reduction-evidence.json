@@ -1,0 +1,259 @@
+{
+  "approved_launches": 2,
+  "deadline_per_launch_seconds": 120,
+  "head_at_launch": "6b8e3f27",
+  "reductions": [
+    {
+      "number": 1,
+      "approval": {
+        "approval": "User yes plz after6b8e3f27",
+        "budget_group": 2,
+        "deadline_seconds": 120,
+        "selection": [
+          "tests",
+          "-k",
+          "TestMessageEndpoint and test_message_returns_response"
+        ],
+        "argv": [
+          "python3",
+          "scripts/verify_refactor.py",
+          "--timeout",
+          "120",
+          "--",
+          "-o",
+          "pythonpath=/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation",
+          "-p",
+          "native_reduce_1",
+          "tests",
+          "-k",
+          "TestMessageEndpoint and test_message_returns_response",
+          "-vv"
+        ],
+        "prepared_time_ns": 1791465290938250000,
+        "semantics": "Capture unchanged except log/module names; helper outcomes independent of pytest assertion"
+      },
+      "pytest_exit": 0,
+      "summary": "=============== 1 passed, 4001 deselected, 3 warnings in 16.87s ================",
+      "parent_pid": 54848,
+      "event_count": 14,
+      "helper_exit_codes": {
+        "0": 3
+      },
+      "helper_sequences": [
+        {
+          "event": "spawn-start",
+          "pid": 54848,
+          "time_ns": 1791465294840108000,
+          "thread_id": 6114177024,
+          "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "token": 1,
+          "category": "git",
+          "argv_count": 2,
+          "cwd_supplied": true,
+          "preexec_supplied": false,
+          "new_session": false,
+          "explicit_env": false
+        },
+        {
+          "event": "spawn-ready",
+          "pid": 54848,
+          "time_ns": 1791465294849241000,
+          "thread_id": 6114177024,
+          "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "token": 1,
+          "helper_pid": 54849,
+          "spawn_node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "category": "git"
+        },
+        {
+          "event": "spawn-exit",
+          "pid": 54848,
+          "time_ns": 1791465295179458000,
+          "thread_id": 6114177024,
+          "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "token": 1,
+          "helper_pid": 54849,
+          "returncode": 0,
+          "spawn_node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "category": "git"
+        },
+        {
+          "event": "spawn-start",
+          "pid": 54848,
+          "time_ns": 1791465301211211000,
+          "thread_id": 6131003392,
+          "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "token": 2,
+          "category": "uname",
+          "argv_count": 2,
+          "cwd_supplied": false,
+          "preexec_supplied": false,
+          "new_session": false,
+          "explicit_env": false
+        },
+        {
+          "event": "spawn-ready",
+          "pid": 54848,
+          "time_ns": 1791465301228847000,
+          "thread_id": 6131003392,
+          "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "token": 2,
+          "helper_pid": 54851,
+          "spawn_node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "category": "uname"
+        },
+        {
+          "event": "spawn-exit",
+          "pid": 54848,
+          "time_ns": 1791465301231268000,
+          "thread_id": 6131003392,
+          "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "token": 2,
+          "helper_pid": 54851,
+          "returncode": 0,
+          "spawn_node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "category": "uname"
+        },
+        {
+          "event": "spawn-start",
+          "pid": 54848,
+          "time_ns": 1791465301231840000,
+          "thread_id": 6131003392,
+          "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "token": 3,
+          "category": "file",
+          "argv_count": 3,
+          "cwd_supplied": false,
+          "preexec_supplied": false,
+          "new_session": false,
+          "explicit_env": true
+        },
+        {
+          "event": "spawn-ready",
+          "pid": 54848,
+          "time_ns": 1791465301242558000,
+          "thread_id": 6131003392,
+          "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "token": 3,
+          "helper_pid": 54852,
+          "spawn_node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "category": "file"
+        },
+        {
+          "event": "spawn-exit",
+          "pid": 54848,
+          "time_ns": 1791465301245999000,
+          "thread_id": 6131003392,
+          "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "token": 3,
+          "helper_pid": 54852,
+          "returncode": 0,
+          "spawn_node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "category": "file"
+        }
+      ],
+      "sigsegv_helper_count": 0,
+      "fatal_python_stderr": false,
+      "session_finish": [
+        {
+          "event": "session-finish",
+          "pid": 54848,
+          "time_ns": 1791465309472950000,
+          "thread_id": 8427552640,
+          "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "exitstatus": 0
+        }
+      ],
+      "capture_restored": true
+    },
+    {
+      "number": 2,
+      "approval": {
+        "approval": "User yes plz after6b8e3f27",
+        "budget_group": 2,
+        "deadline_seconds": 120,
+        "selection": [
+          "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response"
+        ],
+        "argv": [
+          "python3",
+          "scripts/verify_refactor.py",
+          "--timeout",
+          "120",
+          "--",
+          "-o",
+          "pythonpath=/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation",
+          "-p",
+          "native_reduce_2",
+          "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "-vv"
+        ],
+        "prepared_time_ns": 1791465290939289000,
+        "semantics": "Capture unchanged except log/module names; helper outcomes independent of pytest assertion"
+      },
+      "pytest_exit": 0,
+      "summary": "========================= 1 passed, 1 warning in 3.37s =========================",
+      "parent_pid": 54859,
+      "event_count": 8,
+      "helper_exit_codes": {
+        "0": 1
+      },
+      "helper_sequences": [
+        {
+          "event": "spawn-start",
+          "pid": 54859,
+          "time_ns": 1791465313941918000,
+          "thread_id": 6182514688,
+          "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "token": 1,
+          "category": "git",
+          "argv_count": 2,
+          "cwd_supplied": true,
+          "preexec_supplied": false,
+          "new_session": false,
+          "explicit_env": false
+        },
+        {
+          "event": "spawn-ready",
+          "pid": 54859,
+          "time_ns": 1791465313947533000,
+          "thread_id": 6182514688,
+          "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "token": 1,
+          "helper_pid": 54860,
+          "spawn_node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "category": "git"
+        },
+        {
+          "event": "spawn-exit",
+          "pid": 54859,
+          "time_ns": 1791465314062207000,
+          "thread_id": 6182514688,
+          "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "token": 1,
+          "helper_pid": 54860,
+          "returncode": 0,
+          "spawn_node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "category": "git"
+        }
+      ],
+      "sigsegv_helper_count": 0,
+      "fatal_python_stderr": false,
+      "session_finish": [
+        {
+          "event": "session-finish",
+          "pid": 54859,
+          "time_ns": 1791465316833098000,
+          "thread_id": 8427552640,
+          "node": "tests/api/test_agent_loop.py::TestMessageEndpoint::test_message_returns_response",
+          "exitstatus": 0
+        }
+      ],
+      "capture_restored": true
+    }
+  ],
+  "native_fault_reproduced": false,
+  "isolated_case_exercises_platform_helpers": false,
+  "owned_shadow_absent": true,
+  "interpretation": "First-node assertion passes both; full-collection first-node control has successful git/uname/file exits; isolated-node lacks uname/file path. Full-suite native fault remains reproduced/unresolved; no third run or fix."
+}
