@@ -1,0 +1,11 @@
+{
+  "source_url": "https://github.com/moby/moby/blob/3ce5872b7950c63ba2ffbc5123101019ff3e6682/vendor/github.com/moby/profiles/seccomp/default.json",
+  "source_revision": "3ce5872b7950c63ba2ffbc5123101019ff3e6682",
+  "profile_sha256": "536529b665dd0972c37bfb569f5d4ac8a53592e7b00752bc39ff063ca9864c74",
+  "engine_version": "29.8.0",
+  "engine_commit": "3ce5872",
+  "architecture": "aarch64",
+  "mapping_kind": "substitute-reviewed",
+  "mapping_evidence": "docs/audits/2026-10-07-namespace-policy-artifact-review.md#mapping-limitation-requiring-explicit-review",
+  "review_reference": "User proceed after dda6bb3c self-review; version-linked source snapshot accepted, not live-filter export or policy execution authorization."
+}
