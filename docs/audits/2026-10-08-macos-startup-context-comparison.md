@@ -97,7 +97,7 @@ Native proxy-discovery overlap is **a trace-grounded hypothesis**, not the prove
 root cause. It is more specific than blaming sandbox namespace policy, echo PATH,
 OpenAI construction alone or globally disabling telemetry. No lasting fix selected.
 
-## Proposed next experiment — separate permission required
+## Experiment proposed at this checkpoint — subsequently approved
 
 **Four fresh guarded processes,20-second outer deadlines, sequential, two repetitions
 of each condition. No pytest/full-suite runs or API requests.**
@@ -125,6 +125,10 @@ native reports if a fault occurs. Do not extend/retry budget to seek a crash.
 If native proxy phase fails to overlap or no crash occurs, retain that limitation;
 no inference of cause/fix. Any lasting change still requires observed RED and review.
 
-No experiments authorized/run by this read-only comparison request. General
-verification, hardened MT, authority foundation and fresh-context branch review
-remain blocked/pending.
+No experiments were authorized/run by the read-only comparison request itself.
+User subsequently approved four processes; all completed without SIGSEGV, including
+two measured proxy-query/uname-initialization interval overlaps. See the
+[complete control outcomes and limitations](2026-10-08-macos-proxy-fork-results.md).
+The four-run budget is exhausted; no lasting fix or additional launch authorized.
+General verification, hardened MT, authority foundation and fresh-context branch
+review remain blocked/pending.

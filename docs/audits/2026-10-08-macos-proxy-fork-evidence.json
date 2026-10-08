@@ -1,0 +1,769 @@
+{
+  "approval": {
+    "approval": "User proceed after8ea6eaa3 four-probe proposal",
+    "budget": 4,
+    "deadline_seconds": 20,
+    "start_time_ns": 1791467668104525000
+  },
+  "outcomes": [
+    {
+      "number": 1,
+      "mode": "default",
+      "repeat": 1,
+      "pid": 56911,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/proxy_fork_child.py",
+        "default"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "phases": [
+        {
+          "marker": "start",
+          "pid": 56911,
+          "time_ns": 1791467668205844000,
+          "thread": "MainThread",
+          "mode": "default"
+        },
+        {
+          "marker": "guard-denied",
+          "pid": 56911,
+          "time_ns": 1791467668205958000,
+          "thread": "MainThread",
+          "mode": "default"
+        },
+        {
+          "marker": "proxy-environment-empty",
+          "pid": 56911,
+          "time_ns": 1791467668205994000,
+          "thread": "MainThread",
+          "mode": "default"
+        },
+        {
+          "marker": "detection-ready",
+          "pid": 56911,
+          "time_ns": 1791467668684265000,
+          "thread": "owned-platform-worker",
+          "mode": "default"
+        },
+        {
+          "marker": "client-construct-start",
+          "pid": 56911,
+          "time_ns": 1791467668684362000,
+          "thread": "owned-proxy-worker",
+          "mode": "default"
+        },
+        {
+          "marker": "proxy-map-entry",
+          "pid": 56911,
+          "time_ns": 1791467668684650000,
+          "thread": "owned-proxy-worker",
+          "mode": "default",
+          "allow_env_proxies": true
+        },
+        {
+          "marker": "proxy-query-start",
+          "pid": 56911,
+          "time_ns": 1791467668684680000,
+          "thread": "owned-proxy-worker",
+          "mode": "default"
+        },
+        {
+          "marker": "detection-start",
+          "pid": 56911,
+          "time_ns": 1791467668684692000,
+          "thread": "owned-platform-worker",
+          "mode": "default"
+        },
+        {
+          "marker": "helper-start",
+          "pid": 56911,
+          "time_ns": 1791467668684773000,
+          "thread": "owned-platform-worker",
+          "mode": "default",
+          "token": 1,
+          "category": "uname"
+        },
+        {
+          "marker": "proxy-query-finish",
+          "pid": 56911,
+          "time_ns": 1791467668689387000,
+          "thread": "owned-proxy-worker",
+          "mode": "default"
+        },
+        {
+          "marker": "proxy-map-finish",
+          "pid": 56911,
+          "time_ns": 1791467668689609000,
+          "thread": "owned-proxy-worker",
+          "mode": "default"
+        },
+        {
+          "marker": "helper-ready",
+          "pid": 56911,
+          "time_ns": 1791467668690194000,
+          "thread": "owned-platform-worker",
+          "mode": "default",
+          "token": 1,
+          "helper_pid": 56917
+        },
+        {
+          "marker": "helper-exit",
+          "pid": 56911,
+          "time_ns": 1791467668693343000,
+          "thread": "owned-platform-worker",
+          "mode": "default",
+          "token": 1,
+          "helper_pid": 56917,
+          "returncode": 0
+        },
+        {
+          "marker": "helper-start",
+          "pid": 56911,
+          "time_ns": 1791467668697083000,
+          "thread": "owned-platform-worker",
+          "mode": "default",
+          "token": 2,
+          "category": "file"
+        },
+        {
+          "marker": "helper-ready",
+          "pid": 56911,
+          "time_ns": 1791467668701664000,
+          "thread": "owned-platform-worker",
+          "mode": "default",
+          "token": 2,
+          "helper_pid": 56918
+        },
+        {
+          "marker": "helper-exit",
+          "pid": 56911,
+          "time_ns": 1791467668707978000,
+          "thread": "owned-platform-worker",
+          "mode": "default",
+          "token": 2,
+          "helper_pid": 56918,
+          "returncode": 0
+        },
+        {
+          "marker": "detection-finish",
+          "pid": 56911,
+          "time_ns": 1791467668708063000,
+          "thread": "owned-platform-worker",
+          "mode": "default",
+          "result": "MacOS"
+        },
+        {
+          "marker": "client-open",
+          "pid": 56911,
+          "time_ns": 1791467668728808000,
+          "thread": "owned-proxy-worker",
+          "mode": "default"
+        },
+        {
+          "marker": "client-closed",
+          "pid": 56911,
+          "time_ns": 1791467668733101000,
+          "thread": "owned-proxy-worker",
+          "mode": "default"
+        },
+        {
+          "marker": "capture-restored",
+          "pid": 56911,
+          "time_ns": 1791467668733525000,
+          "thread": "MainThread",
+          "mode": "default"
+        },
+        {
+          "marker": "finish",
+          "pid": 56911,
+          "time_ns": 1791467668733548000,
+          "thread": "MainThread",
+          "mode": "default",
+          "results": [
+            "MacOS"
+          ],
+          "errors": []
+        }
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "56911": {
+          "ppid": 56910,
+          "pgid": 56911,
+          "start": "Fri Oct  9 00:54:28 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.846,
+      "proxy_query_duration_ms": 4.707,
+      "overlapping_helper_tokens": [
+        1
+      ]
+    },
+    {
+      "number": 2,
+      "mode": "control",
+      "repeat": 1,
+      "pid": 56921,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/proxy_fork_child.py",
+        "control"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "phases": [
+        {
+          "marker": "start",
+          "pid": 56921,
+          "time_ns": 1791467669029310000,
+          "thread": "MainThread",
+          "mode": "control"
+        },
+        {
+          "marker": "guard-denied",
+          "pid": 56921,
+          "time_ns": 1791467669029432000,
+          "thread": "MainThread",
+          "mode": "control"
+        },
+        {
+          "marker": "proxy-environment-empty",
+          "pid": 56921,
+          "time_ns": 1791467669029469000,
+          "thread": "MainThread",
+          "mode": "control"
+        },
+        {
+          "marker": "detection-ready",
+          "pid": 56921,
+          "time_ns": 1791467669326852000,
+          "thread": "owned-platform-worker",
+          "mode": "control"
+        },
+        {
+          "marker": "client-construct-start",
+          "pid": 56921,
+          "time_ns": 1791467669327027000,
+          "thread": "owned-proxy-worker",
+          "mode": "control"
+        },
+        {
+          "marker": "proxy-map-entry",
+          "pid": 56921,
+          "time_ns": 1791467669327312000,
+          "thread": "owned-proxy-worker",
+          "mode": "control",
+          "allow_env_proxies": false
+        },
+        {
+          "marker": "detection-start",
+          "pid": 56921,
+          "time_ns": 1791467669327351000,
+          "thread": "owned-platform-worker",
+          "mode": "control"
+        },
+        {
+          "marker": "proxy-map-finish",
+          "pid": 56921,
+          "time_ns": 1791467669327381000,
+          "thread": "owned-proxy-worker",
+          "mode": "control"
+        },
+        {
+          "marker": "helper-start",
+          "pid": 56921,
+          "time_ns": 1791467669327509000,
+          "thread": "owned-platform-worker",
+          "mode": "control",
+          "token": 1,
+          "category": "uname"
+        },
+        {
+          "marker": "helper-ready",
+          "pid": 56921,
+          "time_ns": 1791467669332026000,
+          "thread": "owned-platform-worker",
+          "mode": "control",
+          "token": 1,
+          "helper_pid": 56925
+        },
+        {
+          "marker": "helper-exit",
+          "pid": 56921,
+          "time_ns": 1791467669333551000,
+          "thread": "owned-platform-worker",
+          "mode": "control",
+          "token": 1,
+          "helper_pid": 56925,
+          "returncode": 0
+        },
+        {
+          "marker": "helper-start",
+          "pid": 56921,
+          "time_ns": 1791467669336445000,
+          "thread": "owned-platform-worker",
+          "mode": "control",
+          "token": 2,
+          "category": "file"
+        },
+        {
+          "marker": "helper-ready",
+          "pid": 56921,
+          "time_ns": 1791467669339724000,
+          "thread": "owned-platform-worker",
+          "mode": "control",
+          "token": 2,
+          "helper_pid": 56926
+        },
+        {
+          "marker": "helper-exit",
+          "pid": 56921,
+          "time_ns": 1791467669344033000,
+          "thread": "owned-platform-worker",
+          "mode": "control",
+          "token": 2,
+          "helper_pid": 56926,
+          "returncode": 0
+        },
+        {
+          "marker": "detection-finish",
+          "pid": 56921,
+          "time_ns": 1791467669344135000,
+          "thread": "owned-platform-worker",
+          "mode": "control",
+          "result": "MacOS"
+        },
+        {
+          "marker": "client-open",
+          "pid": 56921,
+          "time_ns": 1791467669357327000,
+          "thread": "owned-proxy-worker",
+          "mode": "control"
+        },
+        {
+          "marker": "client-closed",
+          "pid": 56921,
+          "time_ns": 1791467669360345000,
+          "thread": "owned-proxy-worker",
+          "mode": "control"
+        },
+        {
+          "marker": "capture-restored",
+          "pid": 56921,
+          "time_ns": 1791467669360755000,
+          "thread": "MainThread",
+          "mode": "control"
+        },
+        {
+          "marker": "finish",
+          "pid": 56921,
+          "time_ns": 1791467669360775000,
+          "thread": "MainThread",
+          "mode": "control",
+          "results": [
+            "MacOS"
+          ],
+          "errors": []
+        }
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "56921": {
+          "ppid": 56910,
+          "pgid": 56921,
+          "start": "Fri Oct  9 00:54:28 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.574,
+      "proxy_query_duration_ms": null,
+      "overlapping_helper_tokens": []
+    },
+    {
+      "number": 3,
+      "mode": "default",
+      "repeat": 2,
+      "pid": 56929,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/proxy_fork_child.py",
+        "default"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "phases": [
+        {
+          "marker": "start",
+          "pid": 56929,
+          "time_ns": 1791467669603995000,
+          "thread": "MainThread",
+          "mode": "default"
+        },
+        {
+          "marker": "guard-denied",
+          "pid": 56929,
+          "time_ns": 1791467669604099000,
+          "thread": "MainThread",
+          "mode": "default"
+        },
+        {
+          "marker": "proxy-environment-empty",
+          "pid": 56929,
+          "time_ns": 1791467669604138000,
+          "thread": "MainThread",
+          "mode": "default"
+        },
+        {
+          "marker": "detection-ready",
+          "pid": 56929,
+          "time_ns": 1791467669897937000,
+          "thread": "owned-platform-worker",
+          "mode": "default"
+        },
+        {
+          "marker": "client-construct-start",
+          "pid": 56929,
+          "time_ns": 1791467669898125000,
+          "thread": "owned-proxy-worker",
+          "mode": "default"
+        },
+        {
+          "marker": "proxy-map-entry",
+          "pid": 56929,
+          "time_ns": 1791467669898508000,
+          "thread": "owned-proxy-worker",
+          "mode": "default",
+          "allow_env_proxies": true
+        },
+        {
+          "marker": "proxy-query-start",
+          "pid": 56929,
+          "time_ns": 1791467669898542000,
+          "thread": "owned-proxy-worker",
+          "mode": "default"
+        },
+        {
+          "marker": "detection-start",
+          "pid": 56929,
+          "time_ns": 1791467669898554000,
+          "thread": "owned-platform-worker",
+          "mode": "default"
+        },
+        {
+          "marker": "helper-start",
+          "pid": 56929,
+          "time_ns": 1791467669898660000,
+          "thread": "owned-platform-worker",
+          "mode": "default",
+          "token": 1,
+          "category": "uname"
+        },
+        {
+          "marker": "helper-ready",
+          "pid": 56929,
+          "time_ns": 1791467669902266000,
+          "thread": "owned-platform-worker",
+          "mode": "default",
+          "token": 1,
+          "helper_pid": 56933
+        },
+        {
+          "marker": "proxy-query-finish",
+          "pid": 56929,
+          "time_ns": 1791467669903387000,
+          "thread": "owned-proxy-worker",
+          "mode": "default"
+        },
+        {
+          "marker": "proxy-map-finish",
+          "pid": 56929,
+          "time_ns": 1791467669903454000,
+          "thread": "owned-proxy-worker",
+          "mode": "default"
+        },
+        {
+          "marker": "helper-exit",
+          "pid": 56929,
+          "time_ns": 1791467669904044000,
+          "thread": "owned-platform-worker",
+          "mode": "default",
+          "token": 1,
+          "helper_pid": 56933,
+          "returncode": 0
+        },
+        {
+          "marker": "helper-start",
+          "pid": 56929,
+          "time_ns": 1791467669907295000,
+          "thread": "owned-platform-worker",
+          "mode": "default",
+          "token": 2,
+          "category": "file"
+        },
+        {
+          "marker": "helper-ready",
+          "pid": 56929,
+          "time_ns": 1791467669910682000,
+          "thread": "owned-platform-worker",
+          "mode": "default",
+          "token": 2,
+          "helper_pid": 56934
+        },
+        {
+          "marker": "helper-exit",
+          "pid": 56929,
+          "time_ns": 1791467669913325000,
+          "thread": "owned-platform-worker",
+          "mode": "default",
+          "token": 2,
+          "helper_pid": 56934,
+          "returncode": 0
+        },
+        {
+          "marker": "detection-finish",
+          "pid": 56929,
+          "time_ns": 1791467669913437000,
+          "thread": "owned-platform-worker",
+          "mode": "default",
+          "result": "MacOS"
+        },
+        {
+          "marker": "client-open",
+          "pid": 56929,
+          "time_ns": 1791467669930575000,
+          "thread": "owned-proxy-worker",
+          "mode": "default"
+        },
+        {
+          "marker": "client-closed",
+          "pid": 56929,
+          "time_ns": 1791467669933705000,
+          "thread": "owned-proxy-worker",
+          "mode": "default"
+        },
+        {
+          "marker": "capture-restored",
+          "pid": 56929,
+          "time_ns": 1791467669934124000,
+          "thread": "MainThread",
+          "mode": "default"
+        },
+        {
+          "marker": "finish",
+          "pid": 56929,
+          "time_ns": 1791467669934153000,
+          "thread": "MainThread",
+          "mode": "default",
+          "results": [
+            "MacOS"
+          ],
+          "errors": []
+        }
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "56929": {
+          "ppid": 56910,
+          "pgid": 56929,
+          "start": "Fri Oct  9 00:54:29 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.575,
+      "proxy_query_duration_ms": 4.845,
+      "overlapping_helper_tokens": [
+        1
+      ]
+    },
+    {
+      "number": 4,
+      "mode": "control",
+      "repeat": 2,
+      "pid": 56937,
+      "argv": [
+        "/Users/eddy/Developer/Python/assistant/.venv/bin/python",
+        "/Users/eddy/Developer/Python/assistant/.worktrees/execution-authority-impl/.superpowers/sdd/2026-10-07-macos-subprocess-crash-investigation/proxy_fork_child.py",
+        "control"
+      ],
+      "returncode": 0,
+      "timeout": false,
+      "phases": [
+        {
+          "marker": "start",
+          "pid": 56937,
+          "time_ns": 1791467670185294000,
+          "thread": "MainThread",
+          "mode": "control"
+        },
+        {
+          "marker": "guard-denied",
+          "pid": 56937,
+          "time_ns": 1791467670185399000,
+          "thread": "MainThread",
+          "mode": "control"
+        },
+        {
+          "marker": "proxy-environment-empty",
+          "pid": 56937,
+          "time_ns": 1791467670185435000,
+          "thread": "MainThread",
+          "mode": "control"
+        },
+        {
+          "marker": "detection-ready",
+          "pid": 56937,
+          "time_ns": 1791467670479716000,
+          "thread": "owned-platform-worker",
+          "mode": "control"
+        },
+        {
+          "marker": "client-construct-start",
+          "pid": 56937,
+          "time_ns": 1791467670479862000,
+          "thread": "owned-proxy-worker",
+          "mode": "control"
+        },
+        {
+          "marker": "proxy-map-entry",
+          "pid": 56937,
+          "time_ns": 1791467670480134000,
+          "thread": "owned-proxy-worker",
+          "mode": "control",
+          "allow_env_proxies": false
+        },
+        {
+          "marker": "proxy-map-finish",
+          "pid": 56937,
+          "time_ns": 1791467670480163000,
+          "thread": "owned-proxy-worker",
+          "mode": "control"
+        },
+        {
+          "marker": "detection-start",
+          "pid": 56937,
+          "time_ns": 1791467670480176000,
+          "thread": "owned-platform-worker",
+          "mode": "control"
+        },
+        {
+          "marker": "helper-start",
+          "pid": 56937,
+          "time_ns": 1791467670480298000,
+          "thread": "owned-platform-worker",
+          "mode": "control",
+          "token": 1,
+          "category": "uname"
+        },
+        {
+          "marker": "helper-ready",
+          "pid": 56937,
+          "time_ns": 1791467670484658000,
+          "thread": "owned-platform-worker",
+          "mode": "control",
+          "token": 1,
+          "helper_pid": 56941
+        },
+        {
+          "marker": "helper-exit",
+          "pid": 56937,
+          "time_ns": 1791467670485906000,
+          "thread": "owned-platform-worker",
+          "mode": "control",
+          "token": 1,
+          "helper_pid": 56941,
+          "returncode": 0
+        },
+        {
+          "marker": "helper-start",
+          "pid": 56937,
+          "time_ns": 1791467670488466000,
+          "thread": "owned-platform-worker",
+          "mode": "control",
+          "token": 2,
+          "category": "file"
+        },
+        {
+          "marker": "helper-ready",
+          "pid": 56937,
+          "time_ns": 1791467670491536000,
+          "thread": "owned-platform-worker",
+          "mode": "control",
+          "token": 2,
+          "helper_pid": 56942
+        },
+        {
+          "marker": "helper-exit",
+          "pid": 56937,
+          "time_ns": 1791467670495772000,
+          "thread": "owned-platform-worker",
+          "mode": "control",
+          "token": 2,
+          "helper_pid": 56942,
+          "returncode": 0
+        },
+        {
+          "marker": "detection-finish",
+          "pid": 56937,
+          "time_ns": 1791467670495860000,
+          "thread": "owned-platform-worker",
+          "mode": "control",
+          "result": "MacOS"
+        },
+        {
+          "marker": "client-open",
+          "pid": 56937,
+          "time_ns": 1791467670508875000,
+          "thread": "owned-proxy-worker",
+          "mode": "control"
+        },
+        {
+          "marker": "client-closed",
+          "pid": 56937,
+          "time_ns": 1791467670511721000,
+          "thread": "owned-proxy-worker",
+          "mode": "control"
+        },
+        {
+          "marker": "capture-restored",
+          "pid": 56937,
+          "time_ns": 1791467670512079000,
+          "thread": "MainThread",
+          "mode": "control"
+        },
+        {
+          "marker": "finish",
+          "pid": 56937,
+          "time_ns": 1791467670512108000,
+          "thread": "MainThread",
+          "mode": "control",
+          "results": [
+            "MacOS"
+          ],
+          "errors": []
+        }
+      ],
+      "fatal_signature": false,
+      "tracked_processes": {
+        "56937": {
+          "ppid": 56910,
+          "pgid": 56937,
+          "start": "Fri Oct  9 00:54:30 2026    "
+        }
+      },
+      "leftovers": [],
+      "duration_seconds": 0.579,
+      "proxy_query_duration_ms": null,
+      "overlapping_helper_tokens": []
+    }
+  ],
+  "parent_launch_count": 4,
+  "deadline_per_parent_seconds": 20,
+  "sigsegv_reproduced": false,
+  "default_proxy_interval_overlaps_uname_init_both_repeats": true,
+  "overlap_is_native_instruction_proof": false,
+  "owned_shadow_absent": true,
+  "interpretation": "No failure despite two measured proxy-query/uname-init interval overlaps. Native proxy overlap alone not sufficient in these tested processes; does not prove unrelated or fixed. No extra launch/product change."
+}
