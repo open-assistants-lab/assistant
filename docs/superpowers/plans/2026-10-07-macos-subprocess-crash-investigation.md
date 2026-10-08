@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Preserve the already selected native/inline method. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Execution status:** User approved native/inline investigation. Bounded16-probe/6-slice pass executed; native cause remains inconclusive. [Evidence and proposed follow-up](../../audits/2026-10-07-macos-subprocess-crash-investigation.md). No product fix or extra probe budget authorized.
+
 **Goal:** Establish a reproducible, causally useful explanation for the macOS subprocess crashes blocking general verification, without weakening execution or test protections.
 
 **Architecture:** This is a bounded diagnostic investigation, not a sandbox rewrite. First classify existing evidence, then compare isolated synthetic probes and ordered test slices. A lasting fix is deliberately not selected before reproduction; finish with evidence and a proposed exact regression/fix for review.
@@ -81,4 +83,4 @@
 
 Coverage: original95 failures and contradictory full/slice results →Task1; cold/warm/threaded/order and child guard/ownership →Task2; observed RED and invariant preservation before product fixes →Task3. No unknown fix body is presented as implementation-ready. This plan's retained outputs are evidence and a recommendation, not new runtime infrastructure.
 
-**Pending human review of this written plan.** Keep the already selected native/inline method. Approval to prepare this plan does not authorize implementation of a hypothetical product fix. After plan review, execute the bounded investigation sequentially; any lasting fix requires the Task3 design gate.
+**Approved investigation executed within budget; follow-up awaits separate approval.** The native/inline method was preserved. Task1 indexed evidence; Task2 completed its16-probe/6-slice budget and retained negative404 outcomes; Task3 reported inconclusive native cause and proposed eight compositional probes. Existing latest full-suite verification remains blocked. The ledger and report carry step evidence; no hypothetical product fix is authorized by this plan.

@@ -135,3 +135,59 @@ rerun, dependency change, telemetry disablement, sandbox limit/UID weakening,
 Docker change or speculative cache-warming fix. All earlier95 full failures remain
 current unresolved evidence. Task3 must recommend the next discriminating step,
 not infer a root cause from successful controls.
+
+## Task 3 — recommendation and explicit next gate
+
+**No exact production fix is justified yet.** Standalone threaded spawning,
+standalone SDK metadata queries, client construction without requests, API prefix
+and collection alone are insufficient triggers in the cases observed. This is a
+negative result for these controls, not proof that any component is safe in every
+combined context. The ordinary404 failures are a separate recorded concern.
+
+The next cheapest discriminating question is **composition**: does constructing
+an HTTP client and then asking the SDK for platform metadata in the same process
+trigger the native fault? Current probes exercised those components independently;
+SDK async request source performs metadata detection after client initialization.
+No API request is needed to examine this boundary.
+
+### Proposed follow-up: eight fresh guarded processes, not authorized/run here
+
+New proposed budget: **8 processes maximum,20-second deadline each**, sequential;
+no additional pytest slices or full-suite run in this follow-up. Four fixed cases,
+each repeated twice, using the same installed environment and exact owned cleanup:
+
+1. Construct synthetic OpenAI client, call installed get_platform serially, then
+   close the owned client in finally.
+2. Construct synthetic client, call get_platform in one joined worker, then close.
+3. Call stdlib platform.platform before constructing that client; then repeat
+   case1 as an explicit warm-cache control.
+4. Same warm-cache control followed by case2.
+
+Keep the client open during metadata detection to reflect the SDK request-stage
+ordering. Keep the same dummy key/local closed-port base URL, guard installed
+before imports, blank owned .env, synthetic roots and no requests/export endpoints.
+Cache warming is only a discriminating experiment, never a proposed global cure.
+Record startup/thread/finish markers, process roles/return codes and copied fatal
+stacks. If an owned process crashes and macOS creates a native report, read only
+its confirmed PID/time-matched report; do not sweep unrelated/customer diagnostics.
+Stop for cleanup uncertainty. Preserve every failed control; no retry-until-green.
+
+If this reproduces, use the remaining slots only to confirm/reduce that exact
+sequence and propose a lasting regression before a minimal bounded fix. If all
+cases pass, report inconclusive again and review wider runtime-context reduction
+separately. Do not guess that SDK, proxies, caches, preexec or telemetry is the cause.
+No dependency update, spawn-mode override, skipped test or security reduction is
+included. A lasting fix still needs its exact regression to be observed RED and
+its semantics reviewed before implementation; later general acceptance requires
+sandbox/timeout/UID/telemetry/desktop checks, offline wheel/full-suite verification
+and fresh-context whole-branch review.
+
+### Evidence self-review and status
+
+Author-only review checked every budget/result/failure name against the structured
+record and logs; guard ordering and owned shadow absence were verified. No native
+fault was observed in this pass, so native-cause/fix claims would be unjustified.
+No runtime/test/library source changed; durable changes are investigation evidence.
+The latest general full run remains95 failures; neither Linux namespace Task3 nor
+the original authority foundation is cleared. No merge/push/release/customer use.
+Please review/approve the proposed eight-process follow-up before another launch.
