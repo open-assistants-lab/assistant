@@ -5,6 +5,9 @@ Infrastructure blocker: this session exposes subagent_supervisor (requests/statu
 replies), but **no subagent launch tool**. No reviewer was launched. No author
 self-review substituted; no external CLI/runner fallback or package/settings edits.
 This artifact is a bounded fresh-context handoff, not an independent-review result.
+User subsequently selected inline author review; see
+[author findings and no-go conditions](2026-10-09-native-runtime-author-review.md).
+That fallback does not satisfy this pending independent review.
 
 ## Review contract
 
