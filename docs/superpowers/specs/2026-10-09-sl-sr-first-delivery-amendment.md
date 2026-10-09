@@ -2,8 +2,9 @@
 
 Status: operator approved direction; written staging amendment for review before
 revising implementation tasks. No runtime/verification/resource execution by this
-document. Execution preference remains inline/native; independent final branch
-review remains required when reviewer tooling is available.
+document. Execution preference remains inline/native; independent fresh-context
+whole-branch review is mandatory before integration. Unavailable reviewer tooling
+leaves that gate blocked; author review does not replace it.
 
 ## Intent
 
@@ -25,7 +26,11 @@ One person uses the existing native app with the owned local Python engine: expl
 solo provisioning, bound identity, chosen model, conversation, permitted tool,
 approval/cancellation, persisted session/model and honest restart/recovery. First
 acceptance uses isolated scripted providers and synthetic stores/credentials.
-Developer-build proof is not an installable/production DMG claim.
+Developer-build proof is not an installable/production DMG claim. Acceptance must
+assert the exact scripted answer without an error, authenticated instance/actor,
+tool result plus relevant fixture effect/receipt, and recovered session/model after
+restart. HTTP200, an empty response carrying an error, or a Zig build is insufficient.
+Scripted tool evidence does not qualify arbitrary shell/MCP/host containment.
 
 Keep actor/instance/path/credential/admission/receipt primitives already introduced;
 finish only their solo runtime/API integration first. Preserve AgentLoop/providers,
@@ -69,6 +74,15 @@ acceptance. Existing many-team models/tests are retained, not deleted or made we
 **Defer to MU:** public hosted onboarding, untrusted-tenant containment/abuse/service
 operation. No new fairness/quota/spend guarantees are added by ordering stages.
 
+Core Task6 currently says actual worker/credential adapters come from the MT plan.
+That dependency must be explicitly split in the revised task map: solo dispatch
+needs mode-qualified execution/credential/termination adapters behind the **same**
+Actor/RunSnapshot/ExecutionOwner/kernel interfaces. Only the multi-tenant worker
+layout is deferred. Do not route solo tools straight to legacy execution, borrow an
+unqualified MT adapter, or mark common adapter qualification complete from mocks.
+The adapter/backend choice remains an implementation-plan review gate, not a new
+backend selected by this amendment.
+
 Do not make Gate L or MT integrated acceptance a prerequisite for reporting separately
 qualified **solo** milestones. Do not relax SL/Mac or SR/host boundaries because MT
 is paused. Full #40/#41/SL+SR+MT completion still requires the later MT gates.
@@ -81,6 +95,11 @@ written amendment approval:
 
 1. Resume partial core Task1 at **qualified solo provisioning/runtime/context and
    identity ingress**, not another namespace attribution or debugger experiment.
+   First slice is narrowly provisioned fresh state and authenticated identity;
+   execution/legacy routes and background dispatch remain refused. A qualified
+   initialization/identity path is not readiness for tools: policy/configuration,
+   admission/fencing, evidence/recovery, governed adapters and actual mode-specific
+   boundaries must qualify before the corresponding execution paths are enabled.
 2. Wire existing native protocol/connection/config/run tasks for SL/SR; company/team
    controls remain deferred while future-mode-compatible types are retained.
 3. Qualify owned SL helper/macOS boundary and dedicated SR host, then frozen SL
@@ -88,9 +107,12 @@ written amendment approval:
 4. Resume MT from its checkpoint only when that stage is selected.
 
 Latest normal full verification is still red. Post-reboot60s capture is incomplete
-and not a fix. A separately bounded offline full baseline run is the sensible next
-verification gate; no run-until-green, bypass, skipped failure or unlimited diagnostics.
-Native shell/host failures still block claims for the affected solo execution path.
+and not a fix. Focused offline RED/GREEN evidence for an approved solo slice does
+not clear that full-suite gate. One normal bounded offline full baseline run remains
+proposed, not authorized here; a new diagnostic campaign is not a prerequisite to
+reviewing/re-scoping solo tasks. No run-until-green, bypass, skipped failure or unlimited
+diagnostics. Native shell/host failures still block claims for the affected solo
+execution path.
 Dependencies/resources/signing/network remain separately authorized; preserve dirty
 main/unrelated state. This amendment is not permission to merge or enable unqualified
 runtime paths. Final independent whole-branch review remains pending.

@@ -4,7 +4,8 @@ This document provides guidelines for agents working on this codebase.
 
 ## Product direction and documentation authority
 
-- **One shared engine, two products:** a builder platform and a future finished native product. Current non-bug priority is builder/deployer adoption; macOS product work is parked, not a prerequisite.
+- **One shared engine, two products:** a builder platform and a native product. Current branch delivery priority is **SL → SR**, native required; MT is paused and MU later. The [solo-first amendment](docs/superpowers/specs/2026-10-09-sl-sr-first-delivery-amendment.md) awaits written review/task re-scoping; the [MT checkpoint](docs/audits/2026-10-09-mt-paused-checkpoint.md) records unqualified Linux boundaries. This supersedes earlier parked-native direction, not authority/receipt/security requirements. No runtime readiness claim.
+- On this staged branch, use installed dependencies and the isolated offline verifier; no `uv sync`/downloads, live inference or unmodified live-capable native frontend suite. Docker/resource execution, signing and publication require separate permission. Author review does not replace mandatory independent fresh-context whole-branch review.
 - Builders own profiles, custom tools, skills, authored ontology and deterministic domain safeguards. Deployment teams apply conventions in their own repositories/environments and own identity provisioning, credentials, permissions, source access and operations. Do not modify customer deployments without separate authorisation.
 - Start with [builder/deployer conventions](docs/builder-deployment-guide.md), [runtime deployment](DEPLOYMENT.md) and the [synthetic Jen reference](examples/jen_reference/README.md). The [builder contract](docs/superpowers/specs/2026-10-06-assistant-builder-deployment-contract.md) separates the wider target from completed proof.
 - The synthetic reference is not live Jen parity, eddyave/admi adoption or an independent-builder trial. Docker smoke was skipped this round; Compose validation is not deployment proof. eddyave reuse is the recommended next candidate, not an authorised migration.
@@ -583,7 +584,7 @@ assistant/
 
 ### Native App (native-sdk-experiment)
 
-Zig + Native SDK experimental desktop app (macOS, `src/main.zig` + `src/app.native` markup twin). Existing source supports `NATIVE_ASSISTANT_BASE_URL` and `NATIVE_ASSISTANT_LAUNCH_TOKEN`; localhost:8080 and local actor/workspace defaults are not a general remote identity contract. Product work is parked. Do not claim shipped multi-instance login, native OIDC handoff or release packaging from this configuration support.
+Zig + Native SDK experimental desktop app (macOS, `src/main.zig` + `src/app.native` markup twin). Existing source supports `NATIVE_ASSISTANT_BASE_URL` and `NATIVE_ASSISTANT_LAUNCH_TOKEN`; localhost:8080 and local actor/workspace defaults are not a general remote identity contract. SL/SR product work is the active delivery priority, with written staging/task review pending; MT/MU remain deferred. Do not claim shipped multi-instance login, native OIDC handoff or release packaging from this configuration support.
 
 - **Sidebar**: New chat, search, chat list, then Settings + theme toggle only. Tools/Skills/Subagents rows removed — the Tools page lives **inside Settings** as a third section.
 - **Settings sections**: Models (model catalog + role toggle), General (rubric, appearance, about), Tools (built-in tool enable/disable + SaaS connectors).

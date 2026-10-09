@@ -2,6 +2,14 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Current staging (2026-10-09):** SL/SR first; see the
+[solo-first amendment](../specs/2026-10-09-sl-sr-first-delivery-amendment.md) before
+re-scoping tasks. Resume partial Task1 with fresh solo provisioning/identity only;
+execution stays refused until its policy/admission/evidence/adapters qualify.
+Task6's MT-supplied adapter dependency must be split into qualified solo adapters
+and deferred multi-tenant worker layout, preserving common dispatch contracts.
+This is not an executable solo task map yet or permission to remove startup guards.
+
 **Goal:** Deliver authenticated instance ownership, persistent conversation models, atomic run admission and truthful execution evidence on the existing engine.
 
 **Architecture:** Keep the current loop/providers/CoreMem and extend the current execution kernel/store. Persist instance configuration, conversation configuration, admission and receipts in one instance-owned SQLite engine-state file so local admission/configuration changes need no new transaction framework; CoreMem messages remain a separate store with existing idempotent delivery. SQLite transactions contain no model calls, external effects or human waits. This plan does not qualify arbitrary-code isolation or enable hardened MT by itself.
@@ -169,7 +177,7 @@ Expected RED is the named new assertion/import failure, not credentials, missing
 
 **Files:** Modify `src/sdk/governance.py`, `src/sdk/governance_operations.py`, `src/sdk/tools.py`, `src/sdk/loop.py`, `src/sdk/tools_custom.py`, `src/sdk/tool_index.py`, `src/sdk/coordinator.py`, `src/sdk/tools_core/mcp_bridge.py`, `src/sdk/run_service.py`; create `src/sdk/execution_dispatch.py`, `tests/refactor/test_execution_adapters.py`, `tests/refactor/test_execution_recovery.py`.
 
-**Interfaces:** Produce `authorize_dispatch(actor: Actor, request: ExecutionRequest, state: InstanceState, owner: ExecutionOwner) -> ExecutionRequest`; `dispatch(request: ExecutionRequest, executor: ExecutionExecutor, kernel: ExecutionKernel) -> Receipt`; `reconcile(actor: Actor, receipt: Receipt, owner: ExecutionOwner) -> EvidenceAssessment`. Preserve `ExecutionExecutor = Callable[[ExecutionRequest], Awaitable[ExecutionCompletion]]`. Actual worker/credential adapters are supplied by the MT-boundaries plan, not bypassed here.
+**Interfaces:** Produce `authorize_dispatch(actor: Actor, request: ExecutionRequest, state: InstanceState, owner: ExecutionOwner) -> ExecutionRequest`; `dispatch(request: ExecutionRequest, executor: ExecutionExecutor, kernel: ExecutionKernel) -> Receipt`; `reconcile(actor: Actor, receipt: Receipt, owner: ExecutionOwner) -> EvidenceAssessment`. Preserve `ExecutionExecutor = Callable[[ExecutionRequest], Awaitable[ExecutionCompletion]]`. Original all-mode plan: actual worker/credential adapters are supplied by the MT-boundaries plan, not bypassed here. Under solo-first staging, revise this dependency explicitly: qualify SL/SR adapters behind the same dispatch/kernel contracts without requiring MT's multi-tenant layout. No legacy direct-execution bypass or unqualified adapter fallback; exact solo adapter design/tasks still require review.
 
 - [ ] **RED tests:** parametrized `test_all_adapters_obey_admission` for builtin/local write, command, reconstructed command, MCP, sync and async job; `test_revoked_approval_refuses_dispatch`, `test_effect_then_record_failure_no_replay`, `test_safe_annotation_not_replay_authority`, `test_external_key_and_input_stable`, `test_changed_environment_blocks_replay`, `test_background_work_has_bounded_authority`.
   Assertions: failing durable intent invokes executor zero times; built-in revision evidence may establish applied; command success alone does not; async acknowledgement is not terminal; stale grants refuse; uncertain external write is called once even after reopen; effect-free replay still revalidates authority.

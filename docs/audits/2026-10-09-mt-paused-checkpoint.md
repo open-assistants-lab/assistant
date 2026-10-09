@@ -54,7 +54,9 @@ These host/general-test findings are separate from Linux namespace feasibility.
 2. Design/review an exact namespace-capable Linux deployment/backend recipe with
    explicit privilege/credential/resource ownership. New Docker/resource execution
    permission is required; no previous no-op approval implies namespace permission.
-3. Pass real namespace/bwrap feasibility and the complete negative-control matrix.
+3. Pass actual selected-backend feasibility and the complete negative-control matrix
+   (namespace/bwrap feasibility if that candidate is retained). A separately reviewed
+   alternative may replace the candidate, not the required security properties.
    Never use privileged/root, SYS_ADMIN, seccomp=unconfined, disabled NNP, sysctl
    changes or soft/null fallback to manufacture qualification.
 4. Implement/review provisioned tenant/user identities, workers, authenticated
