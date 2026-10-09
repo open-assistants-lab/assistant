@@ -2,6 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Status (2026-10-09): paused while SL/SR are delivered.** Read the
+[MT checkpoint and exact resume sequence](../../audits/2026-10-09-mt-paused-checkpoint.md)
+before restarting. No-op seccomp attribution passed; namespace/bwrap feasibility
+and hardened MT remain unqualified. No current Docker/backend execution authorized.
+
 **Goal:** Qualify and implement Linux Docker tenant/user execution and protected credential boundaries for MT.
 
 **Architecture:** One engine package/release with trusted tenant coordination and isolated user execution; protected integration adapters remain outside arbitrary-code environments. Reuse current sandbox/governance components through a small authenticated dispatch interface. A feasibility stop gate precedes permanent backend implementation; failure never selects the soft/null backend.

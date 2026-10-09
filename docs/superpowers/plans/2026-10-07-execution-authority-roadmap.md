@@ -10,7 +10,14 @@
 
 **Spec:** [#40 execution authority](../specs/2026-10-07-execution-authority-boundaries-design.md), [#41 receipts/recovery](../specs/2026-10-07-execution-receipt-contract-design.md).
 
-Status: implementation-plan draft for user review and execution-method selection.
+**Current delivery priority (2026-10-09): SL → SR first; MT paused, MU later.**
+See [solo-first staging amendment](../specs/2026-10-09-sl-sr-first-delivery-amendment.md)
+and [MT resume checkpoint](../../audits/2026-10-09-mt-paused-checkpoint.md).
+The original all-mode task/gate map below remains a reference, not a requirement
+to finish MT before separately qualifying solo milestones. Written amendment review
+precedes task re-scoping; inline/native execution preference is preserved.
+
+Original plan-draft status (historical): user review and execution-method selection.
 Baseline: `7e2d9778` (v0.6.36); specs at `3f82e67f` in `docs/execution-authority-specs`. No runtime implementation, dependency installation, Docker startup, merge or publication is authorized/performed by drafting these plans.
 
 ## Global Constraints

@@ -2,6 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Current staging (2026-10-09):** SL/SR milestones first; MT acceptance is parked,
+not removed. Apply the [delivery amendment](../specs/2026-10-09-sl-sr-first-delivery-amendment.md)
+when re-scoping tasks: separate solo acceptance from Task6's eventual MT matrix.
+MT/MU selectors do not imply qualified services. Do not weaken solo host boundaries.
+
 **Goal:** Deliver the required native client against the refactored engine, including an SL bundled-helper DMG and authenticated SR/MT connections.
 
 **Architecture:** Retain the existing Zig app and use the version-2 server contract from the core plan. Split connection/protocol/helper-lifecycle state out of `main.zig` only where it prevents authority/cache confusion; no native agent engine. One DMG includes a private Python engine helper for SL, while remote targets do not silently start or use it.
